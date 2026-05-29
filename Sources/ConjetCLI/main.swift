@@ -304,6 +304,7 @@ struct ConjetCLI {
             let response = try daemonRequest(.vmStatus)
             try printDaemonResponse(response, json: json)
         case "start":
+            try ensureVMConfiguredForStart(json: json)
             try ensureDaemon()
             let response = try daemonRequest(.vmStart)
             try printDaemonResponse(response, json: json, failOnError: true)

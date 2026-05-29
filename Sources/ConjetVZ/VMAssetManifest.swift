@@ -153,7 +153,7 @@ public struct VMImageStore: Sendable {
 
     public func loadManifest() throws -> VMAssetManifest {
         guard manifestExists() else {
-            throw ConjetError.unavailable("VM is not configured; run 'conjet vm fetch-fedora' or 'conjet vm init --kernel PATH'")
+            throw ConjetError.unavailable("VM is not configured; run 'conjet start' to fetch and import the latest Conjet-core image")
         }
         let data = try Data(contentsOf: paths.vmManifest)
         return try ConjetJSON.decoder().decode(VMAssetManifest.self, from: data)
