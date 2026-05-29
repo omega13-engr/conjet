@@ -107,6 +107,7 @@ jobs:
           fi
 
           gh release create "${tag}" "${assets[@]}" \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "${tag}" \
             --notes-file "${notes}" \
             --latest
