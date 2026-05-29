@@ -29,6 +29,7 @@ The VZ layer now manages:
   `/init` binary
 - EFI disk boot through `VZEFIBootLoader` with an owned EFI variable store
 - optional cloud-init NoCloud seed ISO attached as a read-only disk
+- compressed raw EFI disk import for Conjet-core `.raw.gz` guest artifacts
 - Docker API forwarding from `~/.conjet/run/docker.sock` to guest VSOCK port
   2375 after VM start
 
@@ -54,6 +55,21 @@ image, probes the real disk format even though Ubuntu uses an `.img` suffix,
 converts QCOW2 to raw, expands the raw boot disk to 16 GiB by default, builds
 the Docker cloud-init seed when requested, and writes an EFI-disk manifest
 ready for `conjet vm start`.
+
+`guest/image/conjet-core` is the Conjet-owned version of that lane. It starts
+from Ubuntu minimal cloud image, installs Docker and the guest VSOCK bridge
+inside the disk image, configures DHCP and vsock module loading, disables
+cloud-init first-boot waits, and emits a `.raw.gz` artifact. The
+`conjet vm fetch-conjet-core --image PATH.raw.gz` command imports that artifact
+directly and does not attach the generic cloud-init Docker seed.
+
+The user-facing bootstrap is `conjet start`. If no VM manifest exists, the CLI
+queries the latest GitHub release for `zdxsector/conjet` by default, selects the
+Conjet-core `.raw.gz` asset that matches the host architecture, downloads the
+matching `.sha512sum` asset when present, verifies it, imports the EFI disk, and
+then starts `conjetd` plus the VM. The release repository can be overridden via
+`CONJET_CORE_REPOSITORY` or `[images].conjet_core_repository` in
+`~/.conjet/config.toml`.
 
 `conjet vm build-initramfs --init PATH` now builds the host-side archive needed
 for that next image phase. It does not synthesize a Linux binary; the supplied

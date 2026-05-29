@@ -1,0 +1,112 @@
+name: Conjet Core Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      root_disk_gb:
+        description: Root disk size for the raw image
+        required: true
+        default: "16"
+      runtime:
+        description: Guest runtime to bake into the image
+        required: true
+        default: docker
+        type: choice
+        options:
+          - docker
+          - none
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/conjet-core-image.yml
+      - guest/image/conjet-core/**
+
+permissions:
+  contents: write
+
+concurrency:
+  group: conjet-core-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.os_arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_arch: aarch64
+          - os_arch: x86_64
+    env:
+      ROOT_DISK_GB: ${{ github.event_name == 'workflow_dispatch' && inputs.root_disk_gb || '16' }}
+      RUNTIME: ${{ github.event_name == 'workflow_dispatch' && inputs.runtime || 'docker' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Enable cross-architecture container execution
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,amd64
+
+      - name: Show Docker environment
+        run: docker info
+
+      - name: Build Conjet core image
+        run: |
+          set -euo pipefail
+          make -C guest/image/conjet-core image \
+            OS_ARCH="${{ matrix.os_arch }}" \
+            ROOT_DISK_GB="${ROOT_DISK_GB}" \
+            RUNTIME="${RUNTIME}"
+
+      - name: Upload image artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: conjet-core-${{ matrix.os_arch }}
+          if-no-files-found: error
+          path: |
+            guest/image/conjet-core/dist/out/*.raw.gz
+            guest/image/conjet-core/dist/out/*.raw.gz.sha512sum
+            guest/image/conjet-core/dist/out/*.raw.gz.json
+
+  release:
+    name: Publish latest image release
+    runs-on: ubuntu-24.04
+    needs:
+      - build
+    steps:
+      - name: Download image artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="conjet-core-$(date -u +'%Y%m%d')-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          notes="release-notes.md"
+          {
+            echo "Conjet-core image release"
+            echo
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Artifacts:"
+            find release-assets -type f -print | sort | sed 's#^#- #'
+          } > "${notes}"
+
+          mapfile -t assets < <(find release-assets -type f -print | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "no release assets found" >&2
+            exit 1
+          fi
+
+          gh release create "${tag}" "${assets[@]}" \
+            --title "${tag}" \
+            --notes-file "${notes}" \
+            --latest

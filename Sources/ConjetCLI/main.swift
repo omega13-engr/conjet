@@ -110,6 +110,7 @@ struct ConjetCLI {
     }
 
     private static func start(json: Bool = false) throws {
+        try ensureVMConfiguredForStart(json: json)
         let socketPath = try startDaemonOnly(printStatus: !json)
         try startVMIfConfigured(socketPath: socketPath, json: json)
     }
@@ -152,7 +153,7 @@ struct ConjetCLI {
         let store = VMImageStore()
         guard store.manifestExists() else {
             if !json {
-                print("VM is not configured yet; run 'conjet vm fetch-fedora' or 'conjet vm init --kernel PATH'")
+                print("VM is not configured yet; no Conjet-core image could be imported")
             }
             return
         }
@@ -174,6 +175,17 @@ struct ConjetCLI {
     private static func vm(args: [String], json: Bool) throws {
         let subcommand = args.first ?? "status"
         switch subcommand {
+        case "fetch-conjet-core":
+            let force = args.contains("--force")
+            let artifact = try conjetCoreArtifactPath(args: args, force: force, printStatus: !json)
+            let manifest = try VMImageStore().importEFIBootDisk(
+                sourcePath: artifact,
+                name: value(after: "--name", in: args) ?? "conjet-core",
+                force: force,
+                cloudInitSeedPath: nil,
+                bootDiskMinimumSizeBytes: bootDiskMinimumSizeBytes(args: args, defaultGiB: nil)
+            )
+            try printVMManifest(manifest, json: json)
         case "fetch-ubuntu-cloud":
             let force = args.contains("--force")
             let release = value(after: "--release", in: args) ?? "noble"
@@ -480,6 +492,184 @@ struct ConjetCLI {
         return seed.path
     }
 
+    private static func ensureVMConfiguredForStart(json: Bool) throws {
+        let store = VMImageStore()
+        guard !store.manifestExists() else {
+            return
+        }
+
+        let config = try ConjetConfig.loadOrCreate()
+        let repository = conjetCoreRepository(cliValue: nil, config: config)
+        if !json {
+            print("VM is not configured; fetching latest Conjet-core image from \(repository)")
+        }
+        let artifact = try downloadLatestConjetCoreArtifact(
+            repository: repository,
+            force: false,
+            printStatus: !json
+        )
+        let manifest = try store.importEFIBootDisk(
+            sourcePath: artifact,
+            name: "conjet-core",
+            force: true,
+            cloudInitSeedPath: nil,
+            bootDiskMinimumSizeBytes: nil
+        )
+        if !json {
+            try printVMManifest(manifest, json: false)
+        }
+    }
+
+    private static func conjetCoreArtifactPath(args: [String], force: Bool, printStatus: Bool) throws -> String {
+        let image = value(after: "--image", in: args)
+        let url = value(after: "--url", in: args)
+        if image != nil, url != nil {
+            throw ConjetError.invalidArgument(
+                "usage: conjet vm fetch-conjet-core [--image PATH|--url HTTPS_URL|--repository OWNER/REPO] [--name NAME] [--boot-disk-gb N] [--force]"
+            )
+        }
+        if let image {
+            return image
+        }
+        if let url {
+            return try downloadConjetCoreArtifact(urlString: url, force: force)
+        }
+        let repository = conjetCoreRepository(cliValue: value(after: "--repository", in: args), config: try ConjetConfig.loadOrCreate())
+        return try downloadLatestConjetCoreArtifact(repository: repository, force: force, printStatus: printStatus)
+    }
+
+    private static func conjetCoreRepository(cliValue: String?, config: ConjetConfig) -> String {
+        let repository: String
+        if let cliValue, !cliValue.isEmpty {
+            repository = cliValue
+        } else if let environment = ProcessInfo.processInfo.environment["CONJET_CORE_REPOSITORY"], !environment.isEmpty {
+            repository = environment
+        } else {
+            repository = config.conjetCoreRepository
+        }
+        return repository
+    }
+
+    private static func downloadLatestConjetCoreArtifact(
+        repository: String,
+        force: Bool,
+        printStatus: Bool
+    ) throws -> String {
+        let source = ConjetCoreReleaseSource(repository: repository)
+        if printStatus {
+            print("Resolving latest Conjet-core release: \(source.latestReleaseURL)")
+        }
+        let releaseData = try githubGet(urlString: source.latestReleaseURL)
+        let artifact = try ConjetCoreReleaseResolver.selectArtifact(
+            fromLatestReleaseJSON: releaseData,
+            hostArchitecture: HostCapabilities.detect().architecture
+        )
+        if printStatus {
+            print("Downloading \(artifact.name) from \(repository) release \(artifact.releaseTag)")
+        }
+        let imagePath = try downloadConjetCoreArtifact(urlString: artifact.downloadURL, force: force)
+        if let checksumURL = artifact.checksumDownloadURL {
+            let checksumPath = try downloadConjetCoreArtifact(urlString: checksumURL, force: force)
+            try verifySHA512(filePath: imagePath, checksumPath: checksumPath)
+            if printStatus {
+                print("Verified SHA-512 checksum for \(artifact.name)")
+            }
+        } else if printStatus {
+            print("No SHA-512 checksum asset found for \(artifact.name); importing without checksum verification")
+        }
+        return imagePath
+    }
+
+    private static func githubGet(urlString: String) throws -> Data {
+        var arguments = [
+            "-fsSL",
+            "--retry", "3",
+            "--connect-timeout", "20",
+            "-H", "Accept: application/vnd.github+json"
+        ]
+        if let token = ProcessInfo.processInfo.environment["GITHUB_TOKEN"], !token.isEmpty {
+            arguments += ["-H", "Authorization: Bearer \(token)"]
+        }
+        arguments.append(urlString)
+
+        let result = try ProcessRunner.run("/usr/bin/curl", arguments)
+        guard result.succeeded else {
+            throw ConjetError.processFailed(
+                executable: result.executable,
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
+        guard let data = result.stdout.data(using: .utf8) else {
+            throw ConjetError.decoding("GitHub release response was not UTF-8")
+        }
+        return data
+    }
+
+    private static func downloadConjetCoreArtifact(urlString: String, force: Bool) throws -> String {
+        guard let remote = URL(string: urlString),
+              remote.scheme == "https",
+              remote.host?.isEmpty == false,
+              !remote.lastPathComponent.isEmpty else {
+            throw ConjetError.invalidArgument("Conjet-core image URL must be a public https:// URL with a file name")
+        }
+
+        let paths = ConjetPaths.default()
+        try paths.ensureBaseDirectories()
+        let destination = paths.vmDirectory.appendingPathComponent(remote.lastPathComponent)
+        if FileManager.default.fileExists(atPath: destination.path), !force {
+            return destination.path
+        }
+
+        let temporary = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).download")
+        if FileManager.default.fileExists(atPath: temporary.path) {
+            try FileManager.default.removeItem(at: temporary)
+        }
+
+        let result = try ProcessRunner.run("/usr/bin/curl", [
+            "-fL",
+            "--retry", "3",
+            "--connect-timeout", "20",
+            "-o", temporary.path,
+            urlString
+        ])
+        guard result.succeeded else {
+            throw ConjetError.processFailed(
+                executable: result.executable,
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        return destination.path
+    }
+
+    private static func verifySHA512(filePath: String, checksumPath: String) throws {
+        let checksumText = try String(contentsOfFile: checksumPath, encoding: .utf8)
+        guard let expected = checksumText.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).first,
+              expected.count == 128 else {
+            throw ConjetError.decoding("invalid SHA-512 checksum file at \(checksumPath)")
+        }
+        let result = try ProcessRunner.run("/usr/bin/shasum", ["-a", "512", filePath])
+        guard result.succeeded else {
+            throw ConjetError.processFailed(
+                executable: result.executable,
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
+        guard let actual = result.stdout.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).first else {
+            throw ConjetError.decoding("could not parse SHA-512 output for \(filePath)")
+        }
+        guard actual.lowercased() == expected.lowercased() else {
+            throw ConjetError.filesystem("SHA-512 mismatch for \(filePath)")
+        }
+    }
+
     private static func bootDiskMinimumSizeBytes(args: [String], defaultGiB: Int64?) throws -> Int64? {
         guard let value = value(after: "--boot-disk-gb", in: args) else {
             return defaultGiB.map { $0 * 1024 * 1024 * 1024 }
@@ -561,10 +751,11 @@ struct ConjetCLI {
 
             Commands:
               conjet doctor [--json]
-              conjet start
+              conjet start [--json]  (auto-fetches latest Conjet-core image when needed)
               conjet status [--json]
               conjet stop
               conjet vm fetch-ubuntu-cloud [--release noble] [--cloud-init-docker] [--boot-disk-gb N] [--force] [--json]
+              conjet vm fetch-conjet-core [--image PATH|--url HTTPS_URL|--repository OWNER/REPO] [--name NAME] [--boot-disk-gb N] [--force] [--json]
               conjet vm fetch-fedora [--release N] [--force] [--json]
               conjet vm fetch-alpine [--force] [--json]
               conjet vm import-efi-disk --image PATH [--name NAME] [--cloud-init-docker] [--boot-disk-gb N] [--force] [--json]

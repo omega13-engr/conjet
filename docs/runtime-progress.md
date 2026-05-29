@@ -27,6 +27,17 @@ Current implemented runtime path:
 11. After VM start, `conjetd` owns `~/.conjet/run/docker.sock` and forwards
     Docker API byte streams to guest VSOCK port 2375.
 12. `conjet run IMAGE [CMD...]` targets `~/.conjet/run/docker.sock` only.
+13. `guest/image/conjet-core` builds a Conjet-owned Ubuntu minimal cloud-image
+    derivative as a `.raw.gz` EFI disk artifact with Docker and the guest
+    VSOCK bridge baked in.
+14. `conjet vm fetch-conjet-core --image PATH.raw.gz` imports that compressed
+    raw artifact directly, without the cloud-init Docker seed.
+15. `conjet start` now performs first-run VM setup automatically by resolving
+    the latest Conjet-core GitHub release, selecting the host-architecture
+    image, verifying the checksum when present, importing it, and then starting
+    the daemon and VM.
+16. `.github/workflows/conjet-core-image.yml` builds and publishes Conjet-core
+    image releases for `aarch64` and `x86_64`.
 
 Observed smoke-test results on 2026-05-29:
 
@@ -57,10 +68,18 @@ Observed smoke-test results on 2026-05-29:
   exposed guest Docker Engine 29.1.3 through `~/.conjet/run/docker.sock`.
 - `CONJET_HOME=/tmp/conjet-ubuntu.rG7eOg .build/debug/conjet run hello-world --json`
   completed successfully through the Conjet socket with exit code 0.
+- The Conjet-core builder and `.raw.gz` import path have been added. The builder
+  follows the colima-core shape but emits a Conjet-specific Ubuntu minimal image
+  with Docker and the VSOCK bridge preinstalled.
+- `conjet start` is now the user-facing first-run path instead of requiring a
+  separate manual image fetch command.
 
 Next required work:
 
-- Promote the Ubuntu cloud-image lane from smoke path to reusable local runtime
-  setup, including lifecycle cleanup and image-cache management.
-- Replace the Ubuntu bootstrap path with a smaller custom Conjet guest image
-  containing containerd, runc, BuildKit, and the guest bridge.
+- Run the GitHub Actions Conjet-core image workflow and boot smoke test the
+  resulting latest release artifact through `conjet start`.
+- Add release signing or attestation after the `.sha512sum` release flow is
+  stable.
+- Replace Docker-package bootstrap with a tighter runtime stack containing
+  containerd, runc, BuildKit, and the guest bridge once Conjet's Docker API
+  surface no longer needs dockerd.

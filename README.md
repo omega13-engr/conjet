@@ -21,6 +21,18 @@ This repository currently implements the first real container-runtime slice from
 - First-class Ubuntu Noble ARM64 cloud image fetch/import path for the
   QCOW2-backed `.img` published by Ubuntu, including raw boot disk expansion
   for Docker-capable cloud-init boots.
+- Conjet-core image import path for prebuilt Conjet-owned `.raw.gz` EFI guest
+  artifacts.
+- Conjet-core image builder under `guest/image/conjet-core`, modeled after the
+  colima-core flow: fetch Ubuntu minimal cloud image, mutate it in a privileged
+  Docker builder, and emit a compressed raw disk with Docker and the Conjet
+  guest VSOCK bridge baked in.
+- One-command first-run setup: `conjet start` auto-resolves the latest
+  Conjet-core GitHub release for the host architecture, downloads the
+  `.raw.gz` image, verifies the `.sha512sum` asset when present, imports it,
+  starts `conjetd`, and starts the VM.
+- GitHub Actions release automation for Conjet-core image artifacts on pushes
+  that change `guest/image/conjet-core/**`, plus manual workflow dispatch.
 - Cloud-init NoCloud seed ISO generation for bootstrapping Docker inside an
   imported distro image, with serial/bootstrap-share diagnostics.
 - Host Docker socket bridge that listens at `~/.conjet/run/docker.sock` after
@@ -62,11 +74,27 @@ For daemon and VM lifecycle testing, build first so `conjet` can find sibling
 swift build
 build-support/sign-debug.sh
 export CONJET_HOME="$(mktemp -d /tmp/conjet.XXXXXX)"
+.build/debug/conjet start
+```
+
+On first run, `conjet start` fetches the latest Conjet-core image release from
+`zdxsector/conjet`. Override the release source with either
+`CONJET_CORE_REPOSITORY=OWNER/REPO` or this config entry:
+
+```toml
+[images]
+conjet_core_repository = "OWNER/REPO"
+```
+
+Manual VM setup commands remain available for development:
+
+```sh
 .build/debug/conjet vm fetch-fedora --release 43
 .build/debug/conjet vm validate  # reports current boot incompatibility for fetched netboot kernels
 .build/debug/conjet vm build-initramfs --init /path/to/linux-arm64-static-init
 .build/debug/conjet vm fetch-ubuntu-cloud --release noble --cloud-init-docker --force
 .build/debug/conjet vm import-efi-disk --image /path/to/cloud-image.qcow2 --cloud-init-docker
+.build/debug/conjet vm fetch-conjet-core --image /path/to/conjet-core.raw.gz --force
 ```
 
 `fetch-fedora` and `fetch-alpine` currently fetch public netboot assets for
@@ -93,6 +121,28 @@ VSOCK-to-Docker bridge. After VM start, Conjet exposes
 `~/.conjet/run/docker.sock` and forwards Docker API traffic to guest VSOCK port
 2375.
 
+For the Conjet-owned minimal image path, build the Ubuntu minimal guest image
+and import its `.raw.gz` artifact:
+
+```sh
+cd guest/image/conjet-core
+make image
+cd ../../..
+.build/debug/conjet vm fetch-conjet-core \
+  --image guest/image/conjet-core/dist/out/conjet-ubuntu-24.04-minimal-cloudimg-aarch64-docker.raw.gz \
+  --force
+.build/debug/conjet vm validate
+```
+
+The Conjet-core artifact already contains Docker and the guest VSOCK bridge, so
+it does not need the `--cloud-init-docker` seed used by the generic Ubuntu
+cloud-image smoke path.
+
+GitHub release automation lives in `.github/workflows/conjet-core-image.yml`.
+It builds `aarch64` and `x86_64` Conjet-core images, uploads the `.raw.gz`,
+`.sha512sum`, and `.json` artifacts, then publishes a GitHub release marked as
+latest. That is the release stream consumed by `conjet start`.
+
 ## Current Boundary
 
 Conjet can now run a Docker image through a real Virtualization.framework
@@ -101,7 +151,8 @@ ARM64 cloud image, converted and expanded it, booted it with cloud-init,
 started guest Docker, exposed `~/.conjet/run/docker.sock`, and successfully ran
 `conjet run hello-world`.
 
-The custom minimal Conjet guest image is still future work. Smoke testing
-downloaded Alpine and Fedora boot assets, and Conjet classifies those public netboot
-`vmlinuz` artifacts as compressed ARM64 EFI zboot kernels before they reach
-Virtualization.framework.
+The custom minimal Conjet guest image now has a local builder and importer, but
+the full image build and boot smoke test remain the next verification step.
+Smoke testing downloaded Alpine and Fedora boot assets, and Conjet classifies
+those public netboot `vmlinuz` artifacts as compressed ARM64 EFI zboot kernels
+before they reach Virtualization.framework.

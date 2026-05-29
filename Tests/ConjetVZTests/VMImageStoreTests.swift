@@ -151,6 +151,34 @@ final class VMImageStoreTests: XCTestCase {
         XCTAssertNoThrow(try store.validateManifest(manifest))
     }
 
+    func testImportEFIBootDiskAcceptsGzippedRawConjetCoreArtifact() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-vz-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ConjetPaths(home: root)
+        try paths.ensureBaseDirectories()
+
+        let raw = root.appendingPathComponent("conjet-core.raw")
+        let gzip = root.appendingPathComponent("conjet-core.raw.gz")
+        try Data("conjet-core-raw-placeholder".utf8).write(to: raw)
+        try gzipFile(source: raw, destination: gzip)
+
+        let store = VMImageStore(paths: paths)
+        let manifest = try store.importEFIBootDisk(
+            sourcePath: gzip.path,
+            name: "conjet-core-test",
+            force: false,
+            dataDiskSizeBytes: 1024 * 1024
+        )
+
+        XCTAssertEqual(manifest.name, "conjet-core-test")
+        XCTAssertEqual(manifest.bootLoaderKind, .efiDisk)
+        XCTAssertEqual(try String(contentsOfFile: manifest.bootDiskPath ?? ""), "conjet-core-raw-placeholder")
+        let vmFiles = try FileManager.default.contentsOfDirectory(atPath: paths.vmDirectory.path)
+        XCTAssertFalse(vmFiles.contains { $0.hasPrefix(".decompressed-") })
+        XCTAssertNoThrow(try store.validateManifest(manifest))
+    }
+
     func testUbuntuCloudImageSourceDefaultsToCurrentNobleArm64Image() {
         let source = UbuntuCloudImageSource()
 
@@ -195,5 +223,24 @@ final class VMImageStoreTests: XCTestCase {
         XCTAssertTrue(result.succeeded, result.stderr)
         let data = try XCTUnwrap(result.stdout.data(using: .utf8))
         return try JSONDecoder().decode(QemuImageInfo.self, from: data)
+    }
+
+    private func gzipFile(source: URL, destination: URL) throws {
+        _ = FileManager.default.createFile(atPath: destination.path, contents: nil)
+        let output = try FileHandle(forWritingTo: destination)
+        defer { try? output.close() }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        process.arguments = ["-c", source.path]
+        process.standardOutput = output
+
+        let stderr = Pipe()
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, stderrText)
     }
 }

@@ -6,19 +6,22 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     public var quietStopMinutes: Int
     public var enableRosetta: Bool
     public var socketPath: String?
+    public var conjetCoreRepository: String
 
     public init(
         vmCPUs: Int = 4,
         memoryMiB: Int = 4096,
         quietStopMinutes: Int = 30,
         enableRosetta: Bool = true,
-        socketPath: String? = nil
+        socketPath: String? = nil,
+        conjetCoreRepository: String = ConjetCoreReleaseSource.defaultRepository
     ) {
         self.vmCPUs = vmCPUs
         self.memoryMiB = memoryMiB
         self.quietStopMinutes = quietStopMinutes
         self.enableRosetta = enableRosetta
         self.socketPath = socketPath
+        self.conjetCoreRepository = conjetCoreRepository
     }
 
     public static let `default` = ConjetConfig()
@@ -51,6 +54,9 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         lines.append("cpus = \(vmCPUs)")
         lines.append("memory_mib = \(memoryMiB)")
         lines.append("enable_rosetta = \(enableRosetta)")
+        lines.append("")
+        lines.append("[images]")
+        lines.append("conjet_core_repository = \"\(escapeTOML(conjetCoreRepository))\"")
         lines.append("")
         return lines.joined(separator: "\n")
     }
@@ -87,6 +93,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                 config.quietStopMinutes = try parseInt(value, key: key)
             case "daemon.socket_path":
                 config.socketPath = parseString(value)
+            case "images.conjet_core_repository":
+                config.conjetCoreRepository = parseString(value)
             default:
                 continue
             }
@@ -97,6 +105,9 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         }
         guard config.memoryMiB >= 512 else {
             throw ConjetError.decoding("vm.memory_mib must be at least 512")
+        }
+        guard isValidGitHubRepository(config.conjetCoreRepository) else {
+            throw ConjetError.decoding("images.conjet_core_repository must use OWNER/REPO format")
         }
         return config
     }
@@ -155,5 +166,10 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
 
     private func escapeTOML(_ value: String) -> String {
         value.replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func isValidGitHubRepository(_ value: String) -> Bool {
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count == 2 && parts.allSatisfy { !$0.isEmpty && !$0.contains(" ") }
     }
 }

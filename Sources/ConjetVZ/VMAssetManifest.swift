@@ -471,21 +471,69 @@ public struct VMImageStore: Sendable {
             }
         }
 
-        if let format = try inspectedDiskImageFormat(source: source) {
+        let preparedSource = try preparedDiskImageSource(source)
+        defer {
+            if preparedSource.removeAfterImport {
+                try? FileManager.default.removeItem(at: preparedSource.url)
+            }
+        }
+
+        if let format = try inspectedDiskImageFormat(source: preparedSource.url) {
             if format == "raw" {
-                try FileManager.default.copyItem(at: source, to: destination)
+                try FileManager.default.copyItem(at: preparedSource.url, to: destination)
                 return
             }
-            try convertDiskImage(source: source, destination: destination)
+            try convertDiskImage(source: preparedSource.url, destination: destination)
             return
         }
 
-        if shouldTreatAsRawWithoutInspection(source) {
-            try FileManager.default.copyItem(at: source, to: destination)
+        if shouldTreatAsRawWithoutInspection(preparedSource.url) {
+            try FileManager.default.copyItem(at: preparedSource.url, to: destination)
             return
         }
 
-        try convertDiskImage(source: source, destination: destination)
+        try convertDiskImage(source: preparedSource.url, destination: destination)
+    }
+
+    private struct PreparedDiskImageSource {
+        var url: URL
+        var removeAfterImport: Bool
+    }
+
+    private func preparedDiskImageSource(_ source: URL) throws -> PreparedDiskImageSource {
+        guard source.pathExtension.lowercased() == "gz" else {
+            return PreparedDiskImageSource(url: source, removeAfterImport: false)
+        }
+
+        let decompressedName = source.deletingPathExtension().lastPathComponent
+        let temporary = paths.vmDirectory
+            .appendingPathComponent(".decompressed-\(UUID().uuidString)-\(decompressedName)")
+        _ = FileManager.default.createFile(atPath: temporary.path, contents: nil)
+
+        let output = try FileHandle(forWritingTo: temporary)
+        defer { try? output.close() }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        process.arguments = ["-dc", source.path]
+        process.standardOutput = output
+
+        let stderr = Pipe()
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            try? FileManager.default.removeItem(at: temporary)
+            throw ConjetError.processFailed(
+                executable: "/usr/bin/gzip",
+                exitCode: process.terminationStatus,
+                stderr: stderrText
+            )
+        }
+
+        return PreparedDiskImageSource(url: temporary, removeAfterImport: true)
     }
 
     private func convertDiskImage(source: URL, destination: URL) throws {
