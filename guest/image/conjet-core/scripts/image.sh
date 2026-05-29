@@ -33,8 +33,15 @@ ARTIFACT_BASE="conjet-ubuntu-${UBUNTU_VERSION}-minimal-cloudimg-${OS_ARCH}-${RUN
 RAW_IMAGE="${WORK_DIR}/${ARTIFACT_BASE}.raw"
 OUT_IMAGE="${OUT_DIR}/${ARTIFACT_BASE}.raw.gz"
 
-LOOP_DEVICE=""
+ROOT_PARTITION_LOOP=""
 
+log() {
+    printf 'conjet-core: %s\n' "$*" >&2
+}
+
+export DEBIAN_FRONTEND=noninteractive
+
+log "installing host image build tools"
 apt-get update
 apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -55,16 +62,38 @@ if [ ! -f "${CLOUD_IMAGE}" ]; then
     exit 1
 fi
 
-partition_path() {
-    local loop="$1"
-    local candidate
-    for candidate in "${loop}p1" "${loop}1"; do
-        if [ -b "${candidate}" ]; then
-            printf '%s\n' "${candidate}"
-            return 0
-        fi
-    done
-    return 1
+partition_geometry() {
+    local image="$1"
+    local partition="$2"
+    parted -m "${image}" unit B print | awk -F: -v partition="${partition}" '
+        $1 == partition {
+            start = $2
+            end = $3
+            gsub(/B/, "", start)
+            gsub(/B/, "", end)
+            print start, end - start + 1
+            exit
+        }
+    '
+}
+
+attach_partition_loop() {
+    local image="$1"
+    local partition="$2"
+    local geometry
+    local start
+    local size
+
+    geometry="$(partition_geometry "${image}" "${partition}")"
+    if [ -z "${geometry}" ]; then
+        echo "could not find partition ${partition} in ${image}" >&2
+        parted -m "${image}" unit B print >&2 || true
+        return 1
+    fi
+
+    read -r start size <<<"${geometry}"
+    log "attaching partition ${partition} at byte offset ${start}, size ${size}"
+    losetup --find --show --offset "${start}" --sizelimit "${size}" "${image}"
 }
 
 unmount_if_mounted() {
@@ -81,34 +110,29 @@ cleanup() {
     unmount_if_mounted "${MOUNT_DIR}/proc"
     unmount_if_mounted "${MOUNT_DIR}/sys"
     unmount_if_mounted "${MOUNT_DIR}"
-    if [ -n "${LOOP_DEVICE}" ]; then
-        losetup -d "${LOOP_DEVICE}" 2>/dev/null || true
-        LOOP_DEVICE=""
+    if [ -n "${ROOT_PARTITION_LOOP}" ]; then
+        losetup -d "${ROOT_PARTITION_LOOP}" 2>/dev/null || true
+        ROOT_PARTITION_LOOP=""
     fi
 }
 
 trap cleanup EXIT
 
 rm -f "${RAW_IMAGE}" "${OUT_IMAGE}" "${OUT_IMAGE}.sha512sum" "${OUT_IMAGE}.json"
+log "converting ${CLOUD_IMAGE} to raw"
 qemu-img convert -O raw "${CLOUD_IMAGE}" "${RAW_IMAGE}"
+log "expanding raw disk to ${ROOT_DISK_GB} GiB"
 truncate -s "${ROOT_DISK_GB}G" "${RAW_IMAGE}"
 
-LOOP_DEVICE="$(losetup --find --show --partscan "${RAW_IMAGE}")"
-sleep 1
-if ! ROOT_PARTITION="$(partition_path "${LOOP_DEVICE}")"; then
-    partx -u "${LOOP_DEVICE}" || true
-    sleep 1
-    ROOT_PARTITION="$(partition_path "${LOOP_DEVICE}")"
-fi
+log "growing root partition in raw disk"
+growpart "${RAW_IMAGE}" 1
+ROOT_PARTITION_LOOP="$(attach_partition_loop "${RAW_IMAGE}" 1)"
+log "checking and expanding root filesystem"
+e2fsck -fy "${ROOT_PARTITION_LOOP}" || true
+resize2fs "${ROOT_PARTITION_LOOP}"
 
-growpart "${LOOP_DEVICE}" 1 || true
-partprobe "${LOOP_DEVICE}" || true
-sleep 1
-ROOT_PARTITION="$(partition_path "${LOOP_DEVICE}")"
-e2fsck -fy "${ROOT_PARTITION}" || true
-resize2fs "${ROOT_PARTITION}"
-
-mount "${ROOT_PARTITION}" "${MOUNT_DIR}"
+log "mounting root filesystem"
+mount "${ROOT_PARTITION_LOOP}" "${MOUNT_DIR}"
 mount -t proc proc "${MOUNT_DIR}/proc"
 mount -t sysfs sysfs "${MOUNT_DIR}/sys"
 mount --bind /dev "${MOUNT_DIR}/dev"
@@ -193,6 +217,7 @@ network:
       dhcp4: true
       dhcp6: false
 EOF_NETPLAN
+chmod 0600 "${MOUNT_DIR}/etc/netplan/50-conjet.yaml"
 
 touch "${MOUNT_DIR}/etc/cloud/cloud-init.disabled"
 
