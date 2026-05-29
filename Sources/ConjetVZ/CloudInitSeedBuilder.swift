@@ -149,6 +149,12 @@ public enum CloudInitSeedBuilder {
                   except OSError:
                       pass
 
+              def shutdown_write(sock):
+                  try:
+                      sock.shutdown(socket.SHUT_WR)
+                  except OSError:
+                      pass
+
               def write_http_unavailable(client, message):
                   body = f"Conjet guest Docker daemon is not ready: {message}\\n".encode()
                   response = (
@@ -173,8 +179,7 @@ public enum CloudInitSeedBuilder {
                   except OSError:
                       pass
                   finally:
-                      close_socket(src)
-                      close_socket(dst)
+                      shutdown_write(dst)
 
               def docker_api_ping(timeout=2.0):
                   upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -245,6 +250,10 @@ public enum CloudInitSeedBuilder {
                   right = threading.Thread(target=pump, args=(upstream, client), daemon=True)
                   left.start()
                   right.start()
+                  left.join()
+                  right.join()
+                  close_socket(upstream)
+                  close_socket(client)
 
               ignore_sigpipe()
               os.makedirs("/run/conjet", exist_ok=True)

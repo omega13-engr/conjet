@@ -37,6 +37,13 @@ def close_socket(sock):
         pass
 
 
+def shutdown_write(sock):
+    try:
+        sock.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+
 def write_http_unavailable(client, message):
     body = f"Conjet guest Docker daemon is not ready: {message}\n".encode()
     response = (
@@ -62,8 +69,7 @@ def pump(source, destination):
     except OSError:
         pass
     finally:
-        close_socket(source)
-        close_socket(destination)
+        shutdown_write(destination)
 
 
 def docker_ready_status(timeout=2.0):
@@ -145,8 +151,14 @@ def handle_client(client):
         close_socket(client)
         return
 
-    threading.Thread(target=pump, args=(client, upstream), daemon=True).start()
-    threading.Thread(target=pump, args=(upstream, client), daemon=True).start()
+    client_to_upstream = threading.Thread(target=pump, args=(client, upstream))
+    upstream_to_client = threading.Thread(target=pump, args=(upstream, client))
+    client_to_upstream.start()
+    upstream_to_client.start()
+    client_to_upstream.join()
+    upstream_to_client.join()
+    close_socket(upstream)
+    close_socket(client)
 
 
 def main():

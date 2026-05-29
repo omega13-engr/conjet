@@ -34,5 +34,8 @@ final class CloudInitSeedBuilderTests: XCTestCase {
         XCTAssertTrue(userData.contains("vmw_vsock_virtio_transport"))
         XCTAssertTrue(userData.contains("/usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0"))
         XCTAssertTrue(userData.contains("StandardOutput=journal"))
+        XCTAssertTrue(userData.contains("shutdown(socket.SHUT_WR)"))
+        XCTAssertTrue(userData.contains("left.join()"))
+        XCTAssertTrue(userData.contains("right.join()"))
     }
 }
