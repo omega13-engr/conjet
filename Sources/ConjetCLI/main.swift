@@ -3,6 +3,7 @@ import ConjetCore
 import ConjetPower
 import ConjetVZ
 import Darwin
+import Dispatch
 import Foundation
 
 @main
@@ -185,6 +186,8 @@ struct ConjetCLI {
         case "fetch-conjet-core":
             let force = args.contains("--force")
             let artifact = try conjetCoreArtifactPath(args: args, force: force, printStatus: !json)
+            let ui = ConjetFetchUI(enabled: !json)
+            ui.step("[conjet-core 4/4] importing img")
             let manifest = try VMImageStore().importEFIBootDisk(
                 sourcePath: artifact,
                 name: value(after: "--name", in: args) ?? "conjet-core",
@@ -192,7 +195,11 @@ struct ConjetCLI {
                 cloudInitSeedPath: nil,
                 bootDiskMinimumSizeBytes: bootDiskMinimumSizeBytes(args: args, defaultGiB: nil)
             )
-            try printVMManifest(manifest, json: json)
+            try printVMManifest(
+                manifest,
+                json: json,
+                headline: "=> [conjet-core 4/4] VM assets configured: \(manifest.name)"
+            )
         case "fetch-ubuntu-cloud":
             let force = args.contains("--force")
             let release = value(after: "--release", in: args) ?? "noble"
@@ -639,14 +646,14 @@ struct ConjetCLI {
 
         let config = try ConjetConfig.loadOrCreate()
         let repository = conjetCoreRepository(cliValue: nil, config: config)
-        if !json {
-            print("VM is not configured; fetching latest Conjet-core image from \(repository)")
-        }
+        let ui = ConjetFetchUI(enabled: !json)
+        ui.step("[conjet-core internal] VM image missing; fetching latest release")
         let artifact = try downloadLatestConjetCoreArtifact(
             repository: repository,
             force: false,
             printStatus: !json
         )
+        ui.step("[conjet-core 4/4] importing img")
         let manifest = try store.importEFIBootDisk(
             sourcePath: artifact,
             name: "conjet-core",
@@ -655,7 +662,11 @@ struct ConjetCLI {
             bootDiskMinimumSizeBytes: nil
         )
         if !json {
-            try printVMManifest(manifest, json: false)
+            try printVMManifest(
+                manifest,
+                json: false,
+                headline: "=> [conjet-core 4/4] VM assets configured: \(manifest.name)"
+            )
         }
     }
 
@@ -671,7 +682,11 @@ struct ConjetCLI {
             return image
         }
         if let url {
-            return try downloadConjetCoreArtifact(urlString: url, force: force)
+            return try downloadConjetCoreArtifact(
+                urlString: url,
+                force: force,
+                progress: ConjetFetchUI(enabled: printStatus).progress(stage: "[conjet-core 1/1] downloading img")
+            )
         }
         let repository = conjetCoreRepository(cliValue: value(after: "--repository", in: args), config: try ConjetConfig.loadOrCreate())
         return try downloadLatestConjetCoreArtifact(repository: repository, force: force, printStatus: printStatus)
@@ -694,27 +709,32 @@ struct ConjetCLI {
         force: Bool,
         printStatus: Bool
     ) throws -> String {
+        let ui = ConjetFetchUI(enabled: printStatus)
         let source = ConjetCoreReleaseSource(repository: repository)
-        if printStatus {
-            print("Resolving latest Conjet-core release: \(source.latestReleaseURL)")
-        }
+        ui.step("[conjet-core internal] load release metadata")
         let releaseData = try githubGet(urlString: source.latestReleaseURL)
+        ui.step("[conjet-core internal] resolve img")
         let artifact = try ConjetCoreReleaseResolver.selectArtifact(
             fromLatestReleaseJSON: releaseData,
             hostArchitecture: HostCapabilities.detect().architecture
         )
-        if printStatus {
-            print("Downloading \(artifact.name) from \(repository) release \(artifact.releaseTag)")
-        }
-        let imagePath = try downloadConjetCoreArtifact(urlString: artifact.downloadURL, force: force)
+        ui.step("[conjet-core internal] selected release \(artifact.releaseTag)")
+        let imagePath = try downloadConjetCoreArtifact(
+            urlString: artifact.downloadURL,
+            force: force,
+            progress: ui.progress(stage: "[conjet-core 1/4] downloading img")
+        )
         if let checksumURL = artifact.checksumDownloadURL {
-            let checksumPath = try downloadConjetCoreArtifact(urlString: checksumURL, force: force)
+            let checksumPath = try downloadConjetCoreArtifact(
+                urlString: checksumURL,
+                force: force,
+                progress: ui.progress(stage: "[conjet-core 2/4] downloading checksum")
+            )
+            ui.step("[conjet-core 3/4] verifying checksum")
             try verifySHA512(filePath: imagePath, checksumPath: checksumPath)
-            if printStatus {
-                print("Verified SHA-512 checksum for \(artifact.name)")
-            }
-        } else if printStatus {
-            print("No SHA-512 checksum asset found for \(artifact.name); importing without checksum verification")
+            ui.step("[conjet-core 3/4] checksum verified")
+        } else {
+            ui.step("[conjet-core 2/4] checksum unavailable; skipping verification")
         }
         return imagePath
     }
@@ -745,7 +765,11 @@ struct ConjetCLI {
         return data
     }
 
-    private static func downloadConjetCoreArtifact(urlString: String, force: Bool) throws -> String {
+    private static func downloadConjetCoreArtifact(
+        urlString: String,
+        force: Bool,
+        progress: DownloadProgressRenderer? = nil
+    ) throws -> String {
         guard let remote = URL(string: urlString),
               remote.scheme == "https",
               remote.host?.isEmpty == false,
@@ -757,6 +781,7 @@ struct ConjetCLI {
         try paths.ensureBaseDirectories()
         let destination = paths.vmDirectory.appendingPathComponent(remote.lastPathComponent)
         if FileManager.default.fileExists(atPath: destination.path), !force {
+            progress?.cached()
             return destination.path
         }
 
@@ -766,20 +791,7 @@ struct ConjetCLI {
             try FileManager.default.removeItem(at: temporary)
         }
 
-        let result = try ProcessRunner.run("/usr/bin/curl", [
-            "-fL",
-            "--retry", "3",
-            "--connect-timeout", "20",
-            "-o", temporary.path,
-            urlString
-        ])
-        guard result.succeeded else {
-            throw ConjetError.processFailed(
-                executable: result.executable,
-                exitCode: result.exitCode,
-                stderr: result.stderr
-            )
-        }
+        try ConjetCoreArtifactDownloader.download(url: remote, to: temporary, progress: progress)
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
         }
@@ -827,12 +839,12 @@ struct ConjetCLI {
         throw ConjetError.unavailable(message)
     }
 
-    private static func printVMManifest(_ manifest: VMAssetManifest, json: Bool) throws {
+    private static func printVMManifest(_ manifest: VMAssetManifest, json: Bool, headline: String? = nil) throws {
         if json {
             print(try ConjetJSON.string(manifest))
             return
         }
-        print("VM assets configured: \(manifest.name)")
+        print(headline ?? "VM assets configured: \(manifest.name)")
         print("  boot loader: \(manifest.bootLoaderKind.rawValue)")
         if manifest.bootLoaderKind == .linuxArm64CompressedEfiZboot {
             print("  runnable: no - standalone zboot files need a full EFI boot disk")
@@ -1044,6 +1056,244 @@ struct ConjetCLI {
               conjet power policy STATE [--json]
             """
         )
+    }
+}
+
+private struct ConjetFetchUI {
+    var enabled: Bool
+
+    func step(_ message: String) {
+        guard enabled else { return }
+        print("=> \(message)")
+    }
+
+    func progress(stage: String) -> DownloadProgressRenderer? {
+        guard enabled else { return nil }
+        return DownloadProgressRenderer(stage: stage)
+    }
+}
+
+private final class DownloadProgressRenderer: @unchecked Sendable {
+    private let stage: String
+    private let lock = NSLock()
+    private var lastPercent: Int?
+    private var lastBytes: Int64 = 0
+    private var emitted = false
+
+    init(stage: String) {
+        self.stage = stage
+    }
+
+    func update(bytesWritten: Int64, totalBytes: Int64?) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let totalBytes, totalBytes > 0 {
+            let percent = min(100, Int((Double(bytesWritten) / Double(totalBytes)) * 100))
+            let shouldEmit = !emitted
+                || percent == 100
+                || lastPercent.map { percent >= $0 + 5 } ?? true
+            guard shouldEmit else { return }
+            lastPercent = percent
+            emitted = true
+            print(
+                "=> \(stage): \(Self.formatBytes(bytesWritten)) / \(Self.formatBytes(totalBytes)) (\(percent)%)"
+            )
+            return
+        }
+
+        let shouldEmit = !emitted || bytesWritten - lastBytes >= 16 * 1024 * 1024
+        guard shouldEmit else { return }
+        lastBytes = bytesWritten
+        emitted = true
+        print("=> \(stage): \(Self.formatBytes(bytesWritten))")
+    }
+
+    func retry(attempt: Int, maxAttempts: Int) {
+        lock.lock()
+        lastPercent = nil
+        lastBytes = 0
+        emitted = false
+        lock.unlock()
+        print("=> \(stage): retrying (\(attempt)/\(maxAttempts))")
+    }
+
+    func cached() {
+        print("=> CACHED \(stage)")
+    }
+
+    func finish(bytesWritten: Int64?) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let bytesWritten {
+            print("=> \(stage): done \(Self.formatBytes(bytesWritten))")
+        } else {
+            print("=> \(stage): done")
+        }
+    }
+
+    private static func formatBytes(_ bytes: Int64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var value = Double(max(bytes, 0))
+        var unitIndex = 0
+        while value >= 1024, unitIndex < units.count - 1 {
+            value /= 1024
+            unitIndex += 1
+        }
+
+        if unitIndex == 0 {
+            return "\(Int(value))\(units[unitIndex])"
+        }
+        if value >= 100 {
+            return String(format: "%.0f%@", value, units[unitIndex])
+        }
+        if value >= 10 {
+            return String(format: "%.1f%@", value, units[unitIndex])
+        }
+        return String(format: "%.2f%@", value, units[unitIndex])
+    }
+}
+
+private enum ConjetCoreArtifactDownloader {
+    private static let maxAttempts = 3
+
+    static func download(
+        url remote: URL,
+        to destination: URL,
+        progress: DownloadProgressRenderer?
+    ) throws {
+        var lastError: Error?
+        for attempt in 1...maxAttempts {
+            do {
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.removeItem(at: destination)
+                }
+                _ = try downloadOnce(url: remote, to: destination, progress: progress)
+                return
+            } catch {
+                lastError = error
+                if attempt < maxAttempts {
+                    progress?.retry(attempt: attempt + 1, maxAttempts: maxAttempts)
+                    Thread.sleep(forTimeInterval: 1)
+                }
+            }
+        }
+        throw lastError ?? ConjetError.unavailable("download failed for \(remote.absoluteString)")
+    }
+
+    private static func downloadOnce(
+        url remote: URL,
+        to destination: URL,
+        progress: DownloadProgressRenderer?
+    ) throws -> Int64 {
+        let delegate = FileDownloadDelegate(destination: destination, progress: progress)
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 60 * 60
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+
+        let task = session.downloadTask(with: remote)
+        task.resume()
+        return try delegate.wait()
+    }
+}
+
+private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let destination: URL
+    private let progress: DownloadProgressRenderer?
+    private let semaphore = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var result: Result<Int64, Error>?
+    private var finishError: Error?
+    private var finishedBytes: Int64?
+
+    init(destination: URL, progress: DownloadProgressRenderer?) {
+        self.destination = destination
+        self.progress = progress
+    }
+
+    func wait() throws -> Int64 {
+        semaphore.wait()
+        lock.lock()
+        defer { lock.unlock() }
+        switch result {
+        case .success(let bytes):
+            return bytes
+        case .failure(let error):
+            throw error
+        case nil:
+            throw ConjetError.unavailable("download did not complete for \(destination.path)")
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        let total = totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil
+        progress?.update(bytesWritten: totalBytesWritten, totalBytes: total)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {
+        do {
+            if let response = downloadTask.response as? HTTPURLResponse,
+               !(200..<300).contains(response.statusCode) {
+                throw ConjetError.unavailable("download failed with HTTP \(response.statusCode)")
+            }
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: location, to: destination)
+            finishedBytes = try Self.fileSize(destination)
+        } catch {
+            finishError = error
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        if let error {
+            complete(.failure(error))
+            return
+        }
+        if let finishError {
+            complete(.failure(finishError))
+            return
+        }
+        guard let finishedBytes else {
+            complete(.failure(ConjetError.filesystem("download did not write \(destination.path)")))
+            return
+        }
+        progress?.finish(bytesWritten: finishedBytes)
+        complete(.success(finishedBytes))
+    }
+
+    private func complete(_ newResult: Result<Int64, Error>) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard result == nil else { return }
+        result = newResult
+        semaphore.signal()
+    }
+
+    private static func fileSize(_ url: URL) throws -> Int64 {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        if let size = attributes[.size] as? NSNumber {
+            return size.int64Value
+        }
+        return 0
     }
 }
 
