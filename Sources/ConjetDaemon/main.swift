@@ -28,9 +28,13 @@ struct ConjetDaemon {
         )
 
         try logger.log("daemon_start", [
+            "profile": paths.profileName,
             "socket": socketPath,
             "vmCPUs": String(config.vmCPUs),
-            "memoryMiB": String(config.memoryMiB)
+            "memoryMiB": String(config.memoryMiB),
+            "architecture": config.architecture,
+            "diskGiB": String(config.diskGiB),
+            "runtime": config.runtime
         ])
 
         let server = UnixSocketServer(socketPath: socketPath)

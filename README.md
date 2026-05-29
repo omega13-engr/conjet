@@ -8,8 +8,13 @@ This repository currently implements the first real container-runtime slice from
 
 - SwiftPM package with `conjet` and `conjetd`.
 - Host capability and Virtualization.framework probing.
-- User-scoped config at `~/.conjet/config.toml`, or `CONJET_HOME` for isolated runs.
-- Unix-domain control socket at `~/.conjet/run/conjetd.sock`.
+- User-scoped config at `~/.conjet/config.toml`, or `CONJET_HOME` for moving
+  all Conjet state to another volume.
+- Profile-scoped config/state. The `default` profile keeps the legacy
+  `~/.conjet` layout; named profiles live under
+  `$CONJET_HOME/profiles/<name>`.
+- Unix-domain control socket at `~/.conjet/run/conjetd.sock` for the default
+  profile, or the profile-specific `run/conjetd.sock` for named profiles.
 - Benchmark JSON and Markdown result output.
 - Initial ConjetFS path placement classifier.
 - Initial energy governor state and resource policy model.
@@ -31,6 +36,9 @@ This repository currently implements the first real container-runtime slice from
   Conjet-core GitHub release for the host architecture, downloads the
   `.raw.gz` image, verifies the `.sha512sum` asset when present, imports it,
   starts `conjetd`, starts the VM, and configures Docker context `conjet`.
+- Colima-style profile flags on `conjet start`: `--profile`, `--cpu`,
+  `--memory`, `--disk`, `--runtime`, and `--arch`. New profiles default to
+  4 CPUs, 8 GiB memory, 100 GiB data disk, Docker runtime, and `aarch64`.
 - GitHub Actions release automation for Conjet-core image artifacts on pushes
   that change `guest/image/conjet-core/**`, plus manual workflow dispatch.
 - Cloud-init NoCloud seed ISO generation for bootstrapping Docker inside an
@@ -81,6 +89,31 @@ export CONJET_HOME="$(mktemp -d /tmp/conjet.XXXXXX)"
 .build/debug/conjet start
 ```
 
+`CONJET_HOME` is the storage root. Use it to move Conjet from `~/.conjet` to an
+external drive:
+
+```sh
+export CONJET_HOME=/Volumes/ExternalSSD/conjet
+.build/debug/conjet start
+```
+
+Profiles are isolated under that root. The default profile remains at
+`$CONJET_HOME` for backward compatibility; named profiles use
+`$CONJET_HOME/profiles/<name>` and get their own config, daemon socket, VM
+state, Docker socket, logs, and Docker context:
+
+```sh
+.build/debug/conjet start --profile default
+.build/debug/conjet start --profile work --cpu 4 --memory 8 --disk 100 --runtime docker --arch aarch64
+.build/debug/conjet profile status --profile work
+.build/debug/conjet profile list
+```
+
+`--disk` accepts either a GiB value or a path to a custom EFI boot disk image.
+If a custom image path is set before the profile has VM assets, Conjet imports
+that image instead of downloading Conjet-core. The Docker runtime is currently
+the supported runtime.
+
 On first run, `conjet start` fetches the latest Conjet-core image release from
 `zdxsector/conjet`. Override the release source with either
 `CONJET_CORE_REPOSITORY=OWNER/REPO` or this config entry:
@@ -90,9 +123,10 @@ On first run, `conjet start` fetches the latest Conjet-core image release from
 conjet_core_repository = "OWNER/REPO"
 ```
 
-After VM start, Conjet creates or updates Docker context `conjet`, points it at
-`unix://~/.conjet/run/docker.sock`, and makes it the active Docker context.
-This lets normal Docker commands target Conjet:
+After VM start, Conjet creates or updates Docker context `conjet` for the
+default profile, or `conjet-<profile>` for named profiles, points it at the
+profile Docker socket, and makes it the active Docker context. This lets normal
+Docker commands target Conjet:
 
 ```sh
 docker context ls

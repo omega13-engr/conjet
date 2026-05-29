@@ -1,6 +1,8 @@
 import Foundation
 
 public struct ConjetPaths: Codable, Equatable, Sendable {
+    public var profileName: String
+    public var rootHome: URL
     public var home: URL
     public var config: URL
     public var runDirectory: URL
@@ -15,13 +17,24 @@ public struct ConjetPaths: Codable, Equatable, Sendable {
     public var dockerSocket: URL
 
     public init(home: URL) {
-        self.home = home
-        self.config = home.appendingPathComponent("config.toml")
-        self.runDirectory = home.appendingPathComponent("run")
+        self.init(home: home, profileName: "default")
+    }
+
+    public init(home: URL, profileName: String) {
+        let safeProfileName = Self.safeProfileName(profileName)
+        let profileHome = safeProfileName == "default"
+            ? home
+            : home.appendingPathComponent("profiles", isDirectory: true)
+                .appendingPathComponent(safeProfileName, isDirectory: true)
+        self.profileName = safeProfileName
+        self.rootHome = home
+        self.home = profileHome
+        self.config = profileHome.appendingPathComponent("config.toml")
+        self.runDirectory = profileHome.appendingPathComponent("run")
         self.socket = runDirectory.appendingPathComponent("conjetd.sock")
-        self.logsDirectory = home.appendingPathComponent("logs")
+        self.logsDirectory = profileHome.appendingPathComponent("logs")
         self.daemonLog = logsDirectory.appendingPathComponent("conjetd.log")
-        self.stateDirectory = home.appendingPathComponent("state")
+        self.stateDirectory = profileHome.appendingPathComponent("state")
         self.vmDirectory = stateDirectory.appendingPathComponent("vm", isDirectory: true)
         self.vmManifest = vmDirectory.appendingPathComponent("manifest.json")
         self.bootstrapShare = vmDirectory.appendingPathComponent("bootstrap", isDirectory: true)
@@ -30,12 +43,13 @@ public struct ConjetPaths: Codable, Equatable, Sendable {
     }
 
     public static func `default`() -> ConjetPaths {
+        let profileName = ProcessInfo.processInfo.environment["CONJET_PROFILE"] ?? "default"
         if let override = ProcessInfo.processInfo.environment["CONJET_HOME"], !override.isEmpty {
-            return ConjetPaths(home: URL(fileURLWithPath: override, isDirectory: true))
+            return ConjetPaths(home: URL(fileURLWithPath: override, isDirectory: true), profileName: profileName)
         }
         let home = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".conjet", isDirectory: true)
-        return ConjetPaths(home: home)
+        return ConjetPaths(home: home, profileName: profileName)
     }
 
     public func ensureBaseDirectories() throws {
@@ -43,5 +57,21 @@ public struct ConjetPaths: Codable, Equatable, Sendable {
         for directory in [home, runDirectory, logsDirectory, stateDirectory, vmDirectory, bootstrapShare] {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
+    }
+
+    public static func isValidProfileName(_ profileName: String) -> Bool {
+        safeProfileName(profileName) == profileName && !profileName.isEmpty
+    }
+
+    public static func safeProfileName(_ profileName: String) -> String {
+        let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "default" }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        guard trimmed.unicodeScalars.allSatisfy({ allowed.contains($0) }),
+              !trimmed.contains(".."),
+              !trimmed.hasPrefix(".") else {
+            return "default"
+        }
+        return trimmed
     }
 }

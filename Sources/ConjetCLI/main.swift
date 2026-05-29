@@ -20,8 +20,18 @@ struct ConjetCLI {
     static func run(arguments: [String]) throws {
         var args = arguments
         let json = args.removeAllOccurrences("--json")
+        let globalProfile = try removeLeadingProfileOption(from: &args)
         let command = args.first ?? "help"
         if !args.isEmpty { args.removeFirst() }
+        let commandProfile: String?
+        if command == "compose" {
+            commandProfile = nil
+        } else {
+            commandProfile = try removeProfileOption(from: &args)
+        }
+        if let profileName = commandProfile ?? globalProfile {
+            try activateProfile(profileName)
+        }
 
         switch command {
         case "doctor":
@@ -29,7 +39,7 @@ struct ConjetCLI {
         case "status":
             try status(json: json)
         case "start":
-            try start(json: json)
+            try start(args: args, json: json)
         case "stop":
             try stop()
         case "shell":
@@ -46,6 +56,8 @@ struct ConjetCLI {
             try sync(args: args, json: json)
         case "power":
             try power(args: args, json: json)
+        case "profile":
+            try profile(args: args, json: json)
         case "help", "-h", "--help":
             printHelp()
         default:
@@ -63,6 +75,8 @@ struct ConjetCLI {
             print(try ConjetJSON.string(output))
         } else {
             print("Conjet doctor")
+            print("  profile: \(paths.profileName)")
+            print("  home: \(paths.home.path)")
             print("  macOS: \(host.macOSVersion) (\(host.buildVersion))")
             print("  arch: \(host.architecture)")
             print("  cpu: \(host.cpuBrand)")
@@ -82,6 +96,7 @@ struct ConjetCLI {
 
     private static func status(json: Bool) throws {
         let paths = ConjetPaths.default()
+        let config = try ConjetConfig.loadOrCreate(paths: paths)
         let socketPath = try socketPath(paths: paths)
         do {
             let response = try UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .status))
@@ -89,6 +104,7 @@ struct ConjetCLI {
                 print(try ConjetJSON.string(response))
             } else if let status = response.status {
                 print("conjetd: \(status.state.rawValue)")
+                printProfileSummary(paths: paths, config: status.config)
                 print("  pid: \(status.pid)")
                 print("  socket: \(status.socketPath)")
                 print("  started: \(status.startedAt)")
@@ -108,14 +124,88 @@ struct ConjetCLI {
                 print(try ConjetJSON.string(offline))
             } else {
                 print(offline.message)
+                printProfileSummary(paths: paths, config: config)
             }
         }
     }
 
-    private static func start(json: Bool = false) throws {
-        try ensureVMConfiguredForStart(json: json)
+    private static func profile(args: [String], json: Bool) throws {
+        let subcommand = args.first ?? "status"
+        switch subcommand {
+        case "status":
+            let paths = ConjetPaths.default()
+            let config = try ConjetConfig.loadOrCreate(paths: paths)
+            let output = ProfileStatus(profile: paths.profileName, home: paths.home.path, config: config)
+            if json {
+                print(try ConjetJSON.string(output))
+            } else {
+                printProfileSummary(paths: paths, config: config)
+            }
+        case "list":
+            let paths = ConjetPaths.default()
+            let profiles = try listProfiles(rootHome: paths.rootHome)
+            if json {
+                print(try ConjetJSON.string(profiles))
+            } else {
+                print("profiles")
+                for profile in profiles {
+                    print("  \(profile)")
+                }
+            }
+        default:
+            throw ConjetError.invalidArgument("unknown profile command '\(subcommand)'")
+        }
+    }
+
+    private static func start(args: [String] = [], json: Bool = false) throws {
+        let paths = ConjetPaths.default()
+        let config = try updateProfileConfigFromStartArgs(args, paths: paths, json: json)
+        try ensureVMConfiguredForStart(json: json, config: config)
         let socketPath = try startDaemonOnly(printStatus: !json)
         try startVMIfConfigured(socketPath: socketPath, json: json)
+    }
+
+    private static func updateProfileConfigFromStartArgs(_ args: [String], paths: ConjetPaths, json: Bool) throws -> ConjetConfig {
+        var config = try ConjetConfig.loadOrCreate(paths: paths)
+        let original = config
+        var remaining = args
+
+        while !remaining.isEmpty {
+            let flag = remaining.removeFirst()
+            switch flag {
+            case "--cpu", "--cpus":
+                config.vmCPUs = try parsePositiveInt(consumeValue(flag, from: &remaining), flag: flag)
+            case "--memory":
+                config.memoryMiB = try parseMemoryMiB(consumeValue(flag, from: &remaining), flag: flag)
+            case "--disk":
+                let value = try consumeValue(flag, from: &remaining)
+                if let diskGiB = try parseOptionalGiB(value, flag: flag) {
+                    config.diskGiB = diskGiB
+                    config.diskImagePath = nil
+                } else {
+                    let path = expandedPath(value)
+                    guard FileManager.default.fileExists(atPath: path) else {
+                        throw ConjetError.invalidArgument("--disk custom image does not exist at \(path)")
+                    }
+                    config.diskImagePath = path
+                }
+            case "--runtime":
+                config.runtime = try normalizeRuntime(consumeValue(flag, from: &remaining))
+            case "--arch", "--architecture":
+                config.architecture = try normalizeArchitecture(consumeValue(flag, from: &remaining))
+            default:
+                throw ConjetError.invalidArgument("unknown start option '\(flag)'")
+            }
+        }
+
+        if config != original {
+            try config.save(paths: paths)
+            if !json {
+                ConjetFetchUI(enabled: true).step("[profile \(paths.profileName)] updated")
+                printProfileSummary(paths: paths, config: config)
+            }
+        }
+        return config
     }
 
     private static func startDaemonOnly(printStatus: Bool) throws -> String {
@@ -133,6 +223,9 @@ struct ConjetCLI {
         let process = Process()
         process.executableURL = daemonURL
         process.arguments = ["--serve"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CONJET_PROFILE"] = paths.profileName
+        process.environment = environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()
@@ -180,6 +273,7 @@ struct ConjetCLI {
         case "fetch-conjet-core":
             let force = args.contains("--force")
             let artifact = try conjetCoreArtifactPath(args: args, force: force, printStatus: !json)
+            let config = try ConjetConfig.loadOrCreate()
             let ui = ConjetFetchUI(enabled: !json)
             ui.step("[conjet-core 4/4] importing img")
             let manifest = try VMImageStore().importEFIBootDisk(
@@ -187,7 +281,8 @@ struct ConjetCLI {
                 name: value(after: "--name", in: args) ?? "conjet-core",
                 force: force,
                 cloudInitSeedPath: nil,
-                bootDiskMinimumSizeBytes: bootDiskMinimumSizeBytes(args: args, defaultGiB: nil)
+                bootDiskMinimumSizeBytes: bootDiskMinimumSizeBytes(args: args, defaultGiB: nil),
+                dataDiskSizeBytes: gibibytes(config.diskGiB)
             )
             try printVMManifest(
                 manifest,
@@ -197,6 +292,7 @@ struct ConjetCLI {
         case "fetch-ubuntu-cloud":
             let force = args.contains("--force")
             let release = value(after: "--release", in: args) ?? "noble"
+            let config = try ConjetConfig.loadOrCreate()
             let cloudInitSeedPath: String?
             if args.contains("--cloud-init-docker") {
                 cloudInitSeedPath = try buildDockerCloudInitSeed()
@@ -207,17 +303,27 @@ struct ConjetCLI {
                 source: UbuntuCloudImageSource(release: release),
                 force: force,
                 cloudInitSeedPath: cloudInitSeedPath,
-                bootDiskMinimumSizeBytes: bootDiskMinimumSizeBytes(args: args, defaultGiB: 16)
+                bootDiskMinimumSizeBytes: bootDiskMinimumSizeBytes(args: args, defaultGiB: 16),
+                dataDiskSizeBytes: gibibytes(config.diskGiB)
             )
             try printVMManifest(manifest, json: json)
         case "fetch-fedora":
             let force = args.contains("--force")
             let release = value(after: "--release", in: args) ?? "43"
-            let manifest = try VMImageStore().fetchFedoraPXE(source: FedoraPXESource(release: release), force: force)
+            let config = try ConjetConfig.loadOrCreate()
+            let manifest = try VMImageStore().fetchFedoraPXE(
+                source: FedoraPXESource(release: release),
+                force: force,
+                dataDiskSizeBytes: gibibytes(config.diskGiB)
+            )
             try printVMManifest(manifest, json: json)
         case "fetch-alpine":
             let force = args.contains("--force")
-            let manifest = try VMImageStore().fetchAlpineNetboot(force: force)
+            let config = try ConjetConfig.loadOrCreate()
+            let manifest = try VMImageStore().fetchAlpineNetboot(
+                force: force,
+                dataDiskSizeBytes: gibibytes(config.diskGiB)
+            )
             try printVMManifest(manifest, json: json)
         case "import-efi-disk":
             guard let image = value(after: "--image", in: args) else {
@@ -312,7 +418,7 @@ struct ConjetCLI {
             let response = try daemonRequest(.vmStatus)
             try printDaemonResponse(response, json: json)
         case "start":
-            try ensureVMConfiguredForStart(json: json)
+            try ensureVMConfiguredForStart(json: json, config: try ConjetConfig.loadOrCreate())
             try ensureDaemon()
             let socketPath = try socketPath(paths: ConjetPaths.default())
             let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
@@ -529,6 +635,139 @@ struct ConjetCLI {
         return config.socketPath ?? paths.socket.path
     }
 
+    private static func activateProfile(_ profileName: String) throws {
+        guard ConjetPaths.isValidProfileName(profileName) else {
+            throw ConjetError.invalidArgument("--profile must contain only letters, numbers, '.', '_' or '-' and cannot start with '.'")
+        }
+        setenv("CONJET_PROFILE", profileName, 1)
+    }
+
+    private static func removeLeadingProfileOption(from args: inout [String]) throws -> String? {
+        guard args.first == "--profile" else { return nil }
+        guard args.indices.contains(1) else {
+            throw ConjetError.invalidArgument("--profile requires a name")
+        }
+        let profileName = args[1]
+        args.removeFirst(2)
+        return profileName
+    }
+
+    private static func removeProfileOption(from args: inout [String]) throws -> String? {
+        guard let index = args.firstIndex(of: "--profile") else { return nil }
+        guard args.indices.contains(index + 1) else {
+            throw ConjetError.invalidArgument("--profile requires a name")
+        }
+        let profileName = args[index + 1]
+        args.removeSubrange(index...(index + 1))
+        return profileName
+    }
+
+    private static func listProfiles(rootHome: URL) throws -> [String] {
+        var profiles = ["default"]
+        let profilesDirectory = rootHome.appendingPathComponent("profiles", isDirectory: true)
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            at: profilesDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey]
+        ) {
+            for entry in entries {
+                let values = try entry.resourceValues(forKeys: [.isDirectoryKey])
+                if values.isDirectory == true,
+                   ConjetPaths.isValidProfileName(entry.lastPathComponent) {
+                    profiles.append(entry.lastPathComponent)
+                }
+            }
+        }
+        return Array(Set(profiles)).sorted()
+    }
+
+    private static func printProfileSummary(paths: ConjetPaths, config: ConjetConfig) {
+        print("  profile: \(paths.profileName)")
+        print("  home: \(paths.home.path)")
+        print("  arch: \(config.architecture)")
+        print("  cpus: \(config.vmCPUs)")
+        print("  memory: \(config.memoryMiB / 1024) GiB")
+        print("  disk: \(config.diskGiB) GiB")
+        if let diskImagePath = config.diskImagePath {
+            print("  disk image: \(diskImagePath)")
+        }
+        print("  runtime: \(config.runtime)")
+    }
+
+    private static func consumeValue(_ flag: String, from args: inout [String]) throws -> String {
+        guard let value = args.first else {
+            throw ConjetError.invalidArgument("\(flag) requires a value")
+        }
+        args.removeFirst()
+        return value
+    }
+
+    private static func parsePositiveInt(_ value: String, flag: String) throws -> Int {
+        guard let integer = Int(value), integer > 0 else {
+            throw ConjetError.invalidArgument("\(flag) must be a positive integer")
+        }
+        return integer
+    }
+
+    private static func parseMemoryMiB(_ value: String, flag: String) throws -> Int {
+        let lowercased = value.lowercased()
+        if lowercased.hasSuffix("mib") || lowercased.hasSuffix("mb") {
+            let number = lowercased
+                .replacingOccurrences(of: "mib", with: "")
+                .replacingOccurrences(of: "mb", with: "")
+            return try parsePositiveInt(number, flag: flag)
+        }
+        return try parsePositiveInt(stripGiBSuffix(lowercased), flag: flag) * 1024
+    }
+
+    private static func parseOptionalGiB(_ value: String, flag: String) throws -> Int? {
+        let stripped = stripGiBSuffix(value.lowercased())
+        guard stripped.allSatisfy({ $0.isNumber }) else {
+            return nil
+        }
+        return try parsePositiveInt(stripped, flag: flag)
+    }
+
+    private static func stripGiBSuffix(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "gib", with: "")
+            .replacingOccurrences(of: "gb", with: "")
+            .replacingOccurrences(of: "g", with: "")
+    }
+
+    private static func normalizeArchitecture(_ value: String) throws -> String {
+        switch value.lowercased() {
+        case "arm64", "arm64e", "aarch64":
+            return "aarch64"
+        case "amd64", "x86_64":
+            return "x86_64"
+        default:
+            throw ConjetError.invalidArgument("--arch must be aarch64 or x86_64")
+        }
+    }
+
+    private static func normalizeRuntime(_ value: String) throws -> String {
+        guard value == "docker" else {
+            throw ConjetError.invalidArgument("--runtime currently supports docker")
+        }
+        return value
+    }
+
+    private static func expandedPath(_ path: String) -> String {
+        if path == "~" {
+            return FileManager.default.homeDirectoryForCurrentUser.path
+        }
+        if path.hasPrefix("~/") {
+            return FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(String(path.dropFirst(2)))
+                .path
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private static func gibibytes(_ value: Int) -> Int64 {
+        Int64(value) * 1024 * 1024 * 1024
+    }
+
     private static func ensureDaemon() throws {
         _ = try startDaemonOnly(printStatus: false)
     }
@@ -664,28 +903,36 @@ struct ConjetCLI {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private static func ensureVMConfiguredForStart(json: Bool) throws {
+    private static func ensureVMConfiguredForStart(json: Bool, config: ConjetConfig) throws {
         let store = VMImageStore()
         guard !store.manifestExists() else {
             return
         }
 
-        let config = try ConjetConfig.loadOrCreate()
-        let repository = conjetCoreRepository(cliValue: nil, config: config)
         let ui = ConjetFetchUI(enabled: !json)
-        ui.step("[conjet-core internal] VM image missing; fetching latest release")
-        let artifact = try downloadLatestConjetCoreArtifact(
-            repository: repository,
-            force: false,
-            printStatus: !json
-        )
+        let artifact: String
+        if let diskImagePath = config.diskImagePath {
+            ui.step("[conjet-core internal] VM image missing; using custom img")
+            artifact = diskImagePath
+        } else {
+            let repository = conjetCoreRepository(cliValue: nil, config: config)
+            ui.step("[conjet-core internal] VM image missing; fetching latest release")
+            artifact = try downloadLatestConjetCoreArtifact(
+                repository: repository,
+                architecture: config.architecture,
+                runtime: config.runtime,
+                force: false,
+                printStatus: !json
+            )
+        }
         ui.step("[conjet-core 4/4] importing img")
         let manifest = try store.importEFIBootDisk(
             sourcePath: artifact,
             name: "conjet-core",
             force: true,
             cloudInitSeedPath: nil,
-            bootDiskMinimumSizeBytes: nil
+            bootDiskMinimumSizeBytes: nil,
+            dataDiskSizeBytes: gibibytes(config.diskGiB)
         )
         if !json {
             try printVMManifest(
@@ -715,7 +962,14 @@ struct ConjetCLI {
             )
         }
         let repository = conjetCoreRepository(cliValue: value(after: "--repository", in: args), config: try ConjetConfig.loadOrCreate())
-        return try downloadLatestConjetCoreArtifact(repository: repository, force: force, printStatus: printStatus)
+        let config = try ConjetConfig.loadOrCreate()
+        return try downloadLatestConjetCoreArtifact(
+            repository: repository,
+            architecture: config.architecture,
+            runtime: config.runtime,
+            force: force,
+            printStatus: printStatus
+        )
     }
 
     private static func conjetCoreRepository(cliValue: String?, config: ConjetConfig) -> String {
@@ -732,6 +986,8 @@ struct ConjetCLI {
 
     private static func downloadLatestConjetCoreArtifact(
         repository: String,
+        architecture: String,
+        runtime: String,
         force: Bool,
         printStatus: Bool
     ) throws -> String {
@@ -742,7 +998,8 @@ struct ConjetCLI {
         ui.step("[conjet-core internal] resolve img")
         let artifact = try ConjetCoreReleaseResolver.selectArtifact(
             fromLatestReleaseJSON: releaseData,
-            hostArchitecture: HostCapabilities.detect().architecture
+            hostArchitecture: architecture,
+            runtime: runtime
         )
         ui.step("[conjet-core internal] selected release \(artifact.releaseTag)")
         let imagePath = try downloadConjetCoreArtifact(
@@ -940,13 +1197,20 @@ struct ConjetCLI {
         }
 
         do {
-            return try DockerContextManager().ensureContext(socketPath: dockerSocketPath, makeCurrent: true)
+            return try DockerContextManager(contextName: dockerContextName(profileName: ConjetPaths.default().profileName))
+                .ensureContext(socketPath: dockerSocketPath, makeCurrent: true)
         } catch {
             if !json {
-                writeDiagnostic("could not configure Docker context 'conjet': \(error)")
+                writeDiagnostic(
+                    "could not configure Docker context '\(dockerContextName(profileName: ConjetPaths.default().profileName))': \(error)"
+                )
             }
             return nil
         }
+    }
+
+    private static func dockerContextName(profileName: String) -> String {
+        profileName == "default" ? "conjet" : "conjet-\(profileName)"
     }
 
     private static func isVirtualizationEntitlementFailure(_ message: String) -> Bool {
@@ -1056,11 +1320,16 @@ struct ConjetCLI {
             """
             conjet - light macOS container runtime prototype
 
+            Global:
+              conjet [--profile NAME] COMMAND...
+              CONJET_HOME=/path/to/home moves Conjet state off ~/.conjet
+
             Commands:
               conjet doctor [--json]
-              conjet start [--json]  (auto-fetches latest Conjet-core image when needed)
+              conjet start [--cpu N] [--memory GiB] [--disk GiB|PATH] [--runtime docker] [--arch aarch64|x86_64] [--json]
               conjet status [--json]
               conjet stop
+              conjet profile status|list [--json]
               conjet shell [-- COMMAND...]
               conjet vm fetch-ubuntu-cloud [--release noble] [--cloud-init-docker] [--boot-disk-gb N] [--force] [--json]
               conjet vm fetch-conjet-core [--image PATH|--url HTTPS_URL|--repository OWNER/REPO] [--name NAME] [--boot-disk-gb N] [--force] [--json]
@@ -1331,6 +1600,12 @@ private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
 private struct DoctorOutput: Codable, Equatable {
     var host: HostCapabilities
     var virtualization: VirtualizationCapabilities
+    var config: ConjetConfig
+}
+
+private struct ProfileStatus: Codable, Equatable {
+    var profile: String
+    var home: String
     var config: ConjetConfig
 }
 

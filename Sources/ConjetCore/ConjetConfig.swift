@@ -3,6 +3,10 @@ import Foundation
 public struct ConjetConfig: Codable, Equatable, Sendable {
     public var vmCPUs: Int
     public var memoryMiB: Int
+    public var architecture: String
+    public var diskGiB: Int
+    public var diskImagePath: String?
+    public var runtime: String
     public var quietStopMinutes: Int
     public var enableRosetta: Bool
     public var socketPath: String?
@@ -10,7 +14,11 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
 
     public init(
         vmCPUs: Int = 4,
-        memoryMiB: Int = 4096,
+        memoryMiB: Int = 8192,
+        architecture: String = "aarch64",
+        diskGiB: Int = 100,
+        diskImagePath: String? = nil,
+        runtime: String = "docker",
         quietStopMinutes: Int = 30,
         enableRosetta: Bool = true,
         socketPath: String? = nil,
@@ -18,6 +26,10 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     ) {
         self.vmCPUs = vmCPUs
         self.memoryMiB = memoryMiB
+        self.architecture = architecture
+        self.diskGiB = diskGiB
+        self.diskImagePath = diskImagePath
+        self.runtime = runtime
         self.quietStopMinutes = quietStopMinutes
         self.enableRosetta = enableRosetta
         self.socketPath = socketPath
@@ -38,6 +50,11 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         return config
     }
 
+    public func save(paths: ConjetPaths = .default()) throws {
+        try paths.ensureBaseDirectories()
+        try renderTOML().write(to: paths.config, atomically: true, encoding: .utf8)
+    }
+
     public func renderTOML() -> String {
         var lines = [
             "# Conjet local configuration",
@@ -53,6 +70,12 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         lines.append("[vm]")
         lines.append("cpus = \(vmCPUs)")
         lines.append("memory_mib = \(memoryMiB)")
+        lines.append("architecture = \"\(escapeTOML(architecture))\"")
+        lines.append("disk_gib = \(diskGiB)")
+        if let diskImagePath {
+            lines.append("disk_image_path = \"\(escapeTOML(diskImagePath))\"")
+        }
+        lines.append("runtime = \"\(escapeTOML(runtime))\"")
         lines.append("enable_rosetta = \(enableRosetta)")
         lines.append("")
         lines.append("[images]")
@@ -87,6 +110,15 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                 config.vmCPUs = try parseInt(value, key: key)
             case "vm.memory_mib":
                 config.memoryMiB = try parseInt(value, key: key)
+            case "vm.architecture":
+                config.architecture = parseString(value)
+            case "vm.disk_gib":
+                config.diskGiB = try parseInt(value, key: key)
+            case "vm.disk_image_path":
+                let parsed = parseString(value)
+                config.diskImagePath = parsed.isEmpty ? nil : parsed
+            case "vm.runtime":
+                config.runtime = parseString(value)
             case "vm.enable_rosetta":
                 config.enableRosetta = try parseBool(value, key: key)
             case "daemon.quiet_stop_minutes":
@@ -105,6 +137,15 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         }
         guard config.memoryMiB >= 512 else {
             throw ConjetError.decoding("vm.memory_mib must be at least 512")
+        }
+        guard ["aarch64", "x86_64"].contains(config.architecture) else {
+            throw ConjetError.decoding("vm.architecture must be aarch64 or x86_64")
+        }
+        guard config.diskGiB > 0 else {
+            throw ConjetError.decoding("vm.disk_gib must be positive")
+        }
+        guard config.runtime == "docker" else {
+            throw ConjetError.decoding("vm.runtime currently supports docker")
         }
         guard isValidGitHubRepository(config.conjetCoreRepository) else {
             throw ConjetError.decoding("images.conjet_core_repository must use OWNER/REPO format")
