@@ -64,6 +64,9 @@ swift run conjet doctor --json
 swift run conjet bench profile --json
 swift run conjet bench small-files --files 10000 --bytes 128 --markdown
 swift run conjet bench docker-compare --contexts conjet,colima --iterations 3 --warmup --markdown
+swift run conjet bench docker-compare --contexts conjet,colima \
+  --workloads npm-install,copy-node-modules,cargo-build,named-volume-io,tmpfs-volume-io \
+  --iterations 1 --warmup --markdown
 swift run conjet sync classify node_modules/react/index.js
 swift run conjet power policy warm-idle
 ```
@@ -163,10 +166,10 @@ latest. That is the release stream consumed by `conjet start`.
 ## Current Boundary
 
 Conjet can now run a Docker image through a real Virtualization.framework
-Ubuntu guest. On 2026-05-29, a signed debug build downloaded Ubuntu Noble's
-ARM64 cloud image, converted and expanded it, booted it with cloud-init,
-started guest Docker, exposed `~/.conjet/run/docker.sock`, and successfully ran
-`conjet run hello-world`.
+Ubuntu guest. `conjet start` downloads the latest Conjet-core release, boots
+the baked Ubuntu minimal image, starts guest Docker, exposes
+`~/.conjet/run/docker.sock`, configures Docker context `conjet`, and supports
+normal `docker`, `docker compose`, and `conjet shell` workflows.
 
 The custom minimal Conjet guest image now has a local builder and importer, but
 the full image build and boot smoke test remain the next verification step.

@@ -440,6 +440,9 @@ struct ConjetCLI {
                 ?? ["conjet", "colima"]
             let iterations = value(after: "--iterations", in: args).flatMap(Int.init) ?? 1
             let warmup = args.contains("--warmup")
+            let workloads = value(after: "--workloads", in: args)
+                .map { $0.split(separator: ",").map(String.init).filter { !$0.isEmpty } }
+                ?? DockerBenchmarkSuite.defaultWorkloads
             let output = value(after: "--output", in: args)
             let workDirectory = value(after: "--dir", in: args)
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
@@ -454,7 +457,8 @@ struct ConjetCLI {
             let results = try DockerBenchmarkSuite(
                 contexts: contexts,
                 iterations: iterations,
-                warmup: warmup
+                warmup: warmup,
+                workloads: workloads
             ).run(workDirectory: workDirectory)
 
             if let output {
@@ -1035,7 +1039,7 @@ struct ConjetCLI {
               conjet compose up [docker compose args]
               conjet bench profile [--json]
               conjet bench small-files [--files N] [--bytes N] [--dir PATH] [--json|--markdown]
-              conjet bench docker-compare [--contexts conjet,colima] [--iterations N] [--warmup] [--output PATH] [--json|--markdown]
+              conjet bench docker-compare [--contexts conjet,colima] [--iterations N] [--workloads NAME,...] [--warmup] [--output PATH] [--json|--markdown]
               conjet sync classify PATH [--json]
               conjet power policy STATE [--json]
             """

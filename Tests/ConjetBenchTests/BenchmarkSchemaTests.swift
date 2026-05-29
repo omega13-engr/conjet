@@ -42,12 +42,47 @@ final class BenchmarkSchemaTests: XCTestCase {
         )
         let results = try suite.run(workDirectory: directory)
 
-        XCTAssertEqual(results.count, 8)
-        XCTAssertEqual(Set(results.map(\.workload)), Set(["docker-version", "container-start", "image-build", "compose-up"]))
+        XCTAssertEqual(results.count, DockerBenchmarkSuite.defaultWorkloads.count * 2)
+        XCTAssertEqual(Set(results.map(\.workload)), Set(DockerBenchmarkSuite.defaultWorkloads))
         XCTAssertTrue(recorder.commands.contains(["docker", "--context", "conjet", "pull", "alpine:3.20"]))
         XCTAssertTrue(recorder.commands.contains(["docker", "--context", "conjet", "pull", "busybox:1.36"]))
+        XCTAssertTrue(recorder.commands.contains(["docker", "--context", "conjet", "pull", "node:22-alpine"]))
+        XCTAssertTrue(recorder.commands.contains(["docker", "--context", "conjet", "pull", "rust:1-alpine"]))
+        XCTAssertTrue(recorder.commands.contains { command in
+            command.starts(with: ["docker", "--context", "conjet", "build"]) &&
+                command.contains("CONJET_BENCH_ITERATION=1")
+        })
+        XCTAssertTrue(recorder.commands.contains { command in
+            command.contains("type=volume,source=conjet-bench-conjet-volume-1,target=/data")
+        })
+        XCTAssertTrue(recorder.commands.contains { command in
+            command.contains("--tmpfs") && command.contains("/scratch:rw,size=64m")
+        })
         XCTAssertTrue(results.allSatisfy { $0.runtime == "conjet" })
         XCTAssertTrue(results.allSatisfy { !$0.command.isEmpty })
+    }
+
+    func testDockerBenchmarkSuiteCanSelectWorkloads() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-docker-bench-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = DockerCommandRecorder()
+        let suite = DockerBenchmarkSuite(
+            contexts: ["conjet"],
+            iterations: 1,
+            warmup: false,
+            workloads: ["npm-install"],
+            runner: recorder.run
+        )
+        let results = try suite.run(workDirectory: directory)
+
+        XCTAssertEqual(results.map(\.workload), ["npm-install"])
+        XCTAssertEqual(results.first?.metrics["dependency_count"], 3)
+        XCTAssertTrue(recorder.commands.allSatisfy { command in
+            command.starts(with: ["docker", "--context", "conjet", "build"]) ||
+                command.starts(with: ["docker", "--context", "conjet", "rmi"])
+        })
     }
 }
 
