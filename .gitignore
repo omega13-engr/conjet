@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+.conjet/
+bench/reports/*.json
+bench/reports/*.md
+DerivedData/
+*.xcuserstate
+.DS_Store

@@ -1,0 +1,197 @@
+import ConjetCore
+import Foundation
+
+public struct CloudInitSeedBuildResult: Codable, Equatable, Sendable {
+    public var outputPath: String
+    public var bytes: UInt64
+    public var userDataBytes: Int
+    public var metaDataBytes: Int
+
+    public init(outputPath: String, bytes: UInt64, userDataBytes: Int, metaDataBytes: Int) {
+        self.outputPath = outputPath
+        self.bytes = bytes
+        self.userDataBytes = userDataBytes
+        self.metaDataBytes = metaDataBytes
+    }
+}
+
+public enum CloudInitSeedBuilder {
+    public static func buildDockerBootstrapSeed(
+        output: URL,
+        instanceID: String = "conjet-local",
+        hostName: String = "conjet"
+    ) throws -> CloudInitSeedBuildResult {
+        try build(
+            output: output,
+            userData: dockerBootstrapUserData(),
+            metaData: """
+            instance-id: \(instanceID)
+            local-hostname: \(hostName)
+            """
+        )
+    }
+
+    public static func build(output: URL, userData: String, metaData: String) throws -> CloudInitSeedBuildResult {
+        let manager = FileManager.default
+        try manager.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if manager.fileExists(atPath: output.path) {
+            try manager.removeItem(at: output)
+        }
+
+        let staging = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-cloud-init-\(UUID().uuidString)", isDirectory: true)
+        defer { try? manager.removeItem(at: staging) }
+        try manager.createDirectory(at: staging, withIntermediateDirectories: true)
+
+        let userDataURL = staging.appendingPathComponent("user-data")
+        let metaDataURL = staging.appendingPathComponent("meta-data")
+        try Data(userData.utf8).write(to: userDataURL, options: .atomic)
+        try Data((metaData.hasSuffix("\n") ? metaData : metaData + "\n").utf8).write(to: metaDataURL, options: .atomic)
+
+        let result = try ProcessRunner.run("/usr/bin/hdiutil", [
+            "makehybrid",
+            "-iso",
+            "-joliet",
+            "-default-volume-name", "cidata",
+            "-o", output.path,
+            staging.path
+        ])
+        guard result.succeeded else {
+            throw ConjetError.processFailed(
+                executable: result.executable,
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
+
+        return CloudInitSeedBuildResult(
+            outputPath: output.path,
+            bytes: try fileSize(output),
+            userDataBytes: Data(userData.utf8).count,
+            metaDataBytes: Data(metaData.utf8).count
+        )
+    }
+
+    public static func dockerBootstrapUserData() -> String {
+        """
+        #cloud-config
+        package_update: true
+        bootcmd:
+          - [ sh, -c, "echo 'Conjet cloud-init bootcmd reached' > /dev/hvc0" ]
+        write_files:
+          - path: /usr/local/sbin/conjet-docker-bootstrap.sh
+            permissions: '0755'
+            content: |
+              #!/bin/sh
+              set -eux
+              mkdir -p /run/conjet /mnt/conjetboot
+              mount -t virtiofs conjetboot /mnt/conjetboot || true
+              trap 'status=$?; cp /run/conjet/docker-bootstrap.log /mnt/conjetboot/docker-bootstrap.log 2>/dev/null || true; { echo "Conjet Docker bootstrap exit ${status}"; tail -100 /run/conjet/docker-bootstrap.log 2>/dev/null || true; } >/dev/hvc0 2>/dev/null || true' EXIT
+              exec >/run/conjet/docker-bootstrap.log 2>&1
+              echo "Conjet Docker bootstrap started"
+              if command -v apt-get >/dev/null 2>&1; then
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update
+                apt-get install -y ca-certificates curl docker.io python3
+                systemctl enable --now docker
+              elif command -v dnf >/dev/null 2>&1; then
+                dnf install -y ca-certificates curl moby-engine python3 || dnf install -y ca-certificates curl docker python3
+                systemctl enable --now docker || systemctl enable --now docker.service
+              elif command -v apk >/dev/null 2>&1; then
+                apk add --no-cache ca-certificates curl docker python3
+                rc-update add docker default || true
+                service docker start || true
+              else
+                echo "unsupported package manager for Conjet Docker bootstrap" >&2
+                exit 1
+              fi
+              if [ -x /usr/bin/unpigz ]; then
+                mv /usr/bin/unpigz /usr/bin/unpigz.conjet-original || true
+                cat >/usr/bin/unpigz <<'SH'
+              #!/bin/sh
+              exec /bin/gzip -d "$@"
+              SH
+                chmod 0755 /usr/bin/unpigz
+              fi
+              cat >/usr/local/sbin/conjet-docker-vsock-bridge.py <<'PY'
+              #!/usr/bin/env python3
+              import os
+              import selectors
+              import socket
+              import threading
+              import time
+
+              DOCKER_SOCKET = "/var/run/docker.sock"
+              VSOCK_PORT = 2375
+              AF_VSOCK = getattr(socket, "AF_VSOCK", 40)
+              VMADDR_CID_ANY = getattr(socket, "VMADDR_CID_ANY", 0xFFFFFFFF)
+
+              def pump(src, dst):
+                  try:
+                      while True:
+                          data = src.recv(65536)
+                          if not data:
+                              break
+                          dst.sendall(data)
+                  finally:
+                      for sock in (src, dst):
+                          try:
+                              sock.shutdown(socket.SHUT_RDWR)
+                          except OSError:
+                              pass
+
+              def handle(client):
+                  upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                  upstream.connect(DOCKER_SOCKET)
+                  left = threading.Thread(target=pump, args=(client, upstream), daemon=True)
+                  right = threading.Thread(target=pump, args=(upstream, client), daemon=True)
+                  left.start()
+                  right.start()
+
+              while not os.path.exists(DOCKER_SOCKET):
+                  time.sleep(1)
+
+              listener = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+              listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              listener.bind((VMADDR_CID_ANY, VSOCK_PORT))
+              listener.listen(128)
+              open("/run/conjet/docker-vsock-ready", "w").write(str(VSOCK_PORT) + "\\n")
+              while True:
+                  client, _ = listener.accept()
+                  threading.Thread(target=handle, args=(client,), daemon=True).start()
+              PY
+              chmod 0755 /usr/local/sbin/conjet-docker-vsock-bridge.py
+              if command -v systemctl >/dev/null 2>&1; then
+                cat >/etc/systemd/system/conjet-docker-vsock.service <<'UNIT'
+              [Unit]
+              Description=Conjet Docker VSOCK bridge
+              After=docker.service
+              Wants=docker.service
+
+              [Service]
+              ExecStart=/usr/local/sbin/conjet-docker-vsock-bridge.py
+              Restart=always
+              RestartSec=1
+
+              [Install]
+              WantedBy=multi-user.target
+              UNIT
+                systemctl daemon-reload
+                systemctl enable --now conjet-docker-vsock.service
+              else
+                nohup /usr/local/sbin/conjet-docker-vsock-bridge.py >/run/conjet/docker-vsock.log 2>&1 &
+              fi
+              echo ready > /run/conjet/docker-bootstrap-ready
+              cp /run/conjet/docker-bootstrap.log /mnt/conjetboot/docker-bootstrap.log 2>/dev/null || true
+              echo "Conjet Docker bootstrap ready" >/dev/hvc0 2>/dev/null || true
+        runcmd:
+          - [ /usr/local/sbin/conjet-docker-bootstrap.sh ]
+        final_message: "Conjet cloud-init Docker bootstrap finished"
+        """
+    }
+
+    private static func fileSize(_ url: URL) throws -> UInt64 {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return attributes[.size] as? UInt64 ?? 0
+    }
+}
