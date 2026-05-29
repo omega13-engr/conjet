@@ -159,6 +159,7 @@ struct ConjetCLI {
             return
         }
         let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
+        let dockerContext = configureDockerContextIfStarted(response, json: json)
         if json {
             print(try ConjetJSON.string(response))
         } else {
@@ -166,6 +167,9 @@ struct ConjetCLI {
             if let vm = response.vm {
                 print("  vm: \(vm.state.rawValue)")
                 print("  serial log: \(vm.serialLogPath ?? "unknown")")
+                if let dockerContext {
+                    print("  docker context: \(dockerContext.contextName)")
+                }
             }
         }
         if !response.ok {
@@ -309,7 +313,8 @@ struct ConjetCLI {
             try ensureDaemon()
             let socketPath = try socketPath(paths: ConjetPaths.default())
             let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
-            try printDaemonResponse(response, json: json, failOnError: true)
+            let dockerContext = configureDockerContextIfStarted(response, json: json)
+            try printDaemonResponse(response, json: json, failOnError: true, dockerContext: dockerContext)
         case "stop":
             try ensureDaemon()
             let response = try daemonRequest(.vmStop)
@@ -451,7 +456,12 @@ struct ConjetCLI {
         )
     }
 
-    private static func printDaemonResponse(_ response: DaemonResponse, json: Bool, failOnError: Bool = false) throws {
+    private static func printDaemonResponse(
+        _ response: DaemonResponse,
+        json: Bool,
+        failOnError: Bool = false,
+        dockerContext: DockerContextResult? = nil
+    ) throws {
         if json {
             print(try ConjetJSON.string(response))
             if failOnError, !response.ok {
@@ -480,6 +490,9 @@ struct ConjetCLI {
             }
             if let dockerSocketPath = vm.dockerSocketPath {
                 print("  docker socket: \(dockerSocketPath)")
+            }
+            if let dockerContext {
+                print("  docker context: \(dockerContext.contextName)")
             }
         }
         if failOnError, !response.ok {
@@ -756,6 +769,23 @@ struct ConjetCLI {
         waitForDaemonStop(socketPath: socketPath)
         let restartedSocketPath = try startDaemonOnly(printStatus: false)
         return try UnixSocketClient(socketPath: restartedSocketPath).send(request)
+    }
+
+    private static func configureDockerContextIfStarted(_ response: DaemonResponse, json: Bool) -> DockerContextResult? {
+        guard response.ok,
+              let vm = response.vm ?? response.status?.vm,
+              let dockerSocketPath = vm.dockerSocketPath else {
+            return nil
+        }
+
+        do {
+            return try DockerContextManager().ensureContext(socketPath: dockerSocketPath, makeCurrent: true)
+        } catch {
+            if !json {
+                writeDiagnostic("could not configure Docker context 'conjet': \(error)")
+            }
+            return nil
+        }
     }
 
     private static func isVirtualizationEntitlementFailure(_ message: String) -> Bool {

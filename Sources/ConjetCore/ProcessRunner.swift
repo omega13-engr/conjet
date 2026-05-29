@@ -7,6 +7,20 @@ public struct ProcessResult: Codable, Equatable, Sendable {
     public var stdout: String
     public var stderr: String
 
+    public init(
+        executable: String,
+        arguments: [String],
+        exitCode: Int32,
+        stdout: String,
+        stderr: String
+    ) {
+        self.executable = executable
+        self.arguments = arguments
+        self.exitCode = exitCode
+        self.stdout = stdout
+        self.stderr = stderr
+    }
+
     public var succeeded: Bool { exitCode == 0 }
 }
 

@@ -73,6 +73,8 @@ Observed smoke-test results on 2026-05-29:
   with Docker and the VSOCK bridge preinstalled.
 - `conjet start` is now the user-facing first-run path instead of requiring a
   separate manual image fetch command.
+- `conjet start` and `conjet vm start` now create or update Docker context
+  `conjet`, point it at `~/.conjet/run/docker.sock`, and make it current.
 
 Next required work:
 

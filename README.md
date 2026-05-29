@@ -30,7 +30,7 @@ This repository currently implements the first real container-runtime slice from
 - One-command first-run setup: `conjet start` auto-resolves the latest
   Conjet-core GitHub release for the host architecture, downloads the
   `.raw.gz` image, verifies the `.sha512sum` asset when present, imports it,
-  starts `conjetd`, and starts the VM.
+  starts `conjetd`, starts the VM, and configures Docker context `conjet`.
 - GitHub Actions release automation for Conjet-core image artifacts on pushes
   that change `guest/image/conjet-core/**`, plus manual workflow dispatch.
 - Cloud-init NoCloud seed ISO generation for bootstrapping Docker inside an
@@ -84,6 +84,15 @@ On first run, `conjet start` fetches the latest Conjet-core image release from
 ```toml
 [images]
 conjet_core_repository = "OWNER/REPO"
+```
+
+After VM start, Conjet creates or updates Docker context `conjet`, points it at
+`unix://~/.conjet/run/docker.sock`, and makes it the active Docker context.
+This lets normal Docker commands target Conjet:
+
+```sh
+docker context ls
+docker ps
 ```
 
 Manual VM setup commands remain available for development:
