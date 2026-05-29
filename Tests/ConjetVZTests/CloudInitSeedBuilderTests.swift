@@ -30,5 +30,8 @@ final class CloudInitSeedBuilderTests: XCTestCase {
         XCTAssertTrue(userData.contains("mount -t virtiofs conjetboot"))
         XCTAssertTrue(userData.contains("docker-bootstrap.log"))
         XCTAssertTrue(userData.contains("unpigz.conjet-original"))
+        XCTAssertTrue(userData.contains("waiting for Docker API"))
+        XCTAssertTrue(userData.contains("vmw_vsock_virtio_transport"))
+        XCTAssertTrue(userData.contains("StandardOutput=journal+console"))
     }
 }

@@ -140,9 +140,14 @@ public final class VirtualMachineController {
             throw ConjetError.unavailable("VM started without a virtio socket device; cannot expose Docker socket")
         }
         dockerBridge?.stop()
+        let connector = RetryingGuestConnectionConnector(
+            base: VZGuestConnectionConnector(socketDevice: socketDevice, queue: queue),
+            timeoutSeconds: 90,
+            intervalSeconds: 0.5
+        )
         let bridge = DockerSocketBridge(
             socketPath: manifest.dockerSocketPath,
-            connector: VZGuestConnectionConnector(socketDevice: socketDevice, queue: queue)
+            connector: connector
         )
         try bridge.start()
         dockerBridge = bridge

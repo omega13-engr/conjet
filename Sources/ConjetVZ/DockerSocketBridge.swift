@@ -40,6 +40,51 @@ public struct UnavailableGuestConnectionConnector: GuestConnectionConnector {
     }
 }
 
+public struct RetryingGuestConnectionConnector: GuestConnectionConnector {
+    private let base: any GuestConnectionConnector
+    private let timeoutSeconds: Double
+    private let intervalSeconds: Double
+
+    public init(
+        base: any GuestConnectionConnector,
+        timeoutSeconds: Double = 90,
+        intervalSeconds: Double = 0.5
+    ) {
+        self.base = base
+        self.timeoutSeconds = timeoutSeconds
+        self.intervalSeconds = intervalSeconds
+    }
+
+    public func connect() throws -> GuestConnection {
+        let timeout = max(0, timeoutSeconds)
+        let interval = max(0.05, intervalSeconds)
+        let deadline = Date().addingTimeInterval(timeout)
+        var attempts = 0
+        var lastError: Error?
+
+        while true {
+            attempts += 1
+            do {
+                return try base.connect()
+            } catch {
+                lastError = error
+                let remaining = deadline.timeIntervalSinceNow
+                if remaining <= 0 {
+                    break
+                }
+                Thread.sleep(forTimeInterval: min(interval, remaining))
+            }
+        }
+
+        if let lastError {
+            throw ConjetError.unavailable(
+                "timed out waiting for guest Docker bridge after \(attempts) attempts: \(lastError)"
+            )
+        }
+        throw ConjetError.unavailable("timed out waiting for guest Docker bridge")
+    }
+}
+
 public final class DockerSocketBridge: @unchecked Sendable {
     public let socketPath: String
     public let guestPort: UInt32

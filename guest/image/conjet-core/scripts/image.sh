@@ -188,23 +188,25 @@ install -m 0755 "${BUILD_DIR}/scripts/conjet-docker-vsock-bridge.py" \
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-docker-vsock.service" <<'UNIT'
 [Unit]
 Description=Conjet Docker VSOCK bridge
-After=docker.service docker.socket
-Wants=docker.service
+After=containerd.service docker.service docker.socket
+Wants=containerd.service docker.service docker.socket
 
 [Service]
 Type=simple
-ExecStartPre=/bin/sh -c 'while [ ! -S /var/run/docker.sock ]; do sleep 1; done'
+ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
+ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet; rm -f /run/conjet/docker-vsock-ready'
 ExecStart=/usr/local/sbin/conjet-docker-vsock-bridge.py
 Restart=always
-RestartSec=1
+RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 
 cat >"${MOUNT_DIR}/etc/modules-load.d/conjet-vsock.conf" <<'EOF_MODULES'
-vsock
-virtio_vsock
+vmw_vsock_virtio_transport
 EOF_MODULES
 
 cat >"${MOUNT_DIR}/etc/netplan/50-conjet.yaml" <<'EOF_NETPLAN'

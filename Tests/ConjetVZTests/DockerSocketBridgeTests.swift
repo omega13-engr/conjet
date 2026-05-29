@@ -1,9 +1,37 @@
+import ConjetCore
 import ConjetVZ
 import Darwin
 import Foundation
 import XCTest
 
 final class DockerSocketBridgeTests: XCTestCase {
+    func testRetryingConnectorEventuallyConnects() throws {
+        let connector = FlakyGuestConnectionConnector(failuresBeforeSuccess: 2)
+        let retrying = RetryingGuestConnectionConnector(
+            base: connector,
+            timeoutSeconds: 1,
+            intervalSeconds: 0.01
+        )
+
+        let connection = try retrying.connect()
+        connection.close()
+        XCTAssertEqual(connector.attempts, 3)
+    }
+
+    func testRetryingConnectorReportsTimeout() {
+        let connector = FlakyGuestConnectionConnector(failuresBeforeSuccess: Int.max)
+        let retrying = RetryingGuestConnectionConnector(
+            base: connector,
+            timeoutSeconds: 0.03,
+            intervalSeconds: 0.01
+        )
+
+        XCTAssertThrowsError(try retrying.connect()) { error in
+            XCTAssertTrue(String(describing: error).contains("timed out waiting for guest Docker bridge"))
+        }
+        XCTAssertGreaterThanOrEqual(connector.attempts, 2)
+    }
+
     func testStartAndStopOwnsDockerSocketPath() throws {
         let root = URL(fileURLWithPath: "/tmp/cjbr-\(shortID())", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -90,5 +118,34 @@ final class DockerSocketBridgeTests: XCTestCase {
 
     private func shortID() -> String {
         String(UUID().uuidString.prefix(8))
+    }
+}
+
+private final class FlakyGuestConnectionConnector: GuestConnectionConnector, @unchecked Sendable {
+    private let lock = NSLock()
+    private let failuresBeforeSuccess: Int
+    private var attemptCount = 0
+
+    var attempts: Int {
+        lock.lock()
+        let value = attemptCount
+        lock.unlock()
+        return value
+    }
+
+    init(failuresBeforeSuccess: Int) {
+        self.failuresBeforeSuccess = failuresBeforeSuccess
+    }
+
+    func connect() throws -> GuestConnection {
+        lock.lock()
+        attemptCount += 1
+        let shouldFail = attemptCount <= failuresBeforeSuccess
+        lock.unlock()
+
+        if shouldFail {
+            throw ConjetError.unavailable("guest not ready")
+        }
+        return GuestConnection(fileDescriptor: -1) {}
     }
 }
