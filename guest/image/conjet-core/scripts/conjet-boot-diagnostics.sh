@@ -19,12 +19,17 @@ mkdir -p /run/conjet
     lsmod | grep -E '(^vsock|vsock|virtio)' || true
 
     echo "conjet-boot-diagnostics: service states"
-    for unit in containerd.service docker.socket docker.service conjet-docker-vsock.service; do
+    for unit in systemd-resolved.service containerd.service docker.socket docker.service conjet-docker-vsock.service; do
         echo "unit=${unit}"
         systemctl is-enabled "${unit}" 2>&1 || true
         systemctl is-active "${unit}" 2>&1 || true
         systemctl --no-pager --full status "${unit}" 2>&1 | sed -n '1,30p' || true
     done
+
+    echo "conjet-boot-diagnostics: resolver"
+    ls -l /etc/resolv.conf 2>&1 || true
+    cat /etc/resolv.conf 2>&1 || true
+    resolvectl status 2>&1 | sed -n '1,80p' || true
 
     echo "conjet-boot-diagnostics: sockets"
     ls -l /var/run/docker.sock /run/conjet/docker-vsock-ready 2>&1 || true

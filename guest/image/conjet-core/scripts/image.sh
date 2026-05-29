@@ -236,8 +236,12 @@ network:
         name: "en*"
       dhcp4: true
       dhcp6: false
+      optional: true
 EOF_NETPLAN
 chmod 0600 "${MOUNT_DIR}/etc/netplan/50-conjet.yaml"
+
+rm -f "${MOUNT_DIR}/etc/resolv.conf"
+ln -sf ../run/systemd/resolve/stub-resolv.conf "${MOUNT_DIR}/etc/resolv.conf"
 
 touch "${MOUNT_DIR}/etc/cloud/cloud-init.disabled"
 
@@ -292,6 +296,7 @@ enable_unit() {
 if [ "${RUNTIME}" = "docker" ]; then
     if command -v systemctl >/dev/null 2>&1; then
         systemctl --root="${MOUNT_DIR}" enable \
+            systemd-resolved.service \
             containerd.service \
             docker.service \
             docker.socket \
@@ -300,6 +305,7 @@ if [ "${RUNTIME}" = "docker" ]; then
             log "systemctl --root enable failed; applying explicit systemd symlinks"
     fi
 
+    enable_unit systemd-resolved.service multi-user.target
     enable_unit containerd.service multi-user.target
     enable_unit docker.service multi-user.target
     enable_unit docker.socket sockets.target
