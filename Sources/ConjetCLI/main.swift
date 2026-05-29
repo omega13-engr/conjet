@@ -119,11 +119,12 @@ struct ConjetCLI {
     }
 
     private static func startDaemonOnly(printStatus: Bool) throws -> String {
+        let ui = ConjetFetchUI(enabled: printStatus)
         let paths = ConjetPaths.default()
         try paths.ensureBaseDirectories()
         let socketPath = try socketPath(paths: paths)
         if let response = try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .ping)), response.ok {
-            if printStatus { print("conjetd is already running") }
+            ui.cached("[conjetd 1/2] running")
             return socketPath
         }
 
@@ -138,7 +139,7 @@ struct ConjetCLI {
 
         for _ in 0..<50 {
             if let response = try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .ping)), response.ok {
-                if printStatus { print("conjetd started") }
+                ui.step("[conjetd 1/2] started")
                 return socketPath
             }
             Thread.sleep(forTimeInterval: 0.1)
@@ -157,7 +158,7 @@ struct ConjetCLI {
         let store = VMImageStore()
         guard store.manifestExists() else {
             if !json {
-                print("VM is not configured yet; no Conjet-core image could be imported")
+                ConjetFetchUI(enabled: true).step("[vm 2/2] not configured; no Conjet-core image imported")
             }
             return
         }
@@ -166,14 +167,7 @@ struct ConjetCLI {
         if json {
             print(try ConjetJSON.string(response))
         } else {
-            print(response.message)
-            if let vm = response.vm {
-                print("  vm: \(vm.state.rawValue)")
-                print("  serial log: \(vm.serialLogPath ?? "unknown")")
-                if let dockerContext {
-                    print("  docker context: \(dockerContext.contextName)")
-                }
-            }
+            printStartVMResponse(response, dockerContext: dockerContext)
         }
         if !response.ok {
             try throwResponseError(response.message)
@@ -323,7 +317,13 @@ struct ConjetCLI {
             let socketPath = try socketPath(paths: ConjetPaths.default())
             let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
             let dockerContext = configureDockerContextIfStarted(response, json: json)
-            try printDaemonResponse(response, json: json, failOnError: true, dockerContext: dockerContext)
+            try printDaemonResponse(
+                response,
+                json: json,
+                failOnError: true,
+                dockerContext: dockerContext,
+                headline: vmStartHeadline(response)
+            )
         case "stop":
             try ensureDaemon()
             let response = try daemonRequest(.vmStop)
@@ -548,7 +548,8 @@ struct ConjetCLI {
         _ response: DaemonResponse,
         json: Bool,
         failOnError: Bool = false,
-        dockerContext: DockerContextResult? = nil
+        dockerContext: DockerContextResult? = nil,
+        headline: String? = nil
     ) throws {
         if json {
             print(try ConjetJSON.string(response))
@@ -557,7 +558,7 @@ struct ConjetCLI {
             }
             return
         }
-        print(response.message)
+        print(headline ?? response.message)
         if let vm = response.vm ?? response.status?.vm {
             print("  vm: \(vm.state.rawValue)")
             print("  manifest: \(vm.manifestPath)")
@@ -586,6 +587,31 @@ struct ConjetCLI {
         if failOnError, !response.ok {
             try throwResponseError(response.message)
         }
+    }
+
+    private static func printStartVMResponse(_ response: DaemonResponse, dockerContext: DockerContextResult?) {
+        print(vmStartHeadline(response))
+        if let dockerContext {
+            ConjetFetchUI(enabled: true).step("[docker context internal] using \(dockerContext.contextName)")
+        }
+        if let vm = response.vm ?? response.status?.vm {
+            print("  vm: \(vm.state.rawValue)")
+            print("  serial log: \(vm.serialLogPath ?? "unknown")")
+            if let dockerContext {
+                print("  docker context: \(dockerContext.contextName)")
+            }
+        }
+    }
+
+    private static func vmStartHeadline(_ response: DaemonResponse) -> String {
+        guard response.ok else {
+            return "=> ERROR [vm 2/2] \(response.message)"
+        }
+        let state = (response.vm ?? response.status?.vm)?.state.rawValue ?? "unknown"
+        if response.message.localizedCaseInsensitiveContains("already") {
+            return "=> CACHED [vm 2/2] \(state)"
+        }
+        return "=> [vm 2/2] \(state)"
     }
 
     private static func buildDockerCloudInitSeed() throws -> String {
@@ -1065,6 +1091,11 @@ private struct ConjetFetchUI {
     func step(_ message: String) {
         guard enabled else { return }
         print("=> \(message)")
+    }
+
+    func cached(_ message: String) {
+        guard enabled else { return }
+        print("=> CACHED \(message)")
     }
 
     func progress(stage: String) -> DownloadProgressRenderer? {
