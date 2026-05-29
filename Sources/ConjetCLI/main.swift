@@ -125,6 +125,7 @@ struct ConjetCLI {
         }
 
         let daemonURL = try daemonExecutableURL()
+        _ = try repairDebugVirtualizationSigningIfPossible(daemonURL: daemonURL)
         let process = Process()
         process.executableURL = daemonURL
         process.arguments = ["--serve"]
@@ -157,7 +158,7 @@ struct ConjetCLI {
             }
             return
         }
-        let response = try UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .vmStart))
+        let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
         if json {
             print(try ConjetJSON.string(response))
         } else {
@@ -306,7 +307,8 @@ struct ConjetCLI {
         case "start":
             try ensureVMConfiguredForStart(json: json)
             try ensureDaemon()
-            let response = try daemonRequest(.vmStart)
+            let socketPath = try socketPath(paths: ConjetPaths.default())
+            let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
             try printDaemonResponse(response, json: json, failOnError: true)
         case "stop":
             try ensureDaemon()
@@ -727,6 +729,119 @@ struct ConjetCLI {
         let text = try String(contentsOf: log, encoding: .utf8)
         let suffix = text.split(separator: "\n", omittingEmptySubsequences: false).suffix(lines)
         print(suffix.joined(separator: "\n"))
+    }
+
+    private static func vmStartResponseWithDebugSigningRepair(socketPath: String, json: Bool) throws -> DaemonResponse {
+        let request = DaemonRequest(command: .vmStart)
+        let response = try UnixSocketClient(socketPath: socketPath).send(request)
+        guard !response.ok, isVirtualizationEntitlementFailure(response.message) else {
+            return response
+        }
+
+        let daemonURL = try daemonExecutableURL()
+        guard isSwiftPMDebugExecutable(daemonURL),
+              repositoryRoot(containing: daemonURL) != nil else {
+            return response
+        }
+
+        let repaired = try repairDebugVirtualizationSigningIfPossible(daemonURL: daemonURL)
+        guard repaired || binaryHasVirtualizationEntitlement(daemonURL) else {
+            return response
+        }
+        if !json {
+            let action = repaired ? "signed it and restarting conjetd" : "restarting conjetd"
+            writeDiagnostic("debug conjetd was missing com.apple.security.virtualization at runtime; \(action)")
+        }
+        _ = try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .stop))
+        waitForDaemonStop(socketPath: socketPath)
+        let restartedSocketPath = try startDaemonOnly(printStatus: false)
+        return try UnixSocketClient(socketPath: restartedSocketPath).send(request)
+    }
+
+    private static func isVirtualizationEntitlementFailure(_ message: String) -> Bool {
+        let lowercased = message.lowercased()
+        return lowercased.contains("com.apple.security.virtualization")
+            || (lowercased.contains("virtualization") && lowercased.contains("entitlement"))
+    }
+
+    @discardableResult
+    private static func repairDebugVirtualizationSigningIfPossible(daemonURL: URL) throws -> Bool {
+        guard isSwiftPMDebugExecutable(daemonURL),
+              let root = repositoryRoot(containing: daemonURL) else {
+            return false
+        }
+
+        let entitlements = root.appendingPathComponent("build-support/conjet-debug.entitlements")
+        guard FileManager.default.fileExists(atPath: entitlements.path) else {
+            return false
+        }
+        guard FileManager.default.isExecutableFile(atPath: daemonURL.path) else {
+            return false
+        }
+        guard !binaryHasVirtualizationEntitlement(daemonURL) else {
+            return false
+        }
+
+        let result = try ProcessRunner.run("/usr/bin/codesign", [
+            "--force",
+            "--sign", "-",
+            "--entitlements", entitlements.path,
+            daemonURL.path
+        ])
+        guard result.succeeded else {
+            throw ConjetError.processFailed(
+                executable: result.executable,
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
+        return true
+    }
+
+    private static func binaryHasVirtualizationEntitlement(_ executable: URL) -> Bool {
+        guard let result = try? ProcessRunner.run("/usr/bin/codesign", [
+            "-d",
+            "--entitlements", ":-",
+            executable.path
+        ]) else {
+            return false
+        }
+        return (result.stdout + result.stderr).contains("com.apple.security.virtualization")
+    }
+
+    private static func isSwiftPMDebugExecutable(_ executable: URL) -> Bool {
+        let path = executable.standardizedFileURL.path
+        return path.contains("/.build/") && path.contains("/debug/")
+    }
+
+    private static func repositoryRoot(containing executable: URL) -> URL? {
+        let manager = FileManager.default
+        var directory = executable.deletingLastPathComponent().standardizedFileURL
+        while true {
+            let entitlements = directory.appendingPathComponent("build-support/conjet-debug.entitlements")
+            if manager.fileExists(atPath: entitlements.path) {
+                return directory
+            }
+            let parent = directory.deletingLastPathComponent()
+            if parent.path == directory.path {
+                return nil
+            }
+            directory = parent
+        }
+    }
+
+    private static func waitForDaemonStop(socketPath: String) {
+        for _ in 0..<50 {
+            let response = try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .ping))
+            if response == nil {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+
+    private static func writeDiagnostic(_ message: String) {
+        FileHandle.standardError.write(Data("conjet: \(message)\n".utf8))
     }
 
     private static func daemonExecutableURL() throws -> URL {
