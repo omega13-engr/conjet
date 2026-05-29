@@ -31,6 +31,8 @@ struct ConjetCLI {
             try start(json: json)
         case "stop":
             try stop()
+        case "shell":
+            try shell(args: args)
         case "vm":
             try vm(args: args, json: json)
         case "run":
@@ -365,6 +367,41 @@ struct ConjetCLI {
         }
     }
 
+    private static func shell(args: [String]) throws {
+        let socket = try ensureConjetDockerSocket()
+        let commandArgs = args.first == "--" ? Array(args.dropFirst()) : args
+        let shellCommand = commandArgs.isEmpty ? ["/bin/bash", "-l"] : commandArgs
+        var dockerArgs = [
+            "docker",
+            "--host",
+            "unix://\(socket)",
+            "run",
+            "--rm"
+        ]
+        if isatty(STDIN_FILENO) == 1, isatty(STDOUT_FILENO) == 1 {
+            dockerArgs.append("-it")
+        }
+        dockerArgs += [
+            "--privileged",
+            "--pid=host",
+            "--net=host",
+            "--ipc=host",
+            "--uts=host",
+            "ubuntu:24.04",
+            "nsenter",
+            "-t",
+            "1",
+            "-m",
+            "-u",
+            "-i",
+            "-n",
+            "-p",
+            "--"
+        ] + shellCommand
+
+        try runInheritedProcess("/usr/bin/env", dockerArgs)
+    }
+
     private static func bench(args: [String], json: Bool) throws {
         let markdown = args.contains("--markdown")
         let args = args.filter { $0 != "--markdown" }
@@ -396,6 +433,46 @@ struct ConjetCLI {
                 print("many-small-files: \(String(format: "%.3f", result.durationSeconds))s")
                 print("  files: \(fileCount)")
                 print("  dir: \(directory.path)")
+            }
+        case "docker-compare":
+            let contexts = value(after: "--contexts", in: args)
+                .map { $0.split(separator: ",").map(String.init).filter { !$0.isEmpty } }
+                ?? ["conjet", "colima"]
+            let iterations = value(after: "--iterations", in: args).flatMap(Int.init) ?? 1
+            let warmup = args.contains("--warmup")
+            let output = value(after: "--output", in: args)
+            let workDirectory = value(after: "--dir", in: args)
+                .map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("conjet-docker-bench-\(UUID().uuidString)", isDirectory: true)
+            defer {
+                if value(after: "--dir", in: args) == nil {
+                    try? FileManager.default.removeItem(at: workDirectory)
+                }
+            }
+
+            let results = try DockerBenchmarkSuite(
+                contexts: contexts,
+                iterations: iterations,
+                warmup: warmup
+            ).run(workDirectory: workDirectory)
+
+            if let output {
+                try writeBenchmarkResults(results, to: URL(fileURLWithPath: output), markdown: markdown)
+            }
+
+            if json {
+                print(try ConjetJSON.string(results))
+            } else if markdown {
+                print(BenchmarkMarkdownReport.render(results: results, title: "Conjet Docker Context Benchmark"))
+            } else {
+                for result in results {
+                    let status = result.exitCode == 0 ? "ok" : "failed"
+                    print("\(result.runtime) \(result.workload): \(String(format: "%.3f", result.durationSeconds))s \(status)")
+                }
+                if let output {
+                    print("wrote benchmark report: \(output)")
+                }
             }
         default:
             throw ConjetError.invalidArgument("unknown bench command '\(subcommand)'")
@@ -506,6 +583,48 @@ struct ConjetCLI {
         let instanceID = "conjet-\(Int(Date().timeIntervalSince1970))-\(suffix)"
         _ = try CloudInitSeedBuilder.buildDockerBootstrapSeed(output: seed, instanceID: String(instanceID))
         return seed.path
+    }
+
+    private static func ensureConjetDockerSocket() throws -> String {
+        let paths = ConjetPaths.default()
+        let socket = paths.dockerSocket.path
+        if FileManager.default.fileExists(atPath: socket) {
+            return socket
+        }
+        try start(json: false)
+        guard FileManager.default.fileExists(atPath: socket) else {
+            throw ConjetError.unavailable("Conjet Docker socket is not available yet at \(socket)")
+        }
+        return socket
+    }
+
+    private static func runInheritedProcess(_ executable: String, _ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardInput = FileHandle.standardInput
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw ConjetError.processFailed(
+                executable: executable,
+                exitCode: process.terminationStatus,
+                stderr: "command exited with status \(process.terminationStatus)"
+            )
+        }
+    }
+
+    private static func writeBenchmarkResults(_ results: [BenchmarkResult], to url: URL, markdown: Bool) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let text = try markdown
+            ? BenchmarkMarkdownReport.render(results: results, title: "Conjet Docker Context Benchmark")
+            : ConjetJSON.string(results)
+        try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
     private static func ensureVMConfiguredForStart(json: Bool) throws {
@@ -900,6 +1019,7 @@ struct ConjetCLI {
               conjet start [--json]  (auto-fetches latest Conjet-core image when needed)
               conjet status [--json]
               conjet stop
+              conjet shell [-- COMMAND...]
               conjet vm fetch-ubuntu-cloud [--release noble] [--cloud-init-docker] [--boot-disk-gb N] [--force] [--json]
               conjet vm fetch-conjet-core [--image PATH|--url HTTPS_URL|--repository OWNER/REPO] [--name NAME] [--boot-disk-gb N] [--force] [--json]
               conjet vm fetch-fedora [--release N] [--force] [--json]
@@ -915,6 +1035,7 @@ struct ConjetCLI {
               conjet compose up [docker compose args]
               conjet bench profile [--json]
               conjet bench small-files [--files N] [--bytes N] [--dir PATH] [--json|--markdown]
+              conjet bench docker-compare [--contexts conjet,colima] [--iterations N] [--warmup] [--output PATH] [--json|--markdown]
               conjet sync classify PATH [--json]
               conjet power policy STATE [--json]
             """

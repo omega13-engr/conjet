@@ -11,7 +11,7 @@ VSOCK_PORT = int(os.environ.get("CONJET_DOCKER_VSOCK_PORT", "2375"))
 AF_VSOCK = getattr(socket, "AF_VSOCK", 40)
 VMADDR_CID_ANY = getattr(socket, "VMADDR_CID_ANY", 0xFFFFFFFF)
 DOCKER_WAIT_LOG_SECONDS = 10
-CLIENT_DOCKER_WAIT_SECONDS = 30
+CLIENT_DOCKER_WAIT_SECONDS = 60
 
 
 def log(message):
@@ -66,7 +66,10 @@ def pump(source, destination):
         close_socket(destination)
 
 
-def docker_api_ping(timeout=2.0):
+def docker_ready_status(timeout=2.0):
+    if not os.path.exists(DOCKER_SOCKET):
+        return False, f"waiting for {DOCKER_SOCKET}"
+
     upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     upstream.settimeout(timeout)
     try:
@@ -85,9 +88,11 @@ def docker_api_ping(timeout=2.0):
             response += chunk
             if b"\r\n\r\nOK" in response or response.rstrip().endswith(b"OK"):
                 break
-        return b"200 OK" in response and response.rstrip().endswith(b"OK")
-    except OSError:
-        return False
+        if b"200 OK" in response and response.rstrip().endswith(b"OK"):
+            return True, "Docker API is ready"
+        return False, "waiting for Docker API /_ping response"
+    except OSError as exc:
+        return False, f"waiting for Docker API on {DOCKER_SOCKET}: {exc}"
     finally:
         close_socket(upstream)
 
@@ -96,13 +101,10 @@ def wait_for_docker_ready():
     last_log = 0
     while True:
         now = time.monotonic()
-        if not os.path.exists(DOCKER_SOCKET):
-            status = f"waiting for {DOCKER_SOCKET}"
-        elif docker_api_ping():
-            log("Docker API is ready")
+        ready, status = docker_ready_status()
+        if ready:
+            log(status)
             return
-        else:
-            status = f"waiting for Docker API on {DOCKER_SOCKET}"
 
         if now - last_log >= DOCKER_WAIT_LOG_SECONDS:
             log(status)
@@ -114,6 +116,14 @@ def connect_docker_with_retry(timeout_seconds=CLIENT_DOCKER_WAIT_SECONDS):
     deadline = time.monotonic() + timeout_seconds
     last_error = None
     while True:
+        ready, status = docker_ready_status(timeout=1.0)
+        if not ready:
+            last_error = status
+            if time.monotonic() >= deadline:
+                raise TimeoutError(status)
+            time.sleep(0.25)
+            continue
+
         upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             upstream.connect(DOCKER_SOCKET)
@@ -146,22 +156,43 @@ def main():
         os.unlink("/run/conjet/docker-vsock-ready")
     except FileNotFoundError:
         pass
-    wait_for_docker_ready()
 
-    listener = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+    log(
+        "starting bridge "
+        f"python={sys.version.split()[0]} "
+        f"af_vsock={AF_VSOCK} cid_any={VMADDR_CID_ANY} "
+        f"port={VSOCK_PORT} docker_socket={DOCKER_SOCKET}"
+    )
+
+    try:
+        listener = socket.socket(AF_VSOCK, socket.SOCK_STREAM)
+    except OSError as exc:
+        log(f"failed to create VSOCK listener socket: {exc}")
+        raise
+
     try:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     except OSError:
         pass
-    listener.bind((VMADDR_CID_ANY, VSOCK_PORT))
-    listener.listen(128)
+    try:
+        listener.bind((VMADDR_CID_ANY, VSOCK_PORT))
+        listener.listen(128)
+    except OSError as exc:
+        log(f"failed to bind VSOCK port {VSOCK_PORT}: {exc}")
+        raise
     log(f"listening on VSOCK port {VSOCK_PORT}")
 
     with open("/run/conjet/docker-vsock-ready", "w", encoding="utf-8") as marker:
         marker.write(f"{VSOCK_PORT}\n")
 
+    threading.Thread(target=wait_for_docker_ready, daemon=True).start()
+
     while True:
-        client, _ = listener.accept()
+        try:
+            client, _ = listener.accept()
+        except OSError as exc:
+            log(f"accept failed on VSOCK port {VSOCK_PORT}: {exc}")
+            continue
         threading.Thread(target=handle_client, args=(client,), daemon=True).start()
 
 

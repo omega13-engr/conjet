@@ -184,6 +184,8 @@ mkdir -p "${MOUNT_DIR}/usr/local/sbin" "${MOUNT_DIR}/etc/systemd/system" \
     "${MOUNT_DIR}/etc/conjet"
 install -m 0755 "${BUILD_DIR}/scripts/conjet-docker-vsock-bridge.py" \
     "${MOUNT_DIR}/usr/local/sbin/conjet-docker-vsock-bridge.py"
+install -m 0755 "${BUILD_DIR}/scripts/conjet-boot-diagnostics.sh" \
+    "${MOUNT_DIR}/usr/local/sbin/conjet-boot-diagnostics.sh"
 
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-docker-vsock.service" <<'UNIT'
 [Unit]
@@ -193,13 +195,29 @@ Wants=containerd.service docker.service docker.socket
 
 [Service]
 Type=simple
+Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
 ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet; rm -f /run/conjet/docker-vsock-ready'
-ExecStart=/usr/local/sbin/conjet-docker-vsock-bridge.py
+ExecStart=/bin/sh -c 'mkdir -p /run/conjet; exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1 | /usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0'
 Restart=always
 RestartSec=2
-StandardOutput=journal+console
-StandardError=journal+console
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat >"${MOUNT_DIR}/etc/systemd/system/conjet-boot-diagnostics.service" <<'UNIT'
+[Unit]
+Description=Conjet boot diagnostics
+After=systemd-modules-load.service containerd.service docker.socket docker.service conjet-docker-vsock.service
+Wants=containerd.service docker.socket docker.service conjet-docker-vsock.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/conjet-boot-diagnostics.sh
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -240,8 +258,53 @@ SH
     chmod 0755 "${MOUNT_DIR}/usr/bin/unpigz"
 fi
 
-if [ "${RUNTIME}" = "docker" ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl --root="${MOUNT_DIR}" enable containerd.service docker.service docker.socket conjet-docker-vsock.service || true
+unit_source_path() {
+    local unit="$1"
+    local unit_path
+
+    for unit_path in \
+        "/etc/systemd/system/${unit}" \
+        "/lib/systemd/system/${unit}" \
+        "/usr/lib/systemd/system/${unit}"; do
+        if [ -f "${MOUNT_DIR}${unit_path}" ]; then
+            printf '%s\n' "${unit_path}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+enable_unit() {
+    local unit="$1"
+    local target="$2"
+    local source_path
+
+    source_path="$(unit_source_path "${unit}")" || {
+        echo "could not find systemd unit ${unit} in guest image" >&2
+        return 1
+    }
+
+    mkdir -p "${MOUNT_DIR}/etc/systemd/system/${target}.wants"
+    ln -sf "${source_path}" "${MOUNT_DIR}/etc/systemd/system/${target}.wants/${unit}"
+}
+
+if [ "${RUNTIME}" = "docker" ]; then
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --root="${MOUNT_DIR}" enable \
+            containerd.service \
+            docker.service \
+            docker.socket \
+            conjet-docker-vsock.service \
+            conjet-boot-diagnostics.service || \
+            log "systemctl --root enable failed; applying explicit systemd symlinks"
+    fi
+
+    enable_unit containerd.service multi-user.target
+    enable_unit docker.service multi-user.target
+    enable_unit docker.socket sockets.target
+    enable_unit conjet-docker-vsock.service multi-user.target
+    enable_unit conjet-boot-diagnostics.service multi-user.target
 fi
 
 chroot "${MOUNT_DIR}" /bin/bash -c 'netplan generate || true'

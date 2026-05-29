@@ -32,6 +32,7 @@ final class CloudInitSeedBuilderTests: XCTestCase {
         XCTAssertTrue(userData.contains("unpigz.conjet-original"))
         XCTAssertTrue(userData.contains("waiting for Docker API"))
         XCTAssertTrue(userData.contains("vmw_vsock_virtio_transport"))
-        XCTAssertTrue(userData.contains("StandardOutput=journal+console"))
+        XCTAssertTrue(userData.contains("/usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0"))
+        XCTAssertTrue(userData.contains("StandardOutput=journal"))
     }
 }

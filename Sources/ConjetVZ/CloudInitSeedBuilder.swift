@@ -277,13 +277,14 @@ public enum CloudInitSeedBuilder {
 
               [Service]
               Type=simple
+              Environment=PYTHONUNBUFFERED=1
               ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
               ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet; rm -f /run/conjet/docker-vsock-ready'
-              ExecStart=/usr/local/sbin/conjet-docker-vsock-bridge.py
+              ExecStart=/bin/sh -c 'mkdir -p /run/conjet; exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1 | /usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0'
               Restart=always
               RestartSec=2
-              StandardOutput=journal+console
-              StandardError=journal+console
+              StandardOutput=journal
+              StandardError=journal
 
               [Install]
               WantedBy=multi-user.target

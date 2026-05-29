@@ -63,6 +63,7 @@ build-support/sign-debug.sh
 swift run conjet doctor --json
 swift run conjet bench profile --json
 swift run conjet bench small-files --files 10000 --bytes 128 --markdown
+swift run conjet bench docker-compare --contexts conjet,colima --iterations 3 --warmup --markdown
 swift run conjet sync classify node_modules/react/index.js
 swift run conjet power policy warm-idle
 ```
@@ -93,6 +94,13 @@ This lets normal Docker commands target Conjet:
 ```sh
 docker context ls
 docker ps
+```
+
+To open a root shell in the Conjet Linux guest through the Docker socket bridge:
+
+```sh
+.build/debug/conjet shell
+.build/debug/conjet shell -- uname -a
 ```
 
 Manual VM setup commands remain available for development:

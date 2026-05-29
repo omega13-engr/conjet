@@ -21,6 +21,17 @@ public enum BenchmarkMarkdownReport {
             lines.append("")
         }
 
+        lines.append("## Summary")
+        lines.append("")
+        lines.append("| Workload | Runtime | Samples | Failures | P50 (s) | P95 (s) | Mean (s) | StdDev (s) |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for summary in summaries(results) {
+            lines.append(
+                "| \(escape(summary.workload)) | \(escape(summary.runtime)) | \(summary.samples) | \(summary.failures) | \(format(summary.p50)) | \(format(summary.p95)) | \(format(summary.mean)) | \(format(summary.standardDeviation)) |"
+            )
+        }
+        lines.append("")
+
         lines.append("## Results")
         lines.append("")
         lines.append("| Workload | Runtime | Duration (s) | Exit | Key Metrics |")
@@ -32,6 +43,53 @@ public enum BenchmarkMarkdownReport {
         }
         lines.append("")
         return lines.joined(separator: "\n")
+    }
+
+    private struct Summary {
+        var workload: String
+        var runtime: String
+        var samples: Int
+        var failures: Int
+        var p50: Double
+        var p95: Double
+        var mean: Double
+        var standardDeviation: Double
+    }
+
+    private static func summaries(_ results: [BenchmarkResult]) -> [Summary] {
+        let grouped = Dictionary(grouping: results) { result in
+            "\(result.workload)\u{0}\(result.runtime)"
+        }
+        return grouped.compactMap { _, values -> Summary? in
+            guard let first = values.first else { return nil }
+            let durations = values.map(\.durationSeconds).sorted()
+            let mean = durations.reduce(0, +) / Double(durations.count)
+            let variance = durations.reduce(0) { partial, value in
+                let delta = value - mean
+                return partial + delta * delta
+            } / Double(durations.count)
+            return Summary(
+                workload: first.workload,
+                runtime: first.runtime,
+                samples: values.count,
+                failures: values.filter { $0.exitCode != 0 }.count,
+                p50: percentile(0.50, durations: durations),
+                p95: percentile(0.95, durations: durations),
+                mean: mean,
+                standardDeviation: sqrt(variance)
+            )
+        }.sorted {
+            if $0.workload == $1.workload {
+                return $0.runtime < $1.runtime
+            }
+            return $0.workload < $1.workload
+        }
+    }
+
+    private static func percentile(_ percentile: Double, durations: [Double]) -> Double {
+        guard !durations.isEmpty else { return 0 }
+        let rank = Int(ceil(percentile * Double(durations.count))) - 1
+        return durations[max(0, min(rank, durations.count - 1))]
     }
 
     private static func metricSummary(_ metrics: [String: Double]) -> String {

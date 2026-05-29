@@ -4,6 +4,7 @@ import Foundation
 public struct BenchmarkResult: Codable, Equatable, Sendable {
     public var workload: String
     public var runtime: String
+    public var command: [String]
     public var startedAt: Date
     public var durationSeconds: Double
     public var exitCode: Int32
@@ -15,6 +16,7 @@ public struct BenchmarkResult: Codable, Equatable, Sendable {
     public init(
         workload: String,
         runtime: String,
+        command: [String] = [],
         startedAt: Date,
         durationSeconds: Double,
         exitCode: Int32,
@@ -25,6 +27,7 @@ public struct BenchmarkResult: Codable, Equatable, Sendable {
     ) {
         self.workload = workload
         self.runtime = runtime
+        self.command = command
         self.startedAt = startedAt
         self.durationSeconds = durationSeconds
         self.exitCode = exitCode
@@ -51,6 +54,7 @@ public struct CommandBenchmarkRunner: Sendable {
         return BenchmarkResult(
             workload: workload,
             runtime: runtime,
+            command: [executable] + arguments,
             startedAt: startedAt,
             durationSeconds: duration,
             exitCode: result.exitCode,
