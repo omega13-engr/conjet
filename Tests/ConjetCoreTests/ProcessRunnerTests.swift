@@ -27,4 +27,19 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("process timed out after"))
         XCTAssertLessThan(Date().timeIntervalSince(startedAt), 5)
     }
+
+    func testRunWithInputTimeoutStartsBeforeChildReadsStdin() throws {
+        let input = Data(repeating: 0x41, count: 8 * 1_024 * 1_024)
+        let startedAt = Date()
+        let result = try ProcessRunner.runWithInput(
+            "/bin/sh",
+            ["-c", "sleep 5"],
+            standardInput: input,
+            timeoutSeconds: 0.1
+        )
+
+        XCTAssertEqual(result.exitCode, 124)
+        XCTAssertTrue(result.stderr.contains("process timed out after"))
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2)
+    }
 }

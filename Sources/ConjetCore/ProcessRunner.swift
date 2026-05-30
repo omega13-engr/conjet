@@ -62,13 +62,26 @@ public enum ProcessRunner {
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        let stdinPipe = standardInput == nil ? nil : Pipe()
+        var stdinFileHandle: FileHandle?
+        var stdinFileURL: URL?
         let stdoutData = LockedProcessData()
         let stderrData = LockedProcessData()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
-        if let stdinPipe {
-            process.standardInput = stdinPipe
+        if let standardInput {
+            let url = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+                .appendingPathComponent("conjet-stdin-\(UUID().uuidString)")
+            try standardInput.write(to: url, options: .atomic)
+            let handle = try FileHandle(forReadingFrom: url)
+            stdinFileURL = url
+            stdinFileHandle = handle
+            process.standardInput = handle
+        }
+        defer {
+            try? stdinFileHandle?.close()
+            if let stdinFileURL {
+                try? FileManager.default.removeItem(at: stdinFileURL)
+            }
         }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
@@ -94,10 +107,6 @@ public enum ProcessRunner {
         }
 
         try process.run()
-        if let standardInput, let stdinPipe {
-            stdinPipe.fileHandleForWriting.write(standardInput)
-            try? stdinPipe.fileHandleForWriting.close()
-        }
 
         var timedOut = false
         var processExited = false
