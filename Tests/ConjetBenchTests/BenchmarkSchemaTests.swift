@@ -236,6 +236,7 @@ final class BenchmarkSchemaTests: XCTestCase {
                 command.contains("--no-cache")
         })
         XCTAssertTrue(recorder.commands.allSatisfy { command in
+            command.starts(with: ["docker", "--context", "conjet", "pull"]) ||
             command.starts(with: ["docker", "--context", "conjet", "build"]) ||
                 command.starts(with: ["docker", "--context", "conjet", "rmi"])
         })

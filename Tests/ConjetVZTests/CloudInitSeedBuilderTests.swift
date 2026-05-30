@@ -27,6 +27,8 @@ final class CloudInitSeedBuilderTests: XCTestCase {
         XCTAssertTrue(userData.contains("conjet-data-disk.service"))
         XCTAssertTrue(userData.contains("/dev/disk/by-id/virtio-conjet-data"))
         XCTAssertTrue(userData.contains("resize2fs"))
+        XCTAssertTrue(userData.contains("tune_block_devices"))
+        XCTAssertTrue(userData.contains("echo none >\"${scheduler}\""))
         XCTAssertTrue(userData.contains("bind_runtime_directory /var/lib/docker"))
         XCTAssertTrue(userData.contains("bind_runtime_directory /var/lib/containerd"))
         XCTAssertTrue(userData.contains("conjet-docker-vsock-bridge.py"))
@@ -91,6 +93,8 @@ final class CloudInitSeedBuilderTests: XCTestCase {
         XCTAssertTrue(script.contains("MOUNT_OPTIONS=\"${CONJET_DATA_MOUNT_OPTIONS:-noatime,nodiratime,lazytime,nodiscard,commit=60}\""))
         XCTAssertTrue(script.contains("mount -o \"${MOUNT_OPTIONS}\""))
         XCTAssertFalse(script.contains("mount -o noatime,discard"))
+        XCTAssertTrue(script.contains("tune_block_devices"))
+        XCTAssertTrue(script.contains("echo none >\"${scheduler}\""))
         XCTAssertTrue(script.contains("bind_runtime_directory /var/lib/containerd"))
         XCTAssertTrue(script.contains("bind_runtime_directory /var/lib/docker"))
     }

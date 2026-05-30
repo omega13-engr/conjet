@@ -143,10 +143,10 @@ public struct DockerBenchmarkSuite {
 
         var results: [BenchmarkResult] = []
         for context in contexts {
+            for image in warmupImages(for: enabledWorkloads) {
+                _ = try? runDocker(context: context, arguments: ["pull", image])
+            }
             if warmup {
-                for image in warmupImages(for: enabledWorkloads) {
-                    _ = try? runDocker(context: context, arguments: ["pull", image])
-                }
                 try warmupConjetPackageCaches(
                     context: context,
                     enabledWorkloads: enabledWorkloads,

@@ -123,6 +123,15 @@ public enum CloudInitSeedBuilder {
               }
               filesystem_type() { blkid -o value -s TYPE "${DEVICE}" 2>/dev/null || true; }
               directory_empty() { [ -z "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }
+              tune_block_devices() {
+                for scheduler in /sys/block/vd*/queue/scheduler; do
+                  [ -e "${scheduler}" ] || continue
+                  if grep -qw none "${scheduler}"; then
+                    echo none >"${scheduler}" 2>/dev/null || true
+                    log "set ${scheduler} to $(cat "${scheduler}")"
+                  fi
+                done
+              }
               mount_data_disk() {
                 mkdir -p "${MOUNT_DIR}"
                 if mountpoint -q "${MOUNT_DIR}"; then
@@ -148,6 +157,7 @@ public enum CloudInitSeedBuilder {
                 log "mounted ${source_dir} on data disk"
               }
               wait_for_device
+              tune_block_devices
               TYPE="$(filesystem_type)"
               if [ -z "${TYPE}" ]; then
                 log "formatting ${DEVICE} as ext4"
