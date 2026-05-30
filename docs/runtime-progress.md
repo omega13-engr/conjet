@@ -190,14 +190,22 @@ Observed progress on 2026-05-31:
   `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-final.json`.
   The gate report is
   `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-final-gate.md`.
-- That gate passed every configured non-power workload against OrbStack:
+- That gate passed every configured non-power workload against OrbStack. The
+  current run uses interleaved measured samples by iteration, so the second
+  runtime no longer gets a systematic host-cache ordering advantage:
   container start, image build, copy-heavy layers, npm, pnpm, Cargo, bind
   mounts, native volumes, named-volume IO, tmpfs IO, ConjetFS fast paths,
   hot-reload latency, and compose-up. Representative P50/P95 ratios were
-  `container-start=0.121/0.115`, `image-build=0.113/0.106`,
-  `copy-node-modules=0.055/0.061`, `npm-install=0.147/0.359`,
-  `pnpm-install=0.348/0.405`, `cargo-build=0.136/0.297`,
-  `hot-reload-fast-path=0.552/0.533`, and `compose-up=0.157/0.157`.
+  `container-start=0.203/0.170`, `image-build=0.124/0.111`,
+  `copy-node-modules=0.067/0.069`, `npm-install=0.333/0.370`,
+  `pnpm-install=0.406/0.379`, `cargo-build=0.244/0.260`,
+  `hot-reload-fast-path=0.574/0.407`, and `compose-up=0.174/0.150`.
+- The same interleaved harness exposed remaining tuned-Colima noise: the
+  latest Colima full gate passed nearly all non-power rules, but raw
+  `pnpm-install` and one `volume-pnpm-install` ratio still missed on small
+  P95/P50 deltas under five-sample nearest-rank P95. The ConjetFS/native-volume
+  fast paths remained comfortably ahead. This is not part of the OrbStack
+  verdict, but it stays open as a harness/runtime stabilization item.
 - `conjet bench energy` was added for active energy-to-solution evidence. It
   runs a workload while sampling `powermetrics`, records workload duration,
   sample duration, workload/power exit codes, and estimated combined/CPU joules

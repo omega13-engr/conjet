@@ -90,6 +90,11 @@ final class BenchmarkSchemaTests: XCTestCase {
                 command.contains("CONJET_BENCH_ITERATION=1")
         })
         XCTAssertTrue(recorder.commands.contains { command in
+            command.starts(with: ["docker", "--context", "conjet", "build"]) &&
+                command.contains("CONJET_BENCH_ITERATION=0") &&
+                command.contains(where: { $0.contains("npm-install") || $0.contains("cargo-build") })
+        })
+        XCTAssertTrue(recorder.commands.contains { command in
             command.contains("type=volume,source=conjet-bench-conjet-volume-1,target=/data")
         })
         XCTAssertTrue(recorder.commands.contains { command in
@@ -176,6 +181,45 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(warmResults.first?.command.joined(separator: " ").contains("conjet-package-npm-cache") ?? false)
     }
 
+    func testConjetFSCargoWarmRunReusesVMNativeTarget() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-docker-bench-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let coldRecorder = DockerCommandRecorder()
+        let coldResults = try DockerBenchmarkSuite(
+            contexts: ["conjet"],
+            iterations: 1,
+            warmup: false,
+            workloads: ["conjetfs-cargo-build"],
+            runner: coldRecorder.run,
+            inputRunner: coldRecorder.runWithInput
+        ).run(workDirectory: directory.appendingPathComponent("cold", isDirectory: true))
+
+        XCTAssertEqual(coldResults.count, 1)
+        XCTAssertEqual(coldResults.first?.metrics["project_volume_reused"], 0)
+        XCTAssertEqual(coldResults.first?.metrics["vm_native_target_reused"], 0)
+
+        let warmRecorder = DockerCommandRecorder()
+        let warmResults = try DockerBenchmarkSuite(
+            contexts: ["conjet"],
+            iterations: 1,
+            warmup: true,
+            workloads: ["conjetfs-cargo-build"],
+            runner: warmRecorder.run,
+            inputRunner: warmRecorder.runWithInput
+        ).run(workDirectory: directory.appendingPathComponent("warm", isDirectory: true))
+        let cargoRuns = warmRecorder.commands.filter { command in
+            command.joined(separator: " ").contains("cargo build --release") &&
+                command.contains("run")
+        }
+
+        XCTAssertEqual(warmResults.count, 1)
+        XCTAssertEqual(cargoRuns.count, 2)
+        XCTAssertEqual(warmResults.first?.metrics["project_volume_reused"], 1)
+        XCTAssertEqual(warmResults.first?.metrics["vm_native_target_reused"], 1)
+    }
+
     func testBindPackageWarmupPrefillsStoresBeforeMeasuredRuns() throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("conjet-docker-bench-test-\(UUID().uuidString)", isDirectory: true)
@@ -255,6 +299,25 @@ final class BenchmarkSchemaTests: XCTestCase {
             command.starts(with: ["docker", "--context", "conjet", "build"]) ||
                 command.starts(with: ["docker", "--context", "conjet", "rmi"])
         })
+    }
+
+    func testDockerBenchmarkSuiteInterleavesMeasuredContextsByIteration() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-docker-bench-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = DockerCommandRecorder()
+        let results = try DockerBenchmarkSuite(
+            contexts: ["conjet", "colima"],
+            iterations: 2,
+            warmup: true,
+            workloads: ["docker-version"],
+            runner: recorder.run,
+            inputRunner: recorder.runWithInput
+        ).run(workDirectory: directory)
+
+        XCTAssertEqual(results.map(\.runtime), ["conjet", "colima", "conjet", "colima"])
+        XCTAssertEqual(results.map { Int($0.metrics["iteration"] ?? -1) }, [1, 1, 2, 2])
     }
 
     func testIdleResourceSamplerAggregatesMatchingProcesses() throws {

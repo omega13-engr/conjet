@@ -77,6 +77,12 @@ not the Conjet benchmark command. The result records workload duration, sampled
 power duration, powermetrics exit code, workload exit code, and estimated
 combined/CPU joules when `powermetrics` returns power rails.
 
+Measured Docker samples must be interleaved by iteration across runtimes after
+all configured warmups complete. A valid two-runtime five-iteration wall-time
+matrix therefore records `conjet-1, baseline-1, conjet-2, baseline-2, ...`
+rather than all Conjet samples followed by all baseline samples. This reduces
+host-cache, thermal, registry, and filesystem ordering bias.
+
 Before any faster-than-OrbStack release claim, run the release-gate
 orchestrator:
 

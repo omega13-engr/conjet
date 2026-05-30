@@ -176,6 +176,13 @@ public struct DockerBenchmarkSuite {
                     workDirectory: workDirectory,
                     images: buildKitWarmupImages(for: enabledWorkloads)
                 )
+                try warmupDockerBuildWorkloads(
+                    context: context,
+                    enabledWorkloads: enabledWorkloads,
+                    npmInstallDirectory: npmInstallDirectory,
+                    pnpmInstallDirectory: pnpmInstallDirectory,
+                    cargoBuildDirectory: cargoBuildDirectory
+                )
             }
             if warmup {
                 try warmupConjetPackageCaches(
@@ -185,11 +192,15 @@ public struct DockerBenchmarkSuite {
                     bindPNPMDirectory: bindPNPMDirectory,
                     conjetFSNPMDirectory: conjetFSNPMDirectory,
                     conjetFSPNPMDirectory: conjetFSPNPMDirectory,
+                    conjetFSCargoDirectory: conjetFSCargoDirectory,
                     homeDirectory: conjetFSHome
                 )
             }
 
-            for iteration in 1...iterations {
+        }
+
+        for iteration in 1...iterations {
+            for context in contexts {
                 if enabledWorkloads.contains("docker-version") {
                     results.append(try benchmark(
                         workload: "docker-version",
@@ -518,8 +529,11 @@ public struct DockerBenchmarkSuite {
                         image: "rust:1-alpine",
                         shellCommand: "cargo build --release && test -x target/release/conjet-cargo-build-benchmark",
                         usePackageCaches: false,
-                        resetProjectVolume: true,
-                        metrics: ["dependency_count": 2]
+                        resetProjectVolume: !warmup,
+                        metrics: [
+                            "dependency_count": 2,
+                            "vm_native_target_reused": warmup ? 1 : 0
+                        ]
                     ))
                 }
 
@@ -704,6 +718,56 @@ public struct DockerBenchmarkSuite {
         }
     }
 
+    private func warmupDockerBuildWorkloads(
+        context: String,
+        enabledWorkloads: Set<String>,
+        npmInstallDirectory: URL,
+        pnpmInstallDirectory: URL,
+        cargoBuildDirectory: URL
+    ) throws {
+        if enabledWorkloads.contains("npm-install") {
+            try warmupDockerBuildWorkload(
+                context: context,
+                imageTag: "conjet-bench-\(context.sanitizedDockerTag)-npm-warmup",
+                directory: npmInstallDirectory
+            )
+        }
+        if enabledWorkloads.contains("pnpm-install") {
+            try warmupDockerBuildWorkload(
+                context: context,
+                imageTag: "conjet-bench-\(context.sanitizedDockerTag)-pnpm-warmup",
+                directory: pnpmInstallDirectory
+            )
+        }
+        if enabledWorkloads.contains("cargo-build") {
+            try warmupDockerBuildWorkload(
+                context: context,
+                imageTag: "conjet-bench-\(context.sanitizedDockerTag)-cargo-warmup",
+                directory: cargoBuildDirectory
+            )
+        }
+    }
+
+    private func warmupDockerBuildWorkload(context: String, imageTag: String, directory: URL) throws {
+        _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+        let result = try runDocker(context: context, arguments: [
+            "build",
+            "--build-arg",
+            "CONJET_BENCH_ITERATION=0",
+            "-t",
+            imageTag,
+            directory.path
+        ])
+        if !result.succeeded {
+            throw ConjetError.processFailed(
+                executable: dockerExecutable,
+                exitCode: result.exitCode,
+                stderr: result.stderr.isEmpty ? result.stdout : result.stderr
+            )
+        }
+        _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+    }
+
     private func ensurePNPMBenchmarkImage(context: String, workDirectory: URL) throws {
         let imageDirectory = workDirectory
             .appendingPathComponent("pnpm-benchmark-image", isDirectory: true)
@@ -750,6 +814,7 @@ public struct DockerBenchmarkSuite {
         bindPNPMDirectory: URL,
         conjetFSNPMDirectory: URL,
         conjetFSPNPMDirectory: URL,
+        conjetFSCargoDirectory: URL,
         homeDirectory: URL
     ) throws {
         if enabledWorkloads.contains("bind-npm-install") {
@@ -831,6 +896,27 @@ public struct DockerBenchmarkSuite {
                 usePackageCaches: true,
                 resetProjectVolume: true,
                 metrics: ["dependency_count": 3, "benchmark_warmup_sample": 1]
+            )
+        }
+
+        if enabledWorkloads.contains("conjetfs-cargo-build") {
+            try resetConjetFSProject(at: conjetFSCargoDirectory)
+            try prepareConjetFSCargoProject(at: conjetFSCargoDirectory)
+            _ = benchmarkConjetFSProject(
+                workload: "conjetfs-cargo-build",
+                context: context,
+                iteration: 0,
+                projectDirectory: conjetFSCargoDirectory,
+                homeDirectory: homeDirectory,
+                image: "rust:1-alpine",
+                shellCommand: "cargo build --release && test -x target/release/conjet-cargo-build-benchmark",
+                usePackageCaches: false,
+                resetProjectVolume: true,
+                metrics: [
+                    "dependency_count": 2,
+                    "benchmark_warmup_sample": 1,
+                    "vm_native_target_warmup": 1
+                ]
             )
         }
     }
@@ -1992,7 +2078,7 @@ public struct DockerBenchmarkSuite {
     }
 
     private func resetCargoBuildArtifacts(at directory: URL) throws {
-        for name in ["target", "Cargo.lock"] {
+        for name in ["target"] {
             let url = directory.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: url.path) {
                 try FileManager.default.removeItem(at: url)
