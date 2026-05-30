@@ -202,6 +202,10 @@ Observed progress on 2026-05-31:
   runs a workload while sampling `powermetrics`, records workload duration,
   sample duration, workload/power exit codes, and estimated combined/CPU joules
   when power rails are available.
+- The release gate now includes `container-start-energy-sample` whenever power
+  evidence is enabled. It runs a fixed container-start loop under active
+  `powermetrics` sampling, writes per-runtime `energy-*.json` artifacts, and
+  gates on `energy_to_solution_joules_estimate`.
 - Local `bench energy` smoke tests proved structured output and workload
   execution, but macOS denied `powermetrics` both without sudo and with
   `sudo -n` because no cached sudo credential was available. Therefore the

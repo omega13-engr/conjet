@@ -68,7 +68,7 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
             switch rule.workload {
             case "idle-resource-sample":
                 return includeIdle
-            case "idle-power-sample":
+            case "idle-power-sample", "container-start-energy-sample":
                 return includePower
             default:
                 return selectedWorkloads.contains(rule.workload) ||
@@ -123,6 +123,7 @@ public struct BenchmarkReleaseGateArtifacts: Codable, Equatable, Sendable {
     public var dockerReport: String
     public var idleReports: [String]
     public var powerReports: [String]
+    public var energyReports: [String]
     public var allResultsReport: String
     public var allResultsMarkdown: String
     public var gateReport: String
@@ -134,6 +135,7 @@ public struct BenchmarkReleaseGateArtifacts: Codable, Equatable, Sendable {
         dockerReport: String,
         idleReports: [String],
         powerReports: [String],
+        energyReports: [String],
         allResultsReport: String,
         allResultsMarkdown: String,
         gateReport: String,
@@ -144,6 +146,7 @@ public struct BenchmarkReleaseGateArtifacts: Codable, Equatable, Sendable {
         self.dockerReport = dockerReport
         self.idleReports = idleReports
         self.powerReports = powerReports
+        self.energyReports = energyReports
         self.allResultsReport = allResultsReport
         self.allResultsMarkdown = allResultsMarkdown
         self.gateReport = gateReport
@@ -184,12 +187,14 @@ public struct BenchmarkReleaseGateRunner {
     private let dockerCollector: DockerCollector
     private let idleCollector: RuntimeCollector
     private let powerCollector: RuntimeCollector
+    private let activeEnergyCollector: RuntimeCollector
 
     public init(
         options: BenchmarkReleaseGateOptions = BenchmarkReleaseGateOptions(),
         dockerCollector: DockerCollector? = nil,
         idleCollector: RuntimeCollector? = nil,
-        powerCollector: RuntimeCollector? = nil
+        powerCollector: RuntimeCollector? = nil,
+        activeEnergyCollector: RuntimeCollector? = nil
     ) {
         self.options = options
         self.dockerCollector = dockerCollector ?? { contexts, iterations, warmup, workloads, workDirectory in
@@ -219,6 +224,33 @@ public struct BenchmarkReleaseGateRunner {
                 useSudo: options.useSudoForPower
             ).run()
         }
+        self.activeEnergyCollector = activeEnergyCollector ?? { runtime, _ in
+            try ActivePowerSampler(
+                runtime: runtime,
+                workloadName: "container-start-energy-sample",
+                processPattern: Self.defaultProcessPattern(runtime: runtime),
+                maxDurationSeconds: options.powerSeconds,
+                minSampleSeconds: min(2, options.powerSeconds),
+                intervalSeconds: options.powerInterval,
+                samplers: options.powerSamplers,
+                useSudo: options.useSudoForPower
+            ).run(
+                executable: "/usr/bin/env",
+                arguments: [
+                    "sh",
+                    "-c",
+                    """
+                    i=0
+                    while [ "$i" -lt 10 ]; do
+                      docker --context "$1" run --rm alpine:3.20 true >/dev/null || exit $?
+                      i=$((i + 1))
+                    done
+                    """,
+                    "conjet-energy-loop",
+                    runtime
+                ]
+            )
+        }
     }
 
     public func run(outputDirectory: URL, workDirectory explicitWorkDirectory: URL? = nil) throws -> BenchmarkReleaseGateRunResult {
@@ -238,6 +270,7 @@ public struct BenchmarkReleaseGateRunner {
         var allResults: [BenchmarkResult] = []
         var idleReportPaths: [String] = []
         var powerReportPaths: [String] = []
+        var energyReportPaths: [String] = []
 
         let dockerWorkDirectory = workDirectory.appendingPathComponent("docker", isDirectory: true)
         let dockerWorkloads = options.effectiveDockerWorkloads
@@ -285,6 +318,18 @@ public struct BenchmarkReleaseGateRunner {
                 try writeJSON(runtimeResults, to: report)
                 powerReportPaths.append(report.path)
             }
+            for runtime in options.contexts {
+                let runtimeResults = try collectRuntimeSamples(
+                    collector: activeEnergyCollector,
+                    workload: "container-start-energy-sample",
+                    runtime: runtime,
+                    runTraceID: traceID
+                )
+                allResults.append(contentsOf: runtimeResults)
+                let report = outputDirectory.appendingPathComponent("energy-\(runtime.sanitizedBenchmarkPathComponent).json")
+                try writeJSON(runtimeResults, to: report)
+                energyReportPaths.append(report.path)
+            }
         }
 
         let allResultsReport = outputDirectory.appendingPathComponent("all-results.json")
@@ -317,6 +362,7 @@ public struct BenchmarkReleaseGateRunner {
             dockerReport: dockerReport.path,
             idleReports: idleReportPaths,
             powerReports: powerReportPaths,
+            energyReports: energyReportPaths,
             allResultsReport: allResultsReport.path,
             allResultsMarkdown: allResultsMarkdown.path,
             gateReport: gateReportPath.path,

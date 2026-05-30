@@ -650,6 +650,14 @@ final class BenchmarkSchemaTests: XCTestCase {
                     duration: 1,
                     metrics: ["combined_power_mw_mean": runtime == "conjet" ? 100 : 200]
                 )
+            },
+            activeEnergyCollector: { runtime, _ in
+                benchmarkResult(
+                    workload: "container-start-energy-sample",
+                    runtime: runtime,
+                    duration: 1,
+                    metrics: ["energy_to_solution_joules_estimate": runtime == "conjet" ? 1 : 3]
+                )
             }
         )
 
@@ -659,7 +667,8 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertEqual(Set(result.gateReport.comparisons.map(\.workload)), [
             "container-start",
             "idle-resource-sample",
-            "idle-power-sample"
+            "idle-power-sample",
+            "container-start-energy-sample"
         ])
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.artifacts.dockerReport))
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.artifacts.allResultsReport))
@@ -668,9 +677,10 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.artifacts.gateMarkdownReport))
         XCTAssertEqual(result.artifacts.idleReports.count, 3)
         XCTAssertEqual(result.artifacts.powerReports.count, 3)
+        XCTAssertEqual(result.artifacts.energyReports.count, 3)
 
         let allResults = try BenchmarkClaimGate.loadJSONReports(urls: [URL(fileURLWithPath: result.artifacts.allResultsReport)])
-        XCTAssertEqual(allResults.count, 18)
+        XCTAssertEqual(allResults.count, 24)
         XCTAssertFalse(result.traceID.isEmpty)
         XCTAssertTrue(allResults.allSatisfy { $0.traceID?.hasPrefix(result.traceID) == true })
     }

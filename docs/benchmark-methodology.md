@@ -94,6 +94,11 @@ The command writes raw Docker, idle CPU, power, combined-result, and gate
 artifacts into the output directory. It exits nonzero if any required workload,
 OrbStack/tuned-Colima baseline, sample count, zero-failure requirement, or
 Conjet P50/P95 win is missing.
+Power-enabled release gates also collect `container-start-energy-sample`, a
+fixed container-start loop measured by `conjet bench energy`, and compare
+`energy_to_solution_joules_estimate` across runtimes. Use `--no-power` only for
+wall-time-only debug runs; it disables both idle power and active energy
+requirements.
 Mapped fast-path rules do not hide raw bind-mount evidence; the reports still
 include direct bind workloads, while rules such as `hot-reload-fast-path`
 explicitly show the candidate and baseline workload names being compared.

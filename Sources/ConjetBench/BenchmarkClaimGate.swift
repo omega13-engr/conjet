@@ -166,7 +166,11 @@ public struct BenchmarkClaimGateOptions: Codable, Equatable, Sendable {
         ),
         BenchmarkClaimRule(workload: "compose-up"),
         BenchmarkClaimRule(workload: "idle-resource-sample", measure: .metric("cpu_percent_mean")),
-        BenchmarkClaimRule(workload: "idle-power-sample", measure: .metric("combined_power_mw_mean"))
+        BenchmarkClaimRule(workload: "idle-power-sample", measure: .metric("combined_power_mw_mean")),
+        BenchmarkClaimRule(
+            workload: "container-start-energy-sample",
+            measure: .metric("energy_to_solution_joules_estimate")
+        )
     ]
 }
 

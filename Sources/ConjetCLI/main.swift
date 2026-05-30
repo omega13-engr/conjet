@@ -815,12 +815,12 @@ struct ConjetCLI {
         )
         let ui = ConjetFetchUI(enabled: !json && !markdown)
         if !json && !markdown {
-            ui.step("[bench 0/4] writing evidence to \(outputDirectory.path)")
+            ui.step("[bench 0/5] writing evidence to \(outputDirectory.path)")
         }
         let runner = BenchmarkReleaseGateRunner(
             options: options,
             dockerCollector: { contexts, iterations, warmup, workloads, workDirectory in
-                ui.step("[bench 1/4] docker workloads: \(contexts.joined(separator: ", "))")
+                ui.step("[bench 1/5] docker workloads: \(contexts.joined(separator: ", "))")
                 return try DockerBenchmarkSuite(
                     contexts: contexts,
                     iterations: iterations,
@@ -830,7 +830,7 @@ struct ConjetCLI {
                 ).run(workDirectory: workDirectory)
             },
             idleCollector: { runtime, iteration in
-                ui.step("[bench 2/4] idle \(runtime) sample \(iteration)/\(options.iterations)")
+                ui.step("[bench 2/5] idle \(runtime) sample \(iteration)/\(options.iterations)")
                 return try IdleResourceSampler(
                     runtime: runtime,
                     processPattern: defaultIdleProcessPattern(runtime: runtime),
@@ -839,7 +839,7 @@ struct ConjetCLI {
                 ).run()
             },
             powerCollector: { runtime, iteration in
-                ui.step("[bench 3/4] power \(runtime) sample \(iteration)/\(options.iterations)")
+                ui.step("[bench 3/5] idle power \(runtime) sample \(iteration)/\(options.iterations)")
                 return try PowerMetricsSampler(
                     runtime: runtime,
                     processPattern: defaultIdleProcessPattern(runtime: runtime),
@@ -848,10 +848,38 @@ struct ConjetCLI {
                     samplers: options.powerSamplers,
                     useSudo: options.useSudoForPower
                 ).run()
+            },
+            activeEnergyCollector: { runtime, iteration in
+                ui.step("[bench 4/5] active energy \(runtime) sample \(iteration)/\(options.iterations)")
+                return try ActivePowerSampler(
+                    runtime: runtime,
+                    workloadName: "container-start-energy-sample",
+                    processPattern: defaultIdleProcessPattern(runtime: runtime),
+                    maxDurationSeconds: options.powerSeconds,
+                    minSampleSeconds: min(2, options.powerSeconds),
+                    intervalSeconds: options.powerInterval,
+                    samplers: options.powerSamplers,
+                    useSudo: options.useSudoForPower
+                ).run(
+                    executable: "/usr/bin/env",
+                    arguments: [
+                        "sh",
+                        "-c",
+                        """
+                        i=0
+                        while [ "$i" -lt 10 ]; do
+                          docker --context "$1" run --rm alpine:3.20 true >/dev/null || exit $?
+                          i=$((i + 1))
+                        done
+                        """,
+                        "conjet-energy-loop",
+                        runtime
+                    ]
+                )
             }
         )
         let result = try runner.run(outputDirectory: outputDirectory, workDirectory: workDirectory)
-        ui.step("[bench 4/4] claim gate \(result.gateReport.passed ? "passed" : "failed")")
+        ui.step("[bench 5/5] claim gate \(result.gateReport.passed ? "passed" : "failed")")
 
         if json {
             print(try ConjetJSON.string(result))
@@ -1150,6 +1178,9 @@ struct ConjetCLI {
         }
         if !result.artifacts.powerReports.isEmpty {
             print("  power reports: \(result.artifacts.powerReports.count)")
+        }
+        if !result.artifacts.energyReports.isEmpty {
+            print("  energy reports: \(result.artifacts.energyReports.count)")
         }
         printBenchmarkGateReport(result.gateReport)
     }
@@ -2154,7 +2185,7 @@ struct ConjetCLI {
               conjet bench power [--runtime NAME] [--process REGEX] [--seconds N] [--interval N] [--output PATH] [--no-sudo] [--json|--markdown]
               conjet bench energy [--runtime NAME] [--workload NAME] [--process REGEX] [--seconds N] [--min-seconds N] [--interval N] [--output PATH] [--no-sudo] [--json|--markdown] -- COMMAND...
               conjet bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N] [--phase any|cold|warm] [--workloads NAME,...] [--no-idle] [--no-power] [--json|--markdown]
-              conjet bench release-gate [--contexts conjet,orbstack,colima] [--iterations N] [--phase cold|warm] [--warmup] [--workloads NAME,...] [--command-timeout N] [--output-dir DIR] [--seconds N] [--no-sudo] [--json|--markdown]
+              conjet bench release-gate [--contexts conjet,orbstack,colima] [--iterations N] [--phase cold|warm] [--warmup] [--workloads NAME,...] [--command-timeout N] [--output-dir DIR] [--seconds N] [--no-sudo] [--no-power] [--json|--markdown]
               conjet bench small-files [--files N] [--bytes N] [--dir PATH] [--json|--markdown]
               conjet bench docker-compare [--contexts conjet,colima] [--iterations N] [--workloads NAME,...] [--warmup] [--command-timeout N] [--output PATH] [--json|--markdown]
               conjet sync classify PATH [--json]

@@ -30,6 +30,12 @@ conjet bench energy --runtime orbstack --workload npm-install-energy --seconds 6
   docker --context orbstack run --rm node:22-alpine node --version
 ```
 
+`conjet bench release-gate` now collects a default active
+`container-start-energy-sample` when power evidence is enabled. That sample
+runs a fixed container-start loop for each runtime and gates on
+`energy_to_solution_joules_estimate`, so a full release gate cannot pass with
+only wall-time and idle-power evidence.
+
 The command runs `sudo -n powermetrics` by default. If the machine is not
 configured for noninteractive `powermetrics`, the benchmark result exits
 nonzero and the failure must stay in the report. That is intentional: missing
