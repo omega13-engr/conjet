@@ -35,7 +35,7 @@ public struct HostCapabilities: Codable, Equatable, Sendable {
 
     private static func swVers(_ argument: String) -> String {
         do {
-            let result = try ProcessRunner.run("/usr/bin/sw_vers", [argument])
+            let result = try ProcessRunner.run("/usr/bin/sw_vers", [argument], timeoutSeconds: 5)
             return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             return "unknown"

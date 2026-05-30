@@ -28,7 +28,7 @@ public enum MachineProfiler {
 
     private static func powerSource() -> String {
         do {
-            let result = try ProcessRunner.run("/usr/bin/pmset", ["-g", "batt"])
+            let result = try ProcessRunner.run("/usr/bin/pmset", ["-g", "batt"], timeoutSeconds: 5)
             let output = result.stdout.lowercased()
             if output.contains("ac power") { return "ac-power" }
             if output.contains("battery power") { return "battery" }
