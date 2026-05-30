@@ -23,7 +23,7 @@ final class BenchmarkSchemaTests: XCTestCase {
         let result = try SmallFileWorkload(fileCount: 2, bytesPerFile: 8).run(directory: directory)
         let markdown = BenchmarkMarkdownReport.render(results: [result])
         XCTAssertTrue(markdown.contains("# Conjet Benchmark Report"))
-        XCTAssertTrue(markdown.contains("| Workload | Runtime | Samples | Failures | P50 (s) | P95 (s) | Mean (s) | StdDev (s) |"))
+        XCTAssertTrue(markdown.contains("| Workload | Runtime | Samples | Failures | P50 (s) | P75 (s) | P95 (s) | P99 (s) | Mean (s) | StdDev (s) |"))
         XCTAssertTrue(markdown.contains("| Workload | Runtime | Duration (s) | Exit | Key Metrics |"))
         XCTAssertTrue(markdown.contains("file_count=2"))
     }

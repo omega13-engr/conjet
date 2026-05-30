@@ -23,11 +23,11 @@ public enum BenchmarkMarkdownReport {
 
         lines.append("## Summary")
         lines.append("")
-        lines.append("| Workload | Runtime | Samples | Failures | P50 (s) | P95 (s) | Mean (s) | StdDev (s) |")
-        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+        lines.append("| Workload | Runtime | Samples | Failures | P50 (s) | P75 (s) | P95 (s) | P99 (s) | Mean (s) | StdDev (s) |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
         for summary in summaries(results) {
             lines.append(
-                "| \(escape(summary.workload)) | \(escape(summary.runtime)) | \(summary.samples) | \(summary.failures) | \(format(summary.p50)) | \(format(summary.p95)) | \(format(summary.mean)) | \(format(summary.standardDeviation)) |"
+                "| \(escape(summary.workload)) | \(escape(summary.runtime)) | \(summary.samples) | \(summary.failures) | \(format(summary.p50)) | \(format(summary.p75)) | \(format(summary.p95)) | \(format(summary.p99)) | \(format(summary.mean)) | \(format(summary.standardDeviation)) |"
             )
         }
         lines.append("")
@@ -78,7 +78,9 @@ public enum BenchmarkMarkdownReport {
         var samples: Int
         var failures: Int
         var p50: Double
+        var p75: Double
         var p95: Double
+        var p99: Double
         var mean: Double
         var standardDeviation: Double
     }
@@ -101,7 +103,9 @@ public enum BenchmarkMarkdownReport {
                 samples: values.count,
                 failures: values.filter { $0.exitCode != 0 }.count,
                 p50: percentile(0.50, durations: durations),
+                p75: percentile(0.75, durations: durations),
                 p95: percentile(0.95, durations: durations),
+                p99: percentile(0.99, durations: durations),
                 mean: mean,
                 standardDeviation: sqrt(variance)
             )
