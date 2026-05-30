@@ -88,16 +88,15 @@ public enum ProcessRunner {
             }
         }
 
+        let waitSemaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            waitSemaphore.signal()
+        }
+
         try process.run()
         if let standardInput, let stdinPipe {
             stdinPipe.fileHandleForWriting.write(standardInput)
             try? stdinPipe.fileHandleForWriting.close()
-        }
-
-        let waitSemaphore = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .utility).async {
-            process.waitUntilExit()
-            waitSemaphore.signal()
         }
 
         var timedOut = false
