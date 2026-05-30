@@ -14,7 +14,9 @@ public struct IdleResourceSampler {
         processPattern: String,
         durationSeconds: Double = 30,
         intervalSeconds: Double = 1,
-        runner: @escaping (String, [String]) throws -> ProcessResult = ProcessRunner.run
+        runner: @escaping (String, [String]) throws -> ProcessResult = {
+            try ProcessRunner.run($0, $1, timeoutSeconds: 5)
+        }
     ) {
         self.runtime = runtime
         self.processPattern = processPattern
