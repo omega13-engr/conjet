@@ -797,7 +797,7 @@ public struct DockerBenchmarkSuite {
             let syncPrepareStartedAt = Date()
             var syncPrepareEndedAt = syncPrepareStartedAt
             let measuredShellCommand = usePackageCaches
-                ? "rm -rf node_modules package-lock.json pnpm-lock.yaml && \(shellCommand)"
+                ? "rm -rf node_modules && \(shellCommand)"
                 : shellCommand
             let fused = try fs.withSyncMountedRun(project: project) { preparation in
                 syncPrepareEndedAt = Date()
@@ -1450,11 +1450,11 @@ public struct DockerBenchmarkSuite {
         # syntax=docker/dockerfile:1.7
         FROM node:22-alpine
         WORKDIR /app
-        COPY package.json ./
+        COPY package.json package-lock.json ./
         ARG CONJET_BENCH_ITERATION=0
         RUN --mount=type=cache,target=/root/.npm \
             echo "$CONJET_BENCH_ITERATION" >/tmp/conjet-bench-iteration \
-            && npm install --prefer-offline --no-audit --no-fund \
+            && \#(npmInstallCommand()) \
             && node -e "const _ = require('lodash'); console.log(_.camelCase('conjet npm install benchmark'))"
         """#
         try dockerfile.write(
@@ -1470,12 +1470,11 @@ public struct DockerBenchmarkSuite {
         # syntax=docker/dockerfile:1.7
         FROM \#(Self.pnpmBenchmarkImage)
         WORKDIR /app
-        COPY package.json ./
+        COPY package.json pnpm-lock.yaml ./
         ARG CONJET_BENCH_ITERATION=0
         RUN --mount=type=cache,target=/root/.npm \
             echo "$CONJET_BENCH_ITERATION" >/tmp/conjet-bench-iteration \
-            && \#(pnpmBootstrapCommand()) \
-            && pnpm install --prefer-offline --ignore-scripts \
+            && \#(pnpmInstallCommand()) \
             && node -e "const _ = require('lodash'); console.log(_.camelCase('conjet pnpm install benchmark'))"
         """#
         try dockerfile.write(
@@ -1487,7 +1486,33 @@ public struct DockerBenchmarkSuite {
 
     private func prepareNPMProject(at directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let packageJSON = """
+        try nodeBenchmarkPackageJSON().write(
+            to: directory.appendingPathComponent("package.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try nodeBenchmarkPackageLock().write(
+            to: directory.appendingPathComponent("package-lock.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    private func preparePNPMProject(at directory: URL) throws {
+        try prepareNPMProject(at: directory)
+        let packageLock = directory.appendingPathComponent("package-lock.json")
+        if FileManager.default.fileExists(atPath: packageLock.path) {
+            try FileManager.default.removeItem(at: packageLock)
+        }
+        try nodeBenchmarkPNPMLock().write(
+            to: directory.appendingPathComponent("pnpm-lock.yaml"),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    private func nodeBenchmarkPackageJSON() -> String {
+        """
         {
           "name": "conjet-npm-install-benchmark",
           "version": "1.0.0",
@@ -1499,15 +1524,107 @@ public struct DockerBenchmarkSuite {
           }
         }
         """
-        try packageJSON.write(
-            to: directory.appendingPathComponent("package.json"),
-            atomically: true,
-            encoding: .utf8
-        )
     }
 
-    private func preparePNPMProject(at directory: URL) throws {
-        try prepareNPMProject(at: directory)
+    private func nodeBenchmarkPackageLock() -> String {
+        #"""
+        {
+          "name": "conjet-npm-install-benchmark",
+          "version": "1.0.0",
+          "lockfileVersion": 3,
+          "requires": true,
+          "packages": {
+            "": {
+              "name": "conjet-npm-install-benchmark",
+              "version": "1.0.0",
+              "dependencies": {
+                "is-number": "7.0.0",
+                "lodash": "4.17.21",
+                "nanoid": "5.0.7"
+              }
+            },
+            "node_modules/is-number": {
+              "version": "7.0.0",
+              "resolved": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
+              "integrity": "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==",
+              "license": "MIT",
+              "engines": {
+                "node": ">=0.12.0"
+              }
+            },
+            "node_modules/lodash": {
+              "version": "4.17.21",
+              "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
+              "integrity": "sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg==",
+              "license": "MIT"
+            },
+            "node_modules/nanoid": {
+              "version": "5.0.7",
+              "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-5.0.7.tgz",
+              "integrity": "sha512-oLxFY2gd2IqnjcYyOXD8XGCftpGtZP2AbHbOkthDkvRywH5ayNtPVy9YlOPcHckXzbLTCHpkb7FB+yuxKV13pQ==",
+              "funding": [
+                {
+                  "type": "github",
+                  "url": "https://github.com/sponsors/ai"
+                }
+              ],
+              "license": "MIT",
+              "bin": {
+                "nanoid": "bin/nanoid.js"
+              },
+              "engines": {
+                "node": "^18 || >=20"
+              }
+            }
+          }
+        }
+        """#
+    }
+
+    private func nodeBenchmarkPNPMLock() -> String {
+        #"""
+        lockfileVersion: '9.0'
+
+        settings:
+          autoInstallPeers: true
+          excludeLinksFromLockfile: false
+
+        importers:
+
+          .:
+            dependencies:
+              is-number:
+                specifier: 7.0.0
+                version: 7.0.0
+              lodash:
+                specifier: 4.17.21
+                version: 4.17.21
+              nanoid:
+                specifier: 5.0.7
+                version: 5.0.7
+
+        packages:
+
+          is-number@7.0.0:
+            resolution: {integrity: sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==}
+            engines: {node: '>=0.12.0'}
+
+          lodash@4.17.21:
+            resolution: {integrity: sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg==}
+
+          nanoid@5.0.7:
+            resolution: {integrity: sha512-oLxFY2gd2IqnjcYyOXD8XGCftpGtZP2AbHbOkthDkvRywH5ayNtPVy9YlOPcHckXzbLTCHpkb7FB+yuxKV13pQ==}
+            engines: {node: ^18 || >=20}
+            hasBin: true
+
+        snapshots:
+
+          is-number@7.0.0: {}
+
+          lodash@4.17.21: {}
+
+          nanoid@5.0.7: {}
+        """#
     }
 
     private enum NodePackageManager {
@@ -1671,7 +1788,7 @@ public struct DockerBenchmarkSuite {
     }
 
     private func resetNPMInstallArtifacts(at directory: URL, preserveCaches: Bool = false) throws {
-        var names = ["node_modules", "package-lock.json"]
+        var names = ["node_modules"]
         if !preserveCaches {
             names.append(".npm-cache")
         }
@@ -1684,7 +1801,7 @@ public struct DockerBenchmarkSuite {
     }
 
     private func resetPNPMInstallArtifacts(at directory: URL, preserveCaches: Bool = false) throws {
-        var names = ["node_modules", "pnpm-lock.yaml"]
+        var names = ["node_modules"]
         if !preserveCaches {
             names.append(contentsOf: [".corepack-cache", ".npm-cache", ".pnpm-store", ".pnpm-state"])
         }
@@ -1800,11 +1917,11 @@ public struct DockerBenchmarkSuite {
     }
 
     private func pnpmInstallCommand(guestPath: String = "/app") -> String {
-        "\(packageTopologyShellPrefix(manager: .pnpm, guestPath: guestPath)) && \(pnpmBootstrapCommand()) && pnpm install --prefer-offline --ignore-scripts"
+        "\(packageTopologyShellPrefix(manager: .pnpm, guestPath: guestPath)) && \(pnpmBootstrapCommand()) && pnpm install --frozen-lockfile --prefer-offline --ignore-scripts"
     }
 
     private func npmInstallCommand(guestPath: String = "/app") -> String {
-        "\(packageTopologyShellPrefix(manager: .npm, guestPath: guestPath)) && npm install --prefer-offline --no-audit --no-fund"
+        "\(packageTopologyShellPrefix(manager: .npm, guestPath: guestPath)) && npm install --prefer-offline --no-audit --no-fund --progress=false --ignore-scripts"
     }
 
     private func pnpmBootstrapCommand() -> String {
@@ -1819,7 +1936,7 @@ public struct DockerBenchmarkSuite {
         let exports = plan.environment
             .sorted { $0.key < $1.key }
             .map { "export \($0.key)=\(shellQuote($0.value))" }
-        let directories = Array(Set(plan.environment.values))
+        let directories = Array(Set(plan.environment.values.filter { $0.hasPrefix("/") }))
             .sorted()
             .map { "mkdir -p \(shellQuote($0))" }
         return (exports + directories).joined(separator: " && ")
@@ -1853,20 +1970,23 @@ public struct DockerBenchmarkSuite {
 
     private func npmVolumeInstallScript() -> String {
         """
-        cat > package.json <<'JSON'
-        {"name":"conjet-volume-npm-install-benchmark","version":"1.0.0","private":true,"dependencies":{"is-number":"7.0.0","lodash":"4.17.21","nanoid":"5.0.7"}}
-        JSON
-        npm install --prefer-offline --no-audit --no-fund && test -d node_modules/lodash
+        \(writeShellFile(path: "package.json", delimiter: "JSON", content: nodeBenchmarkPackageJSON()))
+        \(writeShellFile(path: "package-lock.json", delimiter: "LOCKJSON", content: nodeBenchmarkPackageLock()))
+        \(npmInstallCommand()) && test -d node_modules/lodash
         """
     }
 
     private func pnpmVolumeInstallScript() -> String {
         """
-        cat > package.json <<'JSON'
-        {"name":"conjet-volume-pnpm-install-benchmark","version":"1.0.0","private":true,"dependencies":{"is-number":"7.0.0","lodash":"4.17.21","nanoid":"5.0.7"}}
-        JSON
+        \(writeShellFile(path: "package.json", delimiter: "JSON", content: nodeBenchmarkPackageJSON()))
+        \(writeShellFile(path: "pnpm-lock.yaml", delimiter: "PNPMLOCK", content: nodeBenchmarkPNPMLock()))
         \(pnpmInstallCommand()) && test -d node_modules/lodash
         """
+    }
+
+    private func writeShellFile(path: String, delimiter: String, content: String) -> String {
+        let normalizedContent = content.trimmingCharacters(in: .newlines)
+        return "cat > \(path) <<'\(delimiter)'\n\(normalizedContent)\n\(delimiter)"
     }
 
     private func cargoVolumeBuildScript() -> String {

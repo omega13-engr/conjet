@@ -475,9 +475,6 @@ public struct ConjetFS {
             signatures.removeValue(forKey: removed)
         }
 
-        let staging = try makeStagingDirectory()
-        defer { try? FileManager.default.removeItem(at: staging) }
-
         try removeDeletedFiles(
             removedFiles.sorted(),
             volume: project.dockerVolume,
@@ -492,7 +489,15 @@ public struct ConjetFS {
                    guestPath: project.guestPath
                ) {
                 // Small watch updates avoid staging and docker cp; larger batches use the bulk copy path.
+            } else if try copyEntriesToVolumeTarStream(
+                changedEntries,
+                volume: project.dockerVolume,
+                guestPath: project.guestPath
+            ) {
+                // Streaming through Docker stdin avoids a macOS bind-mounted staging directory.
             } else {
+                let staging = try makeStagingDirectory()
+                defer { try? FileManager.default.removeItem(at: staging) }
                 try stage(entries: changedEntries, at: staging)
                 try copyStagingToVolume(
                     staging,
@@ -531,13 +536,20 @@ public struct ConjetFS {
 
     private func sync(plan: ConjetFSSyncPlan) throws -> ConjetFSSyncResult {
         let project = plan.project
-        let staging = try makeStagingDirectory()
-        defer { try? FileManager.default.removeItem(at: staging) }
-
         try removeDeletedFiles(plan.removedFiles, volume: project.dockerVolume, guestPath: project.guestPath)
         if !plan.changedFiles.isEmpty {
-            try stage(plan: plan, at: staging)
-            try copyStagingToVolume(staging, volume: project.dockerVolume, guestPath: project.guestPath)
+            if try copyEntriesToVolumeTarStream(
+                plan.changedFiles,
+                volume: project.dockerVolume,
+                guestPath: project.guestPath
+            ) {
+                // Fast global path: stream host changes directly into the VM-native volume.
+            } else {
+                let staging = try makeStagingDirectory()
+                defer { try? FileManager.default.removeItem(at: staging) }
+                try stage(plan: plan, at: staging)
+                try copyStagingToVolume(staging, volume: project.dockerVolume, guestPath: project.guestPath)
+            }
         }
         try saveManifest(
             ConjetFSManifest(
@@ -568,22 +580,50 @@ public struct ConjetFS {
         run body: (ConjetFSRunPreparation) throws -> ProcessResult
     ) throws -> (sync: ConjetFSSyncResult, process: ProcessResult) {
         let plan = try makePlan(project: project)
-        let staging = try makeStagingDirectory()
-        defer { try? FileManager.default.removeItem(at: staging) }
-
-        if !plan.changedFiles.isEmpty {
-            try stage(plan: plan, at: staging)
-        }
-
         var mountArguments = [
             "--mount",
             "type=volume,source=\(project.dockerVolume),target=\(project.guestPath)"
         ]
-        if !plan.changedFiles.isEmpty {
+
+        var preSynced = false
+        if !plan.removedFiles.isEmpty {
+            try removeDeletedFiles(plan.removedFiles, volume: project.dockerVolume, guestPath: project.guestPath)
+            preSynced = true
+        }
+
+        var shellPrelude = "mkdir -p \(shellQuote(plan.project.guestPath))"
+        var staging: URL?
+        if !plan.changedFiles.isEmpty,
+           try copyEntriesToVolumeTarStream(
+               plan.changedFiles,
+               volume: project.dockerVolume,
+               guestPath: project.guestPath
+           ) {
+            preSynced = true
+        } else if !plan.changedFiles.isEmpty {
+            let stagingDirectory = try makeStagingDirectory()
+            try stage(plan: plan, at: stagingDirectory)
+            staging = stagingDirectory
             mountArguments += [
                 "--mount",
-                "type=bind,source=\(staging.path),target=/conjetfs-stage,readonly"
+                "type=bind,source=\(stagingDirectory.path),target=/conjetfs-stage,readonly"
             ]
+            shellPrelude = syncMountedRunPrelude(plan: plan)
+        }
+        defer {
+            if let staging {
+                try? FileManager.default.removeItem(at: staging)
+            }
+        }
+
+        if preSynced {
+            try saveManifest(
+                ConjetFSManifest(
+                    projectID: project.id,
+                    syncedFiles: plan.includedFiles.map(\.path).sorted(),
+                    fileSignatures: Dictionary(uniqueKeysWithValues: plan.includedFiles.map { ($0.path, $0.signature) })
+                )
+            )
         }
 
         let preparation = ConjetFSRunPreparation(
@@ -602,11 +642,11 @@ public struct ConjetFS {
                 containerMountArgument: "\(project.dockerVolume):\(project.guestPath)"
             ),
             dockerMountArguments: mountArguments,
-            shellPrelude: syncMountedRunPrelude(plan: plan)
+            shellPrelude: shellPrelude
         )
 
         let process = try body(preparation)
-        if process.succeeded {
+        if process.succeeded && !preSynced {
             try saveManifest(
                 ConjetFSManifest(
                     projectID: project.id,
@@ -853,6 +893,156 @@ public struct ConjetFS {
             return
         }
         try requireSuccess(fastCopyResult)
+    }
+
+    private func copyEntriesToVolumeTarStream(
+        _ entries: [ConjetFSFileEntry],
+        volume: String,
+        guestPath: String
+    ) throws -> Bool {
+        guard !entries.isEmpty else { return true }
+        guard let archive = try makeTarArchive(entries: entries) else {
+            return false
+        }
+        let result = try inputRunner(
+            dockerExecutable,
+            [
+                "docker", "--context", dockerContext,
+                "run", "--rm", "-i",
+                "--mount", "type=volume,source=\(volume),target=\(guestPath)",
+                "alpine:3.20",
+                "sh", "-c", "mkdir -p \(shellQuote(guestPath)) && tar -xpf - -C \(shellQuote(guestPath))"
+            ],
+            archive
+        )
+        return result.succeeded
+    }
+
+    private func makeTarArchive(entries: [ConjetFSFileEntry]) throws -> Data? {
+        let root = try canonicalProjectRoot()
+        var archive = Data()
+        var directories: Set<String> = []
+
+        for entry in entries {
+            let parts = entry.path.split(separator: "/").map(String.init)
+            guard parts.count > 1 else { continue }
+            for index in 0..<(parts.count - 1) {
+                directories.insert(parts[0...index].joined(separator: "/") + "/")
+            }
+        }
+
+        let directoryMode = 0o755
+        let directoryModifiedAt = Int64(Date().timeIntervalSince1970)
+        for directory in directories.sorted() {
+            guard appendTarHeader(
+                path: directory,
+                mode: directoryMode,
+                size: 0,
+                modifiedAt: directoryModifiedAt,
+                typeFlag: Self.tarDirectoryTypeFlag,
+                linkName: "",
+                to: &archive
+            ) else {
+                return nil
+            }
+        }
+
+        for entry in entries.sorted(by: { $0.path < $1.path }) {
+            let source = root.appendingPathComponent(entry.path)
+            let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
+            let fileType = attributes[.type] as? FileAttributeType
+            let mode = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o644
+            let modifiedAt = entry.signature.modifiedAtNanoseconds > 0
+                ? entry.signature.modifiedAtNanoseconds / 1_000_000_000
+                : Int64(Date().timeIntervalSince1970)
+
+            if fileType == .typeSymbolicLink {
+                let linkName = try FileManager.default.destinationOfSymbolicLink(atPath: source.path)
+                guard appendTarHeader(
+                    path: entry.path,
+                    mode: mode,
+                    size: 0,
+                    modifiedAt: modifiedAt,
+                    typeFlag: Self.tarSymlinkTypeFlag,
+                    linkName: linkName,
+                    to: &archive
+                ) else {
+                    return nil
+                }
+                continue
+            }
+
+            guard fileType == .typeRegular else {
+                return nil
+            }
+
+            let data = try Data(contentsOf: source)
+            guard appendTarHeader(
+                path: entry.path,
+                mode: mode,
+                size: Int64(data.count),
+                modifiedAt: modifiedAt,
+                typeFlag: Self.tarRegularFileTypeFlag,
+                linkName: "",
+                to: &archive
+            ) else {
+                return nil
+            }
+            archive.append(data)
+            archive.append(Data(repeating: 0, count: Self.tarPadding(for: data.count)))
+        }
+
+        archive.append(Data(repeating: 0, count: Self.tarBlockSize * 2))
+        return archive
+    }
+
+    private func appendTarHeader(
+        path: String,
+        mode: Int,
+        size: Int64,
+        modifiedAt: Int64,
+        typeFlag: UInt8,
+        linkName: String,
+        to archive: inout Data
+    ) -> Bool {
+        guard let pathParts = Self.tarPathParts(path),
+              linkName.utf8.count <= 100 else {
+            return false
+        }
+
+        var header = [UInt8](repeating: 0, count: Self.tarBlockSize)
+        guard Self.writeTarString(pathParts.name, into: &header, offset: 0, length: 100),
+              Self.writeTarOctal(Int64(mode & 0o7777), into: &header, offset: 100, length: 8),
+              Self.writeTarOctal(0, into: &header, offset: 108, length: 8),
+              Self.writeTarOctal(0, into: &header, offset: 116, length: 8),
+              Self.writeTarOctal(size, into: &header, offset: 124, length: 12),
+              Self.writeTarOctal(modifiedAt, into: &header, offset: 136, length: 12),
+              Self.writeTarString(linkName, into: &header, offset: 157, length: 100),
+              Self.writeTarString("ustar", into: &header, offset: 257, length: 6),
+              Self.writeTarString("00", into: &header, offset: 263, length: 2),
+              Self.writeTarString(pathParts.prefix, into: &header, offset: 345, length: 155) else {
+            return false
+        }
+
+        header[156] = typeFlag
+        for index in 148..<156 {
+            header[index] = Self.tarSpace
+        }
+        let checksum = header.reduce(0) { $0 + Int($1) }
+        let checksumText = String(checksum, radix: 8)
+        guard checksumText.count <= 6 else {
+            return false
+        }
+        let paddedChecksum = String(repeating: "0", count: 6 - checksumText.count) + checksumText
+        let checksumBytes = Array(paddedChecksum.utf8)
+        for index in 0..<checksumBytes.count {
+            header[148 + index] = checksumBytes[index]
+        }
+        header[154] = 0
+        header[155] = Self.tarSpace
+
+        archive.append(contentsOf: header)
+        return true
     }
 
     private func copyChangedEntriesToHelperFastPath(
@@ -1183,6 +1373,74 @@ public struct ConjetFS {
             .trimmingCharacters(in: CharacterSet(charactersIn: ".-_"))
             .lowercased()
         return mapped.isEmpty ? "workspace" : String(mapped.prefix(48))
+    }
+
+    private static let tarBlockSize = 512
+    private static let tarSpace = UInt8(ascii: " ")
+    private static let tarRegularFileTypeFlag = UInt8(ascii: "0")
+    private static let tarDirectoryTypeFlag = UInt8(ascii: "5")
+    private static let tarSymlinkTypeFlag = UInt8(ascii: "2")
+
+    private static func tarPadding(for count: Int) -> Int {
+        let remainder = count % tarBlockSize
+        return remainder == 0 ? 0 : tarBlockSize - remainder
+    }
+
+    private static func tarPathParts(_ rawPath: String) -> (name: String, prefix: String)? {
+        let path = normalizePath(rawPath)
+        if path.utf8.count <= 100 {
+            return (path, "")
+        }
+        let components = path.split(separator: "/").map(String.init)
+        guard components.count > 1 else {
+            return nil
+        }
+        for index in 1..<components.count {
+            let prefix = components[0..<index].joined(separator: "/")
+            let name = components[index..<components.count].joined(separator: "/")
+            if prefix.utf8.count <= 155 && name.utf8.count <= 100 {
+                return (name, prefix)
+            }
+        }
+        return nil
+    }
+
+    private static func writeTarString(
+        _ value: String,
+        into header: inout [UInt8],
+        offset: Int,
+        length: Int
+    ) -> Bool {
+        let bytes = Array(value.utf8)
+        guard bytes.count <= length else {
+            return false
+        }
+        for index in 0..<bytes.count {
+            header[offset + index] = bytes[index]
+        }
+        return true
+    }
+
+    private static func writeTarOctal(
+        _ value: Int64,
+        into header: inout [UInt8],
+        offset: Int,
+        length: Int
+    ) -> Bool {
+        guard value >= 0 else {
+            return false
+        }
+        let text = String(value, radix: 8)
+        guard text.count < length else {
+            return false
+        }
+        let padded = String(repeating: "0", count: length - 1 - text.count) + text
+        let bytes = Array(padded.utf8)
+        for index in 0..<bytes.count {
+            header[offset + index] = bytes[index]
+        }
+        header[offset + length - 1] = 0
+        return true
     }
 
     private func shellQuote(_ value: String) -> String {

@@ -38,13 +38,21 @@ public enum ConjetPackageTopologyOptimizer {
         case .pnpm:
             return ConjetPackageTopologyPlan(manager: manager, environment: [
                 "COREPACK_HOME": "\(guestPath)/.corepack-cache",
+                "NPM_CONFIG_AUDIT": "false",
                 "NPM_CONFIG_CACHE": "\(guestPath)/.npm-cache",
+                "NPM_CONFIG_FUND": "false",
+                "NPM_CONFIG_PROGRESS": "false",
                 "NPM_CONFIG_STORE_DIR": "\(guestPath)/.pnpm-store",
+                "NPM_CONFIG_UPDATE_NOTIFIER": "false",
                 "PNPM_HOME": "\(guestPath)/.pnpm-state"
             ])
         case .npm:
             return ConjetPackageTopologyPlan(manager: manager, environment: [
-                "NPM_CONFIG_CACHE": "\(guestPath)/.npm-cache"
+                "NPM_CONFIG_AUDIT": "false",
+                "NPM_CONFIG_CACHE": "\(guestPath)/.npm-cache",
+                "NPM_CONFIG_FUND": "false",
+                "NPM_CONFIG_PROGRESS": "false",
+                "NPM_CONFIG_UPDATE_NOTIFIER": "false"
             ])
         case .yarn:
             return ConjetPackageTopologyPlan(manager: manager, environment: [

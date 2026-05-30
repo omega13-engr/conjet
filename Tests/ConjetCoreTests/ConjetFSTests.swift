@@ -45,7 +45,8 @@ final class ConjetFSTests: XCTestCase {
             projectRoot: root,
             paths: ConjetPaths(home: home),
             dockerContext: "conjet",
-            runner: runner.run
+            runner: runner.run,
+            inputRunner: runner.runWithInput
         )
         let project = try fs.initializeProject()
         let first = try fs.sync(project: project)
@@ -54,10 +55,10 @@ final class ConjetFSTests: XCTestCase {
         XCTAssertEqual(first.changedFiles, first.includedFiles)
         XCTAssertGreaterThanOrEqual(first.skippedFiles, 2)
         XCTAssertEqual(first.removedFiles, 0)
-        XCTAssertTrue(runner.commands.contains { command in
-            command.starts(with: ["docker", "--context", "conjet", "run", "--rm"]) &&
-                command.contains(where: { $0.contains("type=bind") && $0.contains("target=/conjetfs-stage") }) &&
-                command.contains("type=volume,source=\(project.dockerVolume),target=/workspace")
+        XCTAssertEqual(runner.tarStreamCopyCommandCount, 1)
+        XCTAssertTrue(runner.inputCommands.contains { command in
+            command.arguments.contains("type=volume,source=\(project.dockerVolume),target=/workspace") &&
+                command.standardInput?.isEmpty == false
         })
 
         try FileManager.default.removeItem(at: root.appendingPathComponent("src/index.js"))
@@ -80,12 +81,13 @@ final class ConjetFSTests: XCTestCase {
             projectRoot: root,
             paths: ConjetPaths(home: home),
             dockerContext: "conjet",
-            runner: runner.run
+            runner: runner.run,
+            inputRunner: runner.runWithInput
         )
         let project = try fs.initializeProject()
 
         let first = try fs.sync(project: project)
-        let copiesAfterFirstSync = runner.copyIntoVolumeCommandCount
+        let copiesAfterFirstSync = runner.volumeCopyCommandCount
         XCTAssertEqual(first.changedFiles, first.includedFiles)
 
         let cleanStatus = try fs.status(project: project)
@@ -93,7 +95,7 @@ final class ConjetFSTests: XCTestCase {
         XCTAssertEqual(cleanStatus.changedFiles, 0)
 
         let second = try fs.sync(project: project)
-        let copiesAfterSecondSync = runner.copyIntoVolumeCommandCount
+        let copiesAfterSecondSync = runner.volumeCopyCommandCount
         XCTAssertEqual(second.changedFiles, 0)
         XCTAssertEqual(copiesAfterSecondSync, copiesAfterFirstSync)
 
@@ -127,11 +129,11 @@ final class ConjetFSTests: XCTestCase {
         )
         let project = try fs.initializeProject()
         _ = try fs.sync(project: project)
-        let copiesAfterInitialSync = runner.copyIntoVolumeCommandCount
+        let copiesAfterInitialSync = runner.volumeCopyCommandCount
 
         let clean = try fs.sync(project: project, changedPaths: ["src/index.js"])
         XCTAssertEqual(clean.changedFiles, 0)
-        XCTAssertEqual(runner.copyIntoVolumeCommandCount, copiesAfterInitialSync)
+        XCTAssertEqual(runner.volumeCopyCommandCount, copiesAfterInitialSync)
 
         Thread.sleep(forTimeInterval: 0.01)
         try "console.log('incremental')\n".write(
@@ -143,7 +145,7 @@ final class ConjetFSTests: XCTestCase {
         let changed = try fs.sync(project: project, changedPaths: ["src/index.js"])
         XCTAssertEqual(changed.changedFiles, 1)
         XCTAssertEqual(changed.removedFiles, 0)
-        XCTAssertEqual(runner.copyIntoVolumeCommandCount, copiesAfterInitialSync + 1)
+        XCTAssertEqual(runner.volumeCopyCommandCount, copiesAfterInitialSync + 1)
 
         let status = try fs.status(project: project)
         XCTAssertFalse(status.dirty)
@@ -164,13 +166,13 @@ final class ConjetFSTests: XCTestCase {
         )
         let project = try fs.initializeProject()
         _ = try fs.sync(project: project)
-        let copiesAfterInitialSync = runner.copyIntoVolumeCommandCount
+        let copiesAfterInitialSync = runner.volumeCopyCommandCount
 
         try FileManager.default.removeItem(at: root.appendingPathComponent("src/index.js"))
         let deleted = try fs.sync(project: project, changedPaths: ["src/index.js"])
         XCTAssertEqual(deleted.changedFiles, 0)
         XCTAssertEqual(deleted.removedFiles, 1)
-        XCTAssertEqual(runner.copyIntoVolumeCommandCount, copiesAfterInitialSync)
+        XCTAssertEqual(runner.volumeCopyCommandCount, copiesAfterInitialSync)
         XCTAssertTrue(runner.commands.contains { command in
             command.joined(separator: " ").contains("rm -f -- 'src/index.js'")
         })
@@ -184,7 +186,7 @@ final class ConjetFSTests: XCTestCase {
         let vmNative = try fs.sync(project: project, changedPaths: ["node_modules/react/index.js"])
         XCTAssertEqual(vmNative.changedFiles, 0)
         XCTAssertEqual(vmNative.removedFiles, 0)
-        XCTAssertEqual(runner.copyIntoVolumeCommandCount, copiesAfterInitialSync)
+        XCTAssertEqual(runner.volumeCopyCommandCount, copiesAfterInitialSync)
     }
 
     func testSyncFallsBackToDockerCPWhenStagingBindIsNotVisibleToDocker() throws {
@@ -193,6 +195,7 @@ final class ConjetFSTests: XCTestCase {
         try createProjectFiles(root: root)
 
         let runner = FakeConjetFSDockerRunner()
+        runner.failTarStreamCopy = true
         runner.failFastCopy = true
         let fs = ConjetFS(
             projectRoot: root,
@@ -357,12 +360,24 @@ private final class FakeConjetFSDockerRunner {
     private(set) var commands: [[String]] = []
     private(set) var inputCommands: [(arguments: [String], standardInput: Data?)] = []
     var failFastCopy = false
+    var failTarStreamCopy = false
 
     var copyIntoVolumeCommandCount: Int {
         commands.filter { command in
             command.starts(with: ["docker", "--context", "conjet", "run", "--rm"]) &&
                 command.contains(where: { $0.contains("target=/conjetfs-stage") })
         }.count
+    }
+
+    var tarStreamCopyCommandCount: Int {
+        inputCommands.filter { command in
+            command.arguments.starts(with: ["docker", "--context", "conjet", "run", "--rm", "-i"]) &&
+                command.arguments.joined(separator: " ").contains("tar -xpf -")
+        }.count
+    }
+
+    var volumeCopyCommandCount: Int {
+        copyIntoVolumeCommandCount + tarStreamCopyCommandCount
     }
 
     func run(_ executable: String, _ arguments: [String]) throws -> ProcessResult {
@@ -388,6 +403,16 @@ private final class FakeConjetFSDockerRunner {
 
     func runWithInput(_ executable: String, _ arguments: [String], standardInput: Data?) throws -> ProcessResult {
         inputCommands.append((arguments: arguments, standardInput: standardInput))
+        if failTarStreamCopy,
+           arguments.starts(with: ["docker", "--context", "conjet", "run", "--rm", "-i"]) {
+            return ProcessResult(
+                executable: executable,
+                arguments: arguments,
+                exitCode: 1,
+                stdout: "",
+                stderr: "tar stream failed\n"
+            )
+        }
         return ProcessResult(
             executable: executable,
             arguments: arguments,
