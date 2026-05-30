@@ -60,14 +60,17 @@ public enum ProcessRunner {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
 
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
         var stdinFileHandle: FileHandle?
         var stdinFileURL: URL?
-        let stdoutData = LockedProcessData()
-        let stderrData = LockedProcessData()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+        let outputDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let stdoutURL = outputDirectory.appendingPathComponent("conjet-stdout-\(UUID().uuidString)")
+        let stderrURL = outputDirectory.appendingPathComponent("conjet-stderr-\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
+        FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+        let stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+        let stderrHandle = try FileHandle(forWritingTo: stderrURL)
+        process.standardOutput = stdoutHandle
+        process.standardError = stderrHandle
         if let standardInput {
             let url = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
                 .appendingPathComponent("conjet-stdin-\(UUID().uuidString)")
@@ -79,26 +82,13 @@ public enum ProcessRunner {
         }
         defer {
             try? stdinFileHandle?.close()
+            try? stdoutHandle.close()
+            try? stderrHandle.close()
             if let stdinFileURL {
                 try? FileManager.default.removeItem(at: stdinFileURL)
             }
-        }
-
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-            } else {
-                stdoutData.append(data)
-            }
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-            } else {
-                stderrData.append(data)
-            }
+            try? FileManager.default.removeItem(at: stdoutURL)
+            try? FileManager.default.removeItem(at: stderrURL)
         }
 
         let waitSemaphore = DispatchSemaphore(value: 0)
@@ -109,7 +99,6 @@ public enum ProcessRunner {
         try process.run()
 
         var timedOut = false
-        var processExited = false
         if let timeoutSeconds {
             let timeout = max(0.1, timeoutSeconds)
             if waitSemaphore.wait(timeout: .now() + timeout) == .timedOut {
@@ -119,33 +108,20 @@ public enum ProcessRunner {
                     #if os(macOS) || os(Linux)
                     kill(process.processIdentifier, SIGKILL)
                     #endif
-                    processExited = waitSemaphore.wait(timeout: .now() + 2) == .success
-                } else {
-                    processExited = true
+                    _ = waitSemaphore.wait(timeout: .now() + 2)
                 }
-            } else {
-                processExited = true
             }
         } else {
             waitSemaphore.wait()
-            processExited = true
         }
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        if processExited {
-            let remainingStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            if !remainingStdout.isEmpty {
-                stdoutData.append(remainingStdout)
-            }
-            let remainingStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            if !remainingStderr.isEmpty {
-                stderrData.append(remainingStderr)
-            }
-        }
+        try? stdoutHandle.close()
+        try? stderrHandle.close()
 
-        let stdout = String(data: stdoutData.data(), encoding: .utf8) ?? ""
-        var stderr = String(data: stderrData.data(), encoding: .utf8) ?? ""
+        let stdoutData = (try? Data(contentsOf: stdoutURL)) ?? Data()
+        let stderrData = (try? Data(contentsOf: stderrURL)) ?? Data()
+        let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+        var stderr = String(data: stderrData, encoding: .utf8) ?? ""
         if timedOut {
             let timeout = String(format: "%.3f", timeoutSeconds ?? 0)
             let message = "process timed out after \(timeout)s"
@@ -159,22 +135,5 @@ public enum ProcessRunner {
             stdout: stdout,
             stderr: stderr
         )
-    }
-}
-
-private final class LockedProcessData: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage = Data()
-
-    func append(_ data: Data) {
-        lock.lock()
-        storage.append(data)
-        lock.unlock()
-    }
-
-    func data() -> Data {
-        lock.lock()
-        defer { lock.unlock() }
-        return storage
     }
 }

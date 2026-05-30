@@ -42,4 +42,18 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("process timed out after"))
         XCTAssertLessThan(Date().timeIntervalSince(startedAt), 2)
     }
+
+    func testRunSurvivesRepeatedPipeDraining() throws {
+        for index in 0..<100 {
+            let result = try ProcessRunner.run(
+                "/bin/sh",
+                ["-c", "printf 'stdout-\(index)'; printf 'stderr-\(index)' >&2"],
+                timeoutSeconds: 2
+            )
+
+            XCTAssertEqual(result.exitCode, 0)
+            XCTAssertEqual(result.stdout, "stdout-\(index)")
+            XCTAssertEqual(result.stderr, "stderr-\(index)")
+        }
+    }
 }
