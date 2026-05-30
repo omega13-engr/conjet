@@ -4,6 +4,7 @@ import Foundation
 public struct BenchmarkResult: Codable, Equatable, Sendable {
     public var workload: String
     public var runtime: String
+    public var traceID: String?
     public var command: [String]
     public var startedAt: Date
     public var durationSeconds: Double
@@ -16,6 +17,7 @@ public struct BenchmarkResult: Codable, Equatable, Sendable {
     public init(
         workload: String,
         runtime: String,
+        traceID: String? = nil,
         command: [String] = [],
         startedAt: Date,
         durationSeconds: Double,
@@ -27,6 +29,7 @@ public struct BenchmarkResult: Codable, Equatable, Sendable {
     ) {
         self.workload = workload
         self.runtime = runtime
+        self.traceID = traceID ?? Self.makeTraceID(workload: workload, runtime: runtime, startedAt: startedAt)
         self.command = command
         self.startedAt = startedAt
         self.durationSeconds = durationSeconds
@@ -35,6 +38,29 @@ public struct BenchmarkResult: Codable, Equatable, Sendable {
         self.machine = machine
         self.stdoutTail = stdoutTail
         self.stderrTail = stderrTail
+    }
+
+    public static func makeTraceID(workload: String, runtime: String, startedAt: Date = Date()) -> String {
+        let milliseconds = Int((startedAt.timeIntervalSince1970 * 1_000).rounded())
+        let suffix = UUID().uuidString.prefix(8).lowercased()
+        return [
+            "bench",
+            traceComponent(workload),
+            traceComponent(runtime),
+            String(milliseconds),
+            suffix
+        ].joined(separator: "-")
+    }
+
+    public static func traceComponent(_ value: String) -> String {
+        let scalars = value.lowercased().unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "-" || scalar == "_" || scalar == "." {
+                return Character(scalar)
+            }
+            return "-"
+        }
+        let collapsed = String(scalars).split(separator: "-", omittingEmptySubsequences: true).joined(separator: "-")
+        return collapsed.isEmpty ? "unknown" : collapsed
     }
 }
 

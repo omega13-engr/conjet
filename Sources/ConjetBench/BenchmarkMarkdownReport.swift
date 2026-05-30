@@ -34,11 +34,11 @@ public enum BenchmarkMarkdownReport {
 
         lines.append("## Results")
         lines.append("")
-        lines.append("| Workload | Runtime | Duration (s) | Exit | Key Metrics |")
-        lines.append("| --- | ---: | ---: | ---: | --- |")
+        lines.append("| Trace ID | Workload | Runtime | Duration (s) | Exit | Key Metrics |")
+        lines.append("| --- | --- | ---: | ---: | ---: | --- |")
         for result in results {
             lines.append(
-                "| \(escape(result.workload)) | \(escape(result.runtime)) | \(format(result.durationSeconds)) | \(result.exitCode) | \(escape(metricSummary(result.metrics))) |"
+                "| \(escape(result.traceID ?? "")) | \(escape(result.workload)) | \(escape(result.runtime)) | \(format(result.durationSeconds)) | \(result.exitCode) | \(escape(metricSummary(result.metrics))) |"
             )
         }
         lines.append("")

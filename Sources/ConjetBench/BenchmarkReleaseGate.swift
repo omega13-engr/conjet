@@ -149,15 +149,18 @@ public struct BenchmarkReleaseGateArtifacts: Codable, Equatable, Sendable {
 }
 
 public struct BenchmarkReleaseGateRunResult: Codable, Equatable, Sendable {
+    public var traceID: String
     public var options: BenchmarkReleaseGateOptions
     public var artifacts: BenchmarkReleaseGateArtifacts
     public var gateReport: BenchmarkClaimGateReport
 
     public init(
+        traceID: String,
         options: BenchmarkReleaseGateOptions,
         artifacts: BenchmarkReleaseGateArtifacts,
         gateReport: BenchmarkClaimGateReport
     ) {
+        self.traceID = traceID
         self.options = options
         self.artifacts = artifacts
         self.gateReport = gateReport
@@ -227,6 +230,7 @@ public struct BenchmarkReleaseGateRunner {
         try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: workDirectory, withIntermediateDirectories: true)
 
+        let traceID = Self.makeRunTraceID(outputDirectory: outputDirectory)
         var allResults: [BenchmarkResult] = []
         var idleReportPaths: [String] = []
         var powerReportPaths: [String] = []
@@ -243,7 +247,7 @@ public struct BenchmarkReleaseGateRunner {
                 options.warmup,
                 dockerWorkloads,
                 dockerWorkDirectory
-            ).map(addSamplePhaseIfMissing)
+            ).map { attachTraceID(addSamplePhaseIfMissing($0), runTraceID: traceID) }
         }
         allResults.append(contentsOf: dockerResults)
         let dockerReport = outputDirectory.appendingPathComponent("docker.json")
@@ -251,7 +255,11 @@ public struct BenchmarkReleaseGateRunner {
 
         if options.includeIdle {
             for runtime in options.contexts {
-                let runtimeResults = try collectRuntimeSamples(collector: idleCollector, runtime: runtime)
+                let runtimeResults = try collectRuntimeSamples(
+                    collector: idleCollector,
+                    runtime: runtime,
+                    runTraceID: traceID
+                )
                 allResults.append(contentsOf: runtimeResults)
                 let report = outputDirectory.appendingPathComponent("idle-\(runtime.sanitizedBenchmarkPathComponent).json")
                 try writeJSON(runtimeResults, to: report)
@@ -261,7 +269,11 @@ public struct BenchmarkReleaseGateRunner {
 
         if options.includePower {
             for runtime in options.contexts {
-                let runtimeResults = try collectRuntimeSamples(collector: powerCollector, runtime: runtime)
+                let runtimeResults = try collectRuntimeSamples(
+                    collector: powerCollector,
+                    runtime: runtime,
+                    runTraceID: traceID
+                )
                 allResults.append(contentsOf: runtimeResults)
                 let report = outputDirectory.appendingPathComponent("power-\(runtime.sanitizedBenchmarkPathComponent).json")
                 try writeJSON(runtimeResults, to: report)
@@ -304,7 +316,12 @@ public struct BenchmarkReleaseGateRunner {
             gateReport: gateReportPath.path,
             gateMarkdownReport: gateMarkdownReport.path
         )
-        return BenchmarkReleaseGateRunResult(options: options, artifacts: artifacts, gateReport: gateReport)
+        return BenchmarkReleaseGateRunResult(
+            traceID: traceID,
+            options: options,
+            artifacts: artifacts,
+            gateReport: gateReport
+        )
     }
 
     public static func defaultProcessPattern(runtime: String) -> String {
@@ -322,12 +339,16 @@ public struct BenchmarkReleaseGateRunner {
         }
     }
 
-    private func collectRuntimeSamples(collector: RuntimeCollector, runtime: String) throws -> [BenchmarkResult] {
+    private func collectRuntimeSamples(
+        collector: RuntimeCollector,
+        runtime: String,
+        runTraceID: String
+    ) throws -> [BenchmarkResult] {
         try (1...options.iterations).map { iteration in
             var result = try collector(runtime, iteration)
             result.metrics["iteration"] = Double(iteration)
             result = addSamplePhaseIfMissing(result)
-            return result
+            return attachTraceID(result, runTraceID: runTraceID)
         }
     }
 
@@ -340,6 +361,28 @@ public struct BenchmarkReleaseGateRunner {
             result.metrics[BenchmarkSamplePhase.metricKey] = phaseValue
         }
         return result
+    }
+
+    private func attachTraceID(_ result: BenchmarkResult, runTraceID: String) -> BenchmarkResult {
+        var result = result
+        let iteration = Int(result.metrics["iteration"] ?? 0)
+        result.traceID = [
+            runTraceID,
+            BenchmarkResult.traceComponent(result.runtime),
+            BenchmarkResult.traceComponent(result.workload),
+            String(iteration)
+        ].joined(separator: "-")
+        return result
+    }
+
+    private static func makeRunTraceID(outputDirectory: URL) -> String {
+        let timestamp = Int((Date().timeIntervalSince1970 * 1_000).rounded())
+        return [
+            "bench",
+            "release-gate",
+            BenchmarkResult.traceComponent(outputDirectory.lastPathComponent),
+            String(timestamp)
+        ].joined(separator: "-")
     }
 
     private func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {

@@ -24,8 +24,23 @@ final class BenchmarkSchemaTests: XCTestCase {
         let markdown = BenchmarkMarkdownReport.render(results: [result])
         XCTAssertTrue(markdown.contains("# Conjet Benchmark Report"))
         XCTAssertTrue(markdown.contains("| Workload | Runtime | Samples | Failures | P50 (s) | P75 (s) | P95 (s) | P99 (s) | Mean (s) | StdDev (s) |"))
-        XCTAssertTrue(markdown.contains("| Workload | Runtime | Duration (s) | Exit | Key Metrics |"))
+        XCTAssertTrue(markdown.contains("| Trace ID | Workload | Runtime | Duration (s) | Exit | Key Metrics |"))
+        XCTAssertTrue(markdown.contains(result.traceID ?? "missing-trace-id"))
         XCTAssertTrue(markdown.contains("file_count=2"))
+    }
+
+    func testBenchmarkResultGeneratesTraceID() throws {
+        let result = BenchmarkResult(
+            workload: "pnpm install",
+            runtime: "OrbStack",
+            startedAt: Date(),
+            durationSeconds: 1,
+            exitCode: 0,
+            machine: MachineProfiler.capture()
+        )
+
+        let traceID = try XCTUnwrap(result.traceID)
+        XCTAssertTrue(traceID.hasPrefix("bench-pnpm-install-orbstack-"))
     }
 
     func testMarkdownReportIncludesFailureDetails() throws {
@@ -614,6 +629,8 @@ final class BenchmarkSchemaTests: XCTestCase {
 
         let allResults = try BenchmarkClaimGate.loadJSONReports(urls: [URL(fileURLWithPath: result.artifacts.allResultsReport)])
         XCTAssertEqual(allResults.count, 18)
+        XCTAssertFalse(result.traceID.isEmpty)
+        XCTAssertTrue(allResults.allSatisfy { $0.traceID?.hasPrefix(result.traceID) == true })
     }
 
     func testBenchmarkReleaseGateRunnerFailsWhenOrbStackContextWasNotCollected() throws {
