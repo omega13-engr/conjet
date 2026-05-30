@@ -65,6 +65,32 @@ final class VMImageStoreTests: XCTestCase {
         }
     }
 
+    func testExpandDataDiskIfNeededGrowsExistingManifestDisk() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-vz-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ConjetPaths(home: root)
+        try paths.ensureBaseDirectories()
+
+        let kernel = root.appendingPathComponent("vmlinuz")
+        try Data("kernel".utf8).write(to: kernel)
+
+        let store = VMImageStore(paths: paths)
+        let manifest = try store.initializeFromLocalKernel(
+            kernelPath: kernel.path,
+            initialRamdiskPath: nil,
+            kernelCommandLine: nil,
+            rootDiskSizeBytes: 1024 * 1024,
+            dataDiskSizeBytes: 1024 * 1024
+        )
+
+        try store.expandDataDiskIfNeeded(sizeBytes: 2 * 1024 * 1024)
+        XCTAssertEqual(try fileSize(manifest.dataDiskPath), 2 * 1024 * 1024)
+
+        try store.expandDataDiskIfNeeded(sizeBytes: 1024 * 1024)
+        XCTAssertEqual(try fileSize(manifest.dataDiskPath), 2 * 1024 * 1024)
+    }
+
     func testImportEFIBootDiskCreatesManifestForDiskBoot() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("conjet-vz-test-\(UUID().uuidString)", isDirectory: true)

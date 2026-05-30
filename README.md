@@ -17,6 +17,14 @@ This repository currently implements the first real container-runtime slice from
   profile, or the profile-specific `run/conjetd.sock` for named profiles.
 - Benchmark JSON and Markdown result output.
 - Initial ConjetFS path placement classifier.
+- ConjetFS MVP project workflow: `conjet project init`, `conjet project
+  attach`, `conjet sync push`, `conjet sync status`, `conjet sync repair`,
+  `conjet sync watch`, and `conjet sync export` stage host-authoritative files
+  into a Conjet-owned Docker volume while dependency/build/cache paths stay
+  VM-native.
+- `conjet sync watch` uses macOS FSEvents by default to trigger incremental
+  host-to-VM pushes, with `--poll --interval N` available as a conservative
+  fallback.
 - Initial energy governor state and resource policy model.
 - VZ VM asset management, raw root/data disk creation, serial log path, NAT/vsock/bootstrap-share configuration, and daemon VM lifecycle commands.
 - VM boot artifact classification, with both direct-kernel and EFI-disk boot
@@ -72,10 +80,16 @@ swift run conjet doctor --json
 swift run conjet bench profile --json
 swift run conjet bench small-files --files 10000 --bytes 128 --markdown
 swift run conjet bench docker-compare --contexts conjet,colima --iterations 3 --warmup --markdown
+swift run conjet bench power --runtime conjet --seconds 60 --interval 1 --markdown
+swift run conjet bench release-gate --contexts conjet,orbstack,colima --iterations 3 --warmup --output-dir bench/reports/release-gate-local --json
 swift run conjet bench docker-compare --contexts conjet,colima \
-  --workloads npm-install,copy-node-modules,cargo-build,named-volume-io,tmpfs-volume-io \
+  --workloads npm-install,pnpm-install,copy-node-modules,cargo-build,bind-npm-install,volume-npm-install,conjetfs-npm-install,bind-cargo-build,volume-cargo-build,conjetfs-cargo-build,named-volume-io,tmpfs-volume-io \
   --iterations 1 --warmup --markdown
 swift run conjet sync classify node_modules/react/index.js
+swift run conjet project init .
+swift run conjet project attach .
+swift run conjet sync status .
+swift run conjet sync watch .
 swift run conjet power policy warm-idle
 ```
 
@@ -112,7 +126,10 @@ state, Docker socket, logs, and Docker context:
 `--disk` accepts either a GiB value or a path to a custom EFI boot disk image.
 If a custom image path is set before the profile has VM assets, Conjet imports
 that image instead of downloading Conjet-core. The Docker runtime is currently
-the supported runtime.
+the supported runtime. Profiles also default to host path sharing for `/Users`
+and `/Volumes` so ordinary Docker bind mounts can work when the guest image has
+the matching VirtioFS mount units; disable with `enable_host_mounts = false` in
+`config.toml` when testing stricter ConjetFS-only behavior.
 
 On first run, `conjet start` fetches the latest Conjet-core image release from
 `zdxsector/conjet`. Override the release source with either
@@ -139,6 +156,35 @@ To open a root shell in the Conjet Linux guest through the Docker socket bridge:
 .build/debug/conjet shell
 .build/debug/conjet shell -- uname -a
 ```
+
+To move a project into the ConjetFS MVP path, initialize it and attach it to a
+VM-native workspace volume:
+
+```sh
+.build/debug/conjet project init /path/to/project
+.build/debug/conjet project attach /path/to/project
+.build/debug/conjet sync watch /path/to/project
+.build/debug/conjet project run --path /path/to/project node:22-alpine npm install
+```
+
+`project attach` syncs source files, lockfiles, Dockerfiles, compose files, and
+other host-authoritative project metadata into the volume. Dependency folders
+such as `node_modules`, `vendor`, `target`, `.next`, `.turbo`, `.cache`, and
+language build outputs are not copied from macOS, so package managers and
+build tools create them inside Linux-native storage.
+
+`project run` performs the sync and then runs the container with the project
+volume mounted at `/workspace`; use `--no-sync` to reuse the existing volume
+without another host-to-VM push.
+
+`sync push` is incremental after the first push: ConjetFS records file
+signatures in its profile state and only recopies changed host-authoritative
+files on later pushes. `sync status` reports whether the project is dirty,
+`sync repair` replays the host-authoritative view into the volume, `sync watch`
+uses FSEvents by default to push changed files for development loops, and
+`sync export PATH... --to DEST --path /path/to/project` explicitly copies
+selected generated outputs from the VM-native workspace back to macOS. Use
+`sync watch --poll --interval 1` when debugging the fallback polling path.
 
 Manual VM setup commands remain available for development:
 
@@ -205,8 +251,15 @@ the baked Ubuntu minimal image, starts guest Docker, exposes
 `~/.conjet/run/docker.sock`, configures Docker context `conjet`, and supports
 normal `docker`, `docker compose`, and `conjet shell` workflows.
 
-The custom minimal Conjet guest image now has a local builder and importer, but
-the full image build and boot smoke test remain the next verification step.
+The custom minimal Conjet guest image now has a local builder and importer, and
+ConjetFS has an incremental one-way sync path through Docker volumes, an
+FSEvents-backed host watch command with a polling fallback, and explicit
+artifact export. The remaining performance claim gate is repeated raw-JSON
+P50/P95 benchmark evidence against OrbStack and tuned Colima with the ConjetFS
+workflow enabled, followed by a passing
+`conjet bench release-gate` report. The release gate writes Docker, idle,
+power, combined raw JSON, and Markdown artifacts before it allows any
+faster-than-OrbStack claim.
 Smoke testing downloaded Alpine and Fedora boot assets, and Conjet classifies
 those public netboot `vmlinuz` artifacts as compressed ARM64 EFI zboot kernels
 before they reach Virtualization.framework.

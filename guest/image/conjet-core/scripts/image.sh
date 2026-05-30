@@ -184,14 +184,34 @@ mkdir -p "${MOUNT_DIR}/usr/local/sbin" "${MOUNT_DIR}/etc/systemd/system" \
     "${MOUNT_DIR}/etc/conjet"
 install -m 0755 "${BUILD_DIR}/scripts/conjet-docker-vsock-bridge.py" \
     "${MOUNT_DIR}/usr/local/sbin/conjet-docker-vsock-bridge.py"
+install -m 0755 "${BUILD_DIR}/scripts/conjet-data-disk.sh" \
+    "${MOUNT_DIR}/usr/local/sbin/conjet-data-disk.sh"
 install -m 0755 "${BUILD_DIR}/scripts/conjet-boot-diagnostics.sh" \
     "${MOUNT_DIR}/usr/local/sbin/conjet-boot-diagnostics.sh"
+
+cat >"${MOUNT_DIR}/etc/systemd/system/conjet-data-disk.service" <<'UNIT'
+[Unit]
+Description=Conjet Docker data disk
+DefaultDependencies=no
+After=systemd-udev-settle.service
+Before=local-fs.target containerd.service docker.socket docker.service
+Wants=systemd-udev-settle.service
+ConditionPathExists=/dev/disk/by-id/virtio-conjet-data
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/conjet-data-disk.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=local-fs.target
+UNIT
 
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-docker-vsock.service" <<'UNIT'
 [Unit]
 Description=Conjet Docker VSOCK bridge
-After=containerd.service docker.service docker.socket
-Wants=containerd.service docker.service docker.socket
+After=conjet-data-disk.service containerd.service docker.service docker.socket
+Wants=conjet-data-disk.service containerd.service docker.service docker.socket
 
 [Service]
 Type=simple
@@ -223,7 +243,44 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 UNIT
 
+mkdir -p "${MOUNT_DIR}/Users" "${MOUNT_DIR}/Volumes"
+
+cat >"${MOUNT_DIR}/etc/systemd/system/Users.mount" <<'UNIT'
+[Unit]
+Description=Conjet host /Users VirtioFS share
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=local-fs.target
+
+[Mount]
+What=conjethostusers
+Where=/Users
+Type=virtiofs
+Options=rw
+
+[Install]
+WantedBy=local-fs.target
+UNIT
+
+cat >"${MOUNT_DIR}/etc/systemd/system/Volumes.mount" <<'UNIT'
+[Unit]
+Description=Conjet host /Volumes VirtioFS share
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=local-fs.target
+
+[Mount]
+What=conjethostvolumes
+Where=/Volumes
+Type=virtiofs
+Options=rw
+
+[Install]
+WantedBy=local-fs.target
+UNIT
+
 cat >"${MOUNT_DIR}/etc/modules-load.d/conjet-vsock.conf" <<'EOF_MODULES'
+virtiofs
 vmw_vsock_virtio_transport
 EOF_MODULES
 
@@ -306,11 +363,14 @@ if [ "${RUNTIME}" = "docker" ]; then
     fi
 
     enable_unit systemd-resolved.service multi-user.target
+    enable_unit conjet-data-disk.service local-fs.target
     enable_unit containerd.service multi-user.target
     enable_unit docker.service multi-user.target
     enable_unit docker.socket sockets.target
     enable_unit conjet-docker-vsock.service multi-user.target
     enable_unit conjet-boot-diagnostics.service multi-user.target
+    enable_unit Users.mount local-fs.target
+    enable_unit Volumes.mount local-fs.target
 fi
 
 chroot "${MOUNT_DIR}" /bin/bash -c 'netplan generate || true'

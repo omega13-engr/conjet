@@ -9,6 +9,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     public var runtime: String
     public var quietStopMinutes: Int
     public var enableRosetta: Bool
+    public var enableHostMounts: Bool
     public var socketPath: String?
     public var conjetCoreRepository: String
 
@@ -21,6 +22,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         runtime: String = "docker",
         quietStopMinutes: Int = 30,
         enableRosetta: Bool = true,
+        enableHostMounts: Bool = true,
         socketPath: String? = nil,
         conjetCoreRepository: String = ConjetCoreReleaseSource.defaultRepository
     ) {
@@ -32,6 +34,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         self.runtime = runtime
         self.quietStopMinutes = quietStopMinutes
         self.enableRosetta = enableRosetta
+        self.enableHostMounts = enableHostMounts
         self.socketPath = socketPath
         self.conjetCoreRepository = conjetCoreRepository
     }
@@ -77,6 +80,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         }
         lines.append("runtime = \"\(escapeTOML(runtime))\"")
         lines.append("enable_rosetta = \(enableRosetta)")
+        lines.append("enable_host_mounts = \(enableHostMounts)")
         lines.append("")
         lines.append("[images]")
         lines.append("conjet_core_repository = \"\(escapeTOML(conjetCoreRepository))\"")
@@ -121,6 +125,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                 config.runtime = parseString(value)
             case "vm.enable_rosetta":
                 config.enableRosetta = try parseBool(value, key: key)
+            case "vm.enable_host_mounts":
+                config.enableHostMounts = try parseBool(value, key: key)
             case "daemon.quiet_stop_minutes":
                 config.quietStopMinutes = try parseInt(value, key: key)
             case "daemon.socket_path":

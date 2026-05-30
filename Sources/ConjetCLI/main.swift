@@ -54,6 +54,8 @@ struct ConjetCLI {
             try bench(args: args, json: json)
         case "sync":
             try sync(args: args, json: json)
+        case "project":
+            try project(args: args, json: json)
         case "power":
             try power(args: args, json: json)
         case "profile":
@@ -162,7 +164,7 @@ struct ConjetCLI {
         let config = try updateProfileConfigFromStartArgs(args, paths: paths, json: json)
         try ensureVMConfiguredForStart(json: json, config: config)
         let socketPath = try startDaemonOnly(printStatus: !json)
-        try startVMIfConfigured(socketPath: socketPath, json: json)
+        try startVMIfConfigured(socketPath: socketPath, config: config, json: json)
     }
 
     private static func updateProfileConfigFromStartArgs(_ args: [String], paths: ConjetPaths, json: Bool) throws -> ConjetConfig {
@@ -247,7 +249,7 @@ struct ConjetCLI {
         print(response.message)
     }
 
-    private static func startVMIfConfigured(socketPath: String, json: Bool) throws {
+    private static func startVMIfConfigured(socketPath: String, config: ConjetConfig, json: Bool) throws {
         let store = VMImageStore()
         guard store.manifestExists() else {
             if !json {
@@ -257,10 +259,11 @@ struct ConjetCLI {
         }
         let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
         let dockerContext = configureDockerContextIfStarted(response, json: json)
+        let hostShares = mountHostSharesIfStarted(response, dockerContext: dockerContext, config: config, json: json)
         if json {
             print(try ConjetJSON.string(response))
         } else {
-            printStartVMResponse(response, dockerContext: dockerContext)
+            printStartVMResponse(response, dockerContext: dockerContext, hostShares: hostShares)
         }
         if !response.ok {
             try throwResponseError(response.message)
@@ -418,16 +421,19 @@ struct ConjetCLI {
             let response = try daemonRequest(.vmStatus)
             try printDaemonResponse(response, json: json)
         case "start":
-            try ensureVMConfiguredForStart(json: json, config: try ConjetConfig.loadOrCreate())
+            let config = try ConjetConfig.loadOrCreate()
+            try ensureVMConfiguredForStart(json: json, config: config)
             try ensureDaemon()
             let socketPath = try socketPath(paths: ConjetPaths.default())
             let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
             let dockerContext = configureDockerContextIfStarted(response, json: json)
+            let hostShares = mountHostSharesIfStarted(response, dockerContext: dockerContext, config: config, json: json)
             try printDaemonResponse(
                 response,
                 json: json,
                 failOnError: true,
                 dockerContext: dockerContext,
+                hostShares: hostShares,
                 headline: vmStartHeadline(response)
             )
         case "stop":
@@ -519,6 +525,10 @@ struct ConjetCLI {
         let markdown = args.contains("--markdown")
         let args = args.filter { $0 != "--markdown" }
         let subcommand = args.first ?? "profile"
+        if subcommand == "help" || subcommand == "-h" || subcommand == "--help" || args.contains("--help") || args.contains("-h") {
+            printHelp()
+            return
+        }
         switch subcommand {
         case "profile":
             let profile = MachineProfiler.capture()
@@ -547,6 +557,120 @@ struct ConjetCLI {
                 print("  files: \(fileCount)")
                 print("  dir: \(directory.path)")
             }
+        case "idle":
+            let runtime = value(after: "--runtime", in: args) ?? "conjet"
+            let processPattern = value(after: "--process", in: args) ?? defaultIdleProcessPattern(runtime: runtime)
+            let seconds = value(after: "--seconds", in: args).flatMap(Double.init) ?? 30
+            let interval = value(after: "--interval", in: args).flatMap(Double.init) ?? 1
+            let output = value(after: "--output", in: args)
+            let result = try IdleResourceSampler(
+                runtime: runtime,
+                processPattern: processPattern,
+                durationSeconds: seconds,
+                intervalSeconds: interval
+            ).run()
+            if let output {
+                try writeBenchmarkResults([result], to: URL(fileURLWithPath: output), markdown: markdown)
+            }
+            if json {
+                print(try ConjetJSON.string(result))
+            } else if markdown {
+                print(BenchmarkMarkdownReport.render(results: [result], title: "Conjet Idle Resource Benchmark"))
+            } else {
+                print("\(runtime) idle-resource-sample: \(String(format: "%.3f", result.durationSeconds))s")
+                print("  process pattern: \(processPattern)")
+                print("  samples: \(Int(result.metrics["sample_count"] ?? 0))")
+                print("  cpu mean: \(String(format: "%.3f", result.metrics["cpu_percent_mean"] ?? 0))%")
+                print("  cpu p95: \(String(format: "%.3f", result.metrics["cpu_percent_p95"] ?? 0))%")
+                print("  memory mean: \(String(format: "%.3f", result.metrics["memory_percent_mean"] ?? 0))%")
+            }
+        case "power":
+            let runtime = value(after: "--runtime", in: args) ?? "conjet"
+            let processPattern = value(after: "--process", in: args) ?? defaultIdleProcessPattern(runtime: runtime)
+            let seconds = value(after: "--seconds", in: args).flatMap(Double.init) ?? 60
+            let interval = value(after: "--interval", in: args).flatMap(Double.init) ?? 1
+            let samplers = value(after: "--samplers", in: args) ?? "cpu_power,gpu_power,ane_power,tasks"
+            let output = value(after: "--output", in: args)
+            let result = try PowerMetricsSampler(
+                runtime: runtime,
+                processPattern: processPattern,
+                durationSeconds: seconds,
+                intervalSeconds: interval,
+                samplers: samplers,
+                useSudo: !args.contains("--no-sudo")
+            ).run()
+            if let output {
+                try writeBenchmarkResults([result], to: URL(fileURLWithPath: output), markdown: markdown)
+            }
+            if json {
+                print(try ConjetJSON.string(result))
+            } else if markdown {
+                print(BenchmarkMarkdownReport.render(results: [result], title: "Conjet Power Benchmark"))
+            } else {
+                print("\(runtime) idle-power-sample: \(String(format: "%.3f", result.durationSeconds))s")
+                print("  exit: \(result.exitCode)")
+                print("  process pattern: \(processPattern)")
+                print("  samples: \(Int(result.metrics["powermetrics_sample_count"] ?? 0))")
+                print("  cpu power mean: \(String(format: "%.3f", result.metrics["cpu_power_mw_mean"] ?? 0)) mW")
+                print("  combined power mean: \(String(format: "%.3f", result.metrics["combined_power_mw_mean"] ?? 0)) mW")
+                print("  matched energy impact mean: \(String(format: "%.3f", result.metrics["matched_energy_impact_mean"] ?? 0))")
+                if result.exitCode != 0, !result.stderrTail.isEmpty {
+                    print("  stderr: \(result.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines))")
+                }
+            }
+        case "release-gate":
+            try benchReleaseGate(args: args, json: json, markdown: markdown)
+        case "gate":
+            let reportPaths = value(after: "--reports", in: args)
+                ?? value(after: "--input", in: args)
+                ?? value(after: "--report", in: args)
+            guard let reportPaths else {
+                throw ConjetError.invalidArgument("usage: conjet bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N] [--phase any|cold|warm] [--workloads NAME,...] [--no-idle] [--no-power] [--json]")
+            }
+            let reportURLs = reportPaths
+                .split(separator: ",")
+                .map { URL(fileURLWithPath: expandedPath(String($0))) }
+            let candidate = value(after: "--candidate", in: args) ?? "conjet"
+            let baselines = value(after: "--baselines", in: args)
+                .map { $0.split(separator: ",").map(String.init).filter { !$0.isEmpty } }
+                ?? ["orbstack", "colima"]
+            let minSamples = value(after: "--min-samples", in: args).flatMap(Int.init) ?? 3
+            let samplePhase = try benchmarkSamplePhase(from: value(after: "--phase", in: args), default: .any)
+            let workloads = value(after: "--workloads", in: args).map(csvList)
+            let results = try BenchmarkClaimGate.loadJSONReports(urls: reportURLs)
+            let rules: [BenchmarkClaimRule]
+            if let workloads {
+                rules = BenchmarkReleaseGateOptions(
+                    candidateRuntime: candidate,
+                    baselineRuntimes: baselines,
+                    minimumSamples: minSamples,
+                    workloads: workloads,
+                    includeIdle: !args.contains("--no-idle"),
+                    includePower: !args.contains("--no-power")
+                ).effectiveGateRules
+            } else {
+                rules = BenchmarkClaimGateOptions.defaultRules
+            }
+            let report = BenchmarkClaimGate.evaluate(
+                results: results,
+                options: BenchmarkClaimGateOptions(
+                    candidateRuntime: candidate,
+                    baselineRuntimes: baselines,
+                    minimumSamples: minSamples,
+                    samplePhase: samplePhase,
+                    rules: rules
+                )
+            )
+            if json {
+                print(try ConjetJSON.string(report))
+            } else if markdown {
+                print(BenchmarkClaimGateMarkdownReport.render(report))
+            } else {
+                printBenchmarkGateReport(report)
+            }
+            if !report.passed {
+                throw ConjetError.unavailable("benchmark gate failed; faster-than-OrbStack claim is not proven")
+            }
         case "docker-compare":
             let contexts = value(after: "--contexts", in: args)
                 .map { $0.split(separator: ",").map(String.init).filter { !$0.isEmpty } }
@@ -557,12 +681,17 @@ struct ConjetCLI {
                 .map { $0.split(separator: ",").map(String.init).filter { !$0.isEmpty } }
                 ?? DockerBenchmarkSuite.defaultWorkloads
             let output = value(after: "--output", in: args)
-            let workDirectory = value(after: "--dir", in: args)
+            let explicitWorkDirectory = value(after: "--dir", in: args)
+            let needsHostBindableDirectory = workloads.contains { $0.hasPrefix("bind-") || $0.hasPrefix("conjetfs-") }
+            let generatedRoot = needsHostBindableDirectory
+                ? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                    .appendingPathComponent(".conjet-bench", isDirectory: true)
+                : URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            let workDirectory = explicitWorkDirectory
                 .map { URL(fileURLWithPath: $0, isDirectory: true) }
-                ?? URL(fileURLWithPath: NSTemporaryDirectory())
-                    .appendingPathComponent("conjet-docker-bench-\(UUID().uuidString)", isDirectory: true)
+                ?? generatedRoot.appendingPathComponent("conjet-docker-bench-\(UUID().uuidString)", isDirectory: true)
             defer {
-                if value(after: "--dir", in: args) == nil {
+                if explicitWorkDirectory == nil {
                     try? FileManager.default.removeItem(at: workDirectory)
                 }
             }
@@ -596,17 +725,553 @@ struct ConjetCLI {
         }
     }
 
-    private static func sync(args: [String], json: Bool) throws {
-        guard args.first == "classify", args.count >= 2 else {
-            throw ConjetError.invalidArgument("usage: conjet sync classify PATH [--json]")
+    private static func benchReleaseGate(args: [String], json: Bool, markdown: Bool) throws {
+        let candidate = value(after: "--candidate", in: args) ?? "conjet"
+        let baselines = value(after: "--baselines", in: args)
+            .map(csvList)
+            ?? ["orbstack", "colima"]
+        let contexts = value(after: "--contexts", in: args)
+            .map(csvList)
+            ?? []
+        let iterations = value(after: "--iterations", in: args).flatMap(Int.init) ?? 3
+        let minSamples = value(after: "--min-samples", in: args).flatMap(Int.init) ?? 3
+        let warmup = args.contains("--warmup")
+        let samplePhase = try benchmarkSamplePhase(
+            from: value(after: "--phase", in: args),
+            default: warmup ? .warm : .cold
+        )
+        let workloads = value(after: "--workloads", in: args)
+            .map(csvList)
+            ?? DockerBenchmarkSuite.defaultWorkloads
+        let seconds = value(after: "--seconds", in: args).flatMap(Double.init)
+        let interval = value(after: "--interval", in: args).flatMap(Double.init)
+        let outputDirectory = URL(
+            fileURLWithPath: expandedPath(
+                value(after: "--output-dir", in: args)
+                    ?? value(after: "--output", in: args)
+                    ?? defaultBenchmarkReleaseGateDirectory().path
+            ),
+            isDirectory: true
+        )
+        let workDirectory = value(after: "--work-dir", in: args)
+            .map { URL(fileURLWithPath: expandedPath($0), isDirectory: true) }
+        let options = BenchmarkReleaseGateOptions(
+            contexts: contexts,
+            candidateRuntime: candidate,
+            baselineRuntimes: baselines,
+            iterations: iterations,
+            minimumSamples: minSamples,
+            workloads: workloads,
+            warmup: warmup,
+            samplePhase: samplePhase,
+            includeIdle: !args.contains("--no-idle"),
+            includePower: !args.contains("--no-power"),
+            idleSeconds: value(after: "--idle-seconds", in: args).flatMap(Double.init) ?? seconds ?? 30,
+            idleInterval: value(after: "--idle-interval", in: args).flatMap(Double.init) ?? interval ?? 1,
+            powerSeconds: value(after: "--power-seconds", in: args).flatMap(Double.init) ?? seconds ?? 60,
+            powerInterval: value(after: "--power-interval", in: args).flatMap(Double.init) ?? interval ?? 1,
+            powerSamplers: value(after: "--samplers", in: args) ?? "cpu_power,gpu_power,ane_power,tasks",
+            useSudoForPower: !args.contains("--no-sudo")
+        )
+        let ui = ConjetFetchUI(enabled: !json && !markdown)
+        if !json && !markdown {
+            ui.step("[bench 0/4] writing evidence to \(outputDirectory.path)")
         }
-        let classification = PathClassifier().classify(args[1])
+        let runner = BenchmarkReleaseGateRunner(
+            options: options,
+            dockerCollector: { contexts, iterations, warmup, workloads, workDirectory in
+                ui.step("[bench 1/4] docker workloads: \(contexts.joined(separator: ", "))")
+                return try DockerBenchmarkSuite(
+                    contexts: contexts,
+                    iterations: iterations,
+                    warmup: warmup,
+                    workloads: workloads
+                ).run(workDirectory: workDirectory)
+            },
+            idleCollector: { runtime, iteration in
+                ui.step("[bench 2/4] idle \(runtime) sample \(iteration)/\(options.iterations)")
+                return try IdleResourceSampler(
+                    runtime: runtime,
+                    processPattern: defaultIdleProcessPattern(runtime: runtime),
+                    durationSeconds: options.idleSeconds,
+                    intervalSeconds: options.idleInterval
+                ).run()
+            },
+            powerCollector: { runtime, iteration in
+                ui.step("[bench 3/4] power \(runtime) sample \(iteration)/\(options.iterations)")
+                return try PowerMetricsSampler(
+                    runtime: runtime,
+                    processPattern: defaultIdleProcessPattern(runtime: runtime),
+                    durationSeconds: options.powerSeconds,
+                    intervalSeconds: options.powerInterval,
+                    samplers: options.powerSamplers,
+                    useSudo: options.useSudoForPower
+                ).run()
+            }
+        )
+        let result = try runner.run(outputDirectory: outputDirectory, workDirectory: workDirectory)
+        ui.step("[bench 4/4] claim gate \(result.gateReport.passed ? "passed" : "failed")")
+
         if json {
-            print(try ConjetJSON.string(classification))
+            print(try ConjetJSON.string(result))
+        } else if markdown {
+            print(BenchmarkClaimGateMarkdownReport.render(result.gateReport))
         } else {
-            print("\(classification.path): \(classification.placement.rawValue)")
-            print("  score: \(classification.score)")
-            print("  reason: \(classification.reason)")
+            printBenchmarkReleaseGateResult(result)
+        }
+        if !result.gateReport.passed {
+            throw ConjetError.unavailable("benchmark release gate failed; faster-than-OrbStack claim is not proven")
+        }
+    }
+
+    private static func sync(args: [String], json: Bool) throws {
+        let subcommand = args.first ?? "status"
+        switch subcommand {
+        case "classify":
+            guard args.count >= 2 else {
+                throw ConjetError.invalidArgument("usage: conjet sync classify PATH [--json]")
+            }
+            let classification = PathClassifier().classify(args[1])
+            if json {
+                print(try ConjetJSON.string(classification))
+            } else {
+                print("\(classification.path): \(classification.placement.rawValue)")
+                print("  score: \(classification.score)")
+                print("  reason: \(classification.reason)")
+            }
+        case "push":
+            let result = try syncProject(root: projectRoot(from: Array(args.dropFirst())), json: json)
+            try printConjetFSSyncResult(result, json: json, headline: "ConjetFS sync pushed")
+        case "repair":
+            let result = try syncProject(root: projectRoot(from: Array(args.dropFirst())), json: json)
+            try printConjetFSSyncResult(result, json: json, headline: "ConjetFS sync repaired")
+        case "watch":
+            try watchConjetFSProject(args: Array(args.dropFirst()), json: json)
+        case "export":
+            try exportConjetFSPaths(args: Array(args.dropFirst()), json: json)
+        case "status":
+            let root = projectRoot(from: Array(args.dropFirst()))
+            let fs = conjetFS(root: root)
+            let project = try fs.loadOrInitializeProject()
+            let status = try fs.status(project: project)
+            try printConjetFSStatus(status, json: json, headline: "ConjetFS sync status")
+        default:
+            throw ConjetError.invalidArgument("unknown sync command '\(subcommand)'")
+        }
+    }
+
+    private static func project(args: [String], json: Bool) throws {
+        let subcommand = args.first ?? "status"
+        switch subcommand {
+        case "init":
+            let root = projectRoot(from: Array(args.dropFirst()))
+            let fs = conjetFS(root: root)
+            let project = try fs.initializeProject()
+            let plan = try fs.makePlan(project: project)
+            if json {
+                print(try ConjetJSON.string(project))
+            } else {
+                print("ConjetFS project initialized")
+                print("  project: \(project.name)")
+                print("  host: \(project.hostRoot)")
+                print("  volume: \(project.dockerVolume)")
+                print("  guest: \(project.guestPath)")
+                print("  host-synced files: \(plan.includedFiles.count)")
+                print("  vm-native/skipped files: \(plan.skippedFiles.count)")
+            }
+        case "attach":
+            let root = projectRoot(from: Array(args.dropFirst()))
+            if args.contains("--no-sync") {
+                let fs = conjetFS(root: root)
+                let project = try fs.loadOrInitializeProject()
+                let result = ConjetFSSyncResult(
+                    project: project,
+                    dockerContext: ConjetFS.defaultDockerContext(profileName: ConjetPaths.default().profileName),
+                    guestPath: project.guestPath,
+                    includedFiles: 0,
+                    skippedFiles: 0,
+                    removedFiles: 0,
+                    includedBytes: 0,
+                    skippedBytes: 0,
+                    dockerVolume: project.dockerVolume,
+                    containerMountArgument: "\(project.dockerVolume):\(project.guestPath)"
+                )
+                try printConjetFSSyncResult(result, json: json, headline: "ConjetFS project attached")
+            } else {
+                let result = try syncProject(root: root, json: json)
+                try printConjetFSSyncResult(result, json: json, headline: "ConjetFS project attached")
+            }
+        case "run":
+            try projectRun(args: Array(args.dropFirst()), json: json)
+        case "status":
+            let root = projectRoot(from: Array(args.dropFirst()))
+            let fs = conjetFS(root: root)
+            let project = try fs.loadOrInitializeProject()
+            let status = try fs.status(project: project)
+            try printConjetFSStatus(status, json: json, headline: "ConjetFS project")
+        default:
+            throw ConjetError.invalidArgument("unknown project command '\(subcommand)'")
+        }
+    }
+
+    private static func syncProject(root: URL, json: Bool) throws -> ConjetFSSyncResult {
+        _ = try ensureConjetDockerSocket()
+        let fs = conjetFS(root: root)
+        let project = try fs.loadOrInitializeProject()
+        return try fs.sync(project: project)
+    }
+
+    private static func watchConjetFSProject(args: [String], json: Bool) throws {
+        let interval = value(after: "--interval", in: args).flatMap(Double.init) ?? 1
+        let debounce = value(after: "--debounce", in: args).flatMap(Double.init) ?? 0.005
+        let once = args.contains("--once")
+        let poll = args.contains("--poll")
+        let root = projectRoot(from: args)
+        _ = try ensureConjetDockerSocket()
+        let fs = conjetFS(root: root)
+        let project = try fs.loadOrInitializeProject()
+        var cycle = 0
+        var syncHelper: String?
+        defer {
+            if let syncHelper {
+                fs.stopSyncHelper(syncHelper)
+            }
+        }
+
+        if !json {
+            print("ConjetFS sync watch")
+            print("  project: \(project.name)")
+            print("  host: \(project.hostRoot)")
+            print("  mode: \(poll || once ? "poll" : "fsevents")")
+            if poll || once {
+                print("  interval: \(String(format: "%.3f", interval))s")
+            } else {
+                print("  debounce: \(String(format: "%.3f", debounce))s")
+            }
+        }
+
+        func syncIfDirty(force: Bool, event: ConjetFSWatchEvent? = nil) throws {
+            if let event, !force {
+                let result = try fs.sync(
+                    project: project,
+                    changedPaths: event.changedPaths,
+                    helperContainer: syncHelper
+                )
+                if json {
+                    print(try ConjetJSON.string(result, pretty: false))
+                } else if result.changedFiles > 0 || result.removedFiles > 0 {
+                    print("=> event \(event.changedPaths.prefix(6).joined(separator: ", "))")
+                    print("=> synced \(result.changedFiles) changed, \(result.removedFiles) removed")
+                } else {
+                    print("=> event \(event.changedPaths.prefix(6).joined(separator: ", "))")
+                    print("=> clean")
+                }
+                return
+            }
+
+            let status = try fs.status(project: project)
+            if force || status.dirty {
+                let result = try fs.sync(project: project)
+                if json {
+                    print(try ConjetJSON.string(result, pretty: false))
+                } else if let event {
+                    print("=> event \(event.changedPaths.prefix(6).joined(separator: ", "))")
+                    print("=> synced \(result.changedFiles) changed, \(result.removedFiles) removed")
+                } else {
+                    print("=> synced \(result.changedFiles) changed, \(result.removedFiles) removed")
+                }
+            } else if !json {
+                print("=> clean")
+            }
+        }
+
+        if once || poll {
+            repeat {
+                try syncIfDirty(force: cycle == 0)
+                cycle += 1
+                if once { break }
+                Thread.sleep(forTimeInterval: max(0.1, interval))
+            } while true
+            return
+        }
+
+        try syncIfDirty(force: true)
+        syncHelper = try fs.startSyncHelper(project: project)
+        let watcher = ConjetFSHostEventStream(root: root, debounceSeconds: debounce)
+        try watcher.run { event in
+            do {
+                try syncIfDirty(force: false, event: event)
+            } catch {
+                FileHandle.standardError.write(Data("conjet sync watch: \(error)\n".utf8))
+            }
+        }
+    }
+
+    private static func exportConjetFSPaths(args: [String], json: Bool) throws {
+        let root = projectRootFromPathOption(args)
+        let exportPaths = positionalArguments(from: args, valueOptions: ["--path", "--to", "--destination"])
+        guard !exportPaths.isEmpty else {
+            throw ConjetError.invalidArgument("usage: conjet sync export PATH... --to DEST [--path PROJECT]")
+        }
+        let destination = value(after: "--to", in: args)
+            ?? value(after: "--destination", in: args)
+            ?? FileManager.default.currentDirectoryPath
+        _ = try ensureConjetDockerSocket()
+        let fs = conjetFS(root: root)
+        let project = try fs.loadOrInitializeProject()
+        let result = try fs.export(
+            project: project,
+            paths: exportPaths,
+            to: URL(fileURLWithPath: expandedPath(destination), isDirectory: true)
+        )
+        if json {
+            print(try ConjetJSON.string(result))
+        } else {
+            print("ConjetFS export complete")
+            print("  project: \(result.project.name)")
+            print("  volume: \(result.dockerVolume)")
+            print("  destination: \(result.hostDestination)")
+            print("  exported: \(result.exportedPaths.joined(separator: ", "))")
+        }
+    }
+
+    private static func conjetFS(root: URL) -> ConjetFS {
+        let paths = ConjetPaths.default()
+        return ConjetFS(
+            projectRoot: root,
+            paths: paths,
+            dockerContext: dockerContextName(profileName: paths.profileName)
+        )
+    }
+
+    private static func defaultIdleProcessPattern(runtime: String) -> String {
+        BenchmarkReleaseGateRunner.defaultProcessPattern(runtime: runtime)
+    }
+
+    private static func csvList(_ value: String) -> [String] {
+        value
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func benchmarkSamplePhase(
+        from value: String?,
+        default defaultPhase: BenchmarkSamplePhase
+    ) throws -> BenchmarkSamplePhase {
+        guard let value else {
+            return defaultPhase
+        }
+        guard let phase = BenchmarkSamplePhase(rawValue: value.lowercased()) else {
+            throw ConjetError.invalidArgument("invalid benchmark phase '\(value)'; expected any, cold, or warm")
+        }
+        return phase
+    }
+
+    private static func defaultBenchmarkReleaseGateDirectory(now: Date = Date()) -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("bench", isDirectory: true)
+            .appendingPathComponent("reports", isDirectory: true)
+            .appendingPathComponent("release-gate-\(formatter.string(from: now))", isDirectory: true)
+    }
+
+    private static func printConjetFSSyncResult(_ result: ConjetFSSyncResult, json: Bool, headline: String) throws {
+        if json {
+            print(try ConjetJSON.string(result))
+        } else {
+            print(headline)
+            print("  project: \(result.project.name)")
+            print("  host: \(result.project.hostRoot)")
+            print("  docker context: \(result.dockerContext)")
+            print("  volume: \(result.dockerVolume)")
+            print("  guest path: \(result.guestPath)")
+            print("  host-synced: \(result.includedFiles) files")
+            print("  changed: \(result.changedFiles) files")
+            print("  skipped vm-native: \(result.skippedFiles) files")
+            print("  removed: \(result.removedFiles) files")
+            print("  docker run args: -v \(result.containerMountArgument) -w \(result.guestPath)")
+        }
+    }
+
+    private static func printBenchmarkReleaseGateResult(_ result: BenchmarkReleaseGateRunResult) {
+        print(result.gateReport.passed ? "benchmark release gate: passed" : "benchmark release gate: failed")
+        print("  output: \(result.artifacts.outputDirectory)")
+        print("  docker report: \(result.artifacts.dockerReport)")
+        print("  all results: \(result.artifacts.allResultsReport)")
+        print("  markdown: \(result.artifacts.allResultsMarkdown)")
+        print("  gate report: \(result.artifacts.gateReport)")
+        print("  gate markdown: \(result.artifacts.gateMarkdownReport)")
+        if !result.artifacts.idleReports.isEmpty {
+            print("  idle reports: \(result.artifacts.idleReports.count)")
+        }
+        if !result.artifacts.powerReports.isEmpty {
+            print("  power reports: \(result.artifacts.powerReports.count)")
+        }
+        printBenchmarkGateReport(result.gateReport)
+    }
+
+    private static func printBenchmarkGateReport(_ report: BenchmarkClaimGateReport) {
+        print(report.passed ? "benchmark gate: passed" : "benchmark gate: failed")
+        print("  candidate: \(report.candidateRuntime)")
+        print("  baselines: \(report.baselineRuntimes.joined(separator: ", "))")
+        print("  minimum samples: \(report.minimumSamples)")
+        print("  sample phase: \(report.samplePhase.rawValue)")
+        if !report.missingRequirements.isEmpty {
+            print("  missing requirements:")
+            for requirement in report.missingRequirements.prefix(20) {
+                print("    - \(requirement)")
+            }
+            if report.missingRequirements.count > 20 {
+                print("    - ... \(report.missingRequirements.count - 20) more")
+            }
+        }
+        let failed = report.comparisons.filter { !$0.passed }
+        if !failed.isEmpty {
+            print("  failed comparisons:")
+            for comparison in failed.prefix(20) {
+                print("    - \(benchmarkComparisonLabel(comparison)) vs \(comparison.baselineRuntime): \(comparison.reason)")
+            }
+            if failed.count > 20 {
+                print("    - ... \(failed.count - 20) more")
+            }
+        }
+    }
+
+    private static func benchmarkComparisonLabel(_ comparison: BenchmarkClaimComparison) -> String {
+        if comparison.candidateWorkload == comparison.workload && comparison.baselineWorkload == comparison.workload {
+            return comparison.workload
+        }
+        return "\(comparison.workload) (\(comparison.candidateWorkload) -> \(comparison.baselineWorkload))"
+    }
+
+    private static func renderBenchmarkGateMarkdown(_ report: BenchmarkClaimGateReport) -> String {
+        var lines: [String] = [
+            "# Conjet Benchmark Claim Gate",
+            "",
+            "- Verdict: \(report.passed ? "passed" : "failed")",
+            "- Candidate: \(report.candidateRuntime)",
+            "- Baselines: \(report.baselineRuntimes.joined(separator: ", "))",
+            "- Minimum samples: \(report.minimumSamples)",
+            "- Sample phase: \(report.samplePhase.rawValue)",
+            ""
+        ]
+
+        if !report.missingRequirements.isEmpty {
+            lines.append("## Missing Requirements")
+            lines.append("")
+            for requirement in report.missingRequirements {
+                lines.append("- \(requirement)")
+            }
+            lines.append("")
+        }
+
+        lines.append("## Comparisons")
+        lines.append("")
+        lines.append("| Claim | Candidate Workload | Baseline | Baseline Workload | Measure | Candidate P50 | Baseline P50 | P50 Ratio | Candidate P95 | Baseline P95 | P95 Ratio | Result |")
+        lines.append("| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+        for comparison in report.comparisons {
+            lines.append(
+                "| \(comparison.workload) | \(comparison.candidateWorkload) | \(comparison.baselineRuntime) | \(comparison.baselineWorkload) | \(comparison.measure) | \(formatOptional(comparison.candidateP50)) | \(formatOptional(comparison.baselineP50)) | \(formatOptional(comparison.p50Ratio)) | \(formatOptional(comparison.candidateP95)) | \(formatOptional(comparison.baselineP95)) | \(formatOptional(comparison.p95Ratio)) | \(comparison.passed ? "pass" : comparison.reason) |"
+            )
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func formatOptional(_ value: Double?) -> String {
+        guard let value else { return "n/a" }
+        if value.rounded() == value {
+            return String(format: "%.0f", value)
+        }
+        return String(format: "%.3f", value)
+    }
+
+    private static func printConjetFSStatus(_ status: ConjetFSStatus, json: Bool, headline: String) throws {
+        if json {
+            print(try ConjetJSON.string(status))
+        } else {
+            print(headline)
+            print("  project: \(status.project.name)")
+            print("  host: \(status.project.hostRoot)")
+            print("  docker context: \(status.dockerContext)")
+            print("  volume: \(status.dockerVolume)")
+            print("  guest: \(status.guestPath)")
+            print("  state: \(status.dirty ? "dirty" : "clean")")
+            print("  host-synced: \(status.hostSyncedFiles) files")
+            print("  changed since last push: \(status.changedFiles) files")
+            print("  removed since last push: \(status.removedFiles) files")
+            print("  vm-native/skipped: \(status.skippedFiles) files")
+            if let manifestUpdatedAt = status.manifestUpdatedAt {
+                print("  last push: \(manifestUpdatedAt)")
+            }
+        }
+    }
+
+    private static func projectRun(args: [String], json: Bool) throws {
+        let noSync = args.contains("--no-sync")
+        let root = value(after: "--path", in: args)
+            .map { URL(fileURLWithPath: expandedPath($0), isDirectory: true) }
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let runArgs = args.removingOption("--path").filter { $0 != "--no-sync" }
+        guard let image = runArgs.first else {
+            throw ConjetError.invalidArgument("usage: conjet project run [--path PATH] [--no-sync] IMAGE [CMD...]")
+        }
+
+        let result: ConjetFSSyncResult
+        if noSync {
+            let fs = conjetFS(root: root)
+            let project = try fs.loadOrInitializeProject()
+            result = ConjetFSSyncResult(
+                project: project,
+                dockerContext: ConjetFS.defaultDockerContext(profileName: ConjetPaths.default().profileName),
+                guestPath: project.guestPath,
+                includedFiles: 0,
+                skippedFiles: 0,
+                removedFiles: 0,
+                includedBytes: 0,
+                skippedBytes: 0,
+                dockerVolume: project.dockerVolume,
+                containerMountArgument: "\(project.dockerVolume):\(project.guestPath)"
+            )
+        } else {
+            result = try syncProject(root: root, json: json)
+        }
+
+        let socket = try ensureConjetDockerSocket()
+        var dockerArgs = [
+            "docker",
+            "--host",
+            "unix://\(socket)",
+            "run",
+            "--rm"
+        ]
+        let topology = ConjetPackageTopologyOptimizer.plan(projectRoot: root, guestPath: result.guestPath)
+        dockerArgs += topology.dockerEnvironmentArguments()
+        if !json, isatty(STDIN_FILENO) == 1, isatty(STDOUT_FILENO) == 1 {
+            dockerArgs.append("-it")
+        }
+        dockerArgs += [
+            "--mount",
+            "type=volume,source=\(result.dockerVolume),target=\(result.guestPath)",
+            "-w",
+            result.guestPath,
+            image
+        ] + Array(runArgs.dropFirst())
+
+        if json {
+            let process = try ProcessRunner.run("/usr/bin/env", dockerArgs)
+            print(try ConjetJSON.string(ConjetFSProjectRunResult(sync: result, process: process)))
+            guard process.succeeded else {
+                throw ConjetError.processFailed(
+                    executable: process.executable,
+                    exitCode: process.exitCode,
+                    stderr: process.stderr
+                )
+            }
+        } else {
+            try runInheritedProcess("/usr/bin/env", dockerArgs)
         }
     }
 
@@ -764,6 +1429,38 @@ struct ConjetCLI {
         return URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
+    private static func projectRoot(from args: [String]) -> URL {
+        if let path = value(after: "--path", in: args) {
+            return URL(fileURLWithPath: expandedPath(path), isDirectory: true)
+        }
+        let positionals = positionalArguments(
+            from: args,
+            valueOptions: ["--path", "--interval", "--debounce", "--to", "--destination", "--seconds", "--process", "--runtime"]
+        )
+        let path = positionals.first ?? FileManager.default.currentDirectoryPath
+        return URL(fileURLWithPath: expandedPath(path), isDirectory: true)
+    }
+
+    private static func projectRootFromPathOption(_ args: [String]) -> URL {
+        let path = value(after: "--path", in: args) ?? FileManager.default.currentDirectoryPath
+        return URL(fileURLWithPath: expandedPath(path), isDirectory: true)
+    }
+
+    private static func positionalArguments(from args: [String], valueOptions: Set<String>) -> [String] {
+        var result: [String] = []
+        var index = 0
+        while index < args.count {
+            let element = args[index]
+            if element.hasPrefix("--") {
+                index += valueOptions.contains(element) ? 2 : 1
+                continue
+            }
+            result.append(element)
+            index += 1
+        }
+        return result
+    }
+
     private static func gibibytes(_ value: Int) -> Int64 {
         Int64(value) * 1024 * 1024 * 1024
     }
@@ -788,6 +1485,7 @@ struct ConjetCLI {
         json: Bool,
         failOnError: Bool = false,
         dockerContext: DockerContextResult? = nil,
+        hostShares: HostShareMountResult? = nil,
         headline: String? = nil
     ) throws {
         if json {
@@ -822,22 +1520,35 @@ struct ConjetCLI {
             if let dockerContext {
                 print("  docker context: \(dockerContext.contextName)")
             }
+            if let hostShares {
+                print("  host shares: \(hostShares.mountedPaths.joined(separator: ", "))")
+            }
         }
         if failOnError, !response.ok {
             try throwResponseError(response.message)
         }
     }
 
-    private static func printStartVMResponse(_ response: DaemonResponse, dockerContext: DockerContextResult?) {
+    private static func printStartVMResponse(
+        _ response: DaemonResponse,
+        dockerContext: DockerContextResult?,
+        hostShares: HostShareMountResult?
+    ) {
         print(vmStartHeadline(response))
         if let dockerContext {
             ConjetFetchUI(enabled: true).step("[docker context internal] using \(dockerContext.contextName)")
+        }
+        if let hostShares {
+            ConjetFetchUI(enabled: true).step("[host shares internal] mounted \(hostShares.mountedPaths.joined(separator: ", "))")
         }
         if let vm = response.vm ?? response.status?.vm {
             print("  vm: \(vm.state.rawValue)")
             print("  serial log: \(vm.serialLogPath ?? "unknown")")
             if let dockerContext {
                 print("  docker context: \(dockerContext.contextName)")
+            }
+            if let hostShares {
+                print("  host shares: \(hostShares.mountedPaths.joined(separator: ", "))")
             }
         }
     }
@@ -897,15 +1608,26 @@ struct ConjetCLI {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let text = try markdown
+        let text = try benchmarkOutputIsMarkdown(url: url, requestedMarkdown: markdown)
             ? BenchmarkMarkdownReport.render(results: results, title: "Conjet Docker Context Benchmark")
             : ConjetJSON.string(results)
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    private static func benchmarkOutputIsMarkdown(url: URL, requestedMarkdown: Bool) -> Bool {
+        guard requestedMarkdown else { return false }
+        switch url.pathExtension.lowercased() {
+        case "md", "markdown":
+            return true
+        default:
+            return false
+        }
+    }
+
     private static func ensureVMConfiguredForStart(json: Bool, config: ConjetConfig) throws {
         let store = VMImageStore()
-        guard !store.manifestExists() else {
+        if store.manifestExists() {
+            try store.expandDataDiskIfNeeded(sizeBytes: gibibytes(config.diskGiB))
             return
         }
 
@@ -1213,6 +1935,28 @@ struct ConjetCLI {
         profileName == "default" ? "conjet" : "conjet-\(profileName)"
     }
 
+    private static func mountHostSharesIfStarted(
+        _ response: DaemonResponse,
+        dockerContext: DockerContextResult?,
+        config: ConjetConfig,
+        json: Bool
+    ) -> HostShareMountResult? {
+        guard config.enableHostMounts,
+              response.ok,
+              let dockerContext else {
+            return nil
+        }
+
+        do {
+            return try HostShareMounter(dockerContext: dockerContext.contextName).ensureMounted()
+        } catch {
+            if !json {
+                writeDiagnostic("could not mount Conjet host shares in guest: \(error)")
+            }
+            return nil
+        }
+    }
+
     private static func isVirtualizationEntitlementFailure(_ message: String) -> Bool {
         let lowercased = message.lowercased()
         return lowercased.contains("com.apple.security.virtualization")
@@ -1344,10 +2088,19 @@ struct ConjetCLI {
               conjet vm logs [--lines N]
               conjet run IMAGE [CMD...] [--json]
               conjet compose up [docker compose args]
+              conjet project init|attach|status [PATH] [--json]
+              conjet project run [--path PATH] [--no-sync] IMAGE [CMD...] [--json]
               conjet bench profile [--json]
+              conjet bench idle [--runtime NAME] [--process REGEX] [--seconds N] [--interval N] [--output PATH] [--json|--markdown]
+              conjet bench power [--runtime NAME] [--process REGEX] [--seconds N] [--interval N] [--output PATH] [--no-sudo] [--json|--markdown]
+              conjet bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N] [--phase any|cold|warm] [--workloads NAME,...] [--no-idle] [--no-power] [--json|--markdown]
+              conjet bench release-gate [--contexts conjet,orbstack,colima] [--iterations N] [--phase cold|warm] [--warmup] [--workloads NAME,...] [--output-dir DIR] [--seconds N] [--no-sudo] [--json|--markdown]
               conjet bench small-files [--files N] [--bytes N] [--dir PATH] [--json|--markdown]
               conjet bench docker-compare [--contexts conjet,colima] [--iterations N] [--workloads NAME,...] [--warmup] [--output PATH] [--json|--markdown]
               conjet sync classify PATH [--json]
+              conjet sync push|status|repair [PATH] [--json]
+              conjet sync watch [PATH] [--debounce N] [--poll --interval N] [--once] [--json]
+              conjet sync export PATH... --to DEST [--path PROJECT] [--json]
               conjet power policy STATE [--json]
             """
         )
@@ -1609,6 +2362,11 @@ private struct ProfileStatus: Codable, Equatable {
     var config: ConjetConfig
 }
 
+private struct ConjetFSProjectRunResult: Codable, Equatable {
+    var sync: ConjetFSSyncResult
+    var process: ProcessResult
+}
+
 private extension Array where Element == String {
     mutating func removeAllOccurrences(_ value: String) -> Bool {
         var removed = false
@@ -1620,5 +2378,22 @@ private extension Array where Element == String {
             return true
         }
         return removed
+    }
+
+    func removingOption(_ option: String) -> [String] {
+        var result: [String] = []
+        var skipNext = false
+        for element in self {
+            if skipNext {
+                skipNext = false
+                continue
+            }
+            if element == option {
+                skipNext = true
+                continue
+            }
+            result.append(element)
+        }
+        return result
     }
 }

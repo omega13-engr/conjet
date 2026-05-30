@@ -85,6 +85,143 @@ public struct RetryingGuestConnectionConnector: GuestConnectionConnector {
     }
 }
 
+public final class PooledGuestConnectionConnector: GuestConnectionConnector, @unchecked Sendable {
+    private let base: any GuestConnectionConnector
+    private let capacity: Int
+    private let refillDelaySeconds: Double
+    private let refillQueue = DispatchQueue(label: "dev.conjet.guest-connection-pool", qos: .userInitiated)
+    private let lock = NSLock()
+    private var idleConnections: [GuestConnection] = []
+    private var pendingConnections = 0
+    private var stopped = false
+
+    public init(
+        base: any GuestConnectionConnector,
+        capacity: Int = 4,
+        refillDelaySeconds: Double = 0.25
+    ) {
+        self.base = base
+        self.capacity = max(0, capacity)
+        self.refillDelaySeconds = max(0.01, refillDelaySeconds)
+        scheduleRefill()
+    }
+
+    deinit {
+        closeIdleConnections()
+    }
+
+    public func connect() throws -> GuestConnection {
+        lock.lock()
+        let connection = idleConnections.popLast()
+        lock.unlock()
+
+        if let connection {
+            scheduleRefill()
+            return connection
+        }
+
+        return try base.connect()
+    }
+
+    public func closeIdleConnections() {
+        lock.lock()
+        stopped = true
+        let connections = idleConnections
+        idleConnections.removeAll()
+        lock.unlock()
+
+        for connection in connections {
+            connection.close()
+        }
+    }
+
+    func idleConnectionCountForTesting() -> Int {
+        lock.lock()
+        let count = idleConnections.count
+        lock.unlock()
+        return count
+    }
+
+    private func scheduleRefill() {
+        while true {
+            lock.lock()
+            if stopped || idleConnections.count + pendingConnections >= capacity {
+                lock.unlock()
+                return
+            }
+            pendingConnections += 1
+            lock.unlock()
+
+            refillQueue.async { [weak self] in
+                self?.makeIdleConnection()
+            }
+        }
+    }
+
+    private func makeIdleConnection() {
+        do {
+            let connection = try base.connect()
+            lock.lock()
+            pendingConnections -= 1
+            if stopped || idleConnections.count >= capacity {
+                lock.unlock()
+                connection.close()
+                return
+            }
+            idleConnections.append(connection)
+            lock.unlock()
+        } catch {
+            lock.lock()
+            pendingConnections -= 1
+            let shouldRetry = !stopped
+            lock.unlock()
+
+            if shouldRetry {
+                refillQueue.asyncAfter(deadline: .now() + refillDelaySeconds) { [weak self] in
+                    self?.scheduleRefill()
+                }
+            }
+        }
+    }
+}
+
+enum GuestBridgeCapabilityProbe {
+    static func supportsPooledConnections(
+        connector: any GuestConnectionConnector,
+        timeoutSeconds: Double = 1
+    ) -> Bool {
+        guard let connection = try? connector.connect() else {
+            return false
+        }
+        defer { connection.close() }
+
+        setSocketTimeout(connection.fileDescriptor, timeoutSeconds: timeoutSeconds)
+        let request = "GET /conjet-bridge-capabilities HTTP/1.1\r\nHost: conjet\r\nConnection: close\r\n\r\n"
+        guard writeAll(Data(request.utf8), to: connection.fileDescriptor) else {
+            return false
+        }
+        Darwin.shutdown(connection.fileDescriptor, SHUT_WR)
+
+        var response = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while response.count < 16 * 1024 {
+            let count = Darwin.read(connection.fileDescriptor, &buffer, buffer.count)
+            if count > 0 {
+                response.append(buffer, count: count)
+            } else if count < 0, errno == EINTR {
+                continue
+            } else {
+                break
+            }
+        }
+
+        guard let text = String(data: response, encoding: .utf8) else {
+            return false
+        }
+        return text.contains("200 OK") && text.contains(#""lazy_upstream":true"#)
+    }
+}
+
 public final class DockerSocketBridge: @unchecked Sendable {
     public let socketPath: String
     public let guestPort: UInt32
@@ -244,6 +381,36 @@ private func writeHTTPUnavailable(_ message: String, to fd: Int32) {
 private func disableSigpipe(_ fd: Int32) {
     var enabled: Int32 = 1
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+}
+
+private func setSocketTimeout(_ fd: Int32, timeoutSeconds: Double) {
+    let seconds = max(0, timeoutSeconds)
+    var timeout = timeval(
+        tv_sec: Int(seconds),
+        tv_usec: Int32((seconds.truncatingRemainder(dividingBy: 1)) * 1_000_000)
+    )
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+}
+
+private func writeAll(_ data: Data, to fd: Int32) -> Bool {
+    data.withUnsafeBytes { rawBuffer in
+        guard let baseAddress = rawBuffer.baseAddress else {
+            return true
+        }
+        var written = 0
+        while written < data.count {
+            let count = Darwin.write(fd, baseAddress.advanced(by: written), data.count - written)
+            if count > 0 {
+                written += count
+            } else if count < 0, errno == EINTR {
+                continue
+            } else {
+                return false
+            }
+        }
+        return true
+    }
 }
 
 #if canImport(Virtualization)

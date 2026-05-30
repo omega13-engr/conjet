@@ -84,26 +84,109 @@ public enum CloudInitSeedBuilder {
             content: |
               #!/bin/sh
               set -eux
-              mkdir -p /run/conjet /mnt/conjetboot
+              mkdir -p /run/conjet /mnt/conjetboot /Users /Volumes
               mount -t virtiofs conjetboot /mnt/conjetboot || true
+              mount -t virtiofs conjethostusers /Users || true
+              mount -t virtiofs conjethostvolumes /Volumes || true
               trap 'status=$?; cp /run/conjet/docker-bootstrap.log /mnt/conjetboot/docker-bootstrap.log 2>/dev/null || true; { echo "Conjet Docker bootstrap exit ${status}"; tail -100 /run/conjet/docker-bootstrap.log 2>/dev/null || true; } >/dev/hvc0 2>/dev/null || true' EXIT
               exec >/run/conjet/docker-bootstrap.log 2>&1
               echo "Conjet Docker bootstrap started"
               if command -v apt-get >/dev/null 2>&1; then
                 export DEBIAN_FRONTEND=noninteractive
                 apt-get update
-                apt-get install -y ca-certificates curl docker.io python3
-                systemctl enable --now docker
+                apt-get install -y ca-certificates curl docker.io e2fsprogs python3 util-linux
               elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y ca-certificates curl moby-engine python3 || dnf install -y ca-certificates curl docker python3
-                systemctl enable --now docker || systemctl enable --now docker.service
+                dnf install -y ca-certificates curl e2fsprogs moby-engine python3 util-linux || dnf install -y ca-certificates curl docker e2fsprogs python3 util-linux
               elif command -v apk >/dev/null 2>&1; then
-                apk add --no-cache ca-certificates curl docker python3
-                rc-update add docker default || true
-                service docker start || true
+                apk add --no-cache ca-certificates curl docker e2fsprogs python3 util-linux
               else
                 echo "unsupported package manager for Conjet Docker bootstrap" >&2
                 exit 1
+              fi
+              cat >/usr/local/sbin/conjet-data-disk.sh <<'SH'
+              #!/bin/sh
+              set -eu
+              DEVICE="${CONJET_DATA_DEVICE:-/dev/disk/by-id/virtio-conjet-data}"
+              MOUNT_DIR="${CONJET_DATA_MOUNT:-/mnt/conjet-data}"
+              MOUNT_OPTIONS="${CONJET_DATA_MOUNT_OPTIONS:-noatime,nodiratime,lazytime,nodiscard,commit=60}"
+              log() { echo "conjet-data-disk: $*"; }
+              wait_for_device() {
+                attempts=0
+                while [ ! -e "${DEVICE}" ]; do
+                  attempts=$((attempts + 1))
+                  if [ "${attempts}" -ge 60 ]; then
+                    echo "conjet-data-disk: ${DEVICE} did not appear" >&2
+                    return 1
+                  fi
+                  sleep 1
+                done
+              }
+              filesystem_type() { blkid -o value -s TYPE "${DEVICE}" 2>/dev/null || true; }
+              directory_empty() { [ -z "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }
+              mount_data_disk() {
+                mkdir -p "${MOUNT_DIR}"
+                if mountpoint -q "${MOUNT_DIR}"; then
+                  mount -o "remount,${MOUNT_OPTIONS}" "${MOUNT_DIR}" || true
+                else
+                  mount -o "${MOUNT_OPTIONS}" "${DEVICE}" "${MOUNT_DIR}"
+                fi
+              }
+              bind_runtime_directory() {
+                source_dir="$1"
+                target_dir="${MOUNT_DIR}$1"
+                mkdir -p "${source_dir}" "${target_dir}"
+                if mountpoint -q "${source_dir}"; then
+                  log "${source_dir} already mounted"
+                  return 0
+                fi
+                if ! directory_empty "${source_dir}" && directory_empty "${target_dir}"; then
+                  log "migrating ${source_dir} to data disk"
+                  cp -a "${source_dir}/." "${target_dir}/"
+                fi
+                mount --bind "${target_dir}" "${source_dir}"
+                mountpoint -q "${source_dir}"
+                log "mounted ${source_dir} on data disk"
+              }
+              wait_for_device
+              TYPE="$(filesystem_type)"
+              if [ -z "${TYPE}" ]; then
+                log "formatting ${DEVICE} as ext4"
+                mkfs.ext4 -F -L conjet-data "${DEVICE}"
+              elif [ "${TYPE}" = "ext4" ]; then
+                e2fsck -pf "${DEVICE}" || true
+                resize2fs "${DEVICE}" || true
+              fi
+              mount_data_disk
+              bind_runtime_directory /var/lib/containerd
+              bind_runtime_directory /var/lib/docker
+              log "ready"
+              SH
+              chmod 0755 /usr/local/sbin/conjet-data-disk.sh
+              if command -v systemctl >/dev/null 2>&1; then
+                cat >/etc/systemd/system/conjet-data-disk.service <<'UNIT'
+              [Unit]
+              Description=Conjet Docker data disk
+              DefaultDependencies=no
+              After=systemd-udev-settle.service
+              Before=local-fs.target containerd.service docker.socket docker.service
+              Wants=systemd-udev-settle.service
+              ConditionPathExists=/dev/disk/by-id/virtio-conjet-data
+
+              [Service]
+              Type=oneshot
+              ExecStart=/usr/local/sbin/conjet-data-disk.sh
+              RemainAfterExit=yes
+
+              [Install]
+              WantedBy=local-fs.target
+              UNIT
+                systemctl daemon-reload
+                systemctl enable --now conjet-data-disk.service
+                systemctl enable --now docker || systemctl enable --now docker.service
+              else
+                /usr/local/sbin/conjet-data-disk.sh || true
+                rc-update add docker default || true
+                service docker start || true
               fi
               if [ -x /usr/bin/unpigz ]; then
                 mv /usr/bin/unpigz /usr/bin/unpigz.conjet-original || true
@@ -128,6 +211,7 @@ public enum CloudInitSeedBuilder {
               VMADDR_CID_ANY = getattr(socket, "VMADDR_CID_ANY", 0xFFFFFFFF)
               DOCKER_WAIT_LOG_SECONDS = 10
               CLIENT_DOCKER_WAIT_SECONDS = 30
+              CAPABILITIES_PATH = b"/conjet-bridge-capabilities"
 
               def log(message):
                   sys.stderr.write(f"conjet-docker-vsock: {message}\\n")
@@ -169,6 +253,20 @@ public enum CloudInitSeedBuilder {
                   except OSError:
                       pass
 
+              def write_bridge_capabilities(client):
+                  body = b'{"lazy_upstream":true,"docker_ready_cache":true}\\n'
+                  response = (
+                      b"HTTP/1.1 200 OK\\r\\n"
+                      b"Content-Type: application/json\\r\\n"
+                      b"Connection: close\\r\\n"
+                      b"Content-Length: " + str(len(body)).encode() + b"\\r\\n"
+                      b"\\r\\n" + body
+                  )
+                  try:
+                      client.sendall(response)
+                  except OSError:
+                      pass
+
               def pump(src, dst):
                   try:
                       while True:
@@ -180,6 +278,17 @@ public enum CloudInitSeedBuilder {
                       pass
                   finally:
                       shutdown_write(dst)
+
+              def read_first_client_chunk(client):
+                  try:
+                      return client.recv(65536)
+                  except OSError:
+                      return b""
+
+              def is_bridge_capabilities_request(first_chunk):
+                  request_line = first_chunk.split(b"\\r\\n", 1)[0]
+                  parts = request_line.split()
+                  return len(parts) >= 2 and parts[0] == b"GET" and parts[1] == CAPABILITIES_PATH
 
               def docker_api_ping(timeout=2.0):
                   upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -239,11 +348,27 @@ public enum CloudInitSeedBuilder {
                           time.sleep(0.25)
 
               def handle(client):
+                  first_chunk = read_first_client_chunk(client)
+                  if not first_chunk:
+                      close_socket(client)
+                      return
+
+                  if is_bridge_capabilities_request(first_chunk):
+                      write_bridge_capabilities(client)
+                      close_socket(client)
+                      return
+
                   try:
                       upstream = connect_docker_with_retry()
                   except TimeoutError as exc:
                       log(str(exc))
                       write_http_unavailable(client, str(exc))
+                      close_socket(client)
+                      return
+                  try:
+                      upstream.sendall(first_chunk)
+                  except OSError:
+                      close_socket(upstream)
                       close_socket(client)
                       return
                   left = threading.Thread(target=pump, args=(client, upstream), daemon=True)
@@ -281,8 +406,8 @@ public enum CloudInitSeedBuilder {
                 cat >/etc/systemd/system/conjet-docker-vsock.service <<'UNIT'
               [Unit]
               Description=Conjet Docker VSOCK bridge
-              After=containerd.service docker.service docker.socket
-              Wants=containerd.service docker.service docker.socket
+              After=conjet-data-disk.service containerd.service docker.service docker.socket
+              Wants=conjet-data-disk.service containerd.service docker.service docker.socket
 
               [Service]
               Type=simple

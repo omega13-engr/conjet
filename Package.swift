@@ -16,7 +16,12 @@ let package = Package(
         .library(name: "ConjetVZ", targets: ["ConjetVZ"])
     ],
     targets: [
-        .target(name: "ConjetCore"),
+        .target(
+            name: "ConjetCore",
+            linkerSettings: [
+                .linkedFramework("CoreServices", .when(platforms: [.macOS]))
+            ]
+        ),
         .target(name: "ConjetBench", dependencies: ["ConjetCore"]),
         .target(name: "ConjetPower", dependencies: ["ConjetCore"]),
         .target(

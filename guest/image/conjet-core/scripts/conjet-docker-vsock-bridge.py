@@ -2,16 +2,25 @@
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
 
 DOCKER_SOCKET = os.environ.get("CONJET_DOCKER_SOCKET", "/var/run/docker.sock")
+DOCKER_CLI = os.environ.get("CONJET_DOCKER_CLI", "/usr/bin/docker")
 VSOCK_PORT = int(os.environ.get("CONJET_DOCKER_VSOCK_PORT", "2375"))
 AF_VSOCK = getattr(socket, "AF_VSOCK", 40)
 VMADDR_CID_ANY = getattr(socket, "VMADDR_CID_ANY", 0xFFFFFFFF)
 DOCKER_WAIT_LOG_SECONDS = 10
 CLIENT_DOCKER_WAIT_SECONDS = 60
+BUILDKIT_REPAIR_TIMEOUT_SECONDS = 120
+DOCKER_READY = threading.Event()
+CAPABILITIES_PATH = b"/conjet-bridge-capabilities"
+BUILDKIT_HEALTHCHECK_DOCKERFILE = b"""# syntax=docker/dockerfile:1.7
+FROM scratch
+LABEL org.conjet.buildkit-healthcheck=1
+"""
 
 
 def log(message):
@@ -59,6 +68,21 @@ def write_http_unavailable(client, message):
         pass
 
 
+def write_bridge_capabilities(client):
+    body = b'{"lazy_upstream":true,"docker_ready_cache":true}\n'
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Connection: close\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        b"\r\n" + body
+    )
+    try:
+        client.sendall(response)
+    except OSError:
+        pass
+
+
 def pump(source, destination):
     try:
         while True:
@@ -70,6 +94,19 @@ def pump(source, destination):
         pass
     finally:
         shutdown_write(destination)
+
+
+def read_first_client_chunk(client):
+    try:
+        return client.recv(65536)
+    except OSError:
+        return b""
+
+
+def is_bridge_capabilities_request(first_chunk):
+    request_line = first_chunk.split(b"\r\n", 1)[0]
+    parts = request_line.split()
+    return len(parts) >= 2 and parts[0] == b"GET" and parts[1] == CAPABILITIES_PATH
 
 
 def docker_ready_status(timeout=2.0):
@@ -109,6 +146,7 @@ def wait_for_docker_ready():
         now = time.monotonic()
         ready, status = docker_ready_status()
         if ready:
+            DOCKER_READY.set()
             log(status)
             return
 
@@ -118,17 +156,97 @@ def wait_for_docker_ready():
         time.sleep(1)
 
 
+def run_docker_cli(args, input_bytes=None, timeout=BUILDKIT_REPAIR_TIMEOUT_SECONDS):
+    return subprocess.run(
+        [DOCKER_CLI] + args,
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def output_contains_stale_buildkit_snapshot(process):
+    output = process.stdout + process.stderr
+    return b"parent snapshot" in output and b"does not exist" in output
+
+
+def run_buildkit_healthcheck():
+    if not os.path.exists(DOCKER_CLI):
+        log(f"skipping BuildKit health check; docker CLI not found at {DOCKER_CLI}")
+        return
+
+    args = [
+        "build",
+        "-q",
+        "-t",
+        "conjet-buildkit-healthcheck:latest",
+        "-",
+    ]
+    try:
+        result = run_docker_cli(args, input_bytes=BUILDKIT_HEALTHCHECK_DOCKERFILE)
+    except subprocess.TimeoutExpired:
+        log("BuildKit health check timed out")
+        return
+    except OSError as exc:
+        log(f"BuildKit health check could not start: {exc}")
+        return
+
+    if result.returncode == 0:
+        log("BuildKit health check passed")
+        return
+    if not output_contains_stale_buildkit_snapshot(result):
+        stderr = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        detail = stderr[-1] if stderr else f"exit {result.returncode}"
+        log(f"BuildKit health check skipped repair: {detail}")
+        return
+
+    log("detected stale BuildKit parent snapshot; pruning builder cache")
+    try:
+        prune = run_docker_cli(["builder", "prune", "-af"])
+    except subprocess.TimeoutExpired:
+        log("BuildKit builder prune timed out")
+        return
+    except OSError as exc:
+        log(f"BuildKit builder prune could not start: {exc}")
+        return
+    if prune.returncode != 0:
+        stderr = prune.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        detail = stderr[-1] if stderr else f"exit {prune.returncode}"
+        log(f"BuildKit builder prune failed: {detail}")
+        return
+
+    try:
+        retry = run_docker_cli(args, input_bytes=BUILDKIT_HEALTHCHECK_DOCKERFILE)
+    except subprocess.TimeoutExpired:
+        log("BuildKit health check retry timed out after prune")
+        return
+    except OSError as exc:
+        log(f"BuildKit health check retry could not start after prune: {exc}")
+        return
+    if retry.returncode == 0:
+        log("BuildKit health check passed after cache prune")
+    else:
+        stderr = retry.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        detail = stderr[-1] if stderr else f"exit {retry.returncode}"
+        log(f"BuildKit health check still failing after prune: {detail}")
+
+
 def connect_docker_with_retry(timeout_seconds=CLIENT_DOCKER_WAIT_SECONDS):
     deadline = time.monotonic() + timeout_seconds
     last_error = None
     while True:
-        ready, status = docker_ready_status(timeout=1.0)
-        if not ready:
-            last_error = status
-            if time.monotonic() >= deadline:
-                raise TimeoutError(status)
-            time.sleep(0.25)
-            continue
+        if not DOCKER_READY.is_set():
+            ready, status = docker_ready_status(timeout=1.0)
+            if ready:
+                DOCKER_READY.set()
+            else:
+                last_error = status
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(status)
+                time.sleep(0.25)
+                continue
 
         upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -136,18 +254,36 @@ def connect_docker_with_retry(timeout_seconds=CLIENT_DOCKER_WAIT_SECONDS):
             return upstream
         except OSError as exc:
             last_error = exc
+            DOCKER_READY.clear()
             close_socket(upstream)
             if time.monotonic() >= deadline:
                 raise TimeoutError(f"could not connect to {DOCKER_SOCKET}: {last_error}")
-            time.sleep(0.25)
+            time.sleep(0.05)
 
 
 def handle_client(client):
+    first_chunk = read_first_client_chunk(client)
+    if not first_chunk:
+        close_socket(client)
+        return
+
+    if is_bridge_capabilities_request(first_chunk):
+        write_bridge_capabilities(client)
+        close_socket(client)
+        return
+
     try:
         upstream = connect_docker_with_retry()
     except TimeoutError as exc:
         log(str(exc))
         write_http_unavailable(client, str(exc))
+        close_socket(client)
+        return
+
+    try:
+        upstream.sendall(first_chunk)
+    except OSError:
+        close_socket(upstream)
         close_socket(client)
         return
 
@@ -197,7 +333,11 @@ def main():
     with open("/run/conjet/docker-vsock-ready", "w", encoding="utf-8") as marker:
         marker.write(f"{VSOCK_PORT}\n")
 
-    threading.Thread(target=wait_for_docker_ready, daemon=True).start()
+    def ready_worker():
+        wait_for_docker_ready()
+        run_buildkit_healthcheck()
+
+    threading.Thread(target=ready_worker, daemon=True).start()
 
     while True:
         try:

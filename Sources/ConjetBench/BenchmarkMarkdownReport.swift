@@ -42,6 +42,33 @@ public enum BenchmarkMarkdownReport {
             )
         }
         lines.append("")
+
+        let failures = results.filter { $0.exitCode != 0 }
+        if !failures.isEmpty {
+            lines.append("## Failures")
+            lines.append("")
+            for failure in failures {
+                lines.append("### \(failure.workload) / \(failure.runtime)")
+                lines.append("")
+                lines.append("- Exit: \(failure.exitCode)")
+                lines.append("- Command: `\(escapeInline(failure.command.joined(separator: " ")))`")
+                let stderr = failure.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !stderr.isEmpty {
+                    lines.append("")
+                    lines.append("```text")
+                    lines.append(stderr)
+                    lines.append("```")
+                }
+                let stdout = failure.stdoutTail.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !stdout.isEmpty {
+                    lines.append("")
+                    lines.append("```text")
+                    lines.append(stdout)
+                    lines.append("```")
+                }
+                lines.append("")
+            }
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -108,5 +135,9 @@ public enum BenchmarkMarkdownReport {
 
     private static func escape(_ text: String) -> String {
         text.replacingOccurrences(of: "|", with: "\\|")
+    }
+
+    private static func escapeInline(_ text: String) -> String {
+        text.replacingOccurrences(of: "`", with: "\\`")
     }
 }

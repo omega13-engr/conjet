@@ -4,6 +4,16 @@ Status: planning artifact created from the shared ChatGPT context and current wo
 
 Workspace state on 2026-05-29: `/Users/sly/Workspace/Personal/conjet` is not a Git repository and had no project files before this plan, only ChumMem metadata. Treat this document as the initial technical plan, not as evidence that implementation has started.
 
+Implementation status on 2026-05-30: the SwiftPM skeleton, CLI/daemon IPC,
+Virtualization.framework VM path, Conjet-core release fetch, Docker socket
+bridge, Docker context setup, profiles, `CONJET_HOME`, ConjetFS one-way
+sync-to-volume MVP, host-side FSEvents watch, Docker/idle/power benchmark
+collectors, `bench gate`, and `bench release-gate` are implemented. The
+current verdict is still "not yet proven faster than OrbStack": Conjet has
+promising local results against Colima on filesystem-heavy paths, but the
+release claim requires a passing `conjet bench release-gate` run with OrbStack
+and tuned Colima evidence.
+
 ## 1. Intent
 
 Conjet is a macOS container runtime focused on light resource usage, low power usage, and high-performance developer workflows. The credible research claim is not "10x faster for every workload." The credible target is:
@@ -340,6 +350,7 @@ Deliverables:
 - VM-native dependency/build/cache paths.
 - Native Linux workspace mount path inside containers.
 - Initial path classifier for Node, PHP, Rust, Go, Python.
+- Host-side FSEvents source-edit trigger with polling fallback.
 
 Exit gate:
 
@@ -352,7 +363,7 @@ Exit gate:
 
 Deliverables:
 
-- FSEvents-to-inotify bridge.
+- Guest-side inotify/fanotify replay from compressed FSEvents batches.
 - Event compression and prioritization.
 - Safe two-way sync for selected generated outputs.
 - Conflict detection and conservative resolution.
@@ -423,7 +434,7 @@ Conjet cannot claim "faster than OrbStack and Colima" until this matrix is green
 | Empty container start | Faster than Colima tuned | Competitive with OrbStack |
 | npm/pnpm install | 2x faster than tuned bind mount path | Up to 10x on bad bind-mount baselines |
 | Composer install | 2x faster than tuned bind mount path | Up to 10x on bad bind-mount baselines |
-| Hot reload latency | Equal or faster than OrbStack | Lower CPU wakeups than OrbStack |
+| Hot reload latency | Equal or faster than OrbStack on `hot_reload_seconds` | Lower CPU wakeups than OrbStack |
 | Idle CPU | Lower than Colima default/tuned | OrbStack-class idle |
 | Idle power | Lower than Colima default/tuned | 2x lower than OrbStack only if measured |
 | Energy-to-solution | Lower than Colima tuned | 2x lower than OrbStack on selected workloads |
@@ -435,6 +446,8 @@ Rules:
 - Record thermal state and whether the Mac is plugged in.
 - Separate cold-cache and warm-cache results.
 - Do not compare against misconfigured Colima only; include tuned VZ + VirtioFS.
+- Run `conjet bench release-gate --contexts conjet,orbstack,colima` and publish
+  `all-results.json`, `gate.json`, and `gate.md` with the release artifacts.
 - Publish failed benchmarks too, because they decide next work.
 
 ## 8. Test Strategy

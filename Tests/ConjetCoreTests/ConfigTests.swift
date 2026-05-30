@@ -12,6 +12,7 @@ final class ConfigTests: XCTestCase {
             runtime: "docker",
             quietStopMinutes: 12,
             enableRosetta: false,
+            enableHostMounts: false,
             socketPath: "/tmp/conjet.sock",
             conjetCoreRepository: "zdxsector/conjet"
         )
@@ -35,6 +36,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.architecture, "aarch64")
         XCTAssertEqual(config.diskGiB, 100)
         XCTAssertEqual(config.runtime, "docker")
+        XCTAssertTrue(config.enableHostMounts)
     }
 
     func testNamedProfilePathsAreIsolatedUnderProfilesDirectory() {

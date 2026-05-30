@@ -19,12 +19,17 @@ mkdir -p /run/conjet
     lsmod | grep -E '(^vsock|vsock|virtio)' || true
 
     echo "conjet-boot-diagnostics: service states"
-    for unit in systemd-resolved.service containerd.service docker.socket docker.service conjet-docker-vsock.service; do
+    for unit in systemd-resolved.service conjet-data-disk.service containerd.service docker.socket docker.service conjet-docker-vsock.service; do
         echo "unit=${unit}"
         systemctl is-enabled "${unit}" 2>&1 || true
         systemctl is-active "${unit}" 2>&1 || true
         systemctl --no-pager --full status "${unit}" 2>&1 | sed -n '1,30p' || true
     done
+
+    echo "conjet-boot-diagnostics: block devices"
+    ls -l /dev/disk/by-id 2>&1 || true
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL 2>&1 || true
+    df -T / /mnt/conjet-data /var/lib/docker /var/lib/containerd 2>&1 || true
 
     echo "conjet-boot-diagnostics: resolver"
     ls -l /etc/resolv.conf 2>&1 || true
@@ -34,6 +39,10 @@ mkdir -p /run/conjet
     echo "conjet-boot-diagnostics: sockets"
     ls -l /var/run/docker.sock /run/conjet/docker-vsock-ready 2>&1 || true
     ss -lx 2>&1 | grep -E 'docker|containerd|conjet' || true
+
+    echo "conjet-boot-diagnostics: virtiofs mounts"
+    mount | grep -E 'conjethost|conjetboot|virtiofs' || true
+    ls -ld /Users /Volumes 2>&1 || true
 
     echo "conjet-boot-diagnostics: docker ping"
     python3 - <<'PY' 2>&1 || true

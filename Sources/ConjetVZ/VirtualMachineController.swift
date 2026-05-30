@@ -140,11 +140,21 @@ public final class VirtualMachineController {
             throw ConjetError.unavailable("VM started without a virtio socket device; cannot expose Docker socket")
         }
         dockerBridge?.stop()
-        let connector = RetryingGuestConnectionConnector(
+        let retryingConnector = RetryingGuestConnectionConnector(
             base: VZGuestConnectionConnector(socketDevice: socketDevice, queue: queue),
             timeoutSeconds: 90,
             intervalSeconds: 0.5
         )
+        let connector: any GuestConnectionConnector
+        if GuestBridgeCapabilityProbe.supportsPooledConnections(connector: retryingConnector) {
+            connector = PooledGuestConnectionConnector(
+                base: retryingConnector,
+                capacity: 4,
+                refillDelaySeconds: 0.25
+            )
+        } else {
+            connector = retryingConnector
+        }
         let bridge = DockerSocketBridge(
             socketPath: manifest.dockerSocketPath,
             connector: connector
@@ -251,11 +261,12 @@ private enum VZConfigurationBuilder {
     private static func blockDevice(path: String, identifier: String, readOnly: Bool) throws -> VZVirtioBlockDeviceConfiguration {
         let attachment: VZDiskImageStorageDeviceAttachment
         if #available(macOS 12.0, *) {
+            let modes = diskImageModes(identifier: identifier, readOnly: readOnly)
             attachment = try VZDiskImageStorageDeviceAttachment(
                 url: URL(fileURLWithPath: path),
                 readOnly: readOnly,
-                cachingMode: .automatic,
-                synchronizationMode: .fsync
+                cachingMode: modes.caching,
+                synchronizationMode: modes.synchronization
             )
         } else {
             attachment = try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: path), readOnly: readOnly)
@@ -265,6 +276,20 @@ private enum VZConfigurationBuilder {
             device.blockDeviceIdentifier = identifier
         }
         return device
+    }
+
+    @available(macOS 12.0, *)
+    private static func diskImageModes(
+        identifier: String,
+        readOnly: Bool
+    ) -> (caching: VZDiskImageCachingMode, synchronization: VZDiskImageSynchronizationMode) {
+        if readOnly {
+            return (.automatic, .fsync)
+        }
+        if identifier == "conjet-data" {
+            return (.cached, .none)
+        }
+        return (.automatic, .fsync)
     }
 
     private static func networkDevice() -> VZVirtioNetworkDeviceConfiguration {
@@ -293,6 +318,10 @@ private enum VZConfigurationBuilder {
         bootstrapDevice.share = VZSingleDirectoryShare(directory: bootstrapDirectory)
         devices.append(bootstrapDevice)
 
+        if config.enableHostMounts {
+            devices.append(contentsOf: hostDirectoryShares())
+        }
+
         #if arch(arm64)
         if config.enableRosetta, #available(macOS 13.0, *), VZLinuxRosettaDirectoryShare.availability == .installed {
             let rosettaDevice = VZVirtioFileSystemDeviceConfiguration(tag: "rosetta")
@@ -304,6 +333,24 @@ private enum VZConfigurationBuilder {
         #endif
 
         return devices
+    }
+
+    private static func hostDirectoryShares() -> [VZDirectorySharingDeviceConfiguration] {
+        let hostShares = [
+            ("conjethostusers", "/Users"),
+            ("conjethostvolumes", "/Volumes")
+        ]
+        return hostShares.compactMap { tag, path in
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                return nil
+            }
+            let device = VZVirtioFileSystemDeviceConfiguration(tag: tag)
+            let directory = VZSharedDirectory(url: URL(fileURLWithPath: path, isDirectory: true), readOnly: false)
+            device.share = VZSingleDirectoryShare(directory: directory)
+            return device
+        }
     }
 }
 #endif

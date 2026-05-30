@@ -12,6 +12,9 @@ The first implemented surface is intentionally small:
   `vm-stop`, and `vm-status`.
 - `ConjetBench` records repeatable benchmark JSON.
 - `PathClassifier` encodes the first ConjetFS placement policy.
+- `ConjetFS` project attach syncs host-authoritative files into a Docker
+  volume mounted at `/workspace`, giving containers a native-Linux workspace
+  for dependency and build churn.
 - `EnergyGovernor` encodes low-power runtime states that VM and container
   scheduling can use as the runtime matures.
 
@@ -32,6 +35,9 @@ The VZ layer now manages:
 - compressed raw EFI disk import for Conjet-core `.raw.gz` guest artifacts
 - Docker API forwarding from `~/.conjet/run/docker.sock` to guest VSOCK port
   2375 after VM start
+- optional VirtioFS host shares for `/Users` and `/Volumes`, exposed as
+  `conjethostusers` and `conjethostvolumes`, so the guest Docker daemon can
+  resolve normal macOS bind-mount source paths
 
 `conjet vm fetch-fedora` and `conjet vm fetch-alpine` are boot-asset fetchers,
 not complete container-runtime images. The smoke-test blocker is now concrete:
@@ -59,7 +65,8 @@ ready for `conjet vm start`.
 `guest/image/conjet-core` is the Conjet-owned version of that lane. It starts
 from Ubuntu minimal cloud image, installs Docker and the guest VSOCK bridge
 inside the disk image, configures DHCP and vsock module loading, disables
-cloud-init first-boot waits, and emits a `.raw.gz` artifact. The
+cloud-init first-boot waits, mounts the Conjet host `/Users` and `/Volumes`
+VirtioFS shares, and emits a `.raw.gz` artifact. The
 `conjet vm fetch-conjet-core --image PATH.raw.gz` command imports that artifact
 directly and does not attach the generic cloud-init Docker seed.
 
@@ -91,3 +98,30 @@ OrbStack.
 
 The verified Ubuntu lane now supports `conjet run hello-world` through this
 socket path.
+
+## ConjetFS MVP
+
+The first ConjetFS implementation is intentionally host-driven. The CLI writes
+project metadata under `.conjet/project.json`, combines `.conjetignore`,
+`.dockerignore`, `.gitignore`, and built-in defaults, then stages only
+host-authoritative files according to `PathClassifier`. `conjet project attach`
+creates a Docker volume named for the active profile and project, copies the
+staged files into `/workspace`, and records a manifest of synced paths and file
+signatures under Conjet state so future pushes copy only changed files and can
+delete removed host files without touching VM-native dependency or build
+folders.
+
+`conjet project run` is the first user-facing fast path built on that model: it
+pushes the current project state, mounts the project Docker volume into a
+container at `/workspace`, and keeps package-manager and build churn off the
+macOS filesystem by default. `conjet sync watch` is the current developer
+bridge: it uses macOS FSEvents by default, debounces batches, checks manifest
+dirtiness, and pushes only changed host-authoritative files. `--poll` keeps the
+older polling path available for fallback debugging. `conjet sync export` is
+the explicit escape hatch for copying selected generated outputs from the
+VM-native workspace back to macOS.
+
+This path does not yet provide explicit guest-side inotify/fanotify replay or
+broad two-way sync. Its purpose is to establish the first benchmarkable workflow
+where `npm install`, `pnpm install`, Cargo `target`, package caches, and other
+many-small-file churn stay inside Linux-native storage by default.

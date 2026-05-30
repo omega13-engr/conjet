@@ -1,7 +1,7 @@
 import ConjetCore
-import ConjetVZ
 import Darwin
 import Foundation
+@testable import ConjetVZ
 import XCTest
 
 final class DockerSocketBridgeTests: XCTestCase {
@@ -30,6 +30,62 @@ final class DockerSocketBridgeTests: XCTestCase {
             XCTAssertTrue(String(describing: error).contains("timed out waiting for guest Docker bridge"))
         }
         XCTAssertGreaterThanOrEqual(connector.attempts, 2)
+    }
+
+    func testPooledConnectorServesPreconnectedConnection() throws {
+        let connector = NumberedGuestConnectionConnector()
+        let pooled = PooledGuestConnectionConnector(
+            base: connector,
+            capacity: 1,
+            refillDelaySeconds: 0.01
+        )
+        defer { pooled.closeIdleConnections() }
+
+        XCTAssertTrue(waitUntil { pooled.idleConnectionCountForTesting() == 1 })
+
+        let connection = try pooled.connect()
+        defer { connection.close() }
+        XCTAssertEqual(connection.fileDescriptor, 1)
+    }
+
+    func testPooledConnectorFallsBackWhenPoolIsEmpty() throws {
+        let connector = NumberedGuestConnectionConnector()
+        let pooled = PooledGuestConnectionConnector(
+            base: connector,
+            capacity: 0,
+            refillDelaySeconds: 0.01
+        )
+        defer { pooled.closeIdleConnections() }
+
+        let connection = try pooled.connect()
+        defer { connection.close() }
+        XCTAssertEqual(connection.fileDescriptor, 1)
+    }
+
+    func testCapabilityProbeEnablesPoolForLazyGuestBridge() {
+        let connector = CapabilityResponseGuestConnectionConnector(response: """
+        HTTP/1.1 200 OK\r
+        Content-Type: application/json\r
+        Content-Length: 45\r
+        \r
+        {"lazy_upstream":true,"docker_ready_cache":true}
+
+        """)
+
+        XCTAssertTrue(GuestBridgeCapabilityProbe.supportsPooledConnections(connector: connector))
+    }
+
+    func testCapabilityProbeRejectsLegacyDockerForwarder() {
+        let connector = CapabilityResponseGuestConnectionConnector(response: """
+        HTTP/1.1 404 Not Found\r
+        Content-Type: application/json\r
+        Content-Length: 16\r
+        \r
+        {"message":"404"}
+
+        """)
+
+        XCTAssertFalse(GuestBridgeCapabilityProbe.supportsPooledConnections(connector: connector))
     }
 
     func testStartAndStopOwnsDockerSocketPath() throws {
@@ -119,6 +175,21 @@ final class DockerSocketBridgeTests: XCTestCase {
     private func shortID() -> String {
         String(UUID().uuidString.prefix(8))
     }
+
+    private func waitUntil(
+        timeoutSeconds: TimeInterval = 1,
+        intervalSeconds: TimeInterval = 0.01,
+        _ predicate: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if predicate() {
+                return true
+            }
+            Thread.sleep(forTimeInterval: intervalSeconds)
+        }
+        return predicate()
+    }
 }
 
 private final class FlakyGuestConnectionConnector: GuestConnectionConnector, @unchecked Sendable {
@@ -147,5 +218,50 @@ private final class FlakyGuestConnectionConnector: GuestConnectionConnector, @un
             throw ConjetError.unavailable("guest not ready")
         }
         return GuestConnection(fileDescriptor: -1) {}
+    }
+}
+
+private final class NumberedGuestConnectionConnector: GuestConnectionConnector, @unchecked Sendable {
+    private let lock = NSLock()
+    private var nextFileDescriptor: Int32 = 1
+
+    func connect() throws -> GuestConnection {
+        lock.lock()
+        let fileDescriptor = nextFileDescriptor
+        nextFileDescriptor += 1
+        lock.unlock()
+
+        return GuestConnection(fileDescriptor: fileDescriptor) {}
+    }
+}
+
+private final class CapabilityResponseGuestConnectionConnector: GuestConnectionConnector, @unchecked Sendable {
+    private let response: String
+
+    init(response: String) {
+        self.response = response
+    }
+
+    func connect() throws -> GuestConnection {
+        var fds = [Int32](repeating: -1, count: 2)
+        guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
+            throw ConjetError.socket("socketpair() failed")
+        }
+
+        let clientFD = fds[0]
+        let serverFD = fds[1]
+        let response = response
+        DispatchQueue.global(qos: .userInitiated).async {
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            _ = Darwin.read(serverFD, &buffer, buffer.count)
+            _ = response.withCString { pointer in
+                Darwin.write(serverFD, pointer, strlen(pointer))
+            }
+            Darwin.close(serverFD)
+        }
+
+        return GuestConnection(fileDescriptor: clientFD) {
+            Darwin.close(clientFD)
+        }
     }
 }

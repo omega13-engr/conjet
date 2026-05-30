@@ -165,6 +165,11 @@ public struct VMImageStore: Sendable {
         try data.write(to: paths.vmManifest, options: .atomic)
     }
 
+    public func expandDataDiskIfNeeded(sizeBytes: Int64) throws {
+        let manifest = try loadManifest()
+        try expandRawDiskIfNeeded(url: URL(fileURLWithPath: manifest.dataDiskPath), sizeBytes: sizeBytes)
+    }
+
     public func status(state: VMRunState = .stopped, message: String = "VM configured") -> VMRuntimeStatus {
         do {
             let manifest = try loadManifest()
@@ -592,6 +597,7 @@ public struct VMImageStore: Sendable {
 
     private func createRawDiskIfNeeded(url: URL, sizeBytes: Int64) throws {
         if FileManager.default.fileExists(atPath: url.path) {
+            try expandRawDiskIfNeeded(url: url, sizeBytes: sizeBytes)
             return
         }
         let fd = open(url.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
