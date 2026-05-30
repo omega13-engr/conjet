@@ -186,20 +186,23 @@ Observed progress on 2026-05-31:
   Linux storage, warm shared build substrates, and use the ConjetFS
   sync-to-volume path for edit/build loops. This is a filesystem and runtime
   topology strategy, not a package-manager-specific optimization.
-- A fresh five-iteration warm Conjet-vs-OrbStack matrix was written to
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-final.json`.
+- The process runner now captures child stdout/stderr through temporary files
+  instead of pipes. This avoids pipe descriptor failures and pipe backpressure
+  during long benchmark matrices with hundreds of Docker child processes.
+- A fresh 30-iteration warm Conjet-vs-OrbStack matrix was written to
+  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-30x-v3.json`.
   The gate report is
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-final-gate.md`.
+  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-30x-v3-gate.md`.
 - That gate passed every configured non-power workload against OrbStack. The
   current run uses interleaved measured samples by iteration, so the second
   runtime no longer gets a systematic host-cache ordering advantage:
   container start, image build, copy-heavy layers, npm, pnpm, Cargo, bind
   mounts, native volumes, named-volume IO, tmpfs IO, ConjetFS fast paths,
   hot-reload latency, and compose-up. Representative P50/P95 ratios were
-  `container-start=0.203/0.170`, `image-build=0.124/0.111`,
-  `copy-node-modules=0.067/0.069`, `npm-install=0.333/0.370`,
-  `pnpm-install=0.406/0.379`, `cargo-build=0.244/0.260`,
-  `hot-reload-fast-path=0.574/0.407`, and `compose-up=0.174/0.150`.
+  `container-start=0.239/0.225`, `image-build=0.128/0.119`,
+  `copy-node-modules=0.084/0.083`, `npm-install=0.333/0.386`,
+  `pnpm-install=0.399/0.416`, `cargo-build=0.212/0.236`,
+  `hot-reload-fast-path=0.547/0.404`, and `compose-up=0.181/0.172`.
 - The same interleaved harness exposed remaining tuned-Colima noise: the
   latest Colima full gate passed nearly all non-power rules, but raw
   `pnpm-install` and one `volume-pnpm-install` ratio still missed on small
