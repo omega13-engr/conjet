@@ -285,8 +285,12 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertEqual(result.runtime, "conjet")
         XCTAssertGreaterThanOrEqual(calls, 1)
         XCTAssertEqual(result.metrics["process_count_mean"], 2)
+        XCTAssertEqual(result.metrics["process_count_p99"], 2)
         XCTAssertEqual(result.metrics["cpu_percent_mean"], 2.0)
+        XCTAssertEqual(result.metrics["cpu_percent_p75"], 2.0)
+        XCTAssertEqual(result.metrics["cpu_percent_stddev"], 0)
         XCTAssertEqual(result.metrics["memory_percent_mean"] ?? 0, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(result.metrics["memory_percent_p99"] ?? 0, 0.6, accuracy: 0.0001)
     }
 
     func testPowerMetricsSamplerParsesPowerAndMatchedProcessEnergy() throws {
@@ -330,8 +334,12 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertEqual(result.metrics["powermetrics_sample_count"], 2)
         XCTAssertEqual(result.metrics["matched_process_lines"], 2)
         XCTAssertEqual(result.metrics["cpu_power_mw_mean"] ?? 0, 100, accuracy: 0.0001)
+        XCTAssertEqual(result.metrics["cpu_power_mw_p75"] ?? 0, 120, accuracy: 0.0001)
+        XCTAssertEqual(result.metrics["cpu_power_mw_stddev"] ?? 0, 20, accuracy: 0.0001)
         XCTAssertEqual(result.metrics["combined_power_mw_mean"] ?? 0, 123, accuracy: 0.0001)
+        XCTAssertEqual(result.metrics["combined_power_mw_p99"] ?? 0, 155, accuracy: 0.0001)
         XCTAssertEqual(result.metrics["matched_energy_impact_mean"] ?? 0, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(result.metrics["matched_energy_impact_p50"] ?? 0, 0.75, accuracy: 0.0001)
         XCTAssertEqual(result.metrics["matched_wakeups_per_second_mean"] ?? 0, 3, accuracy: 0.0001)
         XCTAssertEqual(result.metrics["matched_idle_wakeups_per_second_mean"] ?? 0, 1.5, accuracy: 0.0001)
     }

@@ -137,8 +137,12 @@ public struct PowerMetricsSampler {
     private static func addSummary(prefix: String, values: [Double], to metrics: inout [String: Double]) {
         guard !values.isEmpty else { return }
         metrics["\(prefix)_mean"] = mean(values)
+        metrics["\(prefix)_p50"] = percentile(values, 0.50)
+        metrics["\(prefix)_p75"] = percentile(values, 0.75)
         metrics["\(prefix)_p95"] = percentile(values, 0.95)
+        metrics["\(prefix)_p99"] = percentile(values, 0.99)
         metrics["\(prefix)_max"] = values.max() ?? 0
+        metrics["\(prefix)_stddev"] = standardDeviation(values)
     }
 
     private static func value(afterLinePrefix prefix: String, in line: String) -> Double? {
@@ -182,6 +186,16 @@ public struct PowerMetricsSampler {
         let sorted = values.sorted()
         let index = min(sorted.count - 1, max(0, Int((Double(sorted.count - 1) * percentile).rounded(.up))))
         return sorted[index]
+    }
+
+    private static func standardDeviation(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let average = mean(values)
+        let variance = values.reduce(0) { partial, value in
+            let delta = value - average
+            return partial + delta * delta
+        } / Double(values.count)
+        return sqrt(variance)
     }
 
     private func tail(_ text: String, limit: Int = 4096) -> String {
