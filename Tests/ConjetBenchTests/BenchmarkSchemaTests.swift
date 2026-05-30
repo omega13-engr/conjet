@@ -653,6 +653,48 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.artifacts.gateReport))
     }
 
+    func testBenchmarkReleaseGateRunnerSkipsDockerCollectorWhenOnlyIdleIsSelected() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-release-gate-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let options = BenchmarkReleaseGateOptions(
+            contexts: ["conjet", "orbstack"],
+            candidateRuntime: "conjet",
+            baselineRuntimes: ["orbstack"],
+            iterations: 1,
+            minimumSamples: 1,
+            workloads: ["idle-resource-sample"],
+            includeIdle: true,
+            includePower: false,
+            idleSeconds: 1
+        )
+        let runner = BenchmarkReleaseGateRunner(
+            options: options,
+            dockerCollector: { _, _, _, _, _ in
+                XCTFail("Docker collector should not run for an idle-only release gate")
+                return []
+            },
+            idleCollector: { runtime, _ in
+                benchmarkResult(
+                    workload: "idle-resource-sample",
+                    runtime: runtime,
+                    duration: 1,
+                    metrics: ["cpu_percent_mean": runtime == "conjet" ? 0.1 : 0.5]
+                )
+            }
+        )
+
+        let result = try runner.run(outputDirectory: directory)
+
+        XCTAssertTrue(result.gateReport.passed)
+        XCTAssertEqual(result.gateReport.comparisons.map(\.workload), ["idle-resource-sample"])
+        let dockerResults = try BenchmarkClaimGate.loadJSONReports(urls: [URL(fileURLWithPath: result.artifacts.dockerReport)])
+        XCTAssertEqual(dockerResults.count, 0)
+        let allResults = try BenchmarkClaimGate.loadJSONReports(urls: [URL(fileURLWithPath: result.artifacts.allResultsReport)])
+        XCTAssertEqual(allResults.count, 2)
+    }
+
     func testBenchmarkReleaseGateSelectsMappedRulesFromEitherWorkload() throws {
         let conjetFSOptions = BenchmarkReleaseGateOptions(
             workloads: ["conjetfs-hot-reload"],

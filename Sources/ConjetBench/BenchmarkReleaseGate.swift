@@ -232,13 +232,19 @@ public struct BenchmarkReleaseGateRunner {
         var powerReportPaths: [String] = []
 
         let dockerWorkDirectory = workDirectory.appendingPathComponent("docker", isDirectory: true)
-        let dockerResults = try dockerCollector(
-            options.contexts,
-            options.iterations,
-            options.warmup,
-            options.effectiveDockerWorkloads,
-            dockerWorkDirectory
-        ).map(addSamplePhaseIfMissing)
+        let dockerWorkloads = options.effectiveDockerWorkloads
+        let dockerResults: [BenchmarkResult]
+        if dockerWorkloads.isEmpty {
+            dockerResults = []
+        } else {
+            dockerResults = try dockerCollector(
+                options.contexts,
+                options.iterations,
+                options.warmup,
+                dockerWorkloads,
+                dockerWorkDirectory
+            ).map(addSamplePhaseIfMissing)
+        }
         allResults.append(contentsOf: dockerResults)
         let dockerReport = outputDirectory.appendingPathComponent("docker.json")
         try writeJSON(dockerResults, to: dockerReport)
