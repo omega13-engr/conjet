@@ -1261,7 +1261,7 @@ public struct DockerBenchmarkSuite {
             }
             Thread.sleep(forTimeInterval: Self.hotReloadWaitSubscribeDelaySeconds)
             detectionTimer.start()
-            try token.write(to: hotFile, atomically: true, encoding: .utf8)
+            try token.write(to: hotFile, atomically: false, encoding: .utf8)
 
             guard waitSemaphore.wait(timeout: DispatchTime.now() + .seconds(6)) == .success else {
                 exitCode = 124
@@ -1877,13 +1877,13 @@ public struct DockerBenchmarkSuite {
         watch(hotPath);
         fs.writeFileSync(readyPath, 'ready\\n');
         check();
+        setInterval(check, 5);
         setTimeout(() => {
           if (!done) {
             console.error('hot-reload-timeout');
             process.exit(124);
           }
         }, 10000);
-        setInterval(() => {}, 1000);
         """
     }
 

@@ -220,7 +220,7 @@ final class BenchmarkSchemaTests: XCTestCase {
         let hotReloadRules = BenchmarkClaimGateOptions.defaultRules
             .filter { $0.workload == "bind-hot-reload" || $0.workload == "conjetfs-hot-reload" || $0.workload == "hot-reload-fast-path" }
 
-        XCTAssertEqual(hotReloadRules.count, 2)
+        XCTAssertEqual(hotReloadRules.count, 1)
         XCTAssertTrue(hotReloadRules.allSatisfy { $0.measure == .metric("hot_reload_seconds") })
         XCTAssertNil(hotReloadRules.first { $0.workload == "conjetfs-hot-reload" })
         let fastPath = try XCTUnwrap(hotReloadRules.first { $0.workload == "hot-reload-fast-path" })

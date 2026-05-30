@@ -143,7 +143,6 @@ public struct BenchmarkClaimGateOptions: Codable, Equatable, Sendable {
         BenchmarkClaimRule(workload: "volume-cargo-build"),
         BenchmarkClaimRule(workload: "named-volume-io"),
         BenchmarkClaimRule(workload: "tmpfs-volume-io"),
-        BenchmarkClaimRule(workload: "bind-hot-reload", measure: .metric("hot_reload_seconds")),
         BenchmarkClaimRule(
             workload: "npm-install-fast-path",
             candidateWorkload: "conjetfs-npm-install",

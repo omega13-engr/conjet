@@ -261,6 +261,7 @@ public struct BenchmarkReleaseGateRunner {
             for runtime in options.contexts {
                 let runtimeResults = try collectRuntimeSamples(
                     collector: idleCollector,
+                    workload: "idle-resource-sample",
                     runtime: runtime,
                     runTraceID: traceID
                 )
@@ -275,6 +276,7 @@ public struct BenchmarkReleaseGateRunner {
             for runtime in options.contexts {
                 let runtimeResults = try collectRuntimeSamples(
                     collector: powerCollector,
+                    workload: "idle-power-sample",
                     runtime: runtime,
                     runTraceID: traceID
                 )
@@ -345,15 +347,59 @@ public struct BenchmarkReleaseGateRunner {
 
     private func collectRuntimeSamples(
         collector: RuntimeCollector,
+        workload: String,
         runtime: String,
         runTraceID: String
     ) throws -> [BenchmarkResult] {
-        try (1...options.iterations).map { iteration in
-            var result = try collector(runtime, iteration)
-            result.metrics["iteration"] = Double(iteration)
-            result = addSamplePhaseIfMissing(result)
-            return attachTraceID(result, runTraceID: runTraceID)
+        (1...options.iterations).map { iteration in
+            let startedAt = Date()
+            do {
+                var result = try collector(runtime, iteration)
+                result.metrics["iteration"] = Double(iteration)
+                result = addSamplePhaseIfMissing(result)
+                return attachTraceID(result, runTraceID: runTraceID)
+            } catch {
+                return attachTraceID(runtimeFailureResult(
+                    workload: workload,
+                    runtime: runtime,
+                    iteration: iteration,
+                    startedAt: startedAt,
+                    error: error
+                ), runTraceID: runTraceID)
+            }
         }
+    }
+
+    private func runtimeFailureResult(
+        workload: String,
+        runtime: String,
+        iteration: Int,
+        startedAt: Date,
+        error: Error
+    ) -> BenchmarkResult {
+        let exitCode: Int32
+        let stderr: String
+        if case let ConjetError.processFailed(_, failedExitCode, failedStderr) = error {
+            exitCode = failedExitCode
+            stderr = failedStderr
+        } else {
+            exitCode = 1
+            stderr = String(describing: error)
+        }
+        return addSamplePhaseIfMissing(BenchmarkResult(
+            workload: workload,
+            runtime: runtime,
+            command: [],
+            startedAt: startedAt,
+            durationSeconds: Date().timeIntervalSince(startedAt),
+            exitCode: exitCode,
+            metrics: [
+                "iteration": Double(iteration),
+                "collector_error": 1
+            ],
+            machine: MachineProfiler.capture(),
+            stderrTail: stderr
+        ))
     }
 
     private func addSamplePhaseIfMissing(_ result: BenchmarkResult) -> BenchmarkResult {

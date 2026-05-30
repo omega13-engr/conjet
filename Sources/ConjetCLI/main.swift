@@ -638,19 +638,14 @@ struct ConjetCLI {
             let samplePhase = try benchmarkSamplePhase(from: value(after: "--phase", in: args), default: .any)
             let workloads = value(after: "--workloads", in: args).map(csvList)
             let results = try BenchmarkClaimGate.loadJSONReports(urls: reportURLs)
-            let rules: [BenchmarkClaimRule]
-            if let workloads {
-                rules = BenchmarkReleaseGateOptions(
-                    candidateRuntime: candidate,
-                    baselineRuntimes: baselines,
-                    minimumSamples: minSamples,
-                    workloads: workloads,
-                    includeIdle: !args.contains("--no-idle"),
-                    includePower: !args.contains("--no-power")
-                ).effectiveGateRules
-            } else {
-                rules = BenchmarkClaimGateOptions.defaultRules
-            }
+            let rules = BenchmarkReleaseGateOptions(
+                candidateRuntime: candidate,
+                baselineRuntimes: baselines,
+                minimumSamples: minSamples,
+                workloads: workloads ?? DockerBenchmarkSuite.defaultWorkloads,
+                includeIdle: !args.contains("--no-idle"),
+                includePower: !args.contains("--no-power")
+            ).effectiveGateRules
             let report = BenchmarkClaimGate.evaluate(
                 results: results,
                 options: BenchmarkClaimGateOptions(
