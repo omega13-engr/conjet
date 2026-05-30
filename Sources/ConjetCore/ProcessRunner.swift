@@ -101,6 +101,7 @@ public enum ProcessRunner {
         }
 
         var timedOut = false
+        var processExited = false
         if let timeoutSeconds {
             let timeout = max(0.1, timeoutSeconds)
             if waitSemaphore.wait(timeout: .now() + timeout) == .timedOut {
@@ -110,22 +111,29 @@ public enum ProcessRunner {
                     #if os(macOS) || os(Linux)
                     kill(process.processIdentifier, SIGKILL)
                     #endif
-                    waitSemaphore.wait()
+                    processExited = waitSemaphore.wait(timeout: .now() + 2) == .success
+                } else {
+                    processExited = true
                 }
+            } else {
+                processExited = true
             }
         } else {
             waitSemaphore.wait()
+            processExited = true
         }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
-        let remainingStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        if !remainingStdout.isEmpty {
-            stdoutData.append(remainingStdout)
-        }
-        let remainingStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        if !remainingStderr.isEmpty {
-            stderrData.append(remainingStderr)
+        if processExited {
+            let remainingStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            if !remainingStdout.isEmpty {
+                stdoutData.append(remainingStdout)
+            }
+            let remainingStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            if !remainingStderr.isEmpty {
+                stderrData.append(remainingStderr)
+            }
         }
 
         let stdout = String(data: stdoutData.data(), encoding: .utf8) ?? ""
