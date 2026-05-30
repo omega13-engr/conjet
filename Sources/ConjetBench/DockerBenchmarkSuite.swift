@@ -46,6 +46,7 @@ private final class BenchmarkStopwatchBox: @unchecked Sendable {
 
 public struct DockerBenchmarkSuite {
     private static let hotReloadWaitSubscribeDelaySeconds: TimeInterval = 0.02
+    private static let pnpmBenchmarkImage = "conjet-bench-node-pnpm:9.15.9"
 
     public static let defaultWorkloads = [
         "docker-version",
@@ -145,6 +146,9 @@ public struct DockerBenchmarkSuite {
         for context in contexts {
             for image in warmupImages(for: enabledWorkloads) {
                 _ = try? runDocker(context: context, arguments: ["pull", image])
+            }
+            if requiresPNPMBenchmarkImage(enabledWorkloads) {
+                try ensurePNPMBenchmarkImage(context: context, workDirectory: workDirectory)
             }
             if warmup {
                 try warmupConjetPackageCaches(
@@ -293,7 +297,7 @@ public struct DockerBenchmarkSuite {
                             "type=bind,source=\(bindPNPMDirectory.path),target=/app",
                             "-w",
                             "/app",
-                            "node:22-alpine",
+                            Self.pnpmBenchmarkImage,
                             "sh",
                             "-c",
                             pnpmInstallCommand() + " && test -d node_modules/lodash"
@@ -340,7 +344,7 @@ public struct DockerBenchmarkSuite {
                             "type=volume,source=\(volumeName),target=/app",
                             "-w",
                             "/app",
-                            "node:22-alpine",
+                            Self.pnpmBenchmarkImage,
                             "sh",
                             "-c",
                             pnpmVolumeInstallScript()
@@ -422,7 +426,7 @@ public struct DockerBenchmarkSuite {
                         iteration: iteration,
                         projectDirectory: conjetFSPNPMDirectory,
                         homeDirectory: conjetFSHome,
-                        image: "node:22-alpine",
+                        image: Self.pnpmBenchmarkImage,
                         shellCommand: pnpmInstallCommand(guestPath: "/workspace") + " && test -d node_modules/lodash",
                         usePackageCaches: warmup,
                         resetProjectVolume: !warmup,
@@ -556,6 +560,46 @@ public struct DockerBenchmarkSuite {
         return ["build", "--no-cache"] + arguments.dropFirst()
     }
 
+    private func requiresPNPMBenchmarkImage(_ workloads: Set<String>) -> Bool {
+        !workloads.isDisjoint(with: [
+            "pnpm-install",
+            "bind-pnpm-install",
+            "volume-pnpm-install",
+            "conjetfs-pnpm-install"
+        ])
+    }
+
+    private func ensurePNPMBenchmarkImage(context: String, workDirectory: URL) throws {
+        let imageDirectory = workDirectory
+            .appendingPathComponent("pnpm-benchmark-image", isDirectory: true)
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        let dockerfile = #"""
+        FROM node:22-alpine
+        ENV COREPACK_ENABLE_PROJECT_SPEC=0
+        RUN corepack disable >/dev/null 2>&1 || true \
+            && npm install -g pnpm@9.15.9 >/dev/null \
+            && pnpm --version >/dev/null
+        """#
+        try dockerfile.write(
+            to: imageDirectory.appendingPathComponent("Dockerfile"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let result = try runDocker(context: context, arguments: [
+            "build",
+            "-t",
+            Self.pnpmBenchmarkImage,
+            imageDirectory.path
+        ])
+        if !result.succeeded {
+            throw ConjetError.processFailed(
+                executable: dockerExecutable,
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
+    }
+
     private func commonMetrics(_ metrics: [String: Double], iteration: Int) -> [String: Double] {
         var result = metrics
         result["iteration"] = Double(iteration)
@@ -611,7 +655,7 @@ public struct DockerBenchmarkSuite {
                     "type=bind,source=\(bindPNPMDirectory.path),target=/app",
                     "-w",
                     "/app",
-                    "node:22-alpine",
+                    Self.pnpmBenchmarkImage,
                     "sh",
                     "-c",
                     pnpmInstallCommand() + " && test -d node_modules/lodash"
@@ -647,7 +691,7 @@ public struct DockerBenchmarkSuite {
                 iteration: 0,
                 projectDirectory: conjetFSPNPMDirectory,
                 homeDirectory: homeDirectory,
-                image: "node:22-alpine",
+                image: Self.pnpmBenchmarkImage,
                 shellCommand: pnpmInstallCommand(guestPath: "/workspace") + " && test -d node_modules/lodash",
                 usePackageCaches: true,
                 resetProjectVolume: true,
@@ -727,6 +771,14 @@ public struct DockerBenchmarkSuite {
             let project = try fs.loadOrInitializeProject()
             if resetProjectVolume {
                 _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", project.dockerVolume])
+                let createVolume = try runDocker(context: context, arguments: ["volume", "create", project.dockerVolume])
+                if !createVolume.succeeded {
+                    throw ConjetError.processFailed(
+                        executable: dockerExecutable,
+                        exitCode: createVolume.exitCode,
+                        stderr: createVolume.stderr
+                    )
+                }
             }
             startedAt = Date()
             let syncPrepareStartedAt = Date()
@@ -1403,7 +1455,7 @@ public struct DockerBenchmarkSuite {
         try preparePNPMProject(at: directory)
         let dockerfile = #"""
         # syntax=docker/dockerfile:1.7
-        FROM node:22-alpine
+        FROM \#(Self.pnpmBenchmarkImage)
         WORKDIR /app
         COPY package.json ./
         ARG CONJET_BENCH_ITERATION=0
@@ -1743,7 +1795,7 @@ public struct DockerBenchmarkSuite {
     }
 
     private func pnpmBootstrapCommand() -> String {
-        "(corepack enable >/dev/null 2>&1 && corepack prepare pnpm@9.15.9 --activate >/dev/null 2>&1 || npm install -g pnpm@9.15.9 >/dev/null)"
+        "(command -v pnpm >/dev/null 2>&1 || (corepack enable >/dev/null 2>&1 && corepack prepare pnpm@9.15.9 --activate >/dev/null 2>&1 || npm install -g pnpm@9.15.9 >/dev/null))"
     }
 
     private func packageTopologyShellPrefix(manager: ConjetPackageManager, guestPath: String) -> String {
