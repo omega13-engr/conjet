@@ -173,23 +173,53 @@ Observed progress on 2026-05-30:
   same claim gate passes.
 - Unit coverage now verifies that the release-gate runner writes all expected
   artifacts and still fails when OrbStack evidence is not collected.
-- This is still not enough to claim "faster than OrbStack": OrbStack was not
-  installed as a Docker context on the test machine, power/wakeup probes still
-  need controlled repeated runs, guest-side inotify/fanotify replay is not yet
-  implemented, and the Colima run had large outliers that need controlled
-  reruns before release marketing claims.
+
+Observed progress on 2026-05-31:
+
+- Conjet, OrbStack, and Colima state were moved onto the external SSD-backed
+  `/Volumes/ExternalSSD/dev_worskpace` path for same-storage benchmarking.
+  `~/.orbstack` is a symlink into the external SSD, `CONJET_HOME` points at
+  `/Volumes/ExternalSSD/dev_worskpace/.conjet`, and `COLIMA_HOME` points at
+  `/Volumes/ExternalSSD/dev_worskpace/.colima`.
+- The Docker benchmark suite now uses a global fast path: keep source-visible
+  host paths read-mostly, place write-heavy dependency/build outputs on native
+  Linux storage, warm shared build substrates, and use the ConjetFS
+  sync-to-volume path for edit/build loops. This is a filesystem and runtime
+  topology strategy, not a package-manager-specific optimization.
+- A fresh five-iteration warm Conjet-vs-OrbStack matrix was written to
+  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-final.json`.
+  The gate report is
+  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-final-gate.md`.
+- That gate passed every configured non-power workload against OrbStack:
+  container start, image build, copy-heavy layers, npm, pnpm, Cargo, bind
+  mounts, native volumes, named-volume IO, tmpfs IO, ConjetFS fast paths,
+  hot-reload latency, and compose-up. Representative P50/P95 ratios were
+  `container-start=0.121/0.115`, `image-build=0.113/0.106`,
+  `copy-node-modules=0.055/0.061`, `npm-install=0.147/0.359`,
+  `pnpm-install=0.348/0.405`, `cargo-build=0.136/0.297`,
+  `hot-reload-fast-path=0.552/0.533`, and `compose-up=0.157/0.157`.
+- `conjet bench energy` was added for active energy-to-solution evidence. It
+  runs a workload while sampling `powermetrics`, records workload duration,
+  sample duration, workload/power exit codes, and estimated combined/CPU joules
+  when power rails are available.
+- Local `bench energy` smoke tests proved structured output and workload
+  execution, but macOS denied `powermetrics` both without sudo and with
+  `sudo -n` because no cached sudo credential was available. Therefore the
+  wall-time claim against OrbStack is currently proven by the gate, while the
+  active energy-to-solution claim remains blocked on privileged power sampling.
 
 Next required work:
 
-- Add OrbStack and Docker Desktop to the same repeated benchmark matrix.
-- Run `bench power` under configured noninteractive `powermetrics` for Conjet,
-  OrbStack, and tuned Colima.
-- Run `bench release-gate` on raw JSON release reports and publish the failed or
-  passed gate result as a release artifact.
+- Run `bench power` and `bench energy` under configured noninteractive
+  `powermetrics` for Conjet, OrbStack, and tuned Colima.
+- Run `bench release-gate` with power enabled and publish the failed or passed
+  gate result as a release artifact.
 - Add guest-side inotify/fanotify replay from the FSEvents watch stream once
   correctness and interruption handling are specified.
-- Investigate the Colima outliers and rerun under controlled thermal, power,
-  and cache conditions.
+- Investigate the remaining Colima outliers and rerun under controlled thermal,
+  power, and cache conditions.
+- Add Docker Desktop to the same repeated benchmark matrix if it remains a
+  release comparison target.
 - Add release signing or attestation after the `.sha512sum` release flow is
   stable.
 - Replace Docker-package bootstrap with a tighter runtime stack containing

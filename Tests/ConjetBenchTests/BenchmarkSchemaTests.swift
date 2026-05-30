@@ -370,6 +370,22 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(result.stderrTail.contains("password is required"))
     }
 
+    func testActivePowerSamplerComputesEnergyToSolution() throws {
+        let metrics = ActivePowerSampler.energyMetrics(
+            powerMetrics: [
+                "combined_power_mw_mean": 500,
+                "cpu_power_mw_mean": 300
+            ],
+            workloadDurationSeconds: 2,
+            powerDurationSeconds: 3
+        )
+
+        XCTAssertEqual(metrics["workload_duration_seconds"] ?? 0, 2, accuracy: 0.0001)
+        XCTAssertEqual(metrics["power_sample_duration_seconds"] ?? 0, 3, accuracy: 0.0001)
+        XCTAssertEqual(metrics["energy_to_solution_joules_estimate"] ?? 0, 1.0, accuracy: 0.0001)
+        XCTAssertEqual(metrics["cpu_energy_to_solution_joules_estimate"] ?? 0, 0.6, accuracy: 0.0001)
+    }
+
     func testBenchmarkClaimGatePassesWhenCandidateBeatsAllBaselines() throws {
         let rules = [
             BenchmarkClaimRule(workload: "copy-node-modules"),

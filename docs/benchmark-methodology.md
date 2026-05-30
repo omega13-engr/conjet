@@ -59,6 +59,24 @@ not hang on a password prompt. Use `--no-sudo` only for local parser/debug
 checks. A nonzero exit is kept as a benchmark result and must be published with
 the report; it means power evidence is missing for that runtime.
 
+Active energy-to-solution sampling wraps a real workload:
+
+```sh
+conjet bench energy \
+  --runtime conjet \
+  --workload compose-up-energy \
+  --seconds 120 \
+  --interval 1 \
+  --output bench/reports/energy-conjet.json \
+  -- docker --context conjet compose -f compose.yaml up --build --abort-on-container-exit
+```
+
+Run the same command shape for OrbStack and tuned Colima. The workload command
+must appear after `--`; any flags after that separator belong to the workload,
+not the Conjet benchmark command. The result records workload duration, sampled
+power duration, powermetrics exit code, workload exit code, and estimated
+combined/CPU joules when `powermetrics` returns power rails.
+
 Before any faster-than-OrbStack release claim, run the release-gate
 orchestrator:
 

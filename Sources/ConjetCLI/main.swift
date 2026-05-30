@@ -618,6 +618,48 @@ struct ConjetCLI {
                     print("  stderr: \(result.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines))")
                 }
             }
+        case "energy", "active-power":
+            let optionArgs = argsBeforeDoubleDash(args)
+            let runtime = value(after: "--runtime", in: optionArgs) ?? "conjet"
+            let workload = value(after: "--workload", in: optionArgs) ?? "active-energy-sample"
+            let processPattern = value(after: "--process", in: optionArgs) ?? defaultIdleProcessPattern(runtime: runtime)
+            let seconds = value(after: "--seconds", in: optionArgs).flatMap(Double.init) ?? 60
+            let minSeconds = value(after: "--min-seconds", in: optionArgs).flatMap(Double.init) ?? min(2, seconds)
+            let interval = value(after: "--interval", in: optionArgs).flatMap(Double.init) ?? 1
+            let samplers = value(after: "--samplers", in: optionArgs) ?? "cpu_power,gpu_power,ane_power,tasks"
+            let output = value(after: "--output", in: optionArgs)
+            let command = try commandAfterDoubleDash(
+                in: args,
+                usage: "usage: conjet bench energy [--runtime NAME] [--workload NAME] [--process REGEX] [--seconds N] [--min-seconds N] [--interval N] [--output PATH] [--no-sudo] -- COMMAND..."
+            )
+            let result = try ActivePowerSampler(
+                runtime: runtime,
+                workloadName: workload,
+                processPattern: processPattern,
+                maxDurationSeconds: seconds,
+                minSampleSeconds: minSeconds,
+                intervalSeconds: interval,
+                samplers: samplers,
+                useSudo: !optionArgs.contains("--no-sudo")
+            ).run(executable: "/usr/bin/env", arguments: command)
+            if let output {
+                try writeBenchmarkResults([result], to: URL(fileURLWithPath: output), markdown: markdown)
+            }
+            if json {
+                print(try ConjetJSON.string(result))
+            } else if markdown {
+                print(BenchmarkMarkdownReport.render(results: [result], title: "Conjet Active Energy Benchmark"))
+            } else {
+                print("\(runtime) \(workload): \(String(format: "%.3f", result.durationSeconds))s")
+                print("  exit: \(result.exitCode)")
+                print("  process pattern: \(processPattern)")
+                print("  workload duration: \(String(format: "%.3f", result.metrics["workload_duration_seconds"] ?? 0))s")
+                print("  combined power mean: \(String(format: "%.3f", result.metrics["combined_power_mw_mean"] ?? 0)) mW")
+                print("  energy to solution: \(String(format: "%.3f", result.metrics["energy_to_solution_joules_estimate"] ?? 0)) J")
+                if result.exitCode != 0, !result.stderrTail.isEmpty {
+                    print("  stderr: \(result.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines))")
+                }
+            }
         case "release-gate":
             try benchReleaseGate(args: args, json: json, markdown: markdown)
         case "gate":
@@ -2058,6 +2100,24 @@ struct ConjetCLI {
         return args[index + 1]
     }
 
+    private static func argsBeforeDoubleDash(_ args: [String]) -> [String] {
+        guard let separator = args.firstIndex(of: "--") else {
+            return args
+        }
+        return Array(args[..<separator])
+    }
+
+    private static func commandAfterDoubleDash(in args: [String], usage: String) throws -> [String] {
+        guard let separator = args.firstIndex(of: "--") else {
+            throw ConjetError.invalidArgument(usage)
+        }
+        let command = Array(args[(separator + 1)...])
+        guard !command.isEmpty else {
+            throw ConjetError.invalidArgument(usage)
+        }
+        return command
+    }
+
     private static func printHelp() {
         print(
             """
@@ -2092,6 +2152,7 @@ struct ConjetCLI {
               conjet bench profile [--json]
               conjet bench idle [--runtime NAME] [--process REGEX] [--seconds N] [--interval N] [--output PATH] [--json|--markdown]
               conjet bench power [--runtime NAME] [--process REGEX] [--seconds N] [--interval N] [--output PATH] [--no-sudo] [--json|--markdown]
+              conjet bench energy [--runtime NAME] [--workload NAME] [--process REGEX] [--seconds N] [--min-seconds N] [--interval N] [--output PATH] [--no-sudo] [--json|--markdown] -- COMMAND...
               conjet bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N] [--phase any|cold|warm] [--workloads NAME,...] [--no-idle] [--no-power] [--json|--markdown]
               conjet bench release-gate [--contexts conjet,orbstack,colima] [--iterations N] [--phase cold|warm] [--warmup] [--workloads NAME,...] [--command-timeout N] [--output-dir DIR] [--seconds N] [--no-sudo] [--json|--markdown]
               conjet bench small-files [--files N] [--bytes N] [--dir PATH] [--json|--markdown]
