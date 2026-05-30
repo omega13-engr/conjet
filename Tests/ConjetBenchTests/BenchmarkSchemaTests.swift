@@ -398,6 +398,24 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(report.comparisons.allSatisfy(\.passed))
     }
 
+    func testBenchmarkClaimGateTreatsEqualZeroMetricsAsTie() throws {
+        let report = BenchmarkClaimGate.evaluate(
+            results:
+                makeResults(workload: "idle-resource-sample", runtime: "conjet", metric: "cpu_percent_mean", values: [0, 0, 0]) +
+                makeResults(workload: "idle-resource-sample", runtime: "orbstack", metric: "cpu_percent_mean", values: [0, 0, 0]),
+            options: BenchmarkClaimGateOptions(
+                candidateRuntime: "conjet",
+                baselineRuntimes: ["orbstack"],
+                minimumSamples: 3,
+                rules: [BenchmarkClaimRule(workload: "idle-resource-sample", measure: .metric("cpu_percent_mean"))]
+            )
+        )
+
+        XCTAssertTrue(report.passed)
+        XCTAssertEqual(report.comparisons.first?.p50Ratio, 1)
+        XCTAssertEqual(report.comparisons.first?.p95Ratio, 1)
+    }
+
     func testBenchmarkClaimGateFailsWhenOrbStackEvidenceIsMissing() throws {
         let report = BenchmarkClaimGate.evaluate(
             results: makeResults(workload: "copy-node-modules", runtime: "conjet", values: [1.0, 1.1, 1.2])

@@ -594,6 +594,13 @@ public struct ConjetFS {
         var shellPrelude = "mkdir -p \(shellQuote(plan.project.guestPath))"
         var staging: URL?
         if !plan.changedFiles.isEmpty,
+           plan.removedFiles.isEmpty,
+           let inlinePrelude = try inlineTarExtractPrelude(
+               entries: plan.changedFiles,
+               guestPath: project.guestPath
+           ) {
+            shellPrelude = inlinePrelude
+        } else if !plan.changedFiles.isEmpty,
            try copyEntriesToVolumeTarStream(
                plan.changedFiles,
                volume: project.dockerVolume,
@@ -916,6 +923,28 @@ public struct ConjetFS {
             archive
         )
         return result.succeeded
+    }
+
+    private func inlineTarExtractPrelude(
+        entries: [ConjetFSFileEntry],
+        guestPath: String
+    ) throws -> String? {
+        guard !entries.isEmpty else { return nil }
+        let maxInlineFiles = 16
+        let maxInlineArchiveBytes = 64 * 1024
+        guard entries.count <= maxInlineFiles,
+              let archive = try makeTarArchive(entries: entries),
+              archive.count <= maxInlineArchiveBytes else {
+            return nil
+        }
+
+        let encoded = archive.base64EncodedString(options: [.lineLength76Characters])
+        return """
+        mkdir -p \(shellQuote(guestPath)) && tmp="${TMPDIR:-/tmp}/conjetfs-sync-$$.tar.b64" && cat > "$tmp" <<'CONJETFS_TAR'
+        \(encoded)
+        CONJETFS_TAR
+        base64 -d < "$tmp" | tar -xpf - -C \(shellQuote(guestPath)); conjetfs_status=$?; rm -f "$tmp"; test "$conjetfs_status" -eq 0
+        """
     }
 
     private func makeTarArchive(entries: [ConjetFSFileEntry]) throws -> Data? {

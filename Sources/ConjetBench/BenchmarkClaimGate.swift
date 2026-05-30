@@ -519,7 +519,10 @@ public enum BenchmarkClaimGate {
     }
 
     private static func ratio(_ candidate: Double?, _ baseline: Double?) -> Double? {
-        guard let candidate, let baseline, baseline > 0 else { return nil }
+        guard let candidate, let baseline else { return nil }
+        if baseline == 0 {
+            return candidate == 0 ? 1 : nil
+        }
         return candidate / baseline
     }
 

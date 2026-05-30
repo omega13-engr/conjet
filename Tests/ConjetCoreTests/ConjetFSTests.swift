@@ -253,6 +253,40 @@ final class ConjetFSTests: XCTestCase {
         })
     }
 
+    func testWithSyncMountedRunFusesSmallSyncIntoWorkloadCommand() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try createProjectFiles(root: root)
+
+        let runner = FakeConjetFSDockerRunner()
+        let fs = ConjetFS(
+            projectRoot: root,
+            paths: ConjetPaths(home: root.appendingPathComponent(".home")),
+            dockerContext: "conjet",
+            runner: runner.run,
+            inputRunner: runner.runWithInput
+        )
+        let project = try fs.initializeProject()
+        var prelude = ""
+
+        let result = try fs.withSyncMountedRun(project: project) { preparation in
+            prelude = preparation.shellPrelude
+            return ProcessResult(
+                executable: "docker",
+                arguments: ["run"] + preparation.dockerMountArguments,
+                exitCode: 0,
+                stdout: "ok\n",
+                stderr: ""
+            )
+        }
+
+        XCTAssertEqual(result.sync.changedFiles, result.sync.includedFiles)
+        XCTAssertEqual(runner.tarStreamCopyCommandCount, 0)
+        XCTAssertTrue(prelude.contains("CONJETFS_TAR"))
+        XCTAssertTrue(prelude.contains("base64 -d"))
+        XCTAssertTrue(prelude.contains("tar -xpf - -C '/workspace'"))
+    }
+
     func testExportCopiesExplicitPathsFromProjectVolume() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

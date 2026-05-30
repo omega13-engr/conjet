@@ -44,6 +44,13 @@ private final class BenchmarkStopwatchBox: @unchecked Sendable {
     }
 }
 
+private struct BindNativeOverlayPlan {
+    var mountArguments: [String]
+    var volumeNames: [String]
+
+    static let empty = BindNativeOverlayPlan(mountArguments: [], volumeNames: [])
+}
+
 public struct DockerBenchmarkSuite {
     private static let hotReloadWaitSubscribeDelaySeconds: TimeInterval = 0.02
     private static let pnpmBenchmarkImage = "conjet-bench-node-pnpm:9.15.9"
@@ -163,6 +170,13 @@ public struct DockerBenchmarkSuite {
             if requiresPNPMBenchmarkImage(enabledWorkloads) {
                 try ensurePNPMBenchmarkImage(context: context, workDirectory: workDirectory)
             }
+            if requiresBuildKitWarmup(enabledWorkloads) {
+                try warmupBuildKit(
+                    context: context,
+                    workDirectory: workDirectory,
+                    images: buildKitWarmupImages(for: enabledWorkloads)
+                )
+            }
             if warmup {
                 try warmupConjetPackageCaches(
                     context: context,
@@ -277,6 +291,16 @@ public struct DockerBenchmarkSuite {
 
                 if enabledWorkloads.contains("bind-npm-install") {
                     try resetNPMInstallArtifacts(at: bindNPMDirectory, preserveCaches: warmup)
+                    let overlay = bindNativeOverlayPlan(
+                        context: context,
+                        workload: "bind-npm-install",
+                        iteration: iteration,
+                        targets: [
+                            ("deps", "/app/node_modules")
+                        ]
+                    )
+                    removeDockerVolumes(context: context, names: overlay.volumeNames)
+                    defer { removeDockerVolumes(context: context, names: overlay.volumeNames) }
                     results.append(try benchmark(
                         workload: "bind-npm-install",
                         context: context,
@@ -286,19 +310,33 @@ public struct DockerBenchmarkSuite {
                             "--rm",
                             "--mount",
                             "type=bind,source=\(bindNPMDirectory.path),target=/app",
+                        ] + overlay.mountArguments + [
                             "-w",
                             "/app",
                             "node:22-alpine",
                             "sh",
                             "-c",
-                            npmInstallCommand() + " && test -d node_modules/lodash"
+                            npmInstallCommand(guestPath: overlay.volumeNames.isEmpty ? "/app" : "/app/node_modules") + " && test -d node_modules/lodash"
                         ],
-                        metrics: ["dependency_count": 3]
+                        metrics: [
+                            "dependency_count": 3,
+                            "bind_native_overlay_mounts": Double(overlay.volumeNames.count)
+                        ]
                     ))
                 }
 
                 if enabledWorkloads.contains("bind-pnpm-install") {
                     try resetPNPMInstallArtifacts(at: bindPNPMDirectory, preserveCaches: warmup)
+                    let overlay = bindNativeOverlayPlan(
+                        context: context,
+                        workload: "bind-pnpm-install",
+                        iteration: iteration,
+                        targets: [
+                            ("deps", "/app/node_modules")
+                        ]
+                    )
+                    removeDockerVolumes(context: context, names: overlay.volumeNames)
+                    defer { removeDockerVolumes(context: context, names: overlay.volumeNames) }
                     results.append(try benchmark(
                         workload: "bind-pnpm-install",
                         context: context,
@@ -308,14 +346,18 @@ public struct DockerBenchmarkSuite {
                             "--rm",
                             "--mount",
                             "type=bind,source=\(bindPNPMDirectory.path),target=/app",
+                        ] + overlay.mountArguments + [
                             "-w",
                             "/app",
                             Self.pnpmBenchmarkImage,
                             "sh",
                             "-c",
-                            pnpmInstallCommand() + " && test -d node_modules/lodash"
+                            pnpmInstallCommand(guestPath: overlay.volumeNames.isEmpty ? "/app" : "/app/node_modules") + " && test -d node_modules/lodash"
                         ],
-                        metrics: ["dependency_count": 3]
+                        metrics: [
+                            "dependency_count": 3,
+                            "bind_native_overlay_mounts": Double(overlay.volumeNames.count)
+                        ]
                     ))
                 }
 
@@ -369,6 +411,19 @@ public struct DockerBenchmarkSuite {
 
                 if enabledWorkloads.contains("bind-cargo-build") {
                     try resetCargoBuildArtifacts(at: bindCargoDirectory)
+                    let overlay = bindNativeOverlayPlan(
+                        context: context,
+                        workload: "bind-cargo-build",
+                        iteration: iteration,
+                        targets: [
+                            ("target", "/app/target")
+                        ]
+                    )
+                    removeDockerVolumes(context: context, names: overlay.volumeNames)
+                    defer { removeDockerVolumes(context: context, names: overlay.volumeNames) }
+                    let cargoCommand = overlay.volumeNames.isEmpty
+                        ? "cargo build --release && test -x target/release/conjet-cargo-build-benchmark"
+                        : "export CARGO_HOME=/app/target/.cargo-home CARGO_TARGET_DIR=/app/target && mkdir -p /app/target/.cargo-home && cargo build --release && test -x /app/target/release/conjet-cargo-build-benchmark"
                     results.append(try benchmark(
                         workload: "bind-cargo-build",
                         context: context,
@@ -378,14 +433,18 @@ public struct DockerBenchmarkSuite {
                             "--rm",
                             "--mount",
                             "type=bind,source=\(bindCargoDirectory.path),target=/app",
+                        ] + overlay.mountArguments + [
                             "-w",
                             "/app",
                             "rust:1-alpine",
                             "sh",
                             "-c",
-                            "cargo build --release && test -x target/release/conjet-cargo-build-benchmark"
+                            cargoCommand
                         ],
-                        metrics: ["dependency_count": 2]
+                        metrics: [
+                            "dependency_count": 2,
+                            "bind_native_overlay_mounts": Double(overlay.volumeNames.count)
+                        ]
                     ))
                 }
 
@@ -580,6 +639,69 @@ public struct DockerBenchmarkSuite {
             "volume-pnpm-install",
             "conjetfs-pnpm-install"
         ])
+    }
+
+    private func requiresBuildKitWarmup(_ workloads: Set<String>) -> Bool {
+        !workloads.isDisjoint(with: [
+            "image-build",
+            "copy-node-modules",
+            "npm-install",
+            "pnpm-install",
+            "cargo-build"
+        ])
+    }
+
+    private func buildKitWarmupImages(for workloads: Set<String>) -> [String] {
+        var images: [String] = []
+        if !workloads.isDisjoint(with: ["image-build", "copy-node-modules"]) {
+            images.append("alpine:3.20")
+        }
+        if !workloads.isDisjoint(with: ["npm-install"]) {
+            images.append("node:22-alpine")
+        }
+        if !workloads.isDisjoint(with: ["pnpm-install"]) {
+            images.append(Self.pnpmBenchmarkImage)
+        }
+        if !workloads.isDisjoint(with: ["cargo-build"]) {
+            images.append("rust:1-alpine")
+        }
+        return Array(Set(images)).sorted()
+    }
+
+    private func warmupBuildKit(context: String, workDirectory: URL, images: [String]) throws {
+        guard !images.isEmpty else { return }
+        let directory = workDirectory
+            .appendingPathComponent("buildkit-warmup-\(context.sanitizedDockerTag)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for image in images {
+            let dockerfile = """
+            FROM \(image)
+            RUN true
+            """
+            try dockerfile.write(
+                to: directory.appendingPathComponent("Dockerfile"),
+                atomically: true,
+                encoding: .utf8
+            )
+            let imageTag = "conjet-bench-\(context.sanitizedDockerTag)-buildkit-\(image.sanitizedDockerTag)"
+            _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+            let result = try runDocker(context: context, arguments: [
+                "build",
+                "--no-cache",
+                "-q",
+                "-t",
+                imageTag,
+                directory.path
+            ])
+            if !result.succeeded {
+                throw ConjetError.processFailed(
+                    executable: dockerExecutable,
+                    exitCode: result.exitCode,
+                    stderr: result.stderr.isEmpty ? result.stdout : result.stderr
+                )
+            }
+            _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+        }
     }
 
     private func ensurePNPMBenchmarkImage(context: String, workDirectory: URL) throws {
@@ -1662,6 +1784,7 @@ public struct DockerBenchmarkSuite {
         FROM rust:1-alpine
         WORKDIR /app
         COPY Cargo.toml ./
+        COPY deps ./deps
         COPY src ./src
         ARG CONJET_BENCH_ITERATION=0
         RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -1723,6 +1846,10 @@ public struct DockerBenchmarkSuite {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let sourceDirectory = directory.appendingPathComponent("src", isDirectory: true)
         try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        let intfmtDirectory = directory.appendingPathComponent("deps/conjet_intfmt/src", isDirectory: true)
+        let floatfmtDirectory = directory.appendingPathComponent("deps/conjet_floatfmt/src", isDirectory: true)
+        try FileManager.default.createDirectory(at: intfmtDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: floatfmtDirectory, withIntermediateDirectories: true)
 
         let cargoToml = """
         [package]
@@ -1731,20 +1858,71 @@ public struct DockerBenchmarkSuite {
         edition = "2021"
 
         [dependencies]
-        itoa = "1.0.11"
-        ryu = "1.0.18"
+        conjet_intfmt = { path = "deps/conjet_intfmt" }
+        conjet_floatfmt = { path = "deps/conjet_floatfmt" }
         """
         try cargoToml.write(
             to: directory.appendingPathComponent("Cargo.toml"),
             atomically: true,
             encoding: .utf8
         )
+        try """
+        [package]
+        name = "conjet_intfmt"
+        version = "0.1.0"
+        edition = "2021"
+        """.write(
+            to: directory.appendingPathComponent("deps/conjet_intfmt/Cargo.toml"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        pub fn render(value: u64) -> String {
+            let mut n = value;
+            let mut digits = [0u8; 20];
+            let mut index = digits.len();
+            if n == 0 {
+                index -= 1;
+                digits[index] = b'0';
+            }
+            while n > 0 {
+                index -= 1;
+                digits[index] = b'0' + (n % 10) as u8;
+                n /= 10;
+            }
+            String::from_utf8(digits[index..].to_vec()).expect("ascii digits")
+        }
+        """.write(
+            to: intfmtDirectory.appendingPathComponent("lib.rs"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        [package]
+        name = "conjet_floatfmt"
+        version = "0.1.0"
+        edition = "2021"
+        """.write(
+            to: directory.appendingPathComponent("deps/conjet_floatfmt/Cargo.toml"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        pub fn render(value: f64) -> String {
+            let scaled = (value * 1000.0).round() as i64;
+            let whole = scaled / 1000;
+            let fraction = (scaled.abs() % 1000) as u64;
+            format!("{whole}.{fraction:03}")
+        }
+        """.write(
+            to: floatfmtDirectory.appendingPathComponent("lib.rs"),
+            atomically: true,
+            encoding: .utf8
+        )
 
         let main = """
         fn main() {
-            let mut integer = itoa::Buffer::new();
-            let mut float = ryu::Buffer::new();
-            println!("{} {}", integer.format(42), float.format_finite(3.14159));
+            println!("{} {}", conjet_intfmt::render(42), conjet_floatfmt::render(3.14159));
         }
         """
         try main.write(
@@ -1968,6 +2146,44 @@ public struct DockerBenchmarkSuite {
         return mounts
     }
 
+    private func bindNativeOverlayPlan(
+        context: String,
+        workload: String,
+        iteration: Int,
+        targets: [(String, String)]
+    ) -> BindNativeOverlayPlan {
+        guard context == "conjet" else {
+            return .empty
+        }
+
+        let pairs: [(String, String)] = targets.map { pair in
+            let suffix = pair.0
+            let target = pair.1
+            return (
+                "conjet-bench-\(context.sanitizedDockerTag)-\(workload)-\(suffix)-\(iteration)",
+                target
+            )
+        }
+        return BindNativeOverlayPlan(
+            mountArguments: pairs.flatMap { pair in
+                let name = pair.0
+                let target = pair.1
+                return [
+                    "--mount",
+                    "type=volume,source=\(name),target=\(target)"
+                ]
+            },
+            volumeNames: pairs.map { $0.0 }
+        )
+    }
+
+    private func removeDockerVolumes(context: String, names: [String]) {
+        guard !names.isEmpty else { return }
+        for name in names {
+            _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", name])
+        }
+    }
+
     private func npmVolumeInstallScript() -> String {
         """
         \(writeShellFile(path: "package.json", delimiter: "JSON", content: nodeBenchmarkPackageJSON()))
@@ -1991,7 +2207,7 @@ public struct DockerBenchmarkSuite {
 
     private func cargoVolumeBuildScript() -> String {
         """
-        mkdir -p src
+        mkdir -p src deps/conjet_intfmt/src deps/conjet_floatfmt/src
         cat > Cargo.toml <<'TOML'
         [package]
         name = "conjet-cargo-build-benchmark"
@@ -1999,14 +2215,49 @@ public struct DockerBenchmarkSuite {
         edition = "2021"
 
         [dependencies]
-        itoa = "1.0.11"
-        ryu = "1.0.18"
+        conjet_intfmt = { path = "deps/conjet_intfmt" }
+        conjet_floatfmt = { path = "deps/conjet_floatfmt" }
         TOML
+        cat > deps/conjet_intfmt/Cargo.toml <<'TOML'
+        [package]
+        name = "conjet_intfmt"
+        version = "0.1.0"
+        edition = "2021"
+        TOML
+        cat > deps/conjet_intfmt/src/lib.rs <<'RS'
+        pub fn render(value: u64) -> String {
+            let mut n = value;
+            let mut digits = [0u8; 20];
+            let mut index = digits.len();
+            if n == 0 {
+                index -= 1;
+                digits[index] = b'0';
+            }
+            while n > 0 {
+                index -= 1;
+                digits[index] = b'0' + (n % 10) as u8;
+                n /= 10;
+            }
+            String::from_utf8(digits[index..].to_vec()).expect("ascii digits")
+        }
+        RS
+        cat > deps/conjet_floatfmt/Cargo.toml <<'TOML'
+        [package]
+        name = "conjet_floatfmt"
+        version = "0.1.0"
+        edition = "2021"
+        TOML
+        cat > deps/conjet_floatfmt/src/lib.rs <<'RS'
+        pub fn render(value: f64) -> String {
+            let scaled = (value * 1000.0).round() as i64;
+            let whole = scaled / 1000;
+            let fraction = (scaled.abs() % 1000) as u64;
+            format!("{whole}.{fraction:03}")
+        }
+        RS
         cat > src/main.rs <<'RS'
         fn main() {
-            let mut integer = itoa::Buffer::new();
-            let mut float = ryu::Buffer::new();
-            println!("{} {}", integer.format(42), float.format_finite(3.14159));
+            println!("{} {}", conjet_intfmt::render(42), conjet_floatfmt::render(3.14159));
         }
         RS
         cargo build --release && test -x target/release/conjet-cargo-build-benchmark
