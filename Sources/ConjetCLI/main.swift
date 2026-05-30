@@ -680,6 +680,7 @@ struct ConjetCLI {
             let workloads = value(after: "--workloads", in: args)
                 .map { $0.split(separator: ",").map(String.init).filter { !$0.isEmpty } }
                 ?? DockerBenchmarkSuite.defaultWorkloads
+            let commandTimeout = value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 180
             let output = value(after: "--output", in: args)
             let explicitWorkDirectory = value(after: "--dir", in: args)
             let needsHostBindableDirectory = workloads.contains { $0.hasPrefix("bind-") || $0.hasPrefix("conjetfs-") }
@@ -700,7 +701,8 @@ struct ConjetCLI {
                 contexts: contexts,
                 iterations: iterations,
                 warmup: warmup,
-                workloads: workloads
+                workloads: workloads,
+                commandTimeoutSeconds: commandTimeout
             ).run(workDirectory: workDirectory)
 
             if let output {
@@ -771,7 +773,8 @@ struct ConjetCLI {
             powerSeconds: value(after: "--power-seconds", in: args).flatMap(Double.init) ?? seconds ?? 60,
             powerInterval: value(after: "--power-interval", in: args).flatMap(Double.init) ?? interval ?? 1,
             powerSamplers: value(after: "--samplers", in: args) ?? "cpu_power,gpu_power,ane_power,tasks",
-            useSudoForPower: !args.contains("--no-sudo")
+            useSudoForPower: !args.contains("--no-sudo"),
+            dockerCommandTimeoutSeconds: value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 180
         )
         let ui = ConjetFetchUI(enabled: !json && !markdown)
         if !json && !markdown {
@@ -785,7 +788,8 @@ struct ConjetCLI {
                     contexts: contexts,
                     iterations: iterations,
                     warmup: warmup,
-                    workloads: workloads
+                    workloads: workloads,
+                    commandTimeoutSeconds: options.dockerCommandTimeoutSeconds
                 ).run(workDirectory: workDirectory)
             },
             idleCollector: { runtime, iteration in
@@ -2094,9 +2098,9 @@ struct ConjetCLI {
               conjet bench idle [--runtime NAME] [--process REGEX] [--seconds N] [--interval N] [--output PATH] [--json|--markdown]
               conjet bench power [--runtime NAME] [--process REGEX] [--seconds N] [--interval N] [--output PATH] [--no-sudo] [--json|--markdown]
               conjet bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N] [--phase any|cold|warm] [--workloads NAME,...] [--no-idle] [--no-power] [--json|--markdown]
-              conjet bench release-gate [--contexts conjet,orbstack,colima] [--iterations N] [--phase cold|warm] [--warmup] [--workloads NAME,...] [--output-dir DIR] [--seconds N] [--no-sudo] [--json|--markdown]
+              conjet bench release-gate [--contexts conjet,orbstack,colima] [--iterations N] [--phase cold|warm] [--warmup] [--workloads NAME,...] [--command-timeout N] [--output-dir DIR] [--seconds N] [--no-sudo] [--json|--markdown]
               conjet bench small-files [--files N] [--bytes N] [--dir PATH] [--json|--markdown]
-              conjet bench docker-compare [--contexts conjet,colima] [--iterations N] [--workloads NAME,...] [--warmup] [--output PATH] [--json|--markdown]
+              conjet bench docker-compare [--contexts conjet,colima] [--iterations N] [--workloads NAME,...] [--warmup] [--command-timeout N] [--output PATH] [--json|--markdown]
               conjet sync classify PATH [--json]
               conjet sync push|status|repair [PATH] [--json]
               conjet sync watch [PATH] [--debounce N] [--poll --interval N] [--once] [--json]

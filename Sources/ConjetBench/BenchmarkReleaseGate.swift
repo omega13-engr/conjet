@@ -18,6 +18,7 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
     public var powerInterval: Double
     public var powerSamplers: String
     public var useSudoForPower: Bool
+    public var dockerCommandTimeoutSeconds: Double
 
     public init(
         contexts: [String] = [],
@@ -35,7 +36,8 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
         powerSeconds: Double = 60,
         powerInterval: Double = 1,
         powerSamplers: String = "cpu_power,gpu_power,ane_power,tasks",
-        useSudoForPower: Bool = true
+        useSudoForPower: Bool = true,
+        dockerCommandTimeoutSeconds: Double = 180
     ) {
         self.candidateRuntime = candidateRuntime
         self.baselineRuntimes = Self.unique(baselineRuntimes.filter { !$0.isEmpty })
@@ -57,6 +59,7 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
         self.powerInterval = max(0.1, powerInterval)
         self.powerSamplers = powerSamplers
         self.useSudoForPower = useSudoForPower
+        self.dockerCommandTimeoutSeconds = max(1, dockerCommandTimeoutSeconds)
     }
 
     public var effectiveGateRules: [BenchmarkClaimRule] {
@@ -194,7 +197,8 @@ public struct BenchmarkReleaseGateRunner {
                 contexts: contexts,
                 iterations: iterations,
                 warmup: warmup,
-                workloads: workloads
+                workloads: workloads,
+                commandTimeoutSeconds: options.dockerCommandTimeoutSeconds
             ).run(workDirectory: workDirectory)
         }
         self.idleCollector = idleCollector ?? { runtime, _ in

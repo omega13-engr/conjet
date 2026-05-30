@@ -77,6 +77,7 @@ public struct DockerBenchmarkSuite {
     public var warmup: Bool
     public var dockerExecutable: String
     public var workloads: [String]
+    public var commandTimeoutSeconds: Double
 
     private let runner: @Sendable (String, [String]) throws -> ProcessResult
     private let inputRunner: @Sendable (String, [String], Data?) throws -> ProcessResult
@@ -87,16 +88,28 @@ public struct DockerBenchmarkSuite {
         warmup: Bool = false,
         workloads: [String] = DockerBenchmarkSuite.defaultWorkloads,
         dockerExecutable: String = "/usr/bin/env",
-        runner: @escaping @Sendable (String, [String]) throws -> ProcessResult = ProcessRunner.run,
-        inputRunner: @escaping @Sendable (String, [String], Data?) throws -> ProcessResult = ProcessRunner.runWithInput
+        commandTimeoutSeconds: Double = 180,
+        runner: (@Sendable (String, [String]) throws -> ProcessResult)? = nil,
+        inputRunner: (@Sendable (String, [String], Data?) throws -> ProcessResult)? = nil
     ) {
         self.contexts = contexts
         self.iterations = max(1, iterations)
         self.warmup = warmup
         self.workloads = workloads.isEmpty ? DockerBenchmarkSuite.defaultWorkloads : workloads
         self.dockerExecutable = dockerExecutable
-        self.runner = runner
-        self.inputRunner = inputRunner
+        let timeout = max(1, commandTimeoutSeconds)
+        self.commandTimeoutSeconds = timeout
+        self.runner = runner ?? { executable, arguments in
+            try ProcessRunner.run(executable, arguments, timeoutSeconds: timeout)
+        }
+        self.inputRunner = inputRunner ?? { executable, arguments, input in
+            try ProcessRunner.runWithInput(
+                executable,
+                arguments,
+                standardInput: input,
+                timeoutSeconds: timeout
+            )
+        }
     }
 
     public func run(workDirectory: URL) throws -> [BenchmarkResult] {

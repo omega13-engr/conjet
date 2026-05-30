@@ -1,4 +1,9 @@
 import Foundation
+#if os(macOS)
+import Darwin
+#elseif os(Linux)
+import Glibc
+#endif
 
 public struct ProcessResult: Codable, Equatable, Sendable {
     public var executable: String
@@ -29,10 +34,27 @@ public enum ProcessRunner {
         try runWithInput(executable, arguments, standardInput: nil)
     }
 
+    public static func run(
+        _ executable: String,
+        _ arguments: [String] = [],
+        timeoutSeconds: Double?
+    ) throws -> ProcessResult {
+        try runWithInput(executable, arguments, standardInput: nil, timeoutSeconds: timeoutSeconds)
+    }
+
     public static func runWithInput(
         _ executable: String,
         _ arguments: [String] = [],
         standardInput: Data?
+    ) throws -> ProcessResult {
+        try runWithInput(executable, arguments, standardInput: standardInput, timeoutSeconds: nil)
+    }
+
+    public static func runWithInput(
+        _ executable: String,
+        _ arguments: [String] = [],
+        standardInput: Data?,
+        timeoutSeconds: Double?
     ) throws -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -67,7 +89,29 @@ public enum ProcessRunner {
             stdinPipe.fileHandleForWriting.write(standardInput)
             try? stdinPipe.fileHandleForWriting.close()
         }
-        process.waitUntilExit()
+
+        let waitSemaphore = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            process.waitUntilExit()
+            waitSemaphore.signal()
+        }
+
+        var timedOut = false
+        if let timeoutSeconds {
+            let timeout = max(0.1, timeoutSeconds)
+            if waitSemaphore.wait(timeout: .now() + timeout) == .timedOut {
+                timedOut = true
+                process.terminate()
+                if waitSemaphore.wait(timeout: .now() + 2) == .timedOut {
+                    #if os(macOS) || os(Linux)
+                    kill(process.processIdentifier, SIGKILL)
+                    #endif
+                    waitSemaphore.wait()
+                }
+            }
+        } else {
+            waitSemaphore.wait()
+        }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
@@ -81,12 +125,17 @@ public enum ProcessRunner {
         }
 
         let stdout = String(data: stdoutData.data(), encoding: .utf8) ?? ""
-        let stderr = String(data: stderrData.data(), encoding: .utf8) ?? ""
+        var stderr = String(data: stderrData.data(), encoding: .utf8) ?? ""
+        if timedOut {
+            let timeout = String(format: "%.3f", timeoutSeconds ?? 0)
+            let message = "process timed out after \(timeout)s"
+            stderr = stderr.isEmpty ? message : stderr + "\n" + message
+        }
 
         return ProcessResult(
             executable: executable,
             arguments: arguments,
-            exitCode: process.terminationStatus,
+            exitCode: timedOut ? 124 : process.terminationStatus,
             stdout: stdout,
             stderr: stderr
         )
