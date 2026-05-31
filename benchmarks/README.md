@@ -22,9 +22,9 @@ swift run --package-path benchmarks conjet-bench run \
   --output-dir benchmarks/reports/run-all-local
 ```
 
-`conjet-bench run` validates `sudo -v` before it starts. It runs wall-time suites
-in parallel and then runs energy in isolation so power samples are not polluted
-by other benchmark work:
+`conjet-bench run` validates `sudo -v` before it starts. It runs energy first in
+isolation so power samples are not polluted by other benchmark work, then runs
+wall-time suites in parallel:
 
 - `warm-gate`
 - `cold-base-prepulled-gate`
@@ -34,7 +34,25 @@ by other benchmark work:
 - `energy-gate`
 
 The wrapper writes `run-all.json` and `run-all.md` in the selected output
-directory, with each suite writing its own reports in a child directory.
+directory, with each suite writing its own reports in a child directory. By
+default it removes generated `work/` dump trees after report files are written;
+pass `--keep-work` when you need the generated workload directories for
+debugging.
+
+The combined runner uses shorter energy and polyglot defaults than the dedicated
+commands so local report generation does not spend most of its time outside the
+failed wall-time gates. Override with `--energy-samples`, `--energy-seconds`,
+or `--polyglot-samples` for publication runs.
+
+To rerun only selected suites, pass `--suites`:
+
+```sh
+swift run --package-path benchmarks conjet-bench run \
+  --contexts conjet,orbstack,colima \
+  --samples 5 \
+  --suites warm-gate,no-cache-gate,cold-base-prepulled-gate \
+  --output-dir benchmarks/reports/rerun-failed-gates
+```
 
 ## Energy Gate
 
@@ -60,10 +78,14 @@ swift run --package-path benchmarks conjet-bench gate \
   --reports benchmarks/reports/run-all-local/warm-gate/all-results.json \
   --candidate conjet \
   --baselines orbstack,colima \
+  --required-baselines orbstack \
   --min-samples 10 \
   --phase warm \
   --markdown
 ```
+
+Baselines outside `--required-baselines` are still reported, but they are
+advisory and do not decide the gate verdict.
 
 ## Topology Vocabulary
 

@@ -28,6 +28,15 @@ struct ConjetCLI {
         } else {
             commandProfile = try removeProfileOption(from: &args)
         }
+        if command == "help" {
+            printHelp(for: args)
+            return
+        }
+        if isHelpRequest(command: command, args: args) {
+            printHelp(for: [command] + args.filter { !isHelpFlag($0) })
+            return
+        }
+
         if let profileName = commandProfile ?? globalProfile {
             try activateProfile(profileName)
         }
@@ -57,7 +66,7 @@ struct ConjetCLI {
             try power(args: args, json: json)
         case "profile":
             try profile(args: args, json: json)
-        case "help", "-h", "--help":
+        case "-h", "--help":
             printHelp()
         default:
             throw ConjetError.invalidArgument("unknown command '\(command)'")
@@ -1614,6 +1623,364 @@ struct ConjetCLI {
             return nil
         }
         return args[index + 1]
+    }
+
+    private static func isHelpFlag(_ value: String) -> Bool {
+        value == "--help" || value == "-h"
+    }
+
+    private static func isHelpRequest(command: String, args: [String]) -> Bool {
+        guard !args.isEmpty else { return false }
+        if isHelpFlag(args[0]) { return true }
+        switch command {
+        case "vm", "sync", "project", "profile", "power":
+            return args.indices.contains(1) && isHelpFlag(args[1])
+        default:
+            return false
+        }
+    }
+
+    private static func printHelp(for topic: [String]) {
+        let parts = topic.filter { !isHelpFlag($0) }
+        guard let command = parts.first else {
+            printHelp()
+            return
+        }
+
+        switch command {
+        case "start":
+            print(
+                """
+                Start conjetd and the configured VM.
+
+                Usage:
+                  conjet start [--cpus N] [--memory SIZE] [--disk SIZE_OR_PATH] [--runtime NAME] [--arch ARCH]
+
+                Options:
+                  --cpus, --cpu N       Set VM CPU count
+                  --memory SIZE         Set VM memory, for example 4G or 4096M
+                  --disk SIZE_OR_PATH   Set VM data disk size or use a custom disk image path
+                  --runtime NAME        Set container runtime preference
+                  --arch ARCH           Set guest architecture
+                  --profile NAME        Use an isolated Conjet profile
+                  --json                Emit machine-readable JSON where supported
+                  -h, --help            Show this help text
+                """
+            )
+        case "stop":
+            print(
+                """
+                Stop the VM and daemon.
+
+                Usage:
+                  conjet stop [--timeout SECONDS]
+
+                Options:
+                  --timeout SECONDS     Bound graceful shutdown wait time
+                  --profile NAME        Use an isolated Conjet profile
+                  --json                Emit machine-readable JSON where supported
+                  -h, --help            Show this help text
+                """
+            )
+        case "status":
+            print(
+                """
+                Show daemon, VM, and Docker socket status.
+
+                Usage:
+                  conjet status [--json]
+
+                Options:
+                  --profile NAME        Use an isolated Conjet profile
+                  --json                Emit machine-readable JSON
+                  -h, --help            Show this help text
+                """
+            )
+        case "doctor":
+            print(
+                """
+                Check host capabilities and Conjet configuration.
+
+                Usage:
+                  conjet doctor [--json]
+
+                Options:
+                  --profile NAME        Use an isolated Conjet profile
+                  --json                Emit machine-readable JSON
+                  -h, --help            Show this help text
+                """
+            )
+        case "shell":
+            print(
+                """
+                Open a privileged Linux shell through the Conjet Docker socket.
+
+                Usage:
+                  conjet shell [-- COMMAND...]
+
+                Examples:
+                  conjet shell
+                  conjet shell -- uname -a
+                """
+            )
+        case "run":
+            print(
+                """
+                Run a Docker image through Conjet.
+
+                Usage:
+                  conjet run IMAGE [COMMAND...]
+
+                Examples:
+                  conjet run ubuntu:24.04 uname -a
+                  conjet run alpine:latest sh
+                """
+            )
+        case "compose":
+            print(
+                """
+                Pass through to docker compose using Conjet.
+
+                Usage:
+                  conjet compose up [docker compose args]
+
+                Examples:
+                  conjet compose up
+                  conjet compose up --build
+                """
+            )
+        case "vm":
+            printVMHelp(parts: parts)
+        case "project":
+            printProjectHelp(parts: parts)
+        case "sync":
+            printSyncHelp(parts: parts)
+        case "profile":
+            printProfileHelp(parts: parts)
+        case "power":
+            printPowerHelp(parts: parts)
+        default:
+            printHelp()
+        }
+    }
+
+    private static func printVMHelp(parts: [String]) {
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "fetch-conjet-core":
+                print(
+                    """
+                    Download and import a Conjet Core VM image.
+
+                    Usage:
+                      conjet vm fetch-conjet-core [--image PATH|--url HTTPS_URL|--repository OWNER/REPO] [--name NAME] [--boot-disk-gb N] [--force]
+                    """
+                )
+            case "fetch-ubuntu-cloud":
+                print(
+                    """
+                    Prepare an Ubuntu cloud image.
+
+                    Usage:
+                      conjet vm fetch-ubuntu-cloud [--release NAME] [--name NAME] [--cloud-init-docker] [--boot-disk-gb N] [--force]
+                    """
+                )
+            case "fetch-fedora":
+                print(
+                    """
+                    Prepare a Fedora cloud image.
+
+                    Usage:
+                      conjet vm fetch-fedora [--release VERSION] [--force]
+                    """
+                )
+            case "fetch-alpine":
+                print(
+                    """
+                    Prepare an Alpine image.
+
+                    Usage:
+                      conjet vm fetch-alpine [--force]
+                    """
+                )
+            case "import-efi-disk":
+                print(
+                    """
+                    Import a custom EFI-bootable disk image.
+
+                    Usage:
+                      conjet vm import-efi-disk --image PATH [--name NAME] [--cloud-init-docker] [--force]
+                    """
+                )
+            case "init":
+                print(
+                    """
+                    Configure kernel and initrd boot assets.
+
+                    Usage:
+                      conjet vm init --kernel PATH [--initrd PATH] [--cmdline TEXT]
+                    """
+                )
+            case "validate":
+                print("Usage:\n  conjet vm validate [--json]")
+            case "start":
+                print("Usage:\n  conjet vm start [--json]")
+            case "stop":
+                print("Usage:\n  conjet vm stop [--json]")
+            case "status":
+                print("Usage:\n  conjet vm status [--json]")
+            case "logs":
+                print("Usage:\n  conjet vm logs [--lines N]")
+            default:
+                printVMHelp(parts: ["vm"])
+            }
+            return
+        }
+
+        print(
+            """
+            Manage Conjet VM images and VM lifecycle.
+
+            Usage:
+              conjet vm <command> [options]
+
+            Commands:
+              fetch-conjet-core   Download a Conjet Core VM image
+              fetch-ubuntu-cloud  Prepare an Ubuntu cloud image
+              fetch-fedora        Prepare a Fedora cloud image
+              fetch-alpine        Prepare an Alpine image
+              import-efi-disk     Import a custom EFI-bootable disk image
+              init                Configure kernel/initrd boot assets
+              validate            Validate the configured VM image
+              start               Start only the VM layer
+              stop                Stop only the VM layer
+              status              Show VM status
+              logs                Show VM logs
+            """
+        )
+    }
+
+    private static func printProjectHelp(parts: [String]) {
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "init":
+                print("Usage:\n  conjet project init [PATH] [--json]")
+            case "attach":
+                print("Usage:\n  conjet project attach [PATH] [--no-sync] [--json]")
+            case "status":
+                print("Usage:\n  conjet project status [PATH] [--json]")
+            case "run":
+                print("Usage:\n  conjet project run [--path PATH] [--no-sync] IMAGE [COMMAND...]")
+            default:
+                printProjectHelp(parts: ["project"])
+            }
+            return
+        }
+
+        print(
+            """
+            Manage ConjetFS project workspaces.
+
+            Usage:
+              conjet project <command> [options]
+
+            Commands:
+              init      Create ConjetFS metadata for a project
+              attach    Attach an existing project to ConjetFS
+              status    Show project sync state
+              run       Sync and run a container in the project workspace
+            """
+        )
+    }
+
+    private static func printSyncHelp(parts: [String]) {
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "classify":
+                print("Usage:\n  conjet sync classify PATH [--json]")
+            case "push":
+                print("Usage:\n  conjet sync push [PATH] [--json]")
+            case "status":
+                print("Usage:\n  conjet sync status [PATH] [--json]")
+            case "watch":
+                print("Usage:\n  conjet sync watch [PATH] [--once] [--poll] [--interval SECONDS] [--debounce SECONDS] [--json]")
+            case "repair":
+                print("Usage:\n  conjet sync repair [PATH] [--json]")
+            case "export":
+                print("Usage:\n  conjet sync export PATH... --to DEST [--path PROJECT] [--json]")
+            default:
+                printSyncHelp(parts: ["sync"])
+            }
+            return
+        }
+
+        print(
+            """
+            Synchronize project files into ConjetFS.
+
+            Usage:
+              conjet sync <command> [options]
+
+            Commands:
+              classify   Explain host vs Linux-native path handling
+              push       Push changed project files into ConjetFS
+              status     Show ConjetFS sync status
+              watch      Watch and incrementally sync project changes
+              repair     Rebuild ConjetFS metadata
+              export     Export synchronized paths back to macOS
+            """
+        )
+    }
+
+    private static func printProfileHelp(parts: [String]) {
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "status":
+                print("Usage:\n  conjet profile status [--json]")
+            case "list":
+                print("Usage:\n  conjet profile list [--json]")
+            default:
+                printProfileHelp(parts: ["profile"])
+            }
+            return
+        }
+
+        print(
+            """
+            Manage local Conjet profiles.
+
+            Usage:
+              conjet profile <command> [options]
+
+            Commands:
+              status   Show the active profile configuration
+              list     List local profiles
+            """
+        )
+    }
+
+    private static func printPowerHelp(parts: [String]) {
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "policy":
+                print("Usage:\n  conjet power policy STATE [--json]")
+            default:
+                printPowerHelp(parts: ["power"])
+            }
+            return
+        }
+
+        print(
+            """
+            Inspect Conjet power policies.
+
+            Usage:
+              conjet power <command> [options]
+
+            Commands:
+              policy   Show the policy for a runtime state
+            """
+        )
     }
 
     private static func printHelp() {

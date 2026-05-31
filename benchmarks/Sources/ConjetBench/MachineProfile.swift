@@ -15,15 +15,50 @@ public struct MachineProfile: Codable, Equatable, Sendable {
     }
 }
 
+private final class MachineProfileCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var profile: MachineProfile?
+
+    func value(validAt now: Date, ttl: TimeInterval) -> MachineProfile? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let profile, now.timeIntervalSince(profile.capturedAt) <= ttl else {
+            return nil
+        }
+        return profile
+    }
+
+    func store(_ profile: MachineProfile) {
+        lock.lock()
+        self.profile = profile
+        lock.unlock()
+    }
+}
+
 public enum MachineProfiler {
-    public static func capture() -> MachineProfile {
+    private static let cache = MachineProfileCache()
+
+    public static func capture(cacheTTLSeconds: TimeInterval = 30) -> MachineProfile {
+        let now = Date()
+        let ttl = max(0, cacheTTLSeconds)
+        if let cachedProfile = cache.value(validAt: now, ttl: ttl) {
+            return MachineProfile(
+                capturedAt: now,
+                host: cachedProfile.host,
+                powerSource: cachedProfile.powerSource,
+                thermalState: cachedProfile.thermalState
+            )
+        }
+
         let host = HostCapabilities.detect()
-        return MachineProfile(
-            capturedAt: Date(),
+        let profile = MachineProfile(
+            capturedAt: now,
             host: host,
             powerSource: powerSource(),
             thermalState: host.thermalState
         )
+        cache.store(profile)
+        return profile
     }
 
     private static func powerSource() -> String {

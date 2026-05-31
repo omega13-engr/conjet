@@ -55,6 +55,7 @@ private struct BindNativeOverlayPlan {
 public struct DockerBenchmarkSuite {
     private static let hotReloadWaitSubscribeDelaySeconds: TimeInterval = 0.02
     private static let pnpmBenchmarkImage = "conjet-bench-node-pnpm:9.15.9"
+    private static let pnpmBenchmarkImageLock = NSLock()
 
     public static let defaultWorkloads = [
         "docker-version",
@@ -172,6 +173,7 @@ public struct DockerBenchmarkSuite {
     public var workloads: [String]
     public var commandTimeoutSeconds: Double
     public var phase: BenchmarkSamplePhase
+    public var resourceScope: String?
 
     private let runner: @Sendable (String, [String]) throws -> ProcessResult
     private let inputRunner: @Sendable (String, [String], Data?) throws -> ProcessResult
@@ -184,6 +186,7 @@ public struct DockerBenchmarkSuite {
         workloads: [String] = DockerBenchmarkSuite.defaultWorkloads,
         dockerExecutable: String = "/usr/bin/env",
         commandTimeoutSeconds: Double = 180,
+        resourceScope: String? = nil,
         runner: (@Sendable (String, [String]) throws -> ProcessResult)? = nil,
         inputRunner: (@Sendable (String, [String], Data?) throws -> ProcessResult)? = nil
     ) {
@@ -195,6 +198,7 @@ public struct DockerBenchmarkSuite {
         self.dockerExecutable = dockerExecutable
         let timeout = max(1, commandTimeoutSeconds)
         self.commandTimeoutSeconds = timeout
+        self.resourceScope = resourceScope.map { $0.sanitizedDockerTag }
         self.runner = runner ?? { executable, arguments in
             try ProcessRunner.run(executable, arguments, timeoutSeconds: timeout)
         }
@@ -237,21 +241,52 @@ public struct DockerBenchmarkSuite {
         let bindHotReloadDirectory = workDirectory.appendingPathComponent("bind-hot-reload", isDirectory: true)
         let conjetFSHotReloadDirectory = workDirectory.appendingPathComponent("conjetfs-hot-reload", isDirectory: true)
         let composeDirectory = workDirectory.appendingPathComponent("compose", isDirectory: true)
-        try prepareBuildContext(at: buildDirectory)
-        let nodeModulesFileCount = try prepareNodeModulesCopyContext(at: nodeModulesCopyDirectory)
-        try prepareNPMInstallContext(at: npmInstallDirectory)
-        try preparePNPMInstallContext(at: pnpmInstallDirectory)
-        try prepareCargoBuildContext(at: cargoBuildDirectory)
-        try prepareNPMProject(at: bindNPMDirectory)
-        try preparePNPMProject(at: bindPNPMDirectory)
-        try prepareCargoProject(at: bindCargoDirectory)
-        try prepareConjetFSNodeProject(at: conjetFSNPMDirectory, packageManager: .npm)
-        try prepareConjetFSNodeProject(at: conjetFSPNPMDirectory, packageManager: .pnpm)
-        try prepareConjetFSCargoProject(at: conjetFSCargoDirectory)
-        try prepareHotReloadProject(at: bindHotReloadDirectory, token: "initial")
-        try prepareHotReloadProject(at: conjetFSHotReloadDirectory, token: "initial")
-        let composeFile = try prepareComposeProject(at: composeDirectory)
         let conjetFSHome = workDirectory.appendingPathComponent(".conjetfs-home", isDirectory: true)
+        var nodeModulesFileCount = 0
+        var composeFile: URL?
+
+        if enabledWorkloads.contains("image-build") {
+            try prepareBuildContext(at: buildDirectory)
+        }
+        if enabledWorkloads.contains("copy-node-modules") {
+            nodeModulesFileCount = try prepareNodeModulesCopyContext(at: nodeModulesCopyDirectory)
+        }
+        if enabledWorkloads.contains("npm-install") {
+            try prepareNPMInstallContext(at: npmInstallDirectory)
+        }
+        if enabledWorkloads.contains("pnpm-install") {
+            try preparePNPMInstallContext(at: pnpmInstallDirectory)
+        }
+        if enabledWorkloads.contains("cargo-build") {
+            try prepareCargoBuildContext(at: cargoBuildDirectory)
+        }
+        if !enabledWorkloads.isDisjoint(with: ["strict-bind-npm-install", "smart-bind-npm-install"]) {
+            try prepareNPMProject(at: bindNPMDirectory)
+        }
+        if !enabledWorkloads.isDisjoint(with: ["strict-bind-pnpm-install", "smart-bind-pnpm-install"]) {
+            try preparePNPMProject(at: bindPNPMDirectory)
+        }
+        if !enabledWorkloads.isDisjoint(with: ["strict-bind-cargo-build", "smart-bind-cargo-build"]) {
+            try prepareCargoProject(at: bindCargoDirectory)
+        }
+        if enabledWorkloads.contains("conjetfs-npm-install") {
+            try prepareConjetFSNodeProject(at: conjetFSNPMDirectory, packageManager: .npm)
+        }
+        if enabledWorkloads.contains("conjetfs-pnpm-install") {
+            try prepareConjetFSNodeProject(at: conjetFSPNPMDirectory, packageManager: .pnpm)
+        }
+        if enabledWorkloads.contains("conjetfs-cargo-build") {
+            try prepareConjetFSCargoProject(at: conjetFSCargoDirectory)
+        }
+        if !enabledWorkloads.isDisjoint(with: ["strict-bind-hot-reload", "smart-bind-hot-reload"]) {
+            try prepareHotReloadProject(at: bindHotReloadDirectory, token: "initial")
+        }
+        if enabledWorkloads.contains("conjetfs-hot-reload") {
+            try prepareHotReloadProject(at: conjetFSHotReloadDirectory, token: "initial")
+        }
+        if enabledWorkloads.contains("compose-up") {
+            composeFile = try prepareComposeProject(at: composeDirectory)
+        }
 
         var results: [BenchmarkResult] = []
         for context in contexts {
@@ -313,7 +348,9 @@ public struct DockerBenchmarkSuite {
                 }
 
                 if enabledWorkloads.contains("image-build") {
-                    let imageTag = "conjet-bench-\(context.sanitizedDockerTag)-image-\(iteration)"
+                    let imageTag = benchmarkResourceName(context, "image", String(iteration))
+                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+                    defer { _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag]) }
                     results.append(try benchmark(
                         workload: "image-build",
                         context: context,
@@ -321,12 +358,13 @@ public struct DockerBenchmarkSuite {
                         arguments: buildArguments(["build", "-t", imageTag, buildDirectory.path]),
                         metrics: dockerBuildMetrics()
                     ))
-                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
 
                 if enabledWorkloads.contains("copy-node-modules") {
                     try updateNodeModulesCopyMarker(at: nodeModulesCopyDirectory, iteration: iteration)
-                    let imageTag = "conjet-bench-\(context.sanitizedDockerTag)-copy-node-modules-\(iteration)"
+                    let imageTag = benchmarkResourceName(context, "copy-node-modules", String(iteration))
+                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+                    defer { _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag]) }
                     results.append(try benchmark(
                         workload: "copy-node-modules",
                         context: context,
@@ -334,11 +372,12 @@ public struct DockerBenchmarkSuite {
                         arguments: buildArguments(["build", "-t", imageTag, nodeModulesCopyDirectory.path]),
                         metrics: dockerBuildMetrics(["file_count": Double(nodeModulesFileCount)])
                     ))
-                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
 
                 if enabledWorkloads.contains("npm-install") {
-                    let imageTag = "conjet-bench-\(context.sanitizedDockerTag)-npm-\(iteration)"
+                    let imageTag = benchmarkResourceName(context, "npm", String(iteration))
+                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+                    defer { _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag]) }
                     results.append(try benchmark(
                         workload: "npm-install",
                         context: context,
@@ -353,11 +392,12 @@ public struct DockerBenchmarkSuite {
                         ]),
                         metrics: dockerBuildMetrics(["dependency_count": 3])
                     ))
-                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
 
                 if enabledWorkloads.contains("pnpm-install") {
-                    let imageTag = "conjet-bench-\(context.sanitizedDockerTag)-pnpm-\(iteration)"
+                    let imageTag = benchmarkResourceName(context, "pnpm", String(iteration))
+                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+                    defer { _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag]) }
                     results.append(try benchmark(
                         workload: "pnpm-install",
                         context: context,
@@ -372,11 +412,12 @@ public struct DockerBenchmarkSuite {
                         ]),
                         metrics: dockerBuildMetrics(["dependency_count": 3])
                     ))
-                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
 
                 if enabledWorkloads.contains("cargo-build") {
-                    let imageTag = "conjet-bench-\(context.sanitizedDockerTag)-cargo-\(iteration)"
+                    let imageTag = benchmarkResourceName(context, "cargo", String(iteration))
+                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+                    defer { _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag]) }
                     results.append(try benchmark(
                         workload: "cargo-build",
                         context: context,
@@ -391,7 +432,6 @@ public struct DockerBenchmarkSuite {
                         ]),
                         metrics: dockerBuildMetrics(["dependency_count": 2])
                     ))
-                    _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
 
                 if enabledWorkloads.contains("strict-bind-npm-install") {
@@ -533,8 +573,9 @@ public struct DockerBenchmarkSuite {
                 }
 
                 if enabledWorkloads.contains("volume-npm-install") {
-                    let volumeName = "conjet-bench-\(context.sanitizedDockerTag)-npm-volume-\(iteration)"
+                    let volumeName = benchmarkResourceName(context, "npm-volume", String(iteration))
                     _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
+                    defer { _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName]) }
                     results.append(try benchmark(
                         workload: "volume-npm-install",
                         context: context,
@@ -560,12 +601,12 @@ public struct DockerBenchmarkSuite {
                             extra: ["dependency_count": 3]
                         )
                     ))
-                    _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
                 }
 
                 if enabledWorkloads.contains("volume-pnpm-install") {
-                    let volumeName = "conjet-bench-\(context.sanitizedDockerTag)-pnpm-volume-\(iteration)"
+                    let volumeName = benchmarkResourceName(context, "pnpm-volume", String(iteration))
                     _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
+                    defer { _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName]) }
                     results.append(try benchmark(
                         workload: "volume-pnpm-install",
                         context: context,
@@ -591,7 +632,6 @@ public struct DockerBenchmarkSuite {
                             extra: ["dependency_count": 3]
                         )
                     ))
-                    _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
                 }
 
                 if enabledWorkloads.contains("strict-bind-cargo-build") {
@@ -665,8 +705,9 @@ public struct DockerBenchmarkSuite {
                 }
 
                 if enabledWorkloads.contains("volume-cargo-build") {
-                    let volumeName = "conjet-bench-\(context.sanitizedDockerTag)-cargo-volume-\(iteration)"
+                    let volumeName = benchmarkResourceName(context, "cargo-volume", String(iteration))
                     _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
+                    defer { _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName]) }
                     results.append(try benchmark(
                         workload: "volume-cargo-build",
                         context: context,
@@ -692,7 +733,6 @@ public struct DockerBenchmarkSuite {
                             extra: ["dependency_count": 2]
                         )
                     ))
-                    _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
                 }
 
                 if enabledWorkloads.contains("conjetfs-npm-install") {
@@ -809,8 +849,9 @@ public struct DockerBenchmarkSuite {
                 }
 
                 if enabledWorkloads.contains("named-volume-io") {
-                    let volumeName = "conjet-bench-\(context.sanitizedDockerTag)-volume-\(iteration)"
+                    let volumeName = benchmarkResourceName(context, "volume", String(iteration))
                     _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
+                    defer { _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName]) }
                     results.append(try benchmark(
                         workload: "named-volume-io",
                         context: context,
@@ -834,7 +875,6 @@ public struct DockerBenchmarkSuite {
                             extra: ["file_count": 300]
                         )
                     ))
-                    _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
                 }
 
                 if enabledWorkloads.contains("tmpfs-volume-io") {
@@ -862,8 +902,20 @@ public struct DockerBenchmarkSuite {
                     ))
                 }
 
-                if enabledWorkloads.contains("compose-up") {
-                    let project = "conjet-bench-\(context.sanitizedDockerTag)-\(iteration)"
+                if enabledWorkloads.contains("compose-up"), let composeFile {
+                    let project = benchmarkResourceName(context, String(iteration))
+                    let downArguments = [
+                        "compose",
+                        "-f",
+                        composeFile.path,
+                        "-p",
+                        project,
+                        "down",
+                        "-v",
+                        "--remove-orphans"
+                    ]
+                    _ = try? runDocker(context: context, arguments: downArguments)
+                    defer { _ = try? runDocker(context: context, arguments: downArguments) }
                     results.append(try benchmark(
                         workload: "compose-up",
                         context: context,
@@ -881,16 +933,6 @@ public struct DockerBenchmarkSuite {
                             "--remove-orphans"
                         ]
                     ))
-                    _ = try? runDocker(context: context, arguments: [
-                        "compose",
-                        "-f",
-                        composeFile.path,
-                        "-p",
-                        project,
-                        "down",
-                        "-v",
-                        "--remove-orphans"
-                    ])
                 }
             }
         }
@@ -900,6 +942,15 @@ public struct DockerBenchmarkSuite {
 
     private var samplePhase: BenchmarkSamplePhase {
         phase
+    }
+
+    private func benchmarkResourceName(_ components: String...) -> String {
+        var parts = ["conjet-bench"]
+        if let resourceScope {
+            parts.append(resourceScope)
+        }
+        parts.append(contentsOf: components.map(\.sanitizedDockerTag))
+        return parts.joined(separator: "-")
     }
 
     private func buildArguments(_ arguments: [String]) -> [String] {
@@ -969,8 +1020,9 @@ public struct DockerBenchmarkSuite {
                 atomically: true,
                 encoding: .utf8
             )
-            let imageTag = "conjet-bench-\(context.sanitizedDockerTag)-buildkit-\(image.sanitizedDockerTag)"
+            let imageTag = benchmarkResourceName(context, "buildkit", image)
             _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+            defer { _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag]) }
             let result = try runDocker(context: context, arguments: [
                 "build",
                 "--no-cache",
@@ -986,7 +1038,6 @@ public struct DockerBenchmarkSuite {
                     stderr: result.stderr.isEmpty ? result.stdout : result.stderr
                 )
             }
-            _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
         }
     }
 
@@ -1000,21 +1051,21 @@ public struct DockerBenchmarkSuite {
         if enabledWorkloads.contains("npm-install") {
             try warmupDockerBuildWorkload(
                 context: context,
-                imageTag: "conjet-bench-\(context.sanitizedDockerTag)-npm-warmup",
+                imageTag: benchmarkResourceName(context, "npm", "warmup"),
                 directory: npmInstallDirectory
             )
         }
         if enabledWorkloads.contains("pnpm-install") {
             try warmupDockerBuildWorkload(
                 context: context,
-                imageTag: "conjet-bench-\(context.sanitizedDockerTag)-pnpm-warmup",
+                imageTag: benchmarkResourceName(context, "pnpm", "warmup"),
                 directory: pnpmInstallDirectory
             )
         }
         if enabledWorkloads.contains("cargo-build") {
             try warmupDockerBuildWorkload(
                 context: context,
-                imageTag: "conjet-bench-\(context.sanitizedDockerTag)-cargo-warmup",
+                imageTag: benchmarkResourceName(context, "cargo", "warmup"),
                 directory: cargoBuildDirectory
             )
         }
@@ -1022,6 +1073,7 @@ public struct DockerBenchmarkSuite {
 
     private func warmupDockerBuildWorkload(context: String, imageTag: String, directory: URL) throws {
         _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
+        defer { _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag]) }
         let result = try runDocker(context: context, arguments: [
             "build",
             "--build-arg",
@@ -1037,10 +1089,16 @@ public struct DockerBenchmarkSuite {
                 stderr: result.stderr.isEmpty ? result.stdout : result.stderr
             )
         }
-        _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
     }
 
     private func ensurePNPMBenchmarkImage(context: String, workDirectory: URL) throws {
+        Self.pnpmBenchmarkImageLock.lock()
+        defer { Self.pnpmBenchmarkImageLock.unlock() }
+
+        if (try? runDocker(context: context, arguments: ["image", "inspect", Self.pnpmBenchmarkImage]))?.succeeded == true {
+            return
+        }
+
         let imageDirectory = workDirectory
             .appendingPathComponent("pnpm-benchmark-image", isDirectory: true)
         try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
@@ -1411,7 +1469,7 @@ public struct DockerBenchmarkSuite {
         projectDirectory: URL,
         smartOverlay: Bool
     ) -> BenchmarkResult {
-        let containerName = "conjet-bench-\(context.sanitizedDockerTag)-\(workload.sanitizedDockerTag)-\(iteration)"
+        let containerName = benchmarkResourceName(context, workload, String(iteration))
         let token = "hot-\(context.sanitizedDockerTag)-\(iteration)-\(UUID().uuidString.prefix(8))"
         let overlay = smartOverlay
             ? nativeOverlayPlan(
@@ -1463,7 +1521,7 @@ public struct DockerBenchmarkSuite {
         projectDirectory: URL,
         homeDirectory: URL
     ) -> BenchmarkResult {
-        let containerName = "conjet-bench-\(context.sanitizedDockerTag)-conjetfs-hot-\(iteration)"
+        let containerName = benchmarkResourceName(context, "conjetfs-hot", String(iteration))
         let token = "hot-\(context.sanitizedDockerTag)-\(iteration)-\(UUID().uuidString.prefix(8))"
         let machine = MachineProfiler.capture()
         let command = dockerArguments(context: context, arguments: [
@@ -1481,6 +1539,7 @@ public struct DockerBenchmarkSuite {
             hotReloadWatchScript(path: "/workspace/src/hot.txt", token: token)
         ])
         _ = try? runDocker(context: context, arguments: ["rm", "-f", containerName])
+        defer { _ = try? runDocker(context: context, arguments: ["rm", "-f", containerName]) }
         var metrics = commonMetrics(
             topologyMetrics(
                 topology: "conjetfs",
@@ -1784,6 +1843,10 @@ public struct DockerBenchmarkSuite {
         let machine = MachineProfiler.capture()
         let command = dockerArguments(context: context, arguments: runArguments)
         _ = try? runDocker(context: context, arguments: ["rm", "-f", containerName])
+        defer {
+            _ = try? runDocker(context: context, arguments: ["rm", "-f", containerName])
+            removeDockerVolumes(context: context, names: cleanupVolumes)
+        }
         let startedAt = Date()
         var metrics = commonMetrics(initialMetrics, iteration: iteration)
         var stdout = ""
@@ -1907,9 +1970,6 @@ public struct DockerBenchmarkSuite {
             exitCode = 1
             stderr = String(describing: error)
         }
-        _ = try? runDocker(context: context, arguments: ["rm", "-f", containerName])
-        removeDockerVolumes(context: context, names: cleanupVolumes)
-
         return BenchmarkResult(
             workload: workload,
             runtime: context,
@@ -2629,7 +2689,7 @@ public struct DockerBenchmarkSuite {
             let suffix = pair.0
             let target = pair.1
             return (
-                "conjet-bench-\(context.sanitizedDockerTag)-\(workload)-\(suffix)-\(iteration)",
+                benchmarkResourceName(context, workload, suffix, String(iteration)),
                 target
             )
         }

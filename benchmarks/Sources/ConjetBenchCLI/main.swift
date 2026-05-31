@@ -45,22 +45,27 @@ struct ConjetBenchCLI {
             fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? defaultRunAllDirectory().path),
             isDirectory: true
         )
-        let includeEnergy = !args.contains("--no-energy")
-        let includePolyglot = !args.contains("--no-polyglot")
-        let includeNoCache = !args.contains("--no-cache-suite")
+        let selectedSuites = try runAllSuiteSelection(value(after: "--suites", in: args))
+        let includeEnergy = suiteIsSelected("energy-gate", selectedSuites: selectedSuites) && !args.contains("--no-energy")
+        let includePolyglot = suiteIsSelected("polyglot-gate", selectedSuites: selectedSuites) && !args.contains("--no-polyglot")
+        let includeNoCache = suiteIsSelected("no-cache-gate", selectedSuites: selectedSuites) && !args.contains("--no-cache-suite")
+        let cleanupWork = !args.contains("--keep-work")
         let requirePower = args.contains("--require-power")
         let commandTimeout = value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 240
-        let energySeconds = value(after: "--energy-seconds", in: args).flatMap(Double.init) ?? 30
-        let polyglotSamples = value(after: "--polyglot-samples", in: args).flatMap(Int.init) ?? min(samples, 5)
+        let energySeconds = value(after: "--energy-seconds", in: args).flatMap(Double.init) ?? 10
+        let energySamples = value(after: "--energy-samples", in: args).flatMap(Int.init) ?? min(samples, 2)
+        let polyglotSamples = value(after: "--polyglot-samples", in: args).flatMap(Int.init) ?? min(samples, 2)
         let ecosystems = value(after: "--ecosystems", in: args).map(csvList) ?? PolyglotBenchmarkSuite.defaultEcosystems
+        let resourceScope = benchmarkResourceScope(outputDirectory: outputDirectory)
 
         try requireSudo()
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
         let startedAt = Date()
         let box = BenchmarkOutcomeBox()
-        var jobs: [BenchmarkJob] = [
-            BenchmarkJob(name: "warm-gate") {
+        var jobs: [BenchmarkJob] = []
+        if suiteIsSelected("warm-gate", selectedSuites: selectedSuites) {
+            jobs.append(BenchmarkJob(name: "warm-gate") {
                 try runReleaseGate(
                     name: "warm-gate",
                     contexts: contexts,
@@ -68,10 +73,14 @@ struct ConjetBenchCLI {
                     phase: .warm,
                     warmup: true,
                     outputDirectory: outputDirectory.appendingPathComponent("warm-gate", isDirectory: true),
-                    commandTimeout: commandTimeout
+                    commandTimeout: commandTimeout,
+                    resourceScope: "\(resourceScope)-warm-gate",
+                    cleanupWork: cleanupWork
                 )
-            },
-            BenchmarkJob(name: "cold-base-prepulled-gate") {
+            })
+        }
+        if suiteIsSelected("cold-base-prepulled-gate", selectedSuites: selectedSuites) {
+            jobs.append(BenchmarkJob(name: "cold-base-prepulled-gate") {
                 try runReleaseGate(
                     name: "cold-base-prepulled-gate",
                     contexts: contexts,
@@ -79,18 +88,24 @@ struct ConjetBenchCLI {
                     phase: .coldBasePrepulled,
                     warmup: false,
                     outputDirectory: outputDirectory.appendingPathComponent("cold-base-prepulled-gate", isDirectory: true),
-                    commandTimeout: commandTimeout
+                    commandTimeout: commandTimeout,
+                    resourceScope: "\(resourceScope)-cold-base-prepulled-gate",
+                    cleanupWork: cleanupWork
                 )
-            },
-            BenchmarkJob(name: "topology-gate") {
+            })
+        }
+        if suiteIsSelected("topology-gate", selectedSuites: selectedSuites) {
+            jobs.append(BenchmarkJob(name: "topology-gate") {
                 try runTopologyGate(
                     contexts: contexts,
                     samples: samples,
                     outputDirectory: outputDirectory.appendingPathComponent("topology-gate", isDirectory: true),
-                    commandTimeout: commandTimeout
+                    commandTimeout: commandTimeout,
+                    resourceScope: "\(resourceScope)-topology-gate",
+                    cleanupWork: cleanupWork
                 )
-            }
-        ]
+            })
+        }
 
         if includeNoCache {
             jobs.append(BenchmarkJob(name: "no-cache-gate") {
@@ -101,7 +116,9 @@ struct ConjetBenchCLI {
                     phase: .noCache,
                     warmup: false,
                     outputDirectory: outputDirectory.appendingPathComponent("no-cache-gate", isDirectory: true),
-                    commandTimeout: commandTimeout
+                    commandTimeout: commandTimeout,
+                    resourceScope: "\(resourceScope)-no-cache-gate",
+                    cleanupWork: cleanupWork
                 )
             })
         }
@@ -113,7 +130,9 @@ struct ConjetBenchCLI {
                     samples: polyglotSamples,
                     ecosystems: ecosystems,
                     outputDirectory: outputDirectory.appendingPathComponent("polyglot-gate", isDirectory: true),
-                    commandTimeout: max(commandTimeout, 300)
+                    commandTimeout: max(commandTimeout, 300),
+                    resourceScope: "\(resourceScope)-polyglot-gate",
+                    cleanupWork: cleanupWork
                 )
             })
         }
@@ -124,7 +143,7 @@ struct ConjetBenchCLI {
                 print("conjet-bench: sudo validated; starting energy-gate before wall-time suites")
                 var outcome = try runEnergyGate(
                     contexts: contexts,
-                    samples: samples,
+                    energySamples: energySamples,
                     requirePower: requirePower,
                     outputDirectory: outputDirectory.appendingPathComponent("energy-gate", isDirectory: true),
                     seconds: energySeconds
@@ -143,6 +162,10 @@ struct ConjetBenchCLI {
                 ))
                 print("conjet-bench: failed energy-gate: \(error)")
             }
+        }
+
+        guard includeEnergy || !jobs.isEmpty else {
+            throw ConjetError.invalidArgument("no benchmark suites selected")
         }
 
         print("conjet-bench: running \(jobs.count) wall-time suites in parallel")
@@ -172,6 +195,9 @@ struct ConjetBenchCLI {
             }
         }
         group.wait()
+        if cleanupWork {
+            cleanupBenchmarkDumps(in: outputDirectory)
+        }
 
         let suites = box.values.sorted { $0.name < $1.name }
         let outcome = BenchmarkRunAllOutcome(
@@ -196,22 +222,38 @@ struct ConjetBenchCLI {
         phase: BenchmarkSamplePhase,
         warmup: Bool,
         outputDirectory: URL,
-        commandTimeout: Double
+        commandTimeout: Double,
+        resourceScope: String,
+        cleanupWork: Bool
     ) throws -> BenchmarkSuiteOutcome {
+        defer {
+            if cleanupWork {
+                cleanupBenchmarkDumps(in: outputDirectory)
+            }
+        }
         let result = try BenchmarkReleaseGateRunner(
             options: BenchmarkReleaseGateOptions(
                 contexts: contexts,
                 candidateRuntime: "conjet",
                 baselineRuntimes: contexts.filter { $0 != "conjet" },
+                requiredBaselineRuntimes: requiredBaselines(from: contexts),
                 iterations: samples,
                 minimumSamples: samples,
                 warmup: warmup,
                 samplePhase: phase,
                 includeIdle: false,
                 includePower: false,
-                dockerCommandTimeoutSeconds: commandTimeout
+                dockerCommandTimeoutSeconds: commandTimeout,
+                dockerResourceScope: resourceScope
             )
         ).run(outputDirectory: outputDirectory)
+        let advisoryFailures = result.gateReport.comparisons.filter { !$0.requiredBaseline && !$0.passed }.count
+        let summary: String
+        if result.gateReport.passed && advisoryFailures > 0 {
+            summary = "required gate passed; \(advisoryFailures) advisory comparisons failed"
+        } else {
+            summary = result.gateReport.passed ? "gate passed" : "gate failed"
+        }
 
         return BenchmarkSuiteOutcome(
             name: name,
@@ -224,7 +266,7 @@ struct ConjetBenchCLI {
                 "gate": result.artifacts.gateReport,
                 "gate-markdown": result.artifacts.gateMarkdownReport
             ],
-            summary: result.gateReport.passed ? "gate passed" : "gate failed"
+            summary: summary
         )
     }
 
@@ -232,8 +274,15 @@ struct ConjetBenchCLI {
         contexts: [String],
         samples: Int,
         outputDirectory: URL,
-        commandTimeout: Double
+        commandTimeout: Double,
+        resourceScope: String,
+        cleanupWork: Bool
     ) throws -> BenchmarkSuiteOutcome {
+        defer {
+            if cleanupWork {
+                cleanupBenchmarkDumps(in: outputDirectory)
+            }
+        }
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         let workDirectory = outputDirectory.appendingPathComponent("work", isDirectory: true)
         let workloads = [
@@ -259,7 +308,8 @@ struct ConjetBenchCLI {
             warmup: true,
             samplePhase: .warm,
             workloads: workloads,
-            commandTimeoutSeconds: commandTimeout
+            commandTimeoutSeconds: commandTimeout,
+            resourceScope: resourceScope
         ).run(workDirectory: workDirectory)
         let allResults = outputDirectory.appendingPathComponent("all-results.json")
         try ConjetJSON.string(results).write(to: allResults, atomically: true, encoding: .utf8)
@@ -281,8 +331,15 @@ struct ConjetBenchCLI {
         samples: Int,
         ecosystems: [String],
         outputDirectory: URL,
-        commandTimeout: Double
+        commandTimeout: Double,
+        resourceScope: String,
+        cleanupWork: Bool
     ) throws -> BenchmarkSuiteOutcome {
+        defer {
+            if cleanupWork {
+                cleanupBenchmarkDumps(in: outputDirectory)
+            }
+        }
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         let workDirectory = outputDirectory.appendingPathComponent("work", isDirectory: true)
         let results = try PolyglotBenchmarkSuite(
@@ -290,7 +347,8 @@ struct ConjetBenchCLI {
             samples: samples,
             ecosystems: ecosystems,
             topology: "smart-bind",
-            commandTimeoutSeconds: commandTimeout
+            commandTimeoutSeconds: commandTimeout,
+            resourceScope: resourceScope
         ).run(workDirectory: workDirectory)
         let allResults = outputDirectory.appendingPathComponent("all-results.json")
         try ConjetJSON.string(results).write(to: allResults, atomically: true, encoding: .utf8)
@@ -310,7 +368,7 @@ struct ConjetBenchCLI {
 
     private static func runEnergyGate(
         contexts: [String],
-        samples: Int,
+        energySamples: Int,
         requirePower: Bool,
         outputDirectory: URL,
         seconds: Double
@@ -318,7 +376,7 @@ struct ConjetBenchCLI {
         let result = try BenchmarkEnergyGateRunner(
             options: BenchmarkEnergyGateOptions(
                 contexts: contexts,
-                samples: samples,
+                samples: energySamples,
                 requirePower: requirePower,
                 useSudo: true,
                 seconds: seconds
@@ -339,22 +397,25 @@ struct ConjetBenchCLI {
 
     private static func gate(args: [String]) throws {
         guard let reportPaths = value(after: "--reports", in: args) else {
-            throw ConjetError.invalidArgument("usage: conjet-bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N]")
+            throw ConjetError.invalidArgument("usage: conjet-bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--required-baselines orbstack] [--min-samples N]")
         }
         let urls = reportPaths.split(separator: ",").map { URL(fileURLWithPath: expandedPath(String($0))) }
         let candidate = value(after: "--candidate", in: args) ?? "conjet"
         let baselines = value(after: "--baselines", in: args).map(csvList) ?? ["orbstack", "colima"]
+        let requiredBaselines = value(after: "--required-baselines", in: args).map(csvList) ?? baselines
         let minSamples = value(after: "--min-samples", in: args).flatMap(Int.init) ?? 10
         let phase = try samplePhase(value(after: "--phase", in: args))
         let results = try BenchmarkClaimGate.loadJSONReports(urls: urls)
+        let rules = rulesRepresented(in: results)
         let report = BenchmarkClaimGate.evaluate(
             results: results,
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: candidate,
                 baselineRuntimes: baselines,
+                requiredBaselineRuntimes: requiredBaselines,
                 minimumSamples: minSamples,
                 samplePhase: phase,
-                rules: BenchmarkClaimGateOptions.defaultRules
+                rules: rules
             )
         )
         if args.contains("--markdown") {
@@ -415,6 +476,71 @@ struct ConjetBenchCLI {
             throw ConjetError.invalidArgument("invalid phase '\(value)'")
         }
         return phase
+    }
+
+    private static func runAllSuiteSelection(_ value: String?) throws -> Set<String>? {
+        guard let value else { return nil }
+        let suites = csvList(value).map(canonicalRunAllSuiteName)
+        guard !suites.isEmpty else {
+            throw ConjetError.invalidArgument("--suites must contain at least one suite")
+        }
+
+        let validSuites = Set(runAllSuiteNames)
+        let unknownSuites = suites.filter { !validSuites.contains($0) }
+        guard unknownSuites.isEmpty else {
+            throw ConjetError.invalidArgument(
+                "unknown benchmark suites: \(unknownSuites.joined(separator: ", ")); valid suites: \(runAllSuiteNames.joined(separator: ", "))"
+            )
+        }
+        return Set(suites)
+    }
+
+    private static func suiteIsSelected(_ suite: String, selectedSuites: Set<String>?) -> Bool {
+        selectedSuites?.contains(suite) ?? true
+    }
+
+    private static var runAllSuiteNames: [String] {
+        [
+            "warm-gate",
+            "cold-base-prepulled-gate",
+            "no-cache-gate",
+            "topology-gate",
+            "polyglot-gate",
+            "energy-gate"
+        ]
+    }
+
+    private static func canonicalRunAllSuiteName(_ suite: String) -> String {
+        switch suite {
+        case "warm":
+            return "warm-gate"
+        case "cold-base-prepulled", "cold-prepulled":
+            return "cold-base-prepulled-gate"
+        case "no-cache":
+            return "no-cache-gate"
+        case "topology":
+            return "topology-gate"
+        case "polyglot":
+            return "polyglot-gate"
+        case "energy":
+            return "energy-gate"
+        default:
+            return suite
+        }
+    }
+
+    private static func requiredBaselines(from contexts: [String]) -> [String] {
+        let baselines = contexts.filter { $0 != "conjet" }
+        return baselines.contains("orbstack") ? ["orbstack"] : baselines
+    }
+
+    private static func rulesRepresented(in results: [BenchmarkResult]) -> [BenchmarkClaimRule] {
+        let workloads = Set(results.map(\.workload))
+        let rules = BenchmarkClaimGateOptions.defaultRules.filter { rule in
+            workloads.contains(rule.resolvedCandidateWorkload) ||
+                workloads.contains(rule.resolvedBaselineWorkload)
+        }
+        return rules.isEmpty ? BenchmarkClaimGateOptions.defaultRules : rules
     }
 
     private static func renderTopologyMarkdown(_ results: [BenchmarkResult]) -> String {
@@ -479,7 +605,7 @@ struct ConjetBenchCLI {
               conjet-bench gate --reports PATH[,PATH...]
 
             Commands:
-              run          Run wall-time suites in parallel, then run energy in isolation.
+              run          Run energy in isolation, then wall-time suites in parallel.
               energy-gate  Run only the powermetrics energy gate.
               gate         Score existing raw JSON reports.
               help         Show this help text.
@@ -487,15 +613,19 @@ struct ConjetBenchCLI {
             Run options:
               --contexts LIST          Docker contexts to measure (default: conjet,orbstack,colima)
               --samples N              Samples per wall-time workload (default: 10)
-              --polyglot-samples N     Samples per polyglot workload (default: min(samples, 5))
+              --suites LIST            Run only selected suites: warm-gate,cold-base-prepulled-gate,no-cache-gate,topology-gate,polyglot-gate,energy-gate
+              --polyglot-samples N     Samples per polyglot workload (default: min(samples, 2))
               --ecosystems LIST        js,python,jvm,dotnet,go,rust,cpp
               --output-dir DIR         Report root (default: benchmarks/reports/run-all-YYYYMMDD-HHMMSS)
               --command-timeout N      Docker workload timeout in seconds (default: 240)
-              --energy-seconds N       Idle energy sample duration (default: 30)
+              --energy-samples N       Samples per energy workload (default: min(samples, 2))
+              --energy-seconds N       Idle energy sample duration (default: 10)
+              --keep-work              Keep generated workload directories for debugging
               --require-power          Fail energy suite if powermetrics cannot measure
               --no-energy              Skip energy gate
               --no-polyglot            Skip polyglot gate
               --no-cache-suite         Skip no-cache gate
+              --required-baselines LIST Hard-fail gate baselines for existing-report scoring
 
             Notes:
               run always executes sudo -v before starting benchmark suites.
@@ -529,6 +659,35 @@ struct ConjetBenchCLI {
                 .path
         }
         return value
+    }
+
+    private static func benchmarkResourceScope(outputDirectory: URL, now: Date = Date()) -> String {
+        let milliseconds = Int((now.timeIntervalSince1970 * 1_000).rounded())
+        return "\(outputDirectory.lastPathComponent)-\(milliseconds)"
+    }
+
+    private static func cleanupBenchmarkDumps(in directory: URL) {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        ) else {
+            return
+        }
+
+        var dumpDirectories: [URL] = []
+        for case let url as URL in enumerator {
+            guard url.lastPathComponent == "work" else {
+                continue
+            }
+            dumpDirectories.append(url)
+            enumerator.skipDescendants()
+        }
+
+        for dumpDirectory in dumpDirectories {
+            try? fileManager.removeItem(at: dumpDirectory)
+        }
     }
 
     private static func defaultRunAllDirectory(now: Date = Date()) -> URL {

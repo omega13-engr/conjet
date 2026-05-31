@@ -5,6 +5,7 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
     public var contexts: [String]
     public var candidateRuntime: String
     public var baselineRuntimes: [String]
+    public var requiredBaselineRuntimes: [String]
     public var iterations: Int
     public var minimumSamples: Int
     public var workloads: [String]
@@ -19,11 +20,13 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
     public var powerSamplers: String
     public var useSudoForPower: Bool
     public var dockerCommandTimeoutSeconds: Double
+    public var dockerResourceScope: String?
 
     public init(
         contexts: [String] = [],
         candidateRuntime: String = "conjet",
         baselineRuntimes: [String] = ["orbstack", "colima"],
+        requiredBaselineRuntimes: [String]? = nil,
         iterations: Int = 3,
         minimumSamples: Int = 3,
         workloads: [String] = DockerBenchmarkSuite.defaultWorkloads,
@@ -37,10 +40,14 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
         powerInterval: Double = 1,
         powerSamplers: String = "cpu_power,gpu_power,ane_power,tasks",
         useSudoForPower: Bool = true,
-        dockerCommandTimeoutSeconds: Double = 180
+        dockerCommandTimeoutSeconds: Double = 180,
+        dockerResourceScope: String? = nil
     ) {
         self.candidateRuntime = candidateRuntime
         self.baselineRuntimes = Self.unique(baselineRuntimes.filter { !$0.isEmpty })
+        let baselineSet = Set(self.baselineRuntimes)
+        let required = Self.unique((requiredBaselineRuntimes ?? self.baselineRuntimes).filter { baselineSet.contains($0) })
+        self.requiredBaselineRuntimes = required.isEmpty ? self.baselineRuntimes : required
         self.contexts = Self.normalizedContexts(
             contexts,
             candidateRuntime: candidateRuntime,
@@ -60,6 +67,7 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
         self.powerSamplers = powerSamplers
         self.useSudoForPower = useSudoForPower
         self.dockerCommandTimeoutSeconds = max(1, dockerCommandTimeoutSeconds)
+        self.dockerResourceScope = dockerResourceScope
     }
 
     public var effectiveGateRules: [BenchmarkClaimRule] {
@@ -204,7 +212,8 @@ public struct BenchmarkReleaseGateRunner {
                 warmup: warmup,
                 samplePhase: options.samplePhase,
                 workloads: workloads,
-                commandTimeoutSeconds: options.dockerCommandTimeoutSeconds
+                commandTimeoutSeconds: options.dockerCommandTimeoutSeconds,
+                resourceScope: options.dockerResourceScope
             ).run(workDirectory: workDirectory)
         }
         self.idleCollector = idleCollector ?? { runtime, _ in
@@ -345,6 +354,7 @@ public struct BenchmarkReleaseGateRunner {
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: options.candidateRuntime,
                 baselineRuntimes: options.baselineRuntimes,
+                requiredBaselineRuntimes: options.requiredBaselineRuntimes,
                 minimumSamples: options.minimumSamples,
                 samplePhase: options.samplePhase,
                 rules: rules
@@ -496,6 +506,7 @@ public enum BenchmarkClaimGateMarkdownReport {
             "- Verdict: \(report.passed ? "passed" : "failed")",
             "- Candidate: \(report.candidateRuntime)",
             "- Baselines: \(report.baselineRuntimes.joined(separator: ", "))",
+            "- Required baselines: \(report.requiredBaselineRuntimes.joined(separator: ", "))",
             "- Minimum samples: \(report.minimumSamples)",
             "- Sample phase: \(report.samplePhase.rawValue)",
             ""
@@ -512,11 +523,11 @@ public enum BenchmarkClaimGateMarkdownReport {
 
         lines.append("## Comparisons")
         lines.append("")
-        lines.append("| Claim | Candidate Workload | Baseline | Baseline Workload | Measure | Candidate P50 | Baseline P50 | P50 Ratio | Candidate P95 | Baseline P95 | P95 Ratio | Result |")
-        lines.append("| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
+        lines.append("| Claim | Candidate Workload | Baseline | Required | Baseline Workload | Measure | Candidate P50 | Baseline P50 | P50 Ratio | Candidate P95 | Baseline P95 | P95 Ratio | Result |")
+        lines.append("| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
         for comparison in report.comparisons {
             lines.append(
-                "| \(comparison.workload) | \(comparison.candidateWorkload) | \(comparison.baselineRuntime) | \(comparison.baselineWorkload) | \(comparison.measure) | \(formatOptional(comparison.candidateP50)) | \(formatOptional(comparison.baselineP50)) | \(formatOptional(comparison.p50Ratio)) | \(formatOptional(comparison.candidateP95)) | \(formatOptional(comparison.baselineP95)) | \(formatOptional(comparison.p95Ratio)) | \(comparison.passed ? "pass" : comparison.reason) |"
+                "| \(comparison.workload) | \(comparison.candidateWorkload) | \(comparison.baselineRuntime) | \(comparison.requiredBaseline ? "yes" : "advisory") | \(comparison.baselineWorkload) | \(comparison.measure) | \(formatOptional(comparison.candidateP50)) | \(formatOptional(comparison.baselineP50)) | \(formatOptional(comparison.p50Ratio)) | \(formatOptional(comparison.candidateP95)) | \(formatOptional(comparison.baselineP95)) | \(formatOptional(comparison.p95Ratio)) | \(comparison.passed ? "pass" : comparison.reason) |"
             )
         }
         return lines.joined(separator: "\n")

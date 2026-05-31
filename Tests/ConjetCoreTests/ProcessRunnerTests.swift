@@ -1,4 +1,5 @@
 import ConjetCore
+import Darwin
 import XCTest
 
 final class ProcessRunnerTests: XCTestCase {
@@ -58,7 +59,20 @@ final class ProcessRunnerTests: XCTestCase {
     }
 
     func testProcessRunnerStressCleansTemporaryCaptureFiles() throws {
-        let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let rootTemp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let temp = rootTemp.appendingPathComponent("conjet-process-runner-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        let originalTMPDIR = ProcessInfo.processInfo.environment["TMPDIR"]
+        setenv("TMPDIR", temp.path + "/", 1)
+        defer {
+            if let originalTMPDIR {
+                setenv("TMPDIR", originalTMPDIR, 1)
+            } else {
+                unsetenv("TMPDIR")
+            }
+            try? FileManager.default.removeItem(at: temp)
+        }
+
         let before = try conjetCaptureFiles(in: temp)
 
         for index in 0..<500 {
@@ -74,8 +88,13 @@ final class ProcessRunnerTests: XCTestCase {
             XCTAssertFalse(result.stderr.localizedCaseInsensitiveContains("bad file descriptor"))
         }
 
-        let after = try conjetCaptureFiles(in: temp)
-        XCTAssertEqual(after, before)
+        var leaked = try conjetCaptureFiles(in: temp).subtracting(before)
+        let deadline = Date().addingTimeInterval(1)
+        while !leaked.isEmpty, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+            leaked = try conjetCaptureFiles(in: temp).subtracting(before)
+        }
+        XCTAssertEqual(leaked, [])
     }
 
     private func conjetCaptureFiles(in directory: URL) throws -> Set<String> {

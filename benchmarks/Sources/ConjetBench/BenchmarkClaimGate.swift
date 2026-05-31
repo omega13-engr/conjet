@@ -166,6 +166,7 @@ public struct BenchmarkClaimRule: Codable, Equatable, Sendable {
 public struct BenchmarkClaimGateOptions: Codable, Equatable, Sendable {
     public var candidateRuntime: String
     public var baselineRuntimes: [String]
+    public var requiredBaselineRuntimes: [String]
     public var minimumSamples: Int
     public var samplePhase: BenchmarkSamplePhase
     public var rules: [BenchmarkClaimRule]
@@ -173,15 +174,31 @@ public struct BenchmarkClaimGateOptions: Codable, Equatable, Sendable {
     public init(
         candidateRuntime: String = "conjet",
         baselineRuntimes: [String] = ["orbstack", "colima"],
+        requiredBaselineRuntimes: [String]? = nil,
         minimumSamples: Int = 3,
         samplePhase: BenchmarkSamplePhase = .any,
         rules: [BenchmarkClaimRule] = BenchmarkClaimGateOptions.defaultRules
     ) {
+        let baselines = Self.unique(baselineRuntimes.filter { !$0.isEmpty })
+        let required = Self.unique((requiredBaselineRuntimes ?? baselines).filter { !$0.isEmpty })
+        let baselineSet = Set(baselines)
+        let requiredInBaselines = required.filter { baselineSet.contains($0) }
         self.candidateRuntime = candidateRuntime
-        self.baselineRuntimes = baselineRuntimes
+        self.baselineRuntimes = baselines
+        self.requiredBaselineRuntimes = requiredInBaselines.isEmpty ? baselines : requiredInBaselines
         self.minimumSamples = minimumSamples
         self.samplePhase = samplePhase
         self.rules = rules
+    }
+
+    private static func unique(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for value in values where !seen.contains(value) {
+            seen.insert(value)
+            result.append(value)
+        }
+        return result
     }
 
     public static let defaultRules: [BenchmarkClaimRule] = [
@@ -237,6 +254,7 @@ public struct BenchmarkClaimGateReport: Codable, Equatable, Sendable {
     public var passed: Bool
     public var candidateRuntime: String
     public var baselineRuntimes: [String]
+    public var requiredBaselineRuntimes: [String]
     public var minimumSamples: Int
     public var samplePhase: BenchmarkSamplePhase
     public var comparisons: [BenchmarkClaimComparison]
@@ -246,6 +264,7 @@ public struct BenchmarkClaimGateReport: Codable, Equatable, Sendable {
         passed: Bool,
         candidateRuntime: String,
         baselineRuntimes: [String],
+        requiredBaselineRuntimes: [String]? = nil,
         minimumSamples: Int,
         samplePhase: BenchmarkSamplePhase,
         comparisons: [BenchmarkClaimComparison],
@@ -254,10 +273,34 @@ public struct BenchmarkClaimGateReport: Codable, Equatable, Sendable {
         self.passed = passed
         self.candidateRuntime = candidateRuntime
         self.baselineRuntimes = baselineRuntimes
+        self.requiredBaselineRuntimes = requiredBaselineRuntimes ?? baselineRuntimes
         self.minimumSamples = minimumSamples
         self.samplePhase = samplePhase
         self.comparisons = comparisons
         self.missingRequirements = missingRequirements
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case passed
+        case candidateRuntime
+        case baselineRuntimes
+        case requiredBaselineRuntimes
+        case minimumSamples
+        case samplePhase
+        case comparisons
+        case missingRequirements
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.passed = try container.decode(Bool.self, forKey: .passed)
+        self.candidateRuntime = try container.decode(String.self, forKey: .candidateRuntime)
+        self.baselineRuntimes = try container.decode([String].self, forKey: .baselineRuntimes)
+        self.requiredBaselineRuntimes = try container.decodeIfPresent([String].self, forKey: .requiredBaselineRuntimes) ?? baselineRuntimes
+        self.minimumSamples = try container.decode(Int.self, forKey: .minimumSamples)
+        self.samplePhase = try container.decode(BenchmarkSamplePhase.self, forKey: .samplePhase)
+        self.comparisons = try container.decode([BenchmarkClaimComparison].self, forKey: .comparisons)
+        self.missingRequirements = try container.decode([String].self, forKey: .missingRequirements)
     }
 }
 
@@ -277,6 +320,7 @@ public struct BenchmarkClaimComparison: Codable, Equatable, Sendable {
     public var baselineP95: Double?
     public var p50Ratio: Double?
     public var p95Ratio: Double?
+    public var requiredBaseline: Bool
     public var passed: Bool
     public var reason: String
 
@@ -296,6 +340,7 @@ public struct BenchmarkClaimComparison: Codable, Equatable, Sendable {
         baselineP95: Double?,
         p50Ratio: Double?,
         p95Ratio: Double?,
+        requiredBaseline: Bool = true,
         passed: Bool,
         reason: String
     ) {
@@ -314,6 +359,7 @@ public struct BenchmarkClaimComparison: Codable, Equatable, Sendable {
         self.baselineP95 = baselineP95
         self.p50Ratio = p50Ratio
         self.p95Ratio = p95Ratio
+        self.requiredBaseline = requiredBaseline
         self.passed = passed
         self.reason = reason
     }
@@ -334,6 +380,7 @@ public struct BenchmarkClaimComparison: Codable, Equatable, Sendable {
         case baselineP95
         case p50Ratio
         case p95Ratio
+        case requiredBaseline
         case passed
         case reason
     }
@@ -356,6 +403,7 @@ public struct BenchmarkClaimComparison: Codable, Equatable, Sendable {
         self.baselineP95 = try container.decodeIfPresent(Double.self, forKey: .baselineP95)
         self.p50Ratio = try container.decodeIfPresent(Double.self, forKey: .p50Ratio)
         self.p95Ratio = try container.decodeIfPresent(Double.self, forKey: .p95Ratio)
+        self.requiredBaseline = try container.decodeIfPresent(Bool.self, forKey: .requiredBaseline) ?? true
         self.passed = try container.decode(Bool.self, forKey: .passed)
         self.reason = try container.decode(String.self, forKey: .reason)
     }
@@ -368,6 +416,7 @@ public enum BenchmarkClaimGate {
     ) -> BenchmarkClaimGateReport {
         var comparisons: [BenchmarkClaimComparison] = []
         var missing: [String] = []
+        let requiredBaselines = Set(options.requiredBaselineRuntimes)
 
         for rule in options.rules {
             let candidateWorkload = rule.resolvedCandidateWorkload
@@ -387,6 +436,7 @@ public enum BenchmarkClaimGate {
             }
 
             for baselineRuntime in options.baselineRuntimes {
+                let requiredBaseline = requiredBaselines.contains(baselineRuntime)
                 let baseline = summarize(
                     results: results,
                     runtime: baselineRuntime,
@@ -398,16 +448,17 @@ public enum BenchmarkClaimGate {
                     baseline.failures == baseline.samples &&
                     candidate.samples >= options.minimumSamples &&
                     candidate.failures == 0
-                if baseline.samples < options.minimumSamples {
+                if requiredBaseline && baseline.samples < options.minimumSamples {
                     missing.append("\(requirementLabel(rule: rule, workload: baselineWorkload, runtime: baselineRuntime, role: "baseline")): expected at least \(options.minimumSamples) samples, got \(baseline.samples)")
                 }
-                if baseline.missingMeasure && !baselineIsFailedEvidence {
+                if requiredBaseline && baseline.missingMeasure && !baselineIsFailedEvidence {
                     missing.append("\(requirementLabel(rule: rule, workload: baselineWorkload, runtime: baselineRuntime, role: "baseline")): missing measure \(rule.measure.label)")
                 }
 
                 let comparison = compare(
                     rule: rule,
                     baselineRuntime: baselineRuntime,
+                    requiredBaseline: requiredBaseline,
                     candidate: candidate,
                     baseline: baseline,
                     minimumSamples: options.minimumSamples
@@ -416,11 +467,12 @@ public enum BenchmarkClaimGate {
             }
         }
 
-        let passed = missing.isEmpty && comparisons.allSatisfy(\.passed)
+        let passed = missing.isEmpty && comparisons.filter(\.requiredBaseline).allSatisfy(\.passed)
         return BenchmarkClaimGateReport(
             passed: passed,
             candidateRuntime: options.candidateRuntime,
             baselineRuntimes: options.baselineRuntimes,
+            requiredBaselineRuntimes: options.requiredBaselineRuntimes,
             minimumSamples: options.minimumSamples,
             samplePhase: options.samplePhase,
             comparisons: comparisons,
@@ -456,6 +508,7 @@ public enum BenchmarkClaimGate {
     private static func compare(
         rule: BenchmarkClaimRule,
         baselineRuntime: String,
+        requiredBaseline: Bool,
         candidate: Summary,
         baseline: Summary,
         minimumSamples: Int
@@ -490,6 +543,7 @@ public enum BenchmarkClaimGate {
                 baselineP95: baseline.p95,
                 p50Ratio: nil,
                 p95Ratio: nil,
+                requiredBaseline: requiredBaseline,
                 passed: true,
                 reason: "baseline failed all samples while candidate succeeded"
             )
@@ -535,6 +589,7 @@ public enum BenchmarkClaimGate {
             baselineP95: baseline.p95,
             p50Ratio: p50Ratio,
             p95Ratio: p95Ratio,
+            requiredBaseline: requiredBaseline,
             passed: reasons.isEmpty,
             reason: reasons.isEmpty ? "passed" : reasons.joined(separator: "; ")
         )

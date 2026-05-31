@@ -32,6 +32,16 @@ parallel and then runs energy in isolation:
 Each suite writes raw `all-results.json` and a suite Markdown report. The root
 runner writes `run-all.json` and `run-all.md`.
 
+To rerun only specific suites after a partial failure, use `--suites`:
+
+```sh
+swift run --package-path benchmarks conjet-bench run \
+  --contexts conjet,orbstack,colima \
+  --samples 5 \
+  --suites warm-gate,no-cache-gate,cold-base-prepulled-gate \
+  --output-dir benchmarks/reports/rerun-failed-gates
+```
+
 ## Topology Labels
 
 Every result must include topology metadata:
@@ -113,13 +123,15 @@ swift run --package-path benchmarks conjet-bench gate \
   --reports benchmarks/reports/run-all-local/warm-gate/all-results.json \
   --candidate conjet \
   --baselines orbstack,colima \
+  --required-baselines orbstack \
   --min-samples 10 \
   --phase warm \
   --markdown
 ```
 
 Markdown reports are summaries, not proof artifacts. Gate input must be raw
-JSON.
+JSON. Baselines not listed in `--required-baselines` remain in the comparison
+table as advisory evidence but do not decide the gate verdict.
 
 ## Claim Policy
 

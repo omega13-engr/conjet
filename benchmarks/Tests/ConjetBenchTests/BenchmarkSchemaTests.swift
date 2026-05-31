@@ -303,6 +303,36 @@ final class BenchmarkSchemaTests: XCTestCase {
         })
     }
 
+    func testDockerBenchmarkSuiteScopesBenchmarkOwnedDockerResources() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-docker-bench-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = DockerCommandRecorder()
+        _ = try DockerBenchmarkSuite(
+            contexts: ["conjet"],
+            iterations: 1,
+            warmup: true,
+            workloads: [
+                "npm-install",
+                "volume-npm-install",
+                "smart-bind-npm-install",
+                "smart-bind-hot-reload",
+                "compose-up"
+            ],
+            resourceScope: "run alpha",
+            runner: recorder.run,
+            inputRunner: recorder.runWithInput
+        ).run(workDirectory: directory)
+
+        let joinedCommands = recorder.commands.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        XCTAssertTrue(joinedCommands.contains("conjet-bench-run-alpha-conjet-npm-1"))
+        XCTAssertTrue(joinedCommands.contains("type=volume,source=conjet-bench-run-alpha-conjet-npm-volume-1,target=/app"))
+        XCTAssertTrue(joinedCommands.contains("type=volume,source=conjet-bench-run-alpha-conjet-smart-bind-npm-install-deps-1,target=/app/node_modules"))
+        XCTAssertTrue(joinedCommands.contains("-p conjet-bench-run-alpha-conjet-1"))
+        XCTAssertTrue(joinedCommands.contains("--name conjet-bench-run-alpha-conjet-smart-bind-hot-reload-1"))
+    }
+
     func testDockerBenchmarkSuiteInterleavesMeasuredContextsByIteration() throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("conjet-docker-bench-test-\(UUID().uuidString)", isDirectory: true)
@@ -477,6 +507,29 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(report.passed)
         XCTAssertTrue(report.missingRequirements.isEmpty)
         XCTAssertTrue(report.comparisons.allSatisfy(\.passed))
+    }
+
+    func testBenchmarkClaimGateKeepsAdvisoryBaselineFailuresOutOfVerdict() throws {
+        let report = BenchmarkClaimGate.evaluate(
+            results:
+                makeResults(workload: "copy-node-modules", runtime: "conjet", values: [0.8, 0.9, 1.0]) +
+                makeResults(workload: "copy-node-modules", runtime: "orbstack", values: [1.2, 1.3, 1.4]) +
+                makeResults(workload: "copy-node-modules", runtime: "colima", values: [0.5, 0.6, 0.7]),
+            options: BenchmarkClaimGateOptions(
+                candidateRuntime: "conjet",
+                baselineRuntimes: ["orbstack", "colima"],
+                requiredBaselineRuntimes: ["orbstack"],
+                minimumSamples: 3,
+                rules: [BenchmarkClaimRule(workload: "copy-node-modules")]
+            )
+        )
+
+        XCTAssertTrue(report.passed)
+        XCTAssertEqual(report.requiredBaselineRuntimes, ["orbstack"])
+        let colimaComparison = try XCTUnwrap(report.comparisons.first { $0.baselineRuntime == "colima" })
+        XCTAssertFalse(colimaComparison.requiredBaseline)
+        XCTAssertFalse(colimaComparison.passed)
+        XCTAssertTrue(colimaComparison.reason.contains("P50 ratio"))
     }
 
     func testBenchmarkClaimGateTreatsEqualZeroMetricsAsTie() throws {
@@ -1080,6 +1133,25 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(goSum.contains("github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="))
         XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("rust-build/Cargo.toml").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("rust-test/src/lib.rs").path))
+    }
+
+    func testPolyglotSuiteScopesAndCleansNativeVolumes() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-polyglot-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = DockerCommandRecorder()
+        _ = try PolyglotBenchmarkSuite(
+            contexts: ["conjet"],
+            samples: 1,
+            ecosystems: ["go"],
+            resourceScope: "poly alpha",
+            runner: recorder.run
+        ).run(workDirectory: directory)
+
+        let joinedCommands = recorder.commands.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        XCTAssertTrue(joinedCommands.contains("type=volume,source=conjet-bench-poly-alpha-polyglot-conjet-go-build-1-native,target=/workspace/.native"))
+        XCTAssertTrue(joinedCommands.contains("volume rm -f conjet-bench-poly-alpha-polyglot-conjet-go-build-1-native"))
     }
 }
 

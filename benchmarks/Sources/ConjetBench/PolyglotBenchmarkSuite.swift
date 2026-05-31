@@ -10,6 +10,7 @@ public struct PolyglotBenchmarkSuite {
     public var topology: String
     public var dockerExecutable: String
     public var commandTimeoutSeconds: Double
+    public var resourceScope: String?
 
     private let runner: @Sendable (String, [String]) throws -> ProcessResult
 
@@ -20,6 +21,7 @@ public struct PolyglotBenchmarkSuite {
         topology: String = "smart-bind",
         dockerExecutable: String = "/usr/bin/env",
         commandTimeoutSeconds: Double = 300,
+        resourceScope: String? = nil,
         runner: (@Sendable (String, [String]) throws -> ProcessResult)? = nil
     ) {
         self.contexts = contexts.filter { !$0.isEmpty }
@@ -28,6 +30,7 @@ public struct PolyglotBenchmarkSuite {
         self.topology = topology
         self.dockerExecutable = dockerExecutable
         self.commandTimeoutSeconds = max(1, commandTimeoutSeconds)
+        self.resourceScope = resourceScope.map { $0.sanitizedDockerTag }
         self.runner = runner ?? { executable, arguments in
             try ProcessRunner.run(executable, arguments, timeoutSeconds: commandTimeoutSeconds)
         }
@@ -40,6 +43,9 @@ public struct PolyglotBenchmarkSuite {
         try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
         var results: [BenchmarkResult] = []
         let workloads = Self.workloads(for: ecosystems)
+        for workload in workloads {
+            try prepareProject(for: workload, at: workDirectory.appendingPathComponent(workload, isDirectory: true))
+        }
         for sample in 1...samples {
             for context in contexts {
                 for workload in workloads {
@@ -77,8 +83,16 @@ public struct PolyglotBenchmarkSuite {
 
     private func benchmark(workload: String, context: String, sample: Int, workDirectory: URL) throws -> BenchmarkResult {
         let projectDirectory = workDirectory.appendingPathComponent(workload, isDirectory: true)
-        try prepareProject(for: workload, at: projectDirectory)
-        let command = dockerArguments(context: context, workload: workload, projectDirectory: projectDirectory, sample: sample)
+        let volumeName = benchmarkResourceName("polyglot", context, workload, String(sample))
+        let cleanupVolumes = dockerVolumeNames(for: volumeName)
+        removeDockerVolumes(context: context, names: cleanupVolumes)
+        defer { removeDockerVolumes(context: context, names: cleanupVolumes) }
+        let command = dockerArguments(
+            context: context,
+            workload: workload,
+            projectDirectory: projectDirectory,
+            volumeName: volumeName
+        )
         let machine = MachineProfiler.capture()
         let startedAt = Date()
         let process = try runner(dockerExecutable, command)
@@ -102,8 +116,12 @@ public struct PolyglotBenchmarkSuite {
         )
     }
 
-    private func dockerArguments(context: String, workload: String, projectDirectory: URL, sample: Int) -> [String] {
-        let volumeName = "conjet-polyglot-\(context.sanitizedDockerTag)-\(workload.sanitizedDockerTag)-\(sample)"
+    private func dockerArguments(
+        context: String,
+        workload: String,
+        projectDirectory: URL,
+        volumeName: String
+    ) -> [String] {
         let image = imageAndScript(for: workload).image
         let script = imageAndScript(for: workload).script
         switch topology {
@@ -129,6 +147,33 @@ public struct PolyglotBenchmarkSuite {
                 "-w", "/workspace",
                 image, "sh", "-lc", script
             ]
+        }
+    }
+
+    private func dockerVolumeNames(for volumeName: String) -> [String] {
+        switch topology {
+        case "strict-bind":
+            return []
+        case "volume":
+            return [volumeName]
+        default:
+            return ["\(volumeName)-native"]
+        }
+    }
+
+    private func benchmarkResourceName(_ components: String...) -> String {
+        var parts = ["conjet-bench"]
+        if let resourceScope {
+            parts.append(resourceScope)
+        }
+        parts.append(contentsOf: components.map(\.sanitizedDockerTag))
+        return parts.joined(separator: "-")
+    }
+
+    private func removeDockerVolumes(context: String, names: [String]) {
+        guard !names.isEmpty else { return }
+        for name in names {
+            _ = try? runner(dockerExecutable, ["docker", "--context", context, "volume", "rm", "-f", name])
         }
     }
 
