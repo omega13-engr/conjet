@@ -256,20 +256,22 @@ final class BenchmarkSchemaTests: XCTestCase {
 
         XCTAssertEqual(warmResults.count, 1)
         XCTAssertEqual(warmBindRuns.count, 2)
-        XCTAssertTrue(warmBindRuns.allSatisfy { $0.joined(separator: " ").contains("NPM_CONFIG_STORE_DIR='/app/.pnpm-store'") })
+        XCTAssertTrue(warmBindRuns.allSatisfy { $0.joined(separator: " ").contains("NPM_CONFIG_STORE_DIR=") })
         XCTAssertEqual(warmResults.first?.metrics[BenchmarkSamplePhase.metricKey], BenchmarkSamplePhase.warm.metricValue)
+        XCTAssertEqual(warmResults.first?.workload, "smart-bind-pnpm-install")
+        XCTAssertEqual(warmResults.first?.metrics["native_overlay_mounts"], 1)
     }
 
     func testBenchmarkClaimGateDefaultsUseHotReloadLatencyMetric() throws {
         let hotReloadRules = BenchmarkClaimGateOptions.defaultRules
-            .filter { $0.workload == "bind-hot-reload" || $0.workload == "conjetfs-hot-reload" || $0.workload == "hot-reload-fast-path" }
+            .filter { $0.workload == "smart-bind-hot-reload" || $0.workload == "conjetfs-hot-reload" || $0.workload == "hot-reload-fast-path" }
 
         XCTAssertEqual(hotReloadRules.count, 1)
         XCTAssertTrue(hotReloadRules.allSatisfy { $0.measure == .metric("hot_reload_seconds") })
         XCTAssertNil(hotReloadRules.first { $0.workload == "conjetfs-hot-reload" })
         let fastPath = try XCTUnwrap(hotReloadRules.first { $0.workload == "hot-reload-fast-path" })
         XCTAssertEqual(fastPath.resolvedCandidateWorkload, "conjetfs-hot-reload")
-        XCTAssertEqual(fastPath.resolvedBaselineWorkload, "bind-hot-reload")
+        XCTAssertEqual(fastPath.resolvedBaselineWorkload, "smart-bind-hot-reload")
     }
 
     func testDockerBenchmarkSuiteCanSelectWorkloads() throws {
@@ -834,7 +836,7 @@ final class BenchmarkSchemaTests: XCTestCase {
             includePower: false
         )
         XCTAssertTrue(conjetFSOptions.effectiveGateRules.contains { $0.workload == "hot-reload-fast-path" })
-        XCTAssertEqual(Set(conjetFSOptions.effectiveDockerWorkloads), ["conjetfs-hot-reload", "bind-hot-reload"])
+        XCTAssertEqual(Set(conjetFSOptions.effectiveDockerWorkloads), ["conjetfs-hot-reload", "smart-bind-hot-reload"])
 
         let bindOptions = BenchmarkReleaseGateOptions(
             workloads: ["bind-hot-reload"],
@@ -842,7 +844,215 @@ final class BenchmarkSchemaTests: XCTestCase {
             includePower: false
         )
         XCTAssertTrue(bindOptions.effectiveGateRules.contains { $0.workload == "hot-reload-fast-path" })
-        XCTAssertEqual(Set(bindOptions.effectiveDockerWorkloads), ["conjetfs-hot-reload", "bind-hot-reload"])
+        XCTAssertEqual(Set(bindOptions.effectiveDockerWorkloads), ["conjetfs-hot-reload", "smart-bind-hot-reload"])
+    }
+
+    func testStrictBindAndSmartBindTopologyMetadataAreDistinct() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-docker-bench-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = DockerCommandRecorder()
+        let results = try DockerBenchmarkSuite(
+            contexts: ["conjet"],
+            iterations: 1,
+            warmup: false,
+            workloads: ["strict-bind-npm-install", "smart-bind-npm-install"],
+            runner: recorder.run,
+            inputRunner: recorder.runWithInput
+        ).run(workDirectory: directory)
+
+        let strict = try XCTUnwrap(results.first { $0.workload == "strict-bind-npm-install" })
+        XCTAssertEqual(strict.metrics.value(for: "mount_topology"), .string("strict-bind"))
+        XCTAssertEqual(strict.metrics.value(for: "strict_bind"), .bool(true))
+        XCTAssertEqual(strict.metrics.value(for: "smart_mount"), .bool(false))
+        XCTAssertEqual(strict.metrics["native_overlay_mounts"], 0)
+        XCTAssertFalse(strict.command.joined(separator: " ").contains("target=/app/node_modules"))
+
+        let smart = try XCTUnwrap(results.first { $0.workload == "smart-bind-npm-install" })
+        XCTAssertEqual(smart.metrics.value(for: "mount_topology"), .string("smart-bind"))
+        XCTAssertEqual(smart.metrics.value(for: "strict_bind"), .bool(false))
+        XCTAssertEqual(smart.metrics.value(for: "smart_mount"), .bool(true))
+        XCTAssertEqual(smart.metrics["native_overlay_mounts"], 1)
+        XCTAssertEqual(smart.metrics.value(for: "linux_native_write_paths"), .stringArray(["/app/node_modules"]))
+        XCTAssertTrue(smart.command.joined(separator: " ").contains("target=/app/node_modules"))
+    }
+
+    func testDeprecatedBindAliasMapsToSmartBindWorkload() throws {
+        XCTAssertEqual(DockerBenchmarkSuite.canonicalWorkloadName("bind-pnpm-install"), "smart-bind-pnpm-install")
+        XCTAssertEqual(DockerBenchmarkSuite.canonicalWorkloadName("bind-hot-reload"), "smart-bind-hot-reload")
+    }
+
+    func testNoCachePhaseLabelsBuildMetadata() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-docker-bench-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = DockerCommandRecorder()
+        let results = try DockerBenchmarkSuite(
+            contexts: ["conjet"],
+            iterations: 1,
+            warmup: false,
+            samplePhase: .noCache,
+            workloads: ["npm-install"],
+            runner: recorder.run,
+            inputRunner: recorder.runWithInput
+        ).run(workDirectory: directory)
+
+        let result = try XCTUnwrap(results.first)
+        XCTAssertEqual(result.metrics[BenchmarkSamplePhase.metricKey], BenchmarkSamplePhase.noCache.metricValue)
+        XCTAssertEqual(result.metrics.value(for: "sample_phase"), .string("no-cache"))
+        XCTAssertEqual(result.metrics.value(for: "build_cache_mode"), .string("no-cache"))
+        XCTAssertEqual(result.metrics.value(for: "image_cache_mode"), .string("base-prepulled"))
+        XCTAssertEqual(result.metrics.value(for: "docker_build_no_cache"), .bool(true))
+        XCTAssertTrue(result.command.contains("--no-cache"))
+    }
+
+    func testEnergyGateSkipsWhenPowermetricsPrivilegeIsUnavailable() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-energy-gate-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let runner = BenchmarkEnergyGateRunner(
+            options: BenchmarkEnergyGateOptions(
+                contexts: ["conjet", "orbstack"],
+                workloads: ["idle"],
+                samples: 1,
+                requirePower: false,
+                useSudo: true
+            ),
+            runner: { executable, arguments in
+                ProcessResult(executable: executable, arguments: arguments, exitCode: 1, stdout: "", stderr: "sudo: a password is required")
+            }
+        )
+
+        let result = try runner.run(outputDirectory: directory)
+
+        XCTAssertFalse(result.powermetricsAvailable)
+        XCTAssertEqual(result.results.count, 2)
+        XCTAssertTrue(result.results.allSatisfy { $0.metrics.value(for: "energy_verdict") == .string("skipped") })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: result.allResultsReport))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: result.markdownReport))
+    }
+
+    func testEnergyGateFailsWhenPowerIsRequiredButUnavailable() throws {
+        let runner = BenchmarkEnergyGateRunner(
+            options: BenchmarkEnergyGateOptions(
+                contexts: ["conjet"],
+                workloads: ["idle"],
+                samples: 1,
+                requirePower: true,
+                useSudo: true
+            ),
+            sudoAuthenticator: {
+                ProcessResult(
+                    executable: "/usr/bin/sudo",
+                    arguments: ["-v"],
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "sudo: a password is required"
+                )
+            },
+            runner: { executable, arguments in
+                ProcessResult(executable: executable, arguments: arguments, exitCode: 1, stdout: "", stderr: "sudo: a password is required")
+            }
+        )
+
+        XCTAssertThrowsError(try runner.run(outputDirectory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("conjet-energy-gate-\(UUID().uuidString)"))) { error in
+            XCTAssertTrue(String(describing: error).contains("sudo authentication failed before powermetrics"))
+        }
+    }
+
+    func testEnergyGateRequirePowerWarmsInteractiveSudoThenUsesNoninteractivePower() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-energy-gate-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = EnergyGatePrivilegeRecorder()
+        let runner = BenchmarkEnergyGateRunner(
+            options: BenchmarkEnergyGateOptions(
+                contexts: [],
+                workloads: ["idle"],
+                samples: 1,
+                requirePower: true,
+                useSudo: true
+            ),
+            sudoAuthenticator: {
+                recorder.recordAuthentication()
+                return ProcessResult(
+                    executable: "/usr/bin/sudo",
+                    arguments: ["-v"],
+                    exitCode: 0,
+                    stdout: "",
+                    stderr: ""
+                )
+            },
+            runner: { executable, arguments in
+                recorder.recordProbe(arguments)
+                let exitCode: Int32 = recorder.probeCount == 1 ? 1 : 0
+                return ProcessResult(executable: executable, arguments: arguments, exitCode: exitCode, stdout: "", stderr: "")
+            }
+        )
+
+        let result = try runner.run(outputDirectory: directory)
+
+        XCTAssertTrue(result.powermetricsAvailable)
+        XCTAssertNil(result.skippedReason)
+        XCTAssertEqual(result.results.count, 0)
+        XCTAssertEqual(recorder.authenticationCount, 1)
+        XCTAssertEqual(recorder.probeCount, 2)
+        XCTAssertEqual(recorder.probes, [["-n", "/usr/bin/true"], ["-n", "/usr/bin/true"]])
+    }
+
+    func testEnergyGateDefaultsUseComparableActiveMeasurementBounds() {
+        let options = BenchmarkEnergyGateOptions()
+
+        XCTAssertEqual(options.minimumActiveSeconds, 10)
+        XCTAssertEqual(options.workloadTimeoutSeconds, 180)
+        XCTAssertTrue(options.prepullImages)
+    }
+
+    #if os(macOS)
+    func testEnergyGateReportsPrepullFailureBeforeSampling() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-energy-gate-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let runner = BenchmarkEnergyGateRunner(
+            options: BenchmarkEnergyGateOptions(
+                contexts: ["conjet"],
+                workloads: ["npm-install"],
+                samples: 1,
+                useSudo: false,
+                prepullImages: true
+            ),
+            runner: { executable, arguments in
+                ProcessResult(
+                    executable: executable,
+                    arguments: arguments,
+                    exitCode: 7,
+                    stdout: "",
+                    stderr: "pull failed"
+                )
+            }
+        )
+
+        let result = try runner.run(outputDirectory: directory)
+
+        XCTAssertEqual(result.results.count, 1)
+        XCTAssertEqual(result.results.first?.workload, "energy-setup-prepull")
+        XCTAssertEqual(result.results.first?.runtime, "conjet")
+        XCTAssertEqual(result.results.first?.exitCode, 7)
+        XCTAssertEqual(result.results.first?.metrics.value(for: "failure_reason"), .string("prepull_failed"))
+        XCTAssertEqual(result.results.first?.metrics.value(for: "prepull_image"), .string("node:22-alpine"))
+    }
+    #endif
+
+    func testPolyglotSuiteCreatesNonJSEcosystemWorkloads() throws {
+        let workloads = PolyglotBenchmarkSuite.workloads(for: ["python", "go", "cpp"])
+        XCTAssertTrue(workloads.contains("python-test"))
+        XCTAssertTrue(workloads.contains("go-build"))
+        XCTAssertTrue(workloads.contains("cpp-test"))
     }
 }
 
@@ -871,6 +1081,42 @@ private final class DockerCommandRecorder: @unchecked Sendable {
 
     func runWithInput(_ executable: String, _ arguments: [String], _ input: Data?) throws -> ProcessResult {
         try run(executable, arguments)
+    }
+}
+
+private final class EnergyGatePrivilegeRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var authentications: Int = 0
+    private var sudoProbes: [[String]] = []
+
+    var authenticationCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return authentications
+    }
+
+    var probeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return sudoProbes.count
+    }
+
+    var probes: [[String]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return sudoProbes
+    }
+
+    func recordAuthentication() {
+        lock.lock()
+        authentications += 1
+        lock.unlock()
+    }
+
+    func recordProbe(_ arguments: [String]) {
+        lock.lock()
+        sudoProbes.append(arguments)
+        lock.unlock()
     }
 }
 

@@ -47,8 +47,9 @@ private final class BenchmarkStopwatchBox: @unchecked Sendable {
 private struct BindNativeOverlayPlan {
     var mountArguments: [String]
     var volumeNames: [String]
+    var writePaths: [String]
 
-    static let empty = BindNativeOverlayPlan(mountArguments: [], volumeNames: [])
+    static let empty = BindNativeOverlayPlan(mountArguments: [], volumeNames: [], writePaths: [])
 }
 
 public struct DockerBenchmarkSuite {
@@ -63,21 +64,106 @@ public struct DockerBenchmarkSuite {
         "npm-install",
         "pnpm-install",
         "cargo-build",
-        "bind-npm-install",
-        "bind-pnpm-install",
+        "strict-bind-npm-install",
+        "strict-bind-pnpm-install",
+        "strict-bind-cargo-build",
+        "smart-bind-npm-install",
+        "smart-bind-pnpm-install",
+        "smart-bind-cargo-build",
         "volume-npm-install",
         "volume-pnpm-install",
-        "bind-cargo-build",
         "volume-cargo-build",
         "conjetfs-npm-install",
         "conjetfs-pnpm-install",
         "conjetfs-cargo-build",
-        "bind-hot-reload",
+        "strict-bind-hot-reload",
+        "smart-bind-hot-reload",
         "conjetfs-hot-reload",
         "named-volume-io",
         "tmpfs-volume-io",
         "compose-up"
     ]
+
+    public static let deprecatedWorkloadAliases: [String: String] = [
+        "bind-npm-install": "smart-bind-npm-install",
+        "bind-pnpm-install": "smart-bind-pnpm-install",
+        "bind-cargo-build": "smart-bind-cargo-build",
+        "bind-hot-reload": "smart-bind-hot-reload"
+    ]
+
+    public static let coldWorkloads = [
+        "container-start-cold",
+        "image-build-no-cache",
+        "copy-node-modules-no-cache",
+        "npm-install-no-cache",
+        "pnpm-install-no-cache",
+        "cargo-build-no-cache",
+        "strict-bind-npm-install-cold",
+        "smart-bind-npm-install-cold",
+        "strict-bind-pnpm-install-cold",
+        "smart-bind-pnpm-install-cold",
+        "strict-bind-cargo-build-cold",
+        "smart-bind-cargo-build-cold",
+        "volume-npm-install-cold",
+        "volume-pnpm-install-cold",
+        "volume-cargo-build-cold",
+        "conjetfs-npm-install-cold",
+        "conjetfs-pnpm-install-cold",
+        "conjetfs-cargo-build-cold",
+        "compose-up-cold"
+    ]
+
+    public static var supportedWorkloads: [String] {
+        defaultWorkloads + Array(deprecatedWorkloadAliases.keys).sorted() + coldWorkloads
+    }
+
+    public static func canonicalWorkloadName(_ workload: String) -> String {
+        if let mapped = deprecatedWorkloadAliases[workload] {
+            return mapped
+        }
+        switch workload {
+        case "container-start-cold":
+            return "container-start"
+        case "image-build-no-cache":
+            return "image-build"
+        case "copy-node-modules-no-cache":
+            return "copy-node-modules"
+        case "npm-install-no-cache":
+            return "npm-install"
+        case "pnpm-install-no-cache":
+            return "pnpm-install"
+        case "cargo-build-no-cache":
+            return "cargo-build"
+        case "strict-bind-npm-install-cold":
+            return "strict-bind-npm-install"
+        case "smart-bind-npm-install-cold":
+            return "smart-bind-npm-install"
+        case "strict-bind-pnpm-install-cold":
+            return "strict-bind-pnpm-install"
+        case "smart-bind-pnpm-install-cold":
+            return "smart-bind-pnpm-install"
+        case "strict-bind-cargo-build-cold":
+            return "strict-bind-cargo-build"
+        case "smart-bind-cargo-build-cold":
+            return "smart-bind-cargo-build"
+        case "volume-npm-install-cold":
+            return "volume-npm-install"
+        case "volume-pnpm-install-cold":
+            return "volume-pnpm-install"
+        case "volume-cargo-build-cold":
+            return "volume-cargo-build"
+        case "conjetfs-npm-install-cold":
+            return "conjetfs-npm-install"
+        case "conjetfs-pnpm-install-cold":
+            return "conjetfs-pnpm-install"
+        case "conjetfs-cargo-build-cold":
+            return "conjetfs-cargo-build"
+        case "compose-up-cold":
+            return "compose-up"
+        default:
+            return workload
+        }
+    }
 
     public var contexts: [String]
     public var iterations: Int
@@ -85,6 +171,7 @@ public struct DockerBenchmarkSuite {
     public var dockerExecutable: String
     public var workloads: [String]
     public var commandTimeoutSeconds: Double
+    public var phase: BenchmarkSamplePhase
 
     private let runner: @Sendable (String, [String]) throws -> ProcessResult
     private let inputRunner: @Sendable (String, [String], Data?) throws -> ProcessResult
@@ -93,6 +180,7 @@ public struct DockerBenchmarkSuite {
         contexts: [String],
         iterations: Int = 1,
         warmup: Bool = false,
+        samplePhase: BenchmarkSamplePhase? = nil,
         workloads: [String] = DockerBenchmarkSuite.defaultWorkloads,
         dockerExecutable: String = "/usr/bin/env",
         commandTimeoutSeconds: Double = 180,
@@ -102,6 +190,7 @@ public struct DockerBenchmarkSuite {
         self.contexts = contexts
         self.iterations = max(1, iterations)
         self.warmup = warmup
+        self.phase = samplePhase ?? (warmup ? .warm : .cold)
         self.workloads = workloads.isEmpty ? DockerBenchmarkSuite.defaultWorkloads : workloads
         self.dockerExecutable = dockerExecutable
         let timeout = max(1, commandTimeoutSeconds)
@@ -123,13 +212,15 @@ public struct DockerBenchmarkSuite {
         guard !contexts.isEmpty else {
             throw ConjetError.invalidArgument("at least one Docker context is required")
         }
-        let enabledWorkloads = Set(workloads)
-        let unknownWorkloads = enabledWorkloads.subtracting(Self.defaultWorkloads)
+        let requestedWorkloads = Set(workloads)
+        let supportedWorkloads = Set(Self.supportedWorkloads)
+        let unknownWorkloads = requestedWorkloads.subtracting(supportedWorkloads)
         guard unknownWorkloads.isEmpty else {
             throw ConjetError.invalidArgument(
                 "unknown Docker benchmark workloads: \(unknownWorkloads.sorted().joined(separator: ", "))"
             )
         }
+        let enabledWorkloads = Set(workloads.map(Self.canonicalWorkloadName))
 
         let workDirectory = workDirectory.standardizedFileURL
         let buildDirectory = workDirectory.appendingPathComponent("build-context", isDirectory: true)
@@ -164,13 +255,15 @@ public struct DockerBenchmarkSuite {
 
         var results: [BenchmarkResult] = []
         for context in contexts {
-            for image in warmupImages(for: enabledWorkloads) {
-                _ = try? runDocker(context: context, arguments: ["pull", image])
+            if shouldPrepullBaseImages {
+                for image in warmupImages(for: enabledWorkloads) {
+                    _ = try? runDocker(context: context, arguments: ["pull", image])
+                }
             }
             if requiresPNPMBenchmarkImage(enabledWorkloads) {
                 try ensurePNPMBenchmarkImage(context: context, workDirectory: workDirectory)
             }
-            if requiresBuildKitWarmup(enabledWorkloads) {
+            if warmup && requiresBuildKitWarmup(enabledWorkloads) {
                 try warmupBuildKit(
                     context: context,
                     workDirectory: workDirectory,
@@ -225,7 +318,8 @@ public struct DockerBenchmarkSuite {
                         workload: "image-build",
                         context: context,
                         iteration: iteration,
-                        arguments: buildArguments(["build", "-t", imageTag, buildDirectory.path])
+                        arguments: buildArguments(["build", "-t", imageTag, buildDirectory.path]),
+                        metrics: dockerBuildMetrics()
                     ))
                     _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
@@ -238,7 +332,7 @@ public struct DockerBenchmarkSuite {
                         context: context,
                         iteration: iteration,
                         arguments: buildArguments(["build", "-t", imageTag, nodeModulesCopyDirectory.path]),
-                        metrics: ["file_count": Double(nodeModulesFileCount)]
+                        metrics: dockerBuildMetrics(["file_count": Double(nodeModulesFileCount)])
                     ))
                     _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
@@ -257,7 +351,7 @@ public struct DockerBenchmarkSuite {
                             imageTag,
                             npmInstallDirectory.path
                         ]),
-                        metrics: ["dependency_count": 3]
+                        metrics: dockerBuildMetrics(["dependency_count": 3])
                     ))
                     _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
@@ -276,7 +370,7 @@ public struct DockerBenchmarkSuite {
                             imageTag,
                             pnpmInstallDirectory.path
                         ]),
-                        metrics: ["dependency_count": 3]
+                        metrics: dockerBuildMetrics(["dependency_count": 3])
                     ))
                     _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
@@ -295,16 +389,44 @@ public struct DockerBenchmarkSuite {
                             imageTag,
                             cargoBuildDirectory.path
                         ]),
-                        metrics: ["dependency_count": 2]
+                        metrics: dockerBuildMetrics(["dependency_count": 2])
                     ))
                     _ = try? runDocker(context: context, arguments: ["rmi", "-f", imageTag])
                 }
 
-                if enabledWorkloads.contains("bind-npm-install") {
+                if enabledWorkloads.contains("strict-bind-npm-install") {
                     try resetNPMInstallArtifacts(at: bindNPMDirectory, preserveCaches: warmup)
-                    let overlay = bindNativeOverlayPlan(
+                    results.append(try benchmark(
+                        workload: "strict-bind-npm-install",
                         context: context,
-                        workload: "bind-npm-install",
+                        iteration: iteration,
+                        arguments: [
+                            "run",
+                            "--rm",
+                            "--mount",
+                            "type=bind,source=\(bindNPMDirectory.path),target=/app",
+                            "-w",
+                            "/app",
+                            "node:22-alpine",
+                            "sh",
+                            "-c",
+                            npmInstallCommand() + " && test -d node_modules/lodash"
+                        ],
+                        metrics: topologyMetrics(
+                            topology: "strict-bind",
+                            strictBind: true,
+                            smartMount: false,
+                            hostBindPaths: ["/app"],
+                            extra: ["dependency_count": 3]
+                        )
+                    ))
+                }
+
+                if enabledWorkloads.contains("smart-bind-npm-install") {
+                    try resetNPMInstallArtifacts(at: bindNPMDirectory, preserveCaches: warmup)
+                    let overlay = nativeOverlayPlan(
+                        context: context,
+                        workload: "smart-bind-npm-install",
                         iteration: iteration,
                         targets: [
                             ("deps", "/app/node_modules")
@@ -313,7 +435,7 @@ public struct DockerBenchmarkSuite {
                     removeDockerVolumes(context: context, names: overlay.volumeNames)
                     defer { removeDockerVolumes(context: context, names: overlay.volumeNames) }
                     results.append(try benchmark(
-                        workload: "bind-npm-install",
+                        workload: "smart-bind-npm-install",
                         context: context,
                         iteration: iteration,
                         arguments: [
@@ -329,18 +451,51 @@ public struct DockerBenchmarkSuite {
                             "-c",
                             npmInstallCommand(guestPath: overlay.volumeNames.isEmpty ? "/app" : "/app/node_modules") + " && test -d node_modules/lodash"
                         ],
-                        metrics: [
-                            "dependency_count": 3,
-                            "bind_native_overlay_mounts": Double(overlay.volumeNames.count)
-                        ]
+                        metrics: topologyMetrics(
+                            topology: "smart-bind",
+                            strictBind: false,
+                            smartMount: true,
+                            nativeOverlayMounts: overlay.volumeNames.count,
+                            linuxNativeWritePaths: overlay.writePaths,
+                            hostBindPaths: ["/app"],
+                            extra: ["dependency_count": 3]
+                        )
                     ))
                 }
 
-                if enabledWorkloads.contains("bind-pnpm-install") {
+                if enabledWorkloads.contains("strict-bind-pnpm-install") {
                     try resetPNPMInstallArtifacts(at: bindPNPMDirectory, preserveCaches: warmup)
-                    let overlay = bindNativeOverlayPlan(
+                    results.append(try benchmark(
+                        workload: "strict-bind-pnpm-install",
                         context: context,
-                        workload: "bind-pnpm-install",
+                        iteration: iteration,
+                        arguments: [
+                            "run",
+                            "--rm",
+                            "--mount",
+                            "type=bind,source=\(bindPNPMDirectory.path),target=/app",
+                            "-w",
+                            "/app",
+                            Self.pnpmBenchmarkImage,
+                            "sh",
+                            "-c",
+                            pnpmInstallCommand() + " && test -d node_modules/lodash"
+                        ],
+                        metrics: topologyMetrics(
+                            topology: "strict-bind",
+                            strictBind: true,
+                            smartMount: false,
+                            hostBindPaths: ["/app"],
+                            extra: ["dependency_count": 3]
+                        )
+                    ))
+                }
+
+                if enabledWorkloads.contains("smart-bind-pnpm-install") {
+                    try resetPNPMInstallArtifacts(at: bindPNPMDirectory, preserveCaches: warmup)
+                    let overlay = nativeOverlayPlan(
+                        context: context,
+                        workload: "smart-bind-pnpm-install",
                         iteration: iteration,
                         targets: [
                             ("deps", "/app/node_modules")
@@ -349,7 +504,7 @@ public struct DockerBenchmarkSuite {
                     removeDockerVolumes(context: context, names: overlay.volumeNames)
                     defer { removeDockerVolumes(context: context, names: overlay.volumeNames) }
                     results.append(try benchmark(
-                        workload: "bind-pnpm-install",
+                        workload: "smart-bind-pnpm-install",
                         context: context,
                         iteration: iteration,
                         arguments: [
@@ -365,10 +520,15 @@ public struct DockerBenchmarkSuite {
                             "-c",
                             pnpmInstallCommand(guestPath: overlay.volumeNames.isEmpty ? "/app" : "/app/node_modules") + " && test -d node_modules/lodash"
                         ],
-                        metrics: [
-                            "dependency_count": 3,
-                            "bind_native_overlay_mounts": Double(overlay.volumeNames.count)
-                        ]
+                        metrics: topologyMetrics(
+                            topology: "smart-bind",
+                            strictBind: false,
+                            smartMount: true,
+                            nativeOverlayMounts: overlay.volumeNames.count,
+                            linuxNativeWritePaths: overlay.writePaths,
+                            hostBindPaths: ["/app"],
+                            extra: ["dependency_count": 3]
+                        )
                     ))
                 }
 
@@ -391,7 +551,14 @@ public struct DockerBenchmarkSuite {
                             "-c",
                             npmVolumeInstallScript()
                         ],
-                        metrics: ["dependency_count": 3]
+                        metrics: topologyMetrics(
+                            topology: "volume",
+                            strictBind: false,
+                            smartMount: false,
+                            nativeOverlayMounts: 1,
+                            linuxNativeWritePaths: ["/app"],
+                            extra: ["dependency_count": 3]
+                        )
                     ))
                     _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
                 }
@@ -415,16 +582,51 @@ public struct DockerBenchmarkSuite {
                             "-c",
                             pnpmVolumeInstallScript()
                         ],
-                        metrics: ["dependency_count": 3]
+                        metrics: topologyMetrics(
+                            topology: "volume",
+                            strictBind: false,
+                            smartMount: false,
+                            nativeOverlayMounts: 1,
+                            linuxNativeWritePaths: ["/app"],
+                            extra: ["dependency_count": 3]
+                        )
                     ))
                     _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
                 }
 
-                if enabledWorkloads.contains("bind-cargo-build") {
+                if enabledWorkloads.contains("strict-bind-cargo-build") {
                     try resetCargoBuildArtifacts(at: bindCargoDirectory)
-                    let overlay = bindNativeOverlayPlan(
+                    results.append(try benchmark(
+                        workload: "strict-bind-cargo-build",
                         context: context,
-                        workload: "bind-cargo-build",
+                        iteration: iteration,
+                        arguments: [
+                            "run",
+                            "--rm",
+                            "--mount",
+                            "type=bind,source=\(bindCargoDirectory.path),target=/app",
+                            "-w",
+                            "/app",
+                            "rust:1-alpine",
+                            "sh",
+                            "-c",
+                            "cargo build --release && test -x target/release/conjet-cargo-build-benchmark"
+                        ],
+                        metrics: topologyMetrics(
+                            topology: "strict-bind",
+                            strictBind: true,
+                            smartMount: false,
+                            hostBindPaths: ["/app"],
+                            extra: ["dependency_count": 2]
+                        )
+                    ))
+                }
+
+                if enabledWorkloads.contains("smart-bind-cargo-build") {
+                    try resetCargoBuildArtifacts(at: bindCargoDirectory)
+                    let overlay = nativeOverlayPlan(
+                        context: context,
+                        workload: "smart-bind-cargo-build",
                         iteration: iteration,
                         targets: [
                             ("target", "/app/target")
@@ -432,11 +634,9 @@ public struct DockerBenchmarkSuite {
                     )
                     removeDockerVolumes(context: context, names: overlay.volumeNames)
                     defer { removeDockerVolumes(context: context, names: overlay.volumeNames) }
-                    let cargoCommand = overlay.volumeNames.isEmpty
-                        ? "cargo build --release && test -x target/release/conjet-cargo-build-benchmark"
-                        : "export CARGO_HOME=/app/target/.cargo-home CARGO_TARGET_DIR=/app/target && mkdir -p /app/target/.cargo-home && cargo build --release && test -x /app/target/release/conjet-cargo-build-benchmark"
+                    let cargoCommand = "export CARGO_HOME=/app/target/.cargo-home CARGO_TARGET_DIR=/app/target && mkdir -p /app/target/.cargo-home && cargo build --release && test -x /app/target/release/conjet-cargo-build-benchmark"
                     results.append(try benchmark(
-                        workload: "bind-cargo-build",
+                        workload: "smart-bind-cargo-build",
                         context: context,
                         iteration: iteration,
                         arguments: [
@@ -452,10 +652,15 @@ public struct DockerBenchmarkSuite {
                             "-c",
                             cargoCommand
                         ],
-                        metrics: [
-                            "dependency_count": 2,
-                            "bind_native_overlay_mounts": Double(overlay.volumeNames.count)
-                        ]
+                        metrics: topologyMetrics(
+                            topology: "smart-bind",
+                            strictBind: false,
+                            smartMount: true,
+                            nativeOverlayMounts: overlay.volumeNames.count,
+                            linuxNativeWritePaths: overlay.writePaths,
+                            hostBindPaths: ["/app"],
+                            extra: ["dependency_count": 2]
+                        )
                     ))
                 }
 
@@ -478,7 +683,14 @@ public struct DockerBenchmarkSuite {
                             "-c",
                             cargoVolumeBuildScript()
                         ],
-                        metrics: ["dependency_count": 2]
+                        metrics: topologyMetrics(
+                            topology: "volume",
+                            strictBind: false,
+                            smartMount: false,
+                            nativeOverlayMounts: 1,
+                            linuxNativeWritePaths: ["/app"],
+                            extra: ["dependency_count": 2]
+                        )
                     ))
                     _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
                 }
@@ -496,7 +708,15 @@ public struct DockerBenchmarkSuite {
                         shellCommand: npmInstallCommand(guestPath: "/workspace") + " && test -d node_modules/lodash",
                         usePackageCaches: warmup,
                         resetProjectVolume: !warmup,
-                        metrics: ["dependency_count": 3]
+                        metrics: topologyMetrics(
+                            topology: "conjetfs",
+                            strictBind: false,
+                            smartMount: false,
+                            nativeOverlayMounts: 1,
+                            linuxNativeWritePaths: ["/workspace"],
+                            conjetfsFastPath: true,
+                            extra: ["dependency_count": 3]
+                        )
                     ))
                 }
 
@@ -513,7 +733,15 @@ public struct DockerBenchmarkSuite {
                         shellCommand: pnpmInstallCommand(guestPath: "/workspace") + " && test -d node_modules/lodash",
                         usePackageCaches: warmup,
                         resetProjectVolume: !warmup,
-                        metrics: ["dependency_count": 3]
+                        metrics: topologyMetrics(
+                            topology: "conjetfs",
+                            strictBind: false,
+                            smartMount: false,
+                            nativeOverlayMounts: 1,
+                            linuxNativeWritePaths: ["/workspace"],
+                            conjetfsFastPath: true,
+                            extra: ["dependency_count": 3]
+                        )
                     ))
                 }
 
@@ -530,20 +758,42 @@ public struct DockerBenchmarkSuite {
                         shellCommand: "cargo build --release && test -x target/release/conjet-cargo-build-benchmark",
                         usePackageCaches: false,
                         resetProjectVolume: !warmup,
-                        metrics: [
+                        metrics: topologyMetrics(
+                            topology: "conjetfs",
+                            strictBind: false,
+                            smartMount: false,
+                            nativeOverlayMounts: 1,
+                            linuxNativeWritePaths: ["/workspace"],
+                            conjetfsFastPath: true,
+                            extra: [
                             "dependency_count": 2,
                             "vm_native_target_reused": warmup ? 1 : 0
-                        ]
+                            ]
+                        )
                     ))
                 }
 
-                if enabledWorkloads.contains("bind-hot-reload") {
+                if enabledWorkloads.contains("strict-bind-hot-reload") {
                     try resetHotReloadProject(at: bindHotReloadDirectory)
                     try prepareHotReloadProject(at: bindHotReloadDirectory, token: "initial-\(iteration)")
                     results.append(benchmarkBindHotReload(
+                        workload: "strict-bind-hot-reload",
                         context: context,
                         iteration: iteration,
-                        projectDirectory: bindHotReloadDirectory
+                        projectDirectory: bindHotReloadDirectory,
+                        smartOverlay: false
+                    ))
+                }
+
+                if enabledWorkloads.contains("smart-bind-hot-reload") {
+                    try resetHotReloadProject(at: bindHotReloadDirectory)
+                    try prepareHotReloadProject(at: bindHotReloadDirectory, token: "initial-\(iteration)")
+                    results.append(benchmarkBindHotReload(
+                        workload: "smart-bind-hot-reload",
+                        context: context,
+                        iteration: iteration,
+                        projectDirectory: bindHotReloadDirectory,
+                        smartOverlay: true
                     ))
                 }
 
@@ -575,7 +825,14 @@ public struct DockerBenchmarkSuite {
                             "-c",
                             volumeWriteScript(directory: "/data")
                         ],
-                        metrics: ["file_count": 300]
+                        metrics: topologyMetrics(
+                            topology: "named-volume",
+                            strictBind: false,
+                            smartMount: false,
+                            nativeOverlayMounts: 1,
+                            linuxNativeWritePaths: ["/data"],
+                            extra: ["file_count": 300]
+                        )
                     ))
                     _ = try? runDocker(context: context, arguments: ["volume", "rm", "-f", volumeName])
                 }
@@ -595,7 +852,13 @@ public struct DockerBenchmarkSuite {
                             "-c",
                             volumeWriteScript(directory: "/scratch")
                         ],
-                        metrics: ["file_count": 300]
+                        metrics: topologyMetrics(
+                            topology: "tmpfs",
+                            strictBind: false,
+                            smartMount: false,
+                            linuxNativeWritePaths: ["/scratch"],
+                            extra: ["file_count": 300]
+                        )
                     ))
                 }
 
@@ -636,20 +899,29 @@ public struct DockerBenchmarkSuite {
     }
 
     private var samplePhase: BenchmarkSamplePhase {
-        warmup ? .warm : .cold
+        phase
     }
 
     private func buildArguments(_ arguments: [String]) -> [String] {
-        guard !warmup, arguments.first == "build" else {
+        guard shouldDisableDockerBuildCache, arguments.first == "build" else {
             return arguments
         }
         return ["build", "--no-cache"] + arguments.dropFirst()
     }
 
+    private var shouldDisableDockerBuildCache: Bool {
+        phase != .warm
+    }
+
+    private var shouldPrepullBaseImages: Bool {
+        phase != .trueCold
+    }
+
     private func requiresPNPMBenchmarkImage(_ workloads: Set<String>) -> Bool {
         !workloads.isDisjoint(with: [
             "pnpm-install",
-            "bind-pnpm-install",
+            "strict-bind-pnpm-install",
+            "smart-bind-pnpm-install",
             "volume-pnpm-install",
             "conjetfs-pnpm-install"
         ])
@@ -799,12 +1071,73 @@ public struct DockerBenchmarkSuite {
         }
     }
 
-    private func commonMetrics(_ metrics: [String: Double], iteration: Int) -> [String: Double] {
+    private func commonMetrics(_ metrics: [String: Double], iteration: Int) -> BenchmarkMetrics {
+        commonMetrics(BenchmarkMetrics(metrics), iteration: iteration)
+    }
+
+    private func commonMetrics(_ metrics: BenchmarkMetrics, iteration: Int) -> BenchmarkMetrics {
         var result = metrics
         result["iteration"] = Double(iteration)
         result[BenchmarkSamplePhase.metricKey] = samplePhase.metricValue ?? -1
         result["benchmark_warmup"] = warmup ? 1 : 0
+        result.setString(samplePhase.rawValue, for: "sample_phase")
+        result.setString(samplePhase.buildCacheMode, for: "build_cache_mode")
+        result.setString(samplePhase.imageCacheMode, for: "image_cache_mode")
+        result.setString(samplePhase.networkCacheMode, for: "network_cache_mode")
+        result.setBool(shouldPrepullBaseImages, for: "base_image_prepulled")
+        if result.value(for: "mount_topology") == nil {
+            result.setString("unknown", for: "mount_topology")
+        }
+        if result.value(for: "strict_bind") == nil {
+            result.setBool(false, for: "strict_bind")
+        }
+        if result.value(for: "smart_mount") == nil {
+            result.setBool(false, for: "smart_mount")
+        }
+        if result.value(for: "native_overlay_mounts") == nil {
+            result["native_overlay_mounts"] = 0
+        }
+        if result.value(for: "linux_native_write_paths") == nil {
+            result.setStringArray([], for: "linux_native_write_paths")
+        }
+        if result.value(for: "host_bind_paths") == nil {
+            result.setStringArray([], for: "host_bind_paths")
+        }
+        if result.value(for: "conjetfs_fast_path") == nil {
+            result.setBool(false, for: "conjetfs_fast_path")
+        }
         return result
+    }
+
+    private func topologyMetrics(
+        topology: String,
+        strictBind: Bool,
+        smartMount: Bool,
+        nativeOverlayMounts: Int = 0,
+        linuxNativeWritePaths: [String] = [],
+        hostBindPaths: [String] = [],
+        conjetfsFastPath: Bool = false,
+        extra: [String: Double] = [:]
+    ) -> BenchmarkMetrics {
+        var metrics = BenchmarkMetrics(extra)
+        metrics.setString(topology, for: "mount_topology")
+        metrics.setBool(strictBind, for: "strict_bind")
+        metrics.setBool(smartMount, for: "smart_mount")
+        metrics["native_overlay_mounts"] = Double(nativeOverlayMounts)
+        metrics.setStringArray(linuxNativeWritePaths, for: "linux_native_write_paths")
+        metrics.setStringArray(hostBindPaths, for: "host_bind_paths")
+        metrics.setBool(conjetfsFastPath, for: "conjetfs_fast_path")
+        metrics["bind_native_overlay_mounts"] = Double(nativeOverlayMounts)
+        return metrics
+    }
+
+    private func dockerBuildMetrics(_ extra: [String: Double] = [:]) -> BenchmarkMetrics {
+        var metrics = topologyMetrics(topology: "image-build", strictBind: false, smartMount: false, extra: extra)
+        metrics.setBool(shouldDisableDockerBuildCache, for: "docker_build_no_cache")
+        metrics.setNull(for: "buildkit_cached_steps_detected")
+        metrics.setNull(for: "buildkit_cache_hit_count")
+        metrics.setNull(for: "buildkit_cache_miss_count")
+        return metrics
     }
 
     private func warmupConjetPackageCaches(
@@ -817,11 +1150,11 @@ public struct DockerBenchmarkSuite {
         conjetFSCargoDirectory: URL,
         homeDirectory: URL
     ) throws {
-        if enabledWorkloads.contains("bind-npm-install") {
+        if !enabledWorkloads.isDisjoint(with: ["strict-bind-npm-install", "smart-bind-npm-install"]) {
             try resetNPMInstallArtifacts(at: bindNPMDirectory, preserveCaches: false)
             try prepareNPMProject(at: bindNPMDirectory)
             _ = try? benchmark(
-                workload: "bind-npm-install",
+                workload: "smart-bind-npm-install",
                 context: context,
                 iteration: 0,
                 arguments: [
@@ -841,11 +1174,11 @@ public struct DockerBenchmarkSuite {
             try resetNPMInstallArtifacts(at: bindNPMDirectory, preserveCaches: true)
         }
 
-        if enabledWorkloads.contains("bind-pnpm-install") {
+        if !enabledWorkloads.isDisjoint(with: ["strict-bind-pnpm-install", "smart-bind-pnpm-install"]) {
             try resetPNPMInstallArtifacts(at: bindPNPMDirectory, preserveCaches: false)
             try preparePNPMProject(at: bindPNPMDirectory)
             _ = try? benchmark(
-                workload: "bind-pnpm-install",
+                workload: "smart-bind-pnpm-install",
                 context: context,
                 iteration: 0,
                 arguments: [
@@ -926,7 +1259,7 @@ public struct DockerBenchmarkSuite {
         context: String,
         iteration: Int,
         arguments: [String],
-        metrics: [String: Double] = [:]
+        metrics: BenchmarkMetrics = [:]
     ) throws -> BenchmarkResult {
         let command = dockerArguments(context: context, arguments: arguments)
         let machine = MachineProfiler.capture()
@@ -958,7 +1291,7 @@ public struct DockerBenchmarkSuite {
         shellCommand: String,
         usePackageCaches: Bool,
         resetProjectVolume: Bool,
-        metrics: [String: Double]
+        metrics: BenchmarkMetrics
     ) -> BenchmarkResult {
         var command = dockerArguments(context: context, arguments: [
             "run",
@@ -1072,12 +1405,23 @@ public struct DockerBenchmarkSuite {
     }
 
     private func benchmarkBindHotReload(
+        workload: String,
         context: String,
         iteration: Int,
-        projectDirectory: URL
+        projectDirectory: URL,
+        smartOverlay: Bool
     ) -> BenchmarkResult {
-        let containerName = "conjet-bench-\(context.sanitizedDockerTag)-bind-hot-\(iteration)"
+        let containerName = "conjet-bench-\(context.sanitizedDockerTag)-\(workload.sanitizedDockerTag)-\(iteration)"
         let token = "hot-\(context.sanitizedDockerTag)-\(iteration)-\(UUID().uuidString.prefix(8))"
+        let overlay = smartOverlay
+            ? nativeOverlayPlan(
+                context: context,
+                workload: workload,
+                iteration: iteration,
+                targets: [("deps", "/app/node_modules")]
+            )
+            : .empty
+        removeDockerVolumes(context: context, names: overlay.volumeNames)
         let runArguments = [
             "run",
             "-d",
@@ -1085,6 +1429,7 @@ public struct DockerBenchmarkSuite {
             containerName,
             "--mount",
             "type=bind,source=\(projectDirectory.path),target=/app",
+        ] + overlay.mountArguments + [
             "-w",
             "/app",
             "node:22-alpine",
@@ -1093,13 +1438,22 @@ public struct DockerBenchmarkSuite {
             hotReloadWatchScript(path: "/app/src/hot.txt", token: token)
         ]
         return benchmarkHotReload(
-            workload: "bind-hot-reload",
+            workload: workload,
             context: context,
             iteration: iteration,
             runArguments: runArguments,
             containerName: containerName,
             token: token,
-            hotFile: projectDirectory.appendingPathComponent("src/hot.txt")
+            hotFile: projectDirectory.appendingPathComponent("src/hot.txt"),
+            metrics: topologyMetrics(
+                topology: smartOverlay ? "smart-bind" : "strict-bind",
+                strictBind: !smartOverlay,
+                smartMount: smartOverlay,
+                nativeOverlayMounts: overlay.volumeNames.count,
+                linuxNativeWritePaths: overlay.writePaths,
+                hostBindPaths: ["/app"]
+            ),
+            cleanupVolumes: overlay.volumeNames
         )
     }
 
@@ -1127,7 +1481,17 @@ public struct DockerBenchmarkSuite {
             hotReloadWatchScript(path: "/workspace/src/hot.txt", token: token)
         ])
         _ = try? runDocker(context: context, arguments: ["rm", "-f", containerName])
-        var metrics = commonMetrics([:], iteration: iteration)
+        var metrics = commonMetrics(
+            topologyMetrics(
+                topology: "conjetfs",
+                strictBind: false,
+                smartMount: false,
+                nativeOverlayMounts: 1,
+                linuxNativeWritePaths: ["/workspace"],
+                conjetfsFastPath: true
+            ),
+            iteration: iteration
+        )
         var stdout = ""
         var stderr = ""
         var exitCode: Int32 = 0
@@ -1413,13 +1777,15 @@ public struct DockerBenchmarkSuite {
         runArguments: [String],
         containerName: String,
         token: String,
-        hotFile: URL
+        hotFile: URL,
+        metrics initialMetrics: BenchmarkMetrics = [:],
+        cleanupVolumes: [String] = []
     ) -> BenchmarkResult {
         let machine = MachineProfiler.capture()
         let command = dockerArguments(context: context, arguments: runArguments)
         _ = try? runDocker(context: context, arguments: ["rm", "-f", containerName])
         let startedAt = Date()
-        var metrics = commonMetrics([:], iteration: iteration)
+        var metrics = commonMetrics(initialMetrics, iteration: iteration)
         var stdout = ""
         var stderr = ""
         var exitCode: Int32 = 0
@@ -1542,6 +1908,7 @@ public struct DockerBenchmarkSuite {
             stderr = String(describing: error)
         }
         _ = try? runDocker(context: context, arguments: ["rm", "-f", containerName])
+        removeDockerVolumes(context: context, names: cleanupVolumes)
 
         return BenchmarkResult(
             workload: workload,
@@ -2042,10 +2409,30 @@ public struct DockerBenchmarkSuite {
         if !workloads.isDisjoint(with: ["compose-up", "named-volume-io", "tmpfs-volume-io"]) {
             images.append("busybox:1.36")
         }
-        if !workloads.isDisjoint(with: ["npm-install", "pnpm-install", "bind-npm-install", "bind-pnpm-install", "volume-npm-install", "volume-pnpm-install", "conjetfs-npm-install", "conjetfs-pnpm-install", "bind-hot-reload", "conjetfs-hot-reload"]) {
+        if !workloads.isDisjoint(with: [
+            "npm-install",
+            "pnpm-install",
+            "strict-bind-npm-install",
+            "strict-bind-pnpm-install",
+            "smart-bind-npm-install",
+            "smart-bind-pnpm-install",
+            "volume-npm-install",
+            "volume-pnpm-install",
+            "conjetfs-npm-install",
+            "conjetfs-pnpm-install",
+            "strict-bind-hot-reload",
+            "smart-bind-hot-reload",
+            "conjetfs-hot-reload"
+        ]) {
             images.append("node:22-alpine")
         }
-        if !workloads.isDisjoint(with: ["cargo-build", "bind-cargo-build", "volume-cargo-build", "conjetfs-cargo-build"]) {
+        if !workloads.isDisjoint(with: [
+            "cargo-build",
+            "strict-bind-cargo-build",
+            "smart-bind-cargo-build",
+            "volume-cargo-build",
+            "conjetfs-cargo-build"
+        ]) {
             images.append("rust:1-alpine")
         }
         return Array(Set(images)).sorted()
@@ -2232,16 +2619,12 @@ public struct DockerBenchmarkSuite {
         return mounts
     }
 
-    private func bindNativeOverlayPlan(
+    private func nativeOverlayPlan(
         context: String,
         workload: String,
         iteration: Int,
         targets: [(String, String)]
     ) -> BindNativeOverlayPlan {
-        guard context == "conjet" else {
-            return .empty
-        }
-
         let pairs: [(String, String)] = targets.map { pair in
             let suffix = pair.0
             let target = pair.1
@@ -2259,7 +2642,8 @@ public struct DockerBenchmarkSuite {
                     "type=volume,source=\(name),target=\(target)"
                 ]
             },
-            volumeNames: pairs.map { $0.0 }
+            volumeNames: pairs.map { $0.0 },
+            writePaths: pairs.map { $0.1 }
         )
     }
 

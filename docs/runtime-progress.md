@@ -134,38 +134,37 @@ Observed progress on 2026-05-30:
   `0.443/0.448s`. Direct bind `fs.watch` still timed out on Conjet and Colima
   and passed on OrbStack with P50/P95 `0.133/0.200s`.
 - A 3-iteration benchmark report was generated at
-  `bench/reports/docker-conjetfs-contexts-20260530-090525.md` on an Apple M1 Pro
+  `benchmarks/reports/docker-conjetfs-contexts-20260530-090525.md` on an Apple M1 Pro
   with AC power and nominal thermals. All 72 benchmark samples exited 0. Conjet
   beat Colima P50 on the measured bind npm, bind pnpm, bind Cargo, ConjetFS npm,
   ConjetFS pnpm, ConjetFS Cargo, copy-node-modules, named-volume IO, tmpfs IO,
   volume npm, volume pnpm, and volume Cargo workloads in that run.
 - A hot reload report was generated at
-  `bench/reports/docker-hot-reload-contexts-20260530-112320.md` on battery power
+  `benchmarks/reports/docker-hot-reload-contexts-20260530-112320.md` on battery power
   and nominal thermals. All 12 samples exited 0. Conjet and Colima were nearly
   tied on direct bind hot reload P50, while the ConjetFS path measured lower
   P50 than Colima in that run.
-- Short idle process samples were added through `conjet bench idle`. The first
+- Short idle process samples were added through `conjet-bench` idle sampling. The first
   5-second local sample showed Conjet at 0.000 percent mean matched CPU and
   Colima at 18.800 percent mean matched CPU, but this is not a release-grade
   power result.
-- `conjet bench power` was added as the release-path power probe. It wraps
+- `conjet-bench` power sampling was added as the release-path power probe. It wraps
   noninteractive `powermetrics`, parses power rails plus matched process
   energy/wakeup signals when present, and preserves permission failures as
   benchmark failures instead of hiding missing evidence.
-- A local `conjet bench power --runtime conjet --seconds 1 --interval 1
-  --no-sudo --json` smoke confirmed structured output on permission failure:
+- A local standalone benchmark power smoke confirmed structured output on permission failure:
   exit code 1, `powermetrics must be invoked as the superuser`, and machine
   profile metadata captured.
-- `conjet bench gate` was added as the faster-than-OrbStack claim verifier. It
+- `conjet-bench gate` was added as the faster-than-OrbStack claim verifier. It
   accepts raw JSON reports, requires the release workload matrix to include
   Conjet plus OrbStack and tuned Colima, enforces minimum sample counts and zero
   failures, and rejects the claim unless Conjet P50/P95 is at or below each
   baseline for each required workload or metric. Hot-reload rules now compare
   the `hot_reload_seconds` metric directly.
 - A local gate smoke generated one raw JSON Conjet idle report and confirmed
-  `conjet bench gate` exits nonzero with `passed=false` and missing benchmark
+  `conjet-bench gate` exits nonzero with `passed=false` and missing benchmark
   requirements instead of allowing an under-evidenced claim.
-- `conjet bench release-gate` was added as the production evidence
+- `conjet-bench run` was added as the production evidence
   orchestrator. It collects Docker workload samples, idle CPU samples, and
   `powermetrics` power samples for the requested contexts, writes
   `docker.json`, per-runtime idle/power reports, `all-results.json`,
@@ -209,7 +208,7 @@ Observed progress on 2026-05-31:
   P95/P50 deltas under five-sample nearest-rank P95. The ConjetFS/native-volume
   fast paths remained comfortably ahead. This is not part of the OrbStack
   verdict, but it stays open as a harness/runtime stabilization item.
-- `conjet bench energy` was added for active energy-to-solution evidence. It
+- `conjet-bench` active energy sampling was added for active energy-to-solution evidence. It
   runs a workload while sampling `powermetrics`, records workload duration,
   sample duration, workload/power exit codes, and estimated combined/CPU joules
   when power rails are available.

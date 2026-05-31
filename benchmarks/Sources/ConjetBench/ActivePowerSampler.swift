@@ -10,6 +10,7 @@ public struct ActivePowerSampler {
     public var processPattern: String
     public var maxDurationSeconds: Double
     public var minSampleSeconds: Double
+    public var workloadTimeoutSeconds: Double
     public var intervalSeconds: Double
     public var samplers: String
     public var useSudo: Bool
@@ -20,6 +21,7 @@ public struct ActivePowerSampler {
         processPattern: String,
         maxDurationSeconds: Double = 60,
         minSampleSeconds: Double = 2,
+        workloadTimeoutSeconds: Double? = nil,
         intervalSeconds: Double = 1,
         samplers: String = "cpu_power,gpu_power,ane_power,tasks",
         useSudo: Bool = true
@@ -29,6 +31,7 @@ public struct ActivePowerSampler {
         self.processPattern = processPattern
         self.maxDurationSeconds = max(1, maxDurationSeconds)
         self.minSampleSeconds = max(0.1, minSampleSeconds)
+        self.workloadTimeoutSeconds = max(1, workloadTimeoutSeconds ?? maxDurationSeconds)
         self.intervalSeconds = max(0.1, intervalSeconds)
         self.samplers = samplers
         self.useSudo = useSudo
@@ -41,7 +44,8 @@ public struct ActivePowerSampler {
         let machine = MachineProfiler.capture()
         let startedAt = Date()
         let sampleRateMilliseconds = max(100, Int((intervalSeconds * 1_000).rounded()))
-        let sampleCount = max(1, Int((maxDurationSeconds / intervalSeconds).rounded(.up)))
+        let sampleLimitSeconds = max(maxDurationSeconds, workloadTimeoutSeconds)
+        let sampleCount = max(1, Int((sampleLimitSeconds / intervalSeconds).rounded(.up)))
         let powermetricsArguments = [
             "--samplers", samplers,
             "--show-process-energy",
@@ -63,7 +67,7 @@ public struct ActivePowerSampler {
         let workload = try runWorkload(
             executable: executable,
             arguments: arguments,
-            timeoutSeconds: maxDurationSeconds
+            timeoutSeconds: workloadTimeoutSeconds
         )
         let workloadDuration = Date().timeIntervalSince(workloadStartedAt)
 
@@ -85,6 +89,9 @@ public struct ActivePowerSampler {
         metrics["power_exit_code"] = Double(power.exitCode)
         metrics["requested_sample_count"] = Double(sampleCount)
         metrics["requested_sample_rate_ms"] = Double(sampleRateMilliseconds)
+        metrics["power_sample_limit_seconds"] = sampleLimitSeconds
+        metrics["minimum_active_sample_seconds"] = minSampleSeconds
+        metrics["workload_timeout_seconds"] = workloadTimeoutSeconds
 
         let exitCode: Int32 = workload.exitCode == 0 ? power.exitCode : workload.exitCode
         let command = [powerExecutable] + powerArguments + ["--workload", executable] + arguments
@@ -121,9 +128,15 @@ public struct ActivePowerSampler {
         metrics["power_sample_duration_seconds"] = powerDuration
         if let combinedPower = powerMetrics["combined_power_mw_mean"] {
             metrics["energy_to_solution_joules_estimate"] = combinedPower * workloadDuration / 1_000
+            metrics["average_power_watts"] = combinedPower / 1_000
+            metrics["energy_to_solution_joules"] = combinedPower * workloadDuration / 1_000
         }
         if let cpuPower = powerMetrics["cpu_power_mw_mean"] {
             metrics["cpu_energy_to_solution_joules_estimate"] = cpuPower * workloadDuration / 1_000
+            metrics["cpu_power_watts"] = cpuPower / 1_000
+        }
+        if let wakeups = powerMetrics["matched_wakeups_per_second_mean"] {
+            metrics["wakeups_per_second"] = wakeups
         }
         return metrics
     }

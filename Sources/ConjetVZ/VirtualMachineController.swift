@@ -165,6 +165,8 @@ public final class VirtualMachineController {
     #endif
 }
 
+extension VirtualMachineController: @unchecked Sendable {}
+
 #if canImport(Virtualization)
 private struct VZRuntimeResources {
     var serialLogHandle: FileHandle

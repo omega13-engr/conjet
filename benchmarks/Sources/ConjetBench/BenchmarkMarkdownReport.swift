@@ -123,10 +123,10 @@ public enum BenchmarkMarkdownReport {
         return durations[max(0, min(rank, durations.count - 1))]
     }
 
-    private static func metricSummary(_ metrics: [String: Double]) -> String {
+    private static func metricSummary(_ metrics: BenchmarkMetrics) -> String {
         metrics
-            .sorted { $0.key < $1.key }
-            .map { "\($0.key)=\(format($0.value))" }
+            .sortedPairs
+            .map { "\($0.key)=\($0.value.summaryValue)" }
             .joined(separator: ", ")
     }
 

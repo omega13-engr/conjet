@@ -1,131 +1,132 @@
 # Benchmark Methodology
 
-Benchmarks must include machine profile, power source, thermal state, command
-line, runtime name, wall time, exit code, and workload metrics. Claims against
-OrbStack, Colima, or Docker Desktop are not valid until raw JSON for every
-runtime is kept under `bench/reports/`.
+Conjet benchmark code lives in the standalone Swift package under
+`benchmarks/`. The production `conjet` executable must not contain benchmark
+commands or link benchmark modules.
 
-For Docker compatibility and Colima comparison, use:
+All performance claims must be backed by raw JSON under `benchmarks/reports/`
+and by a Markdown report that states cache mode, topology, sample count,
+failures, and caveats.
 
-```sh
-conjet bench docker-compare --contexts conjet,colima --iterations 3 --warmup --json \
-  --output bench/reports/docker-contexts.json
-```
+## Parallel Wrapper
 
-The runner intentionally uses Docker contexts instead of changing the global
-Docker context. It records `docker-version`, `container-start`, `image-build`,
-`copy-node-modules`, `npm-install`, `pnpm-install`, `cargo-build`, bind-mounted
-npm/pnpm/Cargo workloads, VM-native volume npm/pnpm/Cargo workloads, ConjetFS
-sync-to-volume npm/pnpm/Cargo workloads, `named-volume-io`, `tmpfs-volume-io`,
-`bind-hot-reload`, `conjetfs-hot-reload`, and `compose-up` for every context
-and iteration.
-
-Hot-reload workloads must publish `hot_reload_seconds` from an in-container
-Node `fs.watch` listener. The release gate uses that metric for raw
-`bind-hot-reload`, raw `conjetfs-hot-reload`, and the mapped
-`hot-reload-fast-path` rule that compares Conjet `conjetfs-hot-reload` against
-baseline `bind-hot-reload`. This keeps the claim based on edit-to-detection
-latency, not container startup, one-time setup, or a polling loop. For ConjetFS,
-the hot-reload workload must use the host-side FSEvents watcher path and publish
-`watch_sync_seconds` plus `watch_event_paths`.
-
-Use `--workloads NAME,...` for a targeted run when isolating one subsystem. For
-example, use `--workloads conjetfs-npm-install,conjetfs-pnpm-install,conjetfs-cargo-build`
-to focus on the ConjetFS path, or `--workloads named-volume-io,tmpfs-volume-io`
-to focus on Docker-managed storage. Do not compare these results with older
-reports that only included narrower Docker probes.
-
-Idle CPU sampling is separate from Docker workload timing:
+The standard local runner is:
 
 ```sh
-conjet bench idle --runtime conjet --seconds 60 --interval 1 --markdown
-conjet bench idle --runtime colima --seconds 60 --interval 1 --markdown
-conjet bench idle --runtime orbstack --seconds 60 --interval 1 --markdown
-```
-
-These process samples are not a substitute for `powermetrics` energy data, but
-they are a low-friction regression guard for daemon and watcher CPU burn.
-
-Power and wakeup sampling uses macOS `powermetrics`:
-
-```sh
-conjet bench power --runtime conjet --seconds 60 --interval 1 --markdown
-conjet bench power --runtime colima --seconds 60 --interval 1 --markdown
-conjet bench power --runtime orbstack --seconds 60 --interval 1 --markdown
-```
-
-`bench power` runs `sudo -n powermetrics` by default so CI or scripted runs do
-not hang on a password prompt. Use `--no-sudo` only for local parser/debug
-checks. A nonzero exit is kept as a benchmark result and must be published with
-the report; it means power evidence is missing for that runtime.
-
-Active energy-to-solution sampling wraps a real workload:
-
-```sh
-conjet bench energy \
-  --runtime conjet \
-  --workload compose-up-energy \
-  --seconds 120 \
-  --interval 1 \
-  --output bench/reports/energy-conjet.json \
-  -- docker --context conjet compose -f compose.yaml up --build --abort-on-container-exit
-```
-
-Run the same command shape for OrbStack and tuned Colima. The workload command
-must appear after `--`; any flags after that separator belong to the workload,
-not the Conjet benchmark command. The result records workload duration, sampled
-power duration, powermetrics exit code, workload exit code, and estimated
-combined/CPU joules when `powermetrics` returns power rails.
-
-Measured Docker samples must be interleaved by iteration across runtimes after
-all configured warmups complete. A valid two-runtime five-iteration wall-time
-matrix therefore records `conjet-1, baseline-1, conjet-2, baseline-2, ...`
-rather than all Conjet samples followed by all baseline samples. This reduces
-host-cache, thermal, registry, and filesystem ordering bias.
-
-Before any faster-than-OrbStack release claim, run the release-gate
-orchestrator:
-
-```sh
-conjet bench release-gate \
+swift run --package-path benchmarks conjet-bench run \
   --contexts conjet,orbstack,colima \
-  --iterations 5 \
-  --warmup \
-  --seconds 60 \
-  --output-dir bench/reports/release-gate-YYYYMMDD-HHMMSS \
-  --json
+  --samples 10 \
+  --output-dir benchmarks/reports/run-all-YYYYMMDD-HHMMSS
 ```
 
-The command writes raw Docker, idle CPU, power, combined-result, and gate
-artifacts into the output directory. It exits nonzero if any required workload,
-OrbStack/tuned-Colima baseline, sample count, zero-failure requirement, or
-Conjet P50/P95 win is missing.
-Power-enabled release gates also collect `container-start-energy-sample`, a
-fixed container-start loop measured by `conjet bench energy`, and compare
-`energy_to_solution_joules_estimate` across runtimes. Use `--no-power` only for
-wall-time-only debug runs; it disables both idle power and active energy
-requirements.
-Mapped fast-path rules do not hide raw bind-mount evidence; the reports still
-include direct bind workloads, while rules such as `hot-reload-fast-path`
-explicitly show the candidate and baseline workload names being compared.
+The wrapper requires `sudo -v` before starting. It runs wall-time suites in
+parallel and then runs energy in isolation:
 
-For manual debugging, combine raw JSON reports and run the lower-level claim
-gate directly:
+- warm wall-time gate
+- cold base-prepulled gate
+- no-cache gate
+- topology gate
+- polyglot real-project gate
+- energy gate
+
+Each suite writes raw `all-results.json` and a suite Markdown report. The root
+runner writes `run-all.json` and `run-all.md`.
+
+## Topology Labels
+
+Every result must include topology metadata:
+
+- `strict-bind`: host source bind mounted into the container, no native overlay
+  for write-heavy paths.
+- `smart-bind`: host source bind mounted with Linux-native overlays for paths
+  such as `/app/node_modules` or `/app/target`.
+- `volume`: Linux-native Docker volume baseline.
+- `conjetfs`: ConjetFS synchronized source with Linux-native workspace output.
+
+Reports must not call a smart-bind/native-overlay workload a strict bind.
+
+## Warm And Cold Claims
+
+Warm gates prove warm dev-loop behavior only. Cold/no-cache claims require
+results labeled with one of the cold sample phases:
+
+- `cold-base-prepulled`
+- `no-cache`
+- `true-cold`
+
+The primary cold gate should pre-pull base images, clear benchmark-specific
+BuildKit cache where applicable, remove benchmark volumes between samples, and
+use `docker build --no-cache` for no-cache build workloads.
+
+## Hot Reload
+
+Hot reload workloads measure host file write to updated HTTP response where the
+workload supports it. Reports should split:
+
+- `strict-bind-hot-reload`
+- `smart-bind-hot-reload`
+- `conjetfs-hot-reload`
+
+Failures must keep `failure_reason` or `bind_failure_reason` visible in raw
+metrics rather than being hidden by aggregate summaries.
+
+## Polyglot Coverage
+
+The polyglot gate is intended to test whether filesystem/topology benefits
+generalize beyond synthetic Node/Cargo workloads:
 
 ```sh
-conjet bench gate \
-  --reports bench/reports/docker-release-gate.json,bench/reports/idle-conjet.json,bench/reports/idle-orbstack.json,bench/reports/idle-colima.json,bench/reports/power-conjet.json,bench/reports/power-orbstack.json,bench/reports/power-colima.json \
+swift run --package-path benchmarks conjet-bench run \
+  --contexts conjet,orbstack,colima \
+  --samples 10 \
+  --polyglot-samples 5 \
+  --ecosystems js,python,jvm,dotnet,go,rust,cpp \
+  --output-dir benchmarks/reports/polyglot-local
+```
+
+The minimum acceptable coverage is at least three non-JS ecosystems. Strong
+coverage includes JS, Python, JVM, .NET, Go, Rust, and C/C++.
+
+## Energy Claims
+
+Energy superiority requires measured `powermetrics` data:
+
+```sh
+swift run --package-path benchmarks conjet-bench energy-gate \
+  --contexts conjet,orbstack,colima \
+  --workloads idle,container-start-loop,hot-reload-loop,compose-loop,npm-install,pnpm-install,cargo-build \
+  --samples 10 \
+  --require-power \
+  --output-dir benchmarks/reports/energy-gate-YYYYMMDD-HHMMSS
+```
+
+If `powermetrics` is unavailable and `--require-power` is not passed, the report
+must mark the energy verdict as skipped. Skipped power data is not evidence for
+lower energy or lower power.
+
+## Claim Gate
+
+Existing raw JSON reports can be scored with:
+
+```sh
+swift run --package-path benchmarks conjet-bench gate \
+  --reports benchmarks/reports/run-all-local/warm-gate/all-results.json \
   --candidate conjet \
   --baselines orbstack,colima \
-  --min-samples 3 \
-  --json
+  --min-samples 10 \
+  --phase warm \
+  --markdown
 ```
 
-The gate requires the required workloads and runtime baselines to exist, each
-candidate and baseline group to have at least the minimum sample count, zero
-failed samples, and Conjet P50/P95 at or below every baseline for each measure.
-Markdown reports are intentionally rejected by the gate; they are readable
-summaries, not proof artifacts.
-For targeted JSON reports, pass the same `--workloads NAME,...` list used by
-`docker-compare`; add `--no-idle --no-power` when the report intentionally
-omits idle and power samples.
+Markdown reports are summaries, not proof artifacts. Gate input must be raw
+JSON.
+
+## Claim Policy
+
+- Proven: benchmark gate passed with enough samples.
+- Partial: some measured workloads passed and some failed.
+- Not proven: not measured, skipped, or insufficient samples.
+- Failed: measured and did not meet the gate.
+
+Never claim global speedup, cold superiority, strict-bind superiority, or energy
+superiority without matching evidence.

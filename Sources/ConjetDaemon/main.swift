@@ -114,9 +114,32 @@ private final class DaemonRuntime {
                 return DaemonResponse(ok: false, message: String(describing: error), status: status(state: .warmIdle))
             }
         case .stop:
-            _ = try? vmController.stop(store: vmStore)
             stopping = true
-            return DaemonResponse(ok: true, message: "conjetd stopping", status: status(state: .stopping))
+            let cleanupTimeout = request.parameters["timeout_seconds"].flatMap(Double.init)
+                .map { min(max($0, 0.1), 25) }
+                ?? 25
+            let semaphore = DispatchSemaphore(value: 0)
+            let cleanupError = AsyncErrorBox()
+            DispatchQueue.global(qos: .utility).async { [vmController, vmStore] in
+                do {
+                    _ = try vmController.stop(store: vmStore)
+                } catch {
+                    cleanupError.set(error)
+                }
+                semaphore.signal()
+            }
+            let boundedWait = min(cleanupTimeout, 5)
+            let cleanupTimedOut = semaphore.wait(timeout: .now() + boundedWait) == .timedOut
+            let message: String
+            if cleanupTimedOut {
+                message = "conjetd stopping; cleanup still in progress after \(String(format: "%.1f", boundedWait))s"
+            } else if let error = cleanupError.get() {
+                message = "conjetd stopping; cleanup failed separately: \(error)"
+            } else {
+                message = "conjetd stopping; cleanup completed"
+            }
+            let vm = vmStore.status(state: .stopping, message: message)
+            return DaemonResponse(ok: true, message: message, status: status(state: .stopping, vm: vm), vm: vm)
         }
     }
 
@@ -143,6 +166,23 @@ private final class DaemonRuntime {
         case .error, .stopped, .unconfigured:
             return .cold
         }
+    }
+}
+
+private final class AsyncErrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var error: Error?
+
+    func set(_ error: Error?) {
+        lock.lock()
+        self.error = error
+        lock.unlock()
+    }
+
+    func get() -> Error? {
+        lock.lock()
+        defer { lock.unlock() }
+        return error
     }
 }
 

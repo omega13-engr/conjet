@@ -1,8 +1,9 @@
 .build/
 .swiftpm/
 .conjet/
-bench/reports/*.json
-bench/reports/*.md
+benchmarks/reports/**/*.json
+benchmarks/reports/**/*.md
+benchmarks/reports/**/work/
 DerivedData/
 *.xcuserstate
 .DS_Store
