@@ -31,7 +31,7 @@ Kubernetes is not supported yet. It is planned for a later iteration.
 ### Homebrew
 
 ```sh
-brew tap omega13-engr/conjet
+brew tap omega13-engr/conjet https://github.com/omega13-engr/conjet.git
 brew install conjet
 ```
 
