@@ -1,0 +1,28 @@
+{
+  "fileSignatures" : {
+    ".conjetignore" : {
+      "bytes" : 162,
+      "modifiedAtNanoseconds" : 1780195798716740352
+    },
+    "package-lock.json" : {
+      "bytes" : 1477,
+      "modifiedAtNanoseconds" : 1780195798639899136
+    },
+    "package.json" : {
+      "bytes" : 183,
+      "modifiedAtNanoseconds" : 1780195798639379456
+    },
+    "src\/index.js" : {
+      "bytes" : 34,
+      "modifiedAtNanoseconds" : 1780195798640375040
+    }
+  },
+  "projectID" : "f022eb29ad47eaec",
+  "syncedFiles" : [
+    ".conjetignore",
+    "package-lock.json",
+    "package.json",
+    "src\/index.js"
+  ],
+  "updatedAt" : "2026-05-31T02:50:00Z"
+}

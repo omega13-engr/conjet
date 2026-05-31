@@ -1,0 +1,43 @@
+{
+  "fileSignatures" : {
+    ".conjetignore" : {
+      "bytes" : 162,
+      "modifiedAtNanoseconds" : 1780195902318446592
+    },
+    "Cargo.toml" : {
+      "bytes" : 198,
+      "modifiedAtNanoseconds" : 1780195902245465856
+    },
+    "deps\/conjet_floatfmt\/Cargo.toml" : {
+      "bytes" : 69,
+      "modifiedAtNanoseconds" : 1780195902246813184
+    },
+    "deps\/conjet_floatfmt\/src\/lib.rs" : {
+      "bytes" : 206,
+      "modifiedAtNanoseconds" : 1780195902247130880
+    },
+    "deps\/conjet_intfmt\/Cargo.toml" : {
+      "bytes" : 67,
+      "modifiedAtNanoseconds" : 1780195902245918464
+    },
+    "deps\/conjet_intfmt\/src\/lib.rs" : {
+      "bytes" : 379,
+      "modifiedAtNanoseconds" : 1780195902246465280
+    },
+    "src\/main.rs" : {
+      "bytes" : 97,
+      "modifiedAtNanoseconds" : 1780195902247477760
+    }
+  },
+  "projectID" : "563179b8ffb751ea",
+  "syncedFiles" : [
+    ".conjetignore",
+    "Cargo.toml",
+    "deps\/conjet_floatfmt\/Cargo.toml",
+    "deps\/conjet_floatfmt\/src\/lib.rs",
+    "deps\/conjet_intfmt\/Cargo.toml",
+    "deps\/conjet_intfmt\/src\/lib.rs",
+    "src\/main.rs"
+  ],
+  "updatedAt" : "2026-05-31T02:51:44Z"
+}

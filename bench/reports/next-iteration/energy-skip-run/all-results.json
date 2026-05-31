@@ -1,0 +1,94 @@
+[
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T02:56:03Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "conjet",
+    "startedAt" : "2026-05-31T02:56:03Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-idle-conjet-1780196163904-fb392d71",
+    "workload" : "idle"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T02:56:03Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "orbstack",
+    "startedAt" : "2026-05-31T02:56:03Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-idle-orbstack-1780196163904-c7f68fe4",
+    "workload" : "idle"
+  }
+]

@@ -63,7 +63,7 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
     }
 
     public var effectiveGateRules: [BenchmarkClaimRule] {
-        let selectedWorkloads = Set(workloads)
+        let selectedWorkloads = Set(workloads.map(DockerBenchmarkSuite.canonicalWorkloadName))
         return BenchmarkClaimGateOptions.defaultRules.filter { rule in
             switch rule.workload {
             case "idle-resource-sample":
@@ -80,7 +80,7 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
 
     public var effectiveDockerWorkloads: [String] {
         let concreteWorkloads = Set(DockerBenchmarkSuite.defaultWorkloads)
-        var selected = Self.unique(workloads.filter { concreteWorkloads.contains($0) })
+        var selected = Self.unique(workloads.map(DockerBenchmarkSuite.canonicalWorkloadName).filter { concreteWorkloads.contains($0) })
         var seen = Set(selected)
 
         for rule in effectiveGateRules {
@@ -202,6 +202,7 @@ public struct BenchmarkReleaseGateRunner {
                 contexts: contexts,
                 iterations: iterations,
                 warmup: warmup,
+                samplePhase: options.samplePhase,
                 workloads: workloads,
                 commandTimeoutSeconds: options.dockerCommandTimeoutSeconds
             ).run(workDirectory: workDirectory)

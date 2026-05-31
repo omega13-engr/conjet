@@ -8,12 +8,15 @@ public final class UnixSocketClient {
         self.socketPath = socketPath
     }
 
-    public func send(_ request: DaemonRequest) throws -> DaemonResponse {
+    public func send(_ request: DaemonRequest, timeoutSeconds: Double? = nil) throws -> DaemonResponse {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw ConjetError.socket("socket() failed: \(lastErrno())")
         }
         disableSigpipe(fd)
+        if let timeoutSeconds {
+            setSocketTimeout(fd, timeoutSeconds: timeoutSeconds)
+        }
         defer { Darwin.close(fd) }
 
         try withUnixSocketAddress(path: socketPath) { address, length in
@@ -147,6 +150,16 @@ private func readLine(from fd: Int32, maxBytes: Int = 1_048_576) throws -> Data 
         throw ConjetError.socket("connection closed without a response")
     }
     return Data(bytes)
+}
+
+private func setSocketTimeout(_ fd: Int32, timeoutSeconds: Double) {
+    let timeout = max(0.1, timeoutSeconds)
+    var value = timeval(
+        tv_sec: Int(timeout),
+        tv_usec: Int32((timeout - floor(timeout)) * 1_000_000)
+    )
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
 }
 
 private func writeAll(_ data: Data, to fd: Int32) throws {

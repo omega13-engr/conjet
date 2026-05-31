@@ -4,6 +4,9 @@ import Foundation
 public enum BenchmarkSamplePhase: String, Codable, Equatable, Sendable {
     case any
     case cold
+    case coldBasePrepulled = "cold-base-prepulled"
+    case noCache = "no-cache"
+    case trueCold = "true-cold"
     case warm
 
     public static let metricKey = "benchmark_phase"
@@ -14,8 +17,55 @@ public enum BenchmarkSamplePhase: String, Codable, Equatable, Sendable {
             return nil
         case .cold:
             return 0
+        case .coldBasePrepulled:
+            return 2
+        case .noCache:
+            return 3
+        case .trueCold:
+            return 4
         case .warm:
             return 1
+        }
+    }
+
+    public var buildCacheMode: String {
+        switch self {
+        case .any:
+            return "mixed"
+        case .warm:
+            return "warm"
+        case .cold:
+            return "cold"
+        case .coldBasePrepulled:
+            return "base-prepulled-no-build-cache"
+        case .noCache:
+            return "no-cache"
+        case .trueCold:
+            return "cold"
+        }
+    }
+
+    public var imageCacheMode: String {
+        switch self {
+        case .any:
+            return "mixed"
+        case .warm:
+            return "warm"
+        case .cold, .coldBasePrepulled, .noCache:
+            return "base-prepulled"
+        case .trueCold:
+            return "cold"
+        }
+    }
+
+    public var networkCacheMode: String {
+        switch self {
+        case .any:
+            return "mixed"
+        case .warm:
+            return "prepulled"
+        case .cold, .coldBasePrepulled, .noCache, .trueCold:
+            return "online"
         }
     }
 
@@ -25,6 +75,12 @@ public enum BenchmarkSamplePhase: String, Codable, Equatable, Sendable {
             return true
         case .cold:
             return result.metrics[Self.metricKey] == Self.cold.metricValue
+        case .coldBasePrepulled:
+            return result.metrics[Self.metricKey] == Self.coldBasePrepulled.metricValue
+        case .noCache:
+            return result.metrics[Self.metricKey] == Self.noCache.metricValue
+        case .trueCold:
+            return result.metrics[Self.metricKey] == Self.trueCold.metricValue
         case .warm:
             return result.metrics[Self.metricKey] == Self.warm.metricValue
         }
@@ -135,9 +191,12 @@ public struct BenchmarkClaimGateOptions: Codable, Equatable, Sendable {
         BenchmarkClaimRule(workload: "npm-install"),
         BenchmarkClaimRule(workload: "pnpm-install"),
         BenchmarkClaimRule(workload: "cargo-build"),
-        BenchmarkClaimRule(workload: "bind-npm-install"),
-        BenchmarkClaimRule(workload: "bind-pnpm-install"),
-        BenchmarkClaimRule(workload: "bind-cargo-build"),
+        BenchmarkClaimRule(workload: "strict-bind-npm-install"),
+        BenchmarkClaimRule(workload: "strict-bind-pnpm-install"),
+        BenchmarkClaimRule(workload: "strict-bind-cargo-build"),
+        BenchmarkClaimRule(workload: "smart-bind-npm-install"),
+        BenchmarkClaimRule(workload: "smart-bind-pnpm-install"),
+        BenchmarkClaimRule(workload: "smart-bind-cargo-build"),
         BenchmarkClaimRule(workload: "volume-npm-install"),
         BenchmarkClaimRule(workload: "volume-pnpm-install"),
         BenchmarkClaimRule(workload: "volume-cargo-build"),
@@ -146,22 +205,22 @@ public struct BenchmarkClaimGateOptions: Codable, Equatable, Sendable {
         BenchmarkClaimRule(
             workload: "npm-install-fast-path",
             candidateWorkload: "conjetfs-npm-install",
-            baselineWorkload: "bind-npm-install"
+            baselineWorkload: "smart-bind-npm-install"
         ),
         BenchmarkClaimRule(
             workload: "pnpm-install-fast-path",
             candidateWorkload: "conjetfs-pnpm-install",
-            baselineWorkload: "bind-pnpm-install"
+            baselineWorkload: "smart-bind-pnpm-install"
         ),
         BenchmarkClaimRule(
             workload: "cargo-build-fast-path",
             candidateWorkload: "conjetfs-cargo-build",
-            baselineWorkload: "bind-cargo-build"
+            baselineWorkload: "smart-bind-cargo-build"
         ),
         BenchmarkClaimRule(
             workload: "hot-reload-fast-path",
             candidateWorkload: "conjetfs-hot-reload",
-            baselineWorkload: "bind-hot-reload",
+            baselineWorkload: "smart-bind-hot-reload",
             measure: .metric("hot_reload_seconds")
         ),
         BenchmarkClaimRule(workload: "compose-up"),

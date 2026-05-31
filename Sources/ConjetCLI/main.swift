@@ -41,7 +41,7 @@ struct ConjetCLI {
         case "start":
             try start(args: args, json: json)
         case "stop":
-            try stop()
+            try stop(args: args, json: json)
         case "shell":
             try shell(args: args)
         case "vm":
@@ -243,10 +243,20 @@ struct ConjetCLI {
         throw ConjetError.unavailable("conjetd did not become ready")
     }
 
-    private static func stop() throws {
+    private static func stop(args: [String] = [], json: Bool = false) throws {
         let paths = ConjetPaths.default()
-        let response = try UnixSocketClient(socketPath: try socketPath(paths: paths)).send(DaemonRequest(command: .stop))
-        print(response.message)
+        let timeout = value(after: "--timeout", in: args).flatMap(Double.init)
+            ?? ProcessInfo.processInfo.environment["CONJET_STOP_TIMEOUT_SECONDS"].flatMap(Double.init)
+            ?? 25
+        let response = try UnixSocketClient(socketPath: try socketPath(paths: paths)).send(
+            DaemonRequest(command: .stop, parameters: ["timeout_seconds": String(timeout)]),
+            timeoutSeconds: timeout
+        )
+        if json {
+            print(try ConjetJSON.string(response))
+        } else {
+            print(response.message)
+        }
     }
 
     private static func startVMIfConfigured(socketPath: String, config: ConjetConfig, json: Bool) throws {
@@ -660,14 +670,27 @@ struct ConjetCLI {
                     print("  stderr: \(result.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines))")
                 }
             }
-        case "release-gate":
-            try benchReleaseGate(args: args, json: json, markdown: markdown)
+        case "release-gate", "global-gate", "cold-gate", "no-cache-gate":
+            var gateArgs = args
+            if subcommand == "cold-gate", value(after: "--phase", in: gateArgs) == nil {
+                gateArgs += ["--phase", "cold-base-prepulled"]
+            }
+            if subcommand == "no-cache-gate", value(after: "--phase", in: gateArgs) == nil {
+                gateArgs += ["--phase", "no-cache"]
+            }
+            try benchReleaseGate(args: gateArgs, json: json, markdown: markdown)
+        case "topology-gate":
+            try benchTopologyGate(args: args, json: json, markdown: markdown)
+        case "polyglot-gate", "real-project-gate":
+            try benchPolyglotGate(args: args, json: json, markdown: markdown)
+        case "energy-gate":
+            try benchEnergyGate(args: args, json: json, markdown: markdown)
         case "gate":
             let reportPaths = value(after: "--reports", in: args)
                 ?? value(after: "--input", in: args)
                 ?? value(after: "--report", in: args)
             guard let reportPaths else {
-                throw ConjetError.invalidArgument("usage: conjet bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N] [--phase any|cold|warm] [--workloads NAME,...] [--no-idle] [--no-power] [--json]")
+                throw ConjetError.invalidArgument("usage: conjet bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N] [--phase any|cold|cold-base-prepulled|no-cache|true-cold|warm] [--workloads NAME,...] [--no-idle] [--no-power] [--json]")
             }
             let reportURLs = reportPaths
                 .split(separator: ",")
@@ -766,17 +789,24 @@ struct ConjetCLI {
 
     private static func benchReleaseGate(args: [String], json: Bool, markdown: Bool) throws {
         let candidate = value(after: "--candidate", in: args) ?? "conjet"
+        let explicitContexts = value(after: "--contexts", in: args).map(csvList)
         let baselines = value(after: "--baselines", in: args)
             .map(csvList)
+            ?? explicitContexts?.filter { $0 != candidate }
             ?? ["orbstack", "colima"]
         let contexts = value(after: "--contexts", in: args)
             .map(csvList)
             ?? []
-        let iterations = value(after: "--iterations", in: args).flatMap(Int.init) ?? 3
-        let minSamples = value(after: "--min-samples", in: args).flatMap(Int.init) ?? 3
-        let warmup = args.contains("--warmup")
+        let iterations = value(after: "--iterations", in: args).flatMap(Int.init)
+            ?? value(after: "--samples", in: args).flatMap(Int.init)
+            ?? 3
+        let minSamples = value(after: "--min-samples", in: args).flatMap(Int.init)
+            ?? value(after: "--samples", in: args).flatMap(Int.init)
+            ?? 3
+        let requestedPhase = value(after: "--phase", in: args)
+        let warmup = args.contains("--warmup") || requestedPhase?.lowercased() == BenchmarkSamplePhase.warm.rawValue
         let samplePhase = try benchmarkSamplePhase(
-            from: value(after: "--phase", in: args),
+            from: requestedPhase,
             default: warmup ? .warm : .cold
         )
         let workloads = value(after: "--workloads", in: args)
@@ -825,6 +855,7 @@ struct ConjetCLI {
                     contexts: contexts,
                     iterations: iterations,
                     warmup: warmup,
+                    samplePhase: options.samplePhase,
                     workloads: workloads,
                     commandTimeoutSeconds: options.dockerCommandTimeoutSeconds
                 ).run(workDirectory: workDirectory)
@@ -890,6 +921,121 @@ struct ConjetCLI {
         }
         if !result.gateReport.passed {
             throw ConjetError.unavailable("benchmark release gate failed; faster-than-OrbStack claim is not proven")
+        }
+    }
+
+    private static func benchTopologyGate(args: [String], json: Bool, markdown: Bool) throws {
+        let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack"]
+        let samples = value(after: "--samples", in: args).flatMap(Int.init) ?? 10
+        let commandTimeout = value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 180
+        let outputDirectory = URL(
+            fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? defaultBenchmarkReleaseGateDirectory().path),
+            isDirectory: true
+        )
+        let workDirectory = outputDirectory.appendingPathComponent("work", isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        let workloads = [
+            "strict-bind-npm-install",
+            "smart-bind-npm-install",
+            "volume-npm-install",
+            "conjetfs-npm-install",
+            "strict-bind-pnpm-install",
+            "smart-bind-pnpm-install",
+            "volume-pnpm-install",
+            "conjetfs-pnpm-install",
+            "strict-bind-cargo-build",
+            "smart-bind-cargo-build",
+            "volume-cargo-build",
+            "conjetfs-cargo-build",
+            "strict-bind-hot-reload",
+            "smart-bind-hot-reload",
+            "conjetfs-hot-reload"
+        ]
+        let results = try DockerBenchmarkSuite(
+            contexts: contexts,
+            iterations: samples,
+            warmup: true,
+            samplePhase: .warm,
+            workloads: workloads,
+            commandTimeoutSeconds: commandTimeout
+        ).run(workDirectory: workDirectory)
+        let allResults = outputDirectory.appendingPathComponent("all-results.json")
+        try ConjetJSON.string(results).write(to: allResults, atomically: true, encoding: .utf8)
+        let report = outputDirectory.appendingPathComponent("topology-gate.md")
+        try renderTopologyGateMarkdown(results: results).write(to: report, atomically: true, encoding: .utf8)
+        if json {
+            print(try ConjetJSON.string(results))
+        } else if markdown {
+            print(try String(contentsOf: report, encoding: .utf8))
+        } else {
+            print("topology gate results: \(allResults.path)")
+            print("topology gate report: \(report.path)")
+        }
+    }
+
+    private static func benchPolyglotGate(args: [String], json: Bool, markdown: Bool) throws {
+        let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack"]
+        let samples = value(after: "--samples", in: args).flatMap(Int.init) ?? 5
+        let ecosystems = value(after: "--ecosystems", in: args).map(csvList) ?? PolyglotBenchmarkSuite.defaultEcosystems
+        let topology = value(after: "--topology", in: args) ?? "smart-bind"
+        let outputDirectory = URL(
+            fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? defaultBenchmarkReleaseGateDirectory().path),
+            isDirectory: true
+        )
+        let workDirectory = outputDirectory.appendingPathComponent("work", isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        let results = try PolyglotBenchmarkSuite(
+            contexts: contexts,
+            samples: samples,
+            ecosystems: ecosystems,
+            topology: topology,
+            commandTimeoutSeconds: value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 300
+        ).run(workDirectory: workDirectory)
+        let allResults = outputDirectory.appendingPathComponent("all-results.json")
+        try ConjetJSON.string(results).write(to: allResults, atomically: true, encoding: .utf8)
+        let report = outputDirectory.appendingPathComponent("polyglot-gate.md")
+        try renderPolyglotGateMarkdown(results: results, ecosystems: ecosystems, topology: topology)
+            .write(to: report, atomically: true, encoding: .utf8)
+        if json {
+            print(try ConjetJSON.string(results))
+        } else if markdown {
+            print(try String(contentsOf: report, encoding: .utf8))
+        } else {
+            print("polyglot gate results: \(allResults.path)")
+            print("polyglot gate report: \(report.path)")
+        }
+    }
+
+    private static func benchEnergyGate(args: [String], json: Bool, markdown: Bool) throws {
+        let outputDirectory = URL(
+            fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? defaultBenchmarkReleaseGateDirectory().path),
+            isDirectory: true
+        )
+        let options = BenchmarkEnergyGateOptions(
+            contexts: value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack"],
+            workloads: value(after: "--workloads", in: args).map(csvList) ?? ["idle", "container-start-loop", "hot-reload-loop", "compose-loop", "npm-install", "pnpm-install", "cargo-build"],
+            samples: value(after: "--samples", in: args).flatMap(Int.init) ?? 10,
+            requirePower: args.contains("--require-power"),
+            useSudo: !args.contains("--no-sudo"),
+            seconds: value(after: "--seconds", in: args).flatMap(Double.init) ?? 30,
+            minimumActiveSeconds: value(after: "--min-active-seconds", in: args).flatMap(Double.init) ?? 10,
+            workloadTimeoutSeconds: value(after: "--workload-timeout", in: args).flatMap(Double.init) ?? 180,
+            interval: value(after: "--interval", in: args).flatMap(Double.init) ?? 1,
+            samplers: value(after: "--samplers", in: args) ?? "cpu_power,gpu_power,ane_power,tasks",
+            prepullImages: !args.contains("--no-prepull")
+        )
+        let result = try BenchmarkEnergyGateRunner(options: options).run(outputDirectory: outputDirectory)
+        if json {
+            print(try ConjetJSON.string(result))
+        } else if markdown {
+            print(try String(contentsOfFile: result.markdownReport, encoding: .utf8))
+        } else {
+            print("energy gate: \(result.powermetricsAvailable ? "measured" : "skipped")")
+            if let reason = result.skippedReason {
+                print("  reason: \(reason)")
+            }
+            print("  results: \(result.allResultsReport)")
+            print("  report: \(result.markdownReport)")
         }
     }
 
@@ -1132,7 +1278,7 @@ struct ConjetCLI {
             return defaultPhase
         }
         guard let phase = BenchmarkSamplePhase(rawValue: value.lowercased()) else {
-            throw ConjetError.invalidArgument("invalid benchmark phase '\(value)'; expected any, cold, or warm")
+            throw ConjetError.invalidArgument("invalid benchmark phase '\(value)'; expected any, cold, cold-base-prepulled, no-cache, true-cold, or warm")
         }
         return phase
     }
@@ -1249,6 +1395,46 @@ struct ConjetCLI {
                 "| \(comparison.workload) | \(comparison.candidateWorkload) | \(comparison.baselineRuntime) | \(comparison.baselineWorkload) | \(comparison.measure) | \(formatOptional(comparison.candidateP50)) | \(formatOptional(comparison.baselineP50)) | \(formatOptional(comparison.p50Ratio)) | \(formatOptional(comparison.candidateP95)) | \(formatOptional(comparison.baselineP95)) | \(formatOptional(comparison.p95Ratio)) | \(comparison.passed ? "pass" : comparison.reason) |"
             )
         }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func renderTopologyGateMarkdown(results: [BenchmarkResult]) -> String {
+        var lines = [
+            "# Conjet Topology Gate",
+            "",
+            "strict-bind is maximum compatibility and may be slower.",
+            "smart-bind/native-overlay is Conjet's default optimized topology candidate.",
+            "conjetfs is the fast-path workspace.",
+            "volume is the Linux-native baseline.",
+            "",
+            "## Claim Discipline",
+            "",
+            "| Claim | Status | Evidence | Caveat |",
+            "| --- | --- | --- | --- |",
+            "| Conjet strict bind is faster than OrbStack. | Not proven unless strict-bind comparisons pass. | strict-bind workloads in this report. | SmartMount/native-overlay is separate evidence. |",
+            "| Conjet SmartMount/native-overlay topology is faster than OrbStack on selected workloads. | Partial until the gate comparisons pass. | smart-bind workloads in this report. | Not identical to raw Docker bind semantics. |",
+            "| ConjetFS fast path is faster than bind on selected workloads. | Partial until measured comparisons pass. | conjetfs workloads in this report. | Uses ConjetFS-managed source synchronization. |",
+            "",
+            "## Raw Summary",
+            ""
+        ]
+        lines.append(BenchmarkMarkdownReport.render(results: results, title: "Conjet Topology Results"))
+        return lines.joined(separator: "\n")
+    }
+
+    private static func renderPolyglotGateMarkdown(results: [BenchmarkResult], ecosystems: [String], topology: String) -> String {
+        var lines = [
+            "# Conjet Polyglot Gate",
+            "",
+            "- Ecosystems: \(ecosystems.joined(separator: ", "))",
+            "- Topology: \(topology)",
+            "",
+            "Status: Partial until the measured p50/p95 comparisons pass for the selected real-project workloads.",
+            "",
+            "## Raw Summary",
+            ""
+        ]
+        lines.append(BenchmarkMarkdownReport.render(results: results, title: "Conjet Polyglot Results"))
         return lines.joined(separator: "\n")
     }
 
@@ -1977,7 +2163,7 @@ struct ConjetCLI {
             let action = repaired ? "signed it and restarting conjetd" : "restarting conjetd"
             writeDiagnostic("debug conjetd was missing com.apple.security.virtualization at runtime; \(action)")
         }
-        _ = try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .stop))
+        _ = try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .stop), timeoutSeconds: 5)
         waitForDaemonStop(socketPath: socketPath)
         let restartedSocketPath = try startDaemonOnly(printStatus: false)
         return try UnixSocketClient(socketPath: restartedSocketPath).send(request)
@@ -2184,8 +2370,12 @@ struct ConjetCLI {
               conjet bench idle [--runtime NAME] [--process REGEX] [--seconds N] [--interval N] [--output PATH] [--json|--markdown]
               conjet bench power [--runtime NAME] [--process REGEX] [--seconds N] [--interval N] [--output PATH] [--no-sudo] [--json|--markdown]
               conjet bench energy [--runtime NAME] [--workload NAME] [--process REGEX] [--seconds N] [--min-seconds N] [--interval N] [--output PATH] [--no-sudo] [--json|--markdown] -- COMMAND...
-              conjet bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N] [--phase any|cold|warm] [--workloads NAME,...] [--no-idle] [--no-power] [--json|--markdown]
-              conjet bench release-gate [--contexts conjet,orbstack,colima] [--iterations N] [--phase cold|warm] [--warmup] [--workloads NAME,...] [--command-timeout N] [--output-dir DIR] [--seconds N] [--no-sudo] [--no-power] [--json|--markdown]
+              conjet bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--min-samples N] [--phase any|cold|cold-base-prepulled|no-cache|true-cold|warm] [--workloads NAME,...] [--no-idle] [--no-power] [--json|--markdown]
+              conjet bench release-gate|global-gate [--contexts conjet,orbstack,colima] [--samples N|--iterations N] [--phase cold|cold-base-prepulled|no-cache|true-cold|warm] [--warmup] [--workloads NAME,...] [--command-timeout N] [--output-dir DIR] [--seconds N] [--no-sudo] [--no-power] [--json|--markdown]
+              conjet bench topology-gate [--contexts conjet,orbstack] [--samples N] [--output-dir DIR] [--json|--markdown]
+              conjet bench polyglot-gate [--contexts conjet,orbstack] [--samples N] [--ecosystems js,python,jvm,dotnet,go,rust,cpp] [--topology smart-bind|strict-bind|volume] [--output-dir DIR] [--json|--markdown]
+              conjet bench energy-gate [--contexts conjet,orbstack] [--workloads idle,container-start-loop] [--samples N] [--seconds N] [--min-active-seconds N] [--workload-timeout N] [--no-prepull] [--require-power] [--output-dir DIR] [--json|--markdown]
+                Active workloads are pre-pulled, repeated for --min-active-seconds, and bounded by --workload-timeout.
               conjet bench small-files [--files N] [--bytes N] [--dir PATH] [--json|--markdown]
               conjet bench docker-compare [--contexts conjet,colima] [--iterations N] [--workloads NAME,...] [--warmup] [--command-timeout N] [--output PATH] [--json|--markdown]
               conjet sync classify PATH [--json]

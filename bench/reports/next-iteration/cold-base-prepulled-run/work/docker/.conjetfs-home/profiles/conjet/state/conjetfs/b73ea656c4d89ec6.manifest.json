@@ -1,0 +1,23 @@
+{
+  "fileSignatures" : {
+    ".conjetignore" : {
+      "bytes" : 162,
+      "modifiedAtNanoseconds" : 1780195804315971072
+    },
+    "package.json" : {
+      "bytes" : 53,
+      "modifiedAtNanoseconds" : 1780195804232062720
+    },
+    "src\/hot.txt" : {
+      "bytes" : 22,
+      "modifiedAtNanoseconds" : 1780195804846836992
+    }
+  },
+  "projectID" : "b73ea656c4d89ec6",
+  "syncedFiles" : [
+    ".conjetignore",
+    "package.json",
+    "src\/hot.txt"
+  ],
+  "updatedAt" : "2026-05-31T02:50:04Z"
+}

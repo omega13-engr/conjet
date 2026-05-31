@@ -1,0 +1,28 @@
+{
+  "fileSignatures" : {
+    ".conjetignore" : {
+      "bytes" : 162,
+      "modifiedAtNanoseconds" : 1780195800104540928
+    },
+    "package.json" : {
+      "bytes" : 183,
+      "modifiedAtNanoseconds" : 1780195800034624000
+    },
+    "pnpm-lock.yaml" : {
+      "bytes" : 922,
+      "modifiedAtNanoseconds" : 1780195800035308800
+    },
+    "src\/index.js" : {
+      "bytes" : 34,
+      "modifiedAtNanoseconds" : 1780195800035502080
+    }
+  },
+  "projectID" : "02bc6892e593d266",
+  "syncedFiles" : [
+    ".conjetignore",
+    "package.json",
+    "pnpm-lock.yaml",
+    "src\/index.js"
+  ],
+  "updatedAt" : "2026-05-31T02:50:01Z"
+}

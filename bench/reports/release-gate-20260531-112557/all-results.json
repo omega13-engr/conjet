@@ -1,0 +1,646 @@
+[
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "conjet",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-idle-conjet-1780197957555-3045fde5",
+    "workload" : "idle"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "conjet",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-container-start-loop-conjet-1780197957555-a7ee7ba7",
+    "workload" : "container-start-loop"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "conjet",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-hot-reload-loop-conjet-1780197957555-c3c44053",
+    "workload" : "hot-reload-loop"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "conjet",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-compose-loop-conjet-1780197957555-59673d79",
+    "workload" : "compose-loop"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "conjet",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-npm-install-conjet-1780197957555-4ad965fd",
+    "workload" : "npm-install"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "conjet",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-pnpm-install-conjet-1780197957555-e3bb26b1",
+    "workload" : "pnpm-install"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "conjet",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-cargo-conjet-1780197957555-57df9e12",
+    "workload" : "cargo-"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "orbstack",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-idle-orbstack-1780197957555-0dc57afc",
+    "workload" : "idle"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "orbstack",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-container-start-loop-orbstack-1780197957555-5e681920",
+    "workload" : "container-start-loop"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "orbstack",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-hot-reload-loop-orbstack-1780197957555-edaca299",
+    "workload" : "hot-reload-loop"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "orbstack",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-compose-loop-orbstack-1780197957555-c8b815a8",
+    "workload" : "compose-loop"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "orbstack",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-npm-install-orbstack-1780197957555-4c984f18",
+    "workload" : "npm-install"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "orbstack",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-pnpm-install-orbstack-1780197957555-22c5b8c0",
+    "workload" : "pnpm-install"
+  },
+  {
+    "command" : [
+
+    ],
+    "durationSeconds" : 0,
+    "exitCode" : 0,
+    "machine" : {
+      "capturedAt" : "2026-05-31T03:25:57Z",
+      "host" : {
+        "architecture" : "arm64",
+        "buildVersion" : "25E253",
+        "cpuBrand" : "Apple M1 Pro",
+        "isAppleSilicon" : true,
+        "lowPowerModeEnabled" : false,
+        "macOSVersion" : "26.4.1",
+        "memoryBytes" : 17179869184,
+        "requiredEntitlements" : [
+          "com.apple.security.virtualization"
+        ],
+        "rosettaLinuxSupportLikelyAvailable" : true,
+        "thermalState" : "nominal",
+        "virtualizationFrameworkAvailable" : true
+      },
+      "powerSource" : "battery",
+      "thermalState" : "nominal"
+    },
+    "metrics" : {
+      "average_power_watts" : null,
+      "cpu_power_watts" : null,
+      "energy_skip_reason" : "powermetrics requires sudo\/noninteractive privileges",
+      "energy_to_solution_joules" : null,
+      "energy_verdict" : "skipped",
+      "low_power_mode" : false,
+      "package_power_watts" : null,
+      "power_source" : "battery",
+      "thermal_state_after" : "nominal",
+      "thermal_state_before" : "nominal",
+      "wakeups_per_second" : null
+    },
+    "runtime" : "orbstack",
+    "startedAt" : "2026-05-31T03:25:57Z",
+    "stderrTail" : "powermetrics requires sudo\/noninteractive privileges",
+    "stdoutTail" : "",
+    "traceID" : "bench-cargo-orbstack-1780197957555-96595976",
+    "workload" : "cargo-"
+  }
+]

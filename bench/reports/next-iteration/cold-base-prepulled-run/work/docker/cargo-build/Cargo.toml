@@ -1,0 +1,8 @@
+[package]
+name = "conjet-cargo-build-benchmark"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+conjet_intfmt = { path = "deps/conjet_intfmt" }
+conjet_floatfmt = { path = "deps/conjet_floatfmt" }

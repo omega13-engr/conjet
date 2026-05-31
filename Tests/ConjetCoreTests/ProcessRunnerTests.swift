@@ -56,4 +56,34 @@ final class ProcessRunnerTests: XCTestCase {
             XCTAssertEqual(result.stderr, "stderr-\(index)")
         }
     }
+
+    func testProcessRunnerStressCleansTemporaryCaptureFiles() throws {
+        let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let before = try conjetCaptureFiles(in: temp)
+
+        for index in 0..<500 {
+            let result = try ProcessRunner.run(
+                "/bin/sh",
+                ["-c", "printf 'stdout-\(index)'; printf 'stderr-\(index)' >&2"],
+                timeoutSeconds: 2
+            )
+
+            XCTAssertEqual(result.exitCode, 0)
+            XCTAssertEqual(result.stdout, "stdout-\(index)")
+            XCTAssertEqual(result.stderr, "stderr-\(index)")
+            XCTAssertFalse(result.stderr.localizedCaseInsensitiveContains("bad file descriptor"))
+        }
+
+        let after = try conjetCaptureFiles(in: temp)
+        XCTAssertEqual(after, before)
+    }
+
+    private func conjetCaptureFiles(in directory: URL) throws -> Set<String> {
+        let entries = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        return Set(entries.filter {
+            $0.hasPrefix("conjet-stdout-") ||
+                $0.hasPrefix("conjet-stderr-") ||
+                $0.hasPrefix("conjet-stdin-")
+        })
+    }
 }

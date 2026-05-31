@@ -74,6 +74,46 @@ final class UnixSocketTests: XCTestCase {
         XCTAssertNil(state.capturedError())
     }
 
+    func testClientSendTimeoutBoundsSlowDaemonHook() throws {
+        let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("cj-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let socket = root.appendingPathComponent("conjetd.sock")
+        let state = ServerState()
+        let thread = Thread {
+            do {
+                let server = UnixSocketServer(socketPath: socket.path)
+                try server.listen { request in
+                    if request.command == .status {
+                        Thread.sleep(forTimeInterval: 1)
+                    }
+                    if request.command == .stop {
+                        state.stop()
+                    }
+                    return DaemonResponse(ok: true, message: "ok")
+                } shouldStop: {
+                    state.shouldStop()
+                }
+            } catch {
+                state.setError(error)
+            }
+        }
+        thread.start()
+        try waitForSocket(socket.path)
+
+        let startedAt = Date()
+        XCTAssertThrowsError(try UnixSocketClient(socketPath: socket.path).send(
+            DaemonRequest(command: .status),
+            timeoutSeconds: 0.1
+        ))
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1)
+
+        Thread.sleep(forTimeInterval: 1)
+        _ = try UnixSocketClient(socketPath: socket.path).send(DaemonRequest(command: .stop), timeoutSeconds: 1)
+    }
+
     private func waitForSocket(_ path: String) throws {
         for _ in 0..<50 {
             if FileManager.default.fileExists(atPath: path) {

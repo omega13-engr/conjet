@@ -52,6 +52,17 @@ public struct PowerMetricsSampler {
         var metrics = try Self.parseMetrics(output, processPattern: processPattern)
         metrics["requested_sample_count"] = Double(sampleCount)
         metrics["requested_sample_rate_ms"] = Double(sampleRateMilliseconds)
+        if let combinedPower = metrics["combined_power_mw_mean"] {
+            metrics["average_power_watts"] = combinedPower / 1_000
+            metrics["idle_power_watts"] = combinedPower / 1_000
+        }
+        if let cpuPower = metrics["cpu_power_mw_mean"] {
+            metrics["cpu_power_watts"] = cpuPower / 1_000
+        }
+        if let wakeups = metrics["matched_wakeups_per_second_mean"] {
+            metrics["wakeups_per_second"] = wakeups
+            metrics["idle_wakeups_per_second"] = wakeups
+        }
 
         return BenchmarkResult(
             workload: "idle-power-sample",
