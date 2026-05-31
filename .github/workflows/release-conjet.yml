@@ -19,7 +19,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  HOMEBREW_TAP_REPOSITORY: omega13-engr/homebrew-conjet
   SWIFT_VERSION: "6.1.0"
 
 jobs:
@@ -69,16 +68,6 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Verify VERSION
-        run: |
-          set -euo pipefail
-          expected="${{ steps.meta.outputs.version }}"
-          actual="$(tr -d '[:space:]' < VERSION)"
-          if [ "${actual}" != "${expected}" ]; then
-            echo "VERSION=${actual}, expected ${expected}" >&2
-            exit 1
-          fi
-
       - name: Test Conjet
         run: swift test
 
@@ -119,15 +108,16 @@ jobs:
             dist/*.tar.gz.sha256
 
   release:
-    name: Publish GitHub release and tap formula
+    name: Publish GitHub release and formula
     runs-on: ubuntu-24.04
     needs:
       - build
-    env:
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
 
       - name: Download release artifact
         uses: actions/download-artifact@v4
@@ -170,15 +160,37 @@ jobs:
       - name: Render Homebrew formula
         run: |
           set -euo pipefail
-          tag="${{ needs.build.outputs.tag }}"
-          source_url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz"
-          curl -fsSL "${source_url}" -o source.tar.gz
-          source_sha="$(sha256sum source.tar.gz | awk '{print $1}')"
+          artifact_base="${{ needs.build.outputs.artifact_base }}"
+          sha_file="$(find release-assets -name "${artifact_base}.tar.gz.sha256" -print -quit)"
+          if [ -z "${sha_file}" ]; then
+            echo "missing release checksum for ${artifact_base}.tar.gz" >&2
+            exit 1
+          fi
+          asset_sha="$(awk '{print $1}' "${sha_file}")"
+          artifact_arch="${artifact_base##*-macos-}"
           mkdir -p homebrew-formula
           build-support/render-homebrew-formula.sh \
             "${{ needs.build.outputs.version }}" \
-            "${source_sha}" \
-            "${GITHUB_REPOSITORY}" > homebrew-formula/conjet.rb
+            "${asset_sha}" \
+            "${GITHUB_REPOSITORY}" \
+            "${artifact_arch}" > homebrew-formula/conjet.rb
+
+      - name: Update source formula
+        run: |
+          set -euo pipefail
+          version="${{ needs.build.outputs.version }}"
+          cp homebrew-formula/conjet.rb Formula/conjet.rb
+          printf '%s\n' "${version}" > VERSION
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/conjet.rb VERSION
+          if git diff --cached --quiet; then
+            echo "Source formula already up to date"
+            exit 0
+          fi
+          git commit -m "chore(release): update conjet ${version}"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
 
       - name: Upload Homebrew formula to release
         env:
@@ -188,21 +200,3 @@ jobs:
           gh release upload "${{ needs.build.outputs.tag }}" homebrew-formula/conjet.rb \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
-
-      - name: Update Homebrew tap repository
-        if: env.HOMEBREW_TAP_TOKEN != ''
-        run: |
-          set -euo pipefail
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPOSITORY}.git" tap
-          mkdir -p tap/Formula
-          cp homebrew-formula/conjet.rb tap/Formula/conjet.rb
-          cd tap
-          git add Formula/conjet.rb
-          if git diff --cached --quiet; then
-            echo "Homebrew tap already up to date"
-            exit 0
-          fi
-          git commit -m "conjet ${{ needs.build.outputs.version }}"
-          git push

@@ -10,16 +10,24 @@ Production runtime releases use semantic version tags:
 conjet-vX.Y.Z
 ```
 
-The tag must match the root `VERSION` file.
+The pushed tag is the source of truth for the release version.
 
 Publishing a tag like `conjet-v0.1.0` runs `.github/workflows/release-conjet.yml`.
 The workflow builds `conjet` and `conjetd`, runs tests, publishes release
-archives, and prepares the Homebrew formula for the tap.
+archives, renders the Homebrew formula from the release asset checksum, updates
+`Formula/conjet.rb`, and uploads the generated formula to the release.
 
 Manual release:
 
 ```sh
 gh workflow run release-conjet.yml -f version=0.1.0
+```
+
+For normal releases, push a semantic version tag:
+
+```sh
+git tag conjet-v0.1.0
+git push origin conjet-v0.1.0
 ```
 
 ## Conjet Core Image

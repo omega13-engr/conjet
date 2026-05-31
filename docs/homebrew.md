@@ -3,12 +3,11 @@
 Conjet is installed through the Homebrew tap:
 
 ```sh
-brew tap omega13-engr/conjet
+brew tap omega13-engr/conjet https://github.com/omega13-engr/conjet.git
 brew install conjet
 ```
 
-Homebrew resolves that tap name to the GitHub repository
-`omega13-engr/homebrew-conjet`.
+The explicit URL keeps the tap pointed at the Conjet repository.
 
 ## Release Flow
 
@@ -21,14 +20,13 @@ conjet-vX.Y.Z
 When `.github/workflows/release-conjet.yml` runs, it:
 
 - builds and tests the Swift package,
-- creates release archives for `conjet` and `conjetd`,
+- creates a release archive for `conjet` and `conjetd`,
 - publishes a GitHub release,
-- renders a release formula with the source archive SHA256,
+- renders a binary Homebrew formula with the release archive SHA256,
 - uploads that formula as a release asset,
-- updates `omega13-engr/homebrew-conjet` when `HOMEBREW_TAP_TOKEN` is configured.
+- updates `Formula/conjet.rb` in the source repository.
 
-The checked-in `Formula/conjet.rb` is the source formula. The release workflow
-renders the exact formula that should be published to the tap for each version.
+The pushed `conjet-vX.Y.Z` tag is the source of truth for the release version.
 
 ## Developer Builds
 
