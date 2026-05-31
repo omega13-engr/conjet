@@ -14,7 +14,7 @@ final class ConfigTests: XCTestCase {
             enableRosetta: false,
             enableHostMounts: false,
             socketPath: "/tmp/conjet.sock",
-            conjetCoreRepository: "zdxsector/conjet"
+            conjetCoreRepository: "omega13-engr/conjet"
         )
         let parsed = try ConjetConfig.parseTOML(config.renderTOML())
         XCTAssertEqual(parsed, config)

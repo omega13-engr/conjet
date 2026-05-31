@@ -13,6 +13,7 @@ UBUNTU_VERSION="${UBUNTU_VERSION:-24.04}"
 ROOT_DISK_GB="${ROOT_DISK_GB:-16}"
 RUNTIME="${RUNTIME:-docker}"
 DOCKER_PACKAGE="${DOCKER_PACKAGE:-docker.io}"
+CONJET_CORE_VERSION="${CONJET_CORE_VERSION:-0.1.0}"
 
 case "${RUNTIME}" in
     docker|none)
@@ -304,6 +305,7 @@ touch "${MOUNT_DIR}/etc/cloud/cloud-init.disabled"
 
 cat >"${MOUNT_DIR}/etc/conjet/release" <<EOF_RELEASE
 name=conjet-core
+version=${CONJET_CORE_VERSION}
 ubuntu_version=${UBUNTU_VERSION}
 arch=${OS_ARCH}
 runtime=${RUNTIME}
@@ -391,6 +393,7 @@ sha512sum "${OUT_IMAGE}" >"${OUT_IMAGE}.sha512sum"
 cat >"${OUT_IMAGE}.json" <<EOF_JSON
 {
   "name": "conjet-core",
+  "version": "${CONJET_CORE_VERSION}",
   "ubuntuVersion": "${UBUNTU_VERSION}",
   "architecture": "${OS_ARCH}",
   "runtime": "${RUNTIME}",

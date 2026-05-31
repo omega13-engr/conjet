@@ -33,11 +33,11 @@ Current implemented runtime path:
 14. `conjet vm fetch-conjet-core --image PATH.raw.gz` imports that compressed
     raw artifact directly, without the cloud-init Docker seed.
 15. `conjet start` now performs first-run VM setup automatically by resolving
-    the latest Conjet-core GitHub release, selecting the host-architecture
-    image, verifying the checksum when present, importing it, and then starting
-    the daemon and VM.
-16. `.github/workflows/conjet-core-image.yml` builds and publishes Conjet-core
-    image releases for `aarch64` and `x86_64`.
+    the newest stable `conjet-core-vX.Y.Z` GitHub release, selecting the
+    host-architecture image, verifying the checksum when present, importing it,
+    and then starting the daemon and VM.
+16. `.github/workflows/conjet-core-image.yml` builds and publishes separate
+    Conjet Core image releases for `aarch64` and `x86_64`.
 
 Observed smoke-test results on 2026-05-29:
 

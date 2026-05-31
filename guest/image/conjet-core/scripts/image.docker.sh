@@ -8,6 +8,7 @@ UBUNTU_VERSION="${UBUNTU_VERSION:-24.04}"
 ROOT_DISK_GB="${ROOT_DISK_GB:-16}"
 RUNTIME="${RUNTIME:-docker}"
 DOCKER_PACKAGE="${DOCKER_PACKAGE:-docker.io}"
+CONJET_CORE_VERSION="${CONJET_CORE_VERSION:-0.1.0}"
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "docker is required to build the Conjet core image" >&2
@@ -27,6 +28,7 @@ docker run --rm --privileged \
     --env "ROOT_DISK_GB=${ROOT_DISK_GB}" \
     --env "RUNTIME=${RUNTIME}" \
     --env "DOCKER_PACKAGE=${DOCKER_PACKAGE}" \
+    --env "CONJET_CORE_VERSION=${CONJET_CORE_VERSION}" \
     --env "HOST_UID=$(id -u)" \
     --env "HOST_GID=$(id -g)" \
     "ubuntu:${UBUNTU_VERSION}" \

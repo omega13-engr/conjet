@@ -1,0 +1,199 @@
+name: Conjet Release
+
+on:
+  push:
+    tags:
+      - conjet-v*.*.*
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to release, without the conjet-v prefix
+        required: true
+        default: 0.1.0
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-conjet-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HOMEBREW_TAP_REPOSITORY: omega13-engr/homebrew-conjet
+
+jobs:
+  build:
+    name: Build release binaries
+    runs-on: macos-14
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      artifact_base: ${{ steps.package.outputs.artifact_base }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+            tag="conjet-v${version}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#conjet-v}"
+          fi
+
+          if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "invalid Conjet semantic version: ${version}" >&2
+            exit 1
+          fi
+
+          if [ "${tag}" != "conjet-v${version}" ]; then
+            echo "Conjet release tags must use conjet-vX.Y.Z" >&2
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify VERSION
+        run: |
+          set -euo pipefail
+          expected="${{ steps.meta.outputs.version }}"
+          actual="$(tr -d '[:space:]' < VERSION)"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "VERSION=${actual}, expected ${expected}" >&2
+            exit 1
+          fi
+
+      - name: Test Conjet
+        run: swift test
+
+      - name: Build release products
+        run: |
+          set -euo pipefail
+          swift build -c release --product conjet
+          swift build -c release --product conjetd
+
+      - name: Sign release products
+        run: |
+          set -euo pipefail
+          codesign --force --sign - --entitlements build-support/conjet-debug.entitlements .build/release/conjet
+          codesign --force --sign - --entitlements build-support/conjet-debug.entitlements .build/release/conjetd
+
+      - name: Package release binaries
+        id: package
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          arch="$(uname -m)"
+          artifact_base="conjet-${version}-macos-${arch}"
+          mkdir -p "dist/${artifact_base}"
+          cp .build/release/conjet "dist/${artifact_base}/"
+          cp .build/release/conjetd "dist/${artifact_base}/"
+          cp README.md "dist/${artifact_base}/"
+          tar -C dist -czf "dist/${artifact_base}.tar.gz" "${artifact_base}"
+          shasum -a 256 "dist/${artifact_base}.tar.gz" > "dist/${artifact_base}.tar.gz.sha256"
+          echo "artifact_base=${artifact_base}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact_base }}
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+
+  release:
+    name: Publish GitHub release and tap formula
+    runs-on: ubuntu-24.04
+    needs:
+      - build
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          notes="release-notes.md"
+          {
+            echo "Conjet v${{ needs.build.outputs.version }}"
+            echo
+            echo "Release tag: ${{ needs.build.outputs.tag }}"
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Assets:"
+            find release-assets -type f -print | sort | sed 's#^#- #'
+          } > "${notes}"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -type f -print | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "no release assets found" >&2
+            exit 1
+          fi
+
+          gh release create "${{ needs.build.outputs.tag }}" "${assets[@]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "Conjet v${{ needs.build.outputs.version }}" \
+            --notes-file release-notes.md \
+            --latest
+
+      - name: Render Homebrew formula
+        run: |
+          set -euo pipefail
+          tag="${{ needs.build.outputs.tag }}"
+          source_url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz"
+          curl -fsSL "${source_url}" -o source.tar.gz
+          source_sha="$(sha256sum source.tar.gz | awk '{print $1}')"
+          mkdir -p homebrew-formula
+          build-support/render-homebrew-formula.sh \
+            "${{ needs.build.outputs.version }}" \
+            "${source_sha}" \
+            "${GITHUB_REPOSITORY}" > homebrew-formula/conjet.rb
+
+      - name: Upload Homebrew formula to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ needs.build.outputs.tag }}" homebrew-formula/conjet.rb \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+      - name: Update Homebrew tap repository
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPOSITORY}.git" tap
+          mkdir -p tap/Formula
+          cp homebrew-formula/conjet.rb tap/Formula/conjet.rb
+          cd tap
+          git add Formula/conjet.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew tap already up to date"
+            exit 0
+          fi
+          git commit -m "conjet ${{ needs.build.outputs.version }}"
+          git push

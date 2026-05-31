@@ -1,8 +1,14 @@
 class Conjet < Formula
-  desc "Lightweight macOS container runtime with synchronized Linux workspaces"
+  desc "Super Sonic Speed containers for macOS developers"
   homepage "https://github.com/omega13-engr/conjet"
-  url "https://github.com/omega13-engr/conjet.git", branch: "main"
+  url "https://github.com/omega13-engr/conjet.git", tag: "conjet-v0.1.0"
   version "0.1.0"
+  head "https://github.com/omega13-engr/conjet.git", branch: "main"
+
+  livecheck do
+    url "https://github.com/omega13-engr/conjet/releases"
+    regex(/^conjet-v(\d+\.\d+\.\d+)$/i)
+  end
 
   depends_on xcode: ["15.0", :build]
   depends_on macos: :sonoma
