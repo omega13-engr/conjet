@@ -1,4 +1,4 @@
-<img src="docs/assets/Conjet.png" width="100">
+<img src="docs/assets/Conjet.png" width="150">
 
 **Super Sonic Speed, Power Efficient, dev-friendly Docker-compatible containers for macOS only.**
 
