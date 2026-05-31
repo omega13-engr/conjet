@@ -71,12 +71,12 @@ VirtioFS shares, and emits a `.raw.gz` artifact. The
 directly and does not attach the generic cloud-init Docker seed.
 
 The user-facing bootstrap is `conjet start`. If no VM manifest exists, the CLI
-queries the latest GitHub release for `zdxsector/conjet` by default, selects the
-Conjet-core `.raw.gz` asset that matches the host architecture, downloads the
-matching `.sha512sum` asset when present, verifies it, imports the EFI disk, and
-then starts `conjetd` plus the VM. The release repository can be overridden via
-`CONJET_CORE_REPOSITORY` or `[images].conjet_core_repository` in
-`~/.conjet/config.toml`.
+queries GitHub releases for `omega13-engr/conjet` by default, selects the newest
+stable `conjet-core-vX.Y.Z` release with a `.raw.gz` asset that matches the host
+architecture, downloads the matching `.sha512sum` asset when present, verifies
+it, imports the EFI disk, and then starts `conjetd` plus the VM. The release
+repository can be overridden via `CONJET_CORE_REPOSITORY` or
+`[images].conjet_core_repository` in `~/.conjet/config.toml`.
 
 `conjet vm build-initramfs --init PATH` now builds the host-side archive needed
 for that next image phase. It does not synthesize a Linux binary; the supplied

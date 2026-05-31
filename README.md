@@ -38,7 +38,7 @@ brew install conjet
 ### From Source
 
 ```sh
-git clone https://github.com/zdxsector/conjet.git
+git clone https://github.com/omega13-engr/conjet.git
 cd conjet
 swift build
 swift test
@@ -174,6 +174,17 @@ Release build:
 ```sh
 swift build -c release
 ```
+
+---
+
+## Releases
+
+Conjet and Conjet Core images are released separately:
+
+- `conjet-vX.Y.Z` for the CLI and daemon
+- `conjet-core-vX.Y.Z` for the VM image
+
+Both release lanes use semantic versioning.
 
 ---
 

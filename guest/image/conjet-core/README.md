@@ -58,5 +58,5 @@ build-support/sign-debug.sh
 
 For normal users, this manual import should not be necessary. The GitHub
 workflow at `.github/workflows/conjet-core-image.yml` publishes these artifacts
-as releases, and `conjet start` downloads the latest matching image
-automatically when no VM is configured.
+as `conjet-core-vX.Y.Z` releases, and `conjet start` downloads the newest
+matching image automatically when no VM is configured.

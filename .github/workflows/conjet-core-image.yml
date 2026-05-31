@@ -1,8 +1,15 @@
-name: Conjet Core Image
+name: Conjet Core Image Release
 
 on:
+  push:
+    tags:
+      - conjet-core-v*.*.*
   workflow_dispatch:
     inputs:
+      version:
+        description: Semantic version to release, without the conjet-core-v prefix
+        required: true
+        default: 0.1.0
       root_disk_gb:
         description: Root disk size for the raw image
         required: true
@@ -15,12 +22,6 @@ on:
         options:
           - docker
           - none
-  push:
-    branches:
-      - main
-    paths:
-      - .github/workflows/conjet-core-image.yml
-      - guest/image/conjet-core/**
 
 permissions:
   contents: write
@@ -30,9 +31,66 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  meta:
+    name: Resolve release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      root_disk_gb: ${{ steps.meta.outputs.root_disk_gb }}
+      runtime: ${{ steps.meta.outputs.runtime }}
+    steps:
+      - name: Resolve metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+            tag="conjet-core-v${version}"
+            root_disk_gb="${{ inputs.root_disk_gb }}"
+            runtime="${{ inputs.runtime }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#conjet-core-v}"
+            root_disk_gb="16"
+            runtime="docker"
+          fi
+
+          if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "invalid Conjet Core semantic version: ${version}" >&2
+            exit 1
+          fi
+
+          if [ "${tag}" != "conjet-core-v${version}" ]; then
+            echo "Conjet Core release tags must use conjet-core-vX.Y.Z" >&2
+            exit 1
+          fi
+
+          case "${runtime}" in
+            docker|none) ;;
+            *)
+              echo "invalid runtime: ${runtime}" >&2
+              exit 1
+              ;;
+          esac
+
+          if ! printf '%s\n' "${root_disk_gb}" | grep -Eq '^[0-9]+$'; then
+            echo "root_disk_gb must be an integer" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "root_disk_gb=${root_disk_gb}"
+            echo "runtime=${runtime}"
+          } >> "${GITHUB_OUTPUT}"
+
   build:
     name: Build ${{ matrix.os_arch }}
     runs-on: ubuntu-24.04
+    needs:
+      - meta
     strategy:
       fail-fast: false
       matrix:
@@ -40,11 +98,21 @@ jobs:
           - os_arch: aarch64
           - os_arch: x86_64
     env:
-      ROOT_DISK_GB: ${{ github.event_name == 'workflow_dispatch' && inputs.root_disk_gb || '16' }}
-      RUNTIME: ${{ github.event_name == 'workflow_dispatch' && inputs.runtime || 'docker' }}
+      CONJET_CORE_VERSION: ${{ needs.meta.outputs.version }}
+      ROOT_DISK_GB: ${{ needs.meta.outputs.root_disk_gb }}
+      RUNTIME: ${{ needs.meta.outputs.runtime }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Verify Conjet Core VERSION
+        run: |
+          set -euo pipefail
+          actual="$(tr -d '[:space:]' < guest/image/conjet-core/VERSION)"
+          if [ "${actual}" != "${CONJET_CORE_VERSION}" ]; then
+            echo "guest/image/conjet-core/VERSION=${actual}, expected ${CONJET_CORE_VERSION}" >&2
+            exit 1
+          fi
 
       - name: Enable cross-architecture container execution
         uses: docker/setup-qemu-action@v3
@@ -54,18 +122,19 @@ jobs:
       - name: Show Docker environment
         run: docker info
 
-      - name: Build Conjet core image
+      - name: Build Conjet Core image
         run: |
           set -euo pipefail
           make -C guest/image/conjet-core image \
             OS_ARCH="${{ matrix.os_arch }}" \
+            CONJET_CORE_VERSION="${CONJET_CORE_VERSION}" \
             ROOT_DISK_GB="${ROOT_DISK_GB}" \
             RUNTIME="${RUNTIME}"
 
       - name: Upload image artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: conjet-core-${{ matrix.os_arch }}
+          name: conjet-core-${{ needs.meta.outputs.version }}-${{ matrix.os_arch }}
           if-no-files-found: error
           path: |
             guest/image/conjet-core/dist/out/*.raw.gz
@@ -73,9 +142,10 @@ jobs:
             guest/image/conjet-core/dist/out/*.raw.gz.json
 
   release:
-    name: Publish latest image release
+    name: Publish Conjet Core image release
     runs-on: ubuntu-24.04
     needs:
+      - meta
       - build
     steps:
       - name: Download image artifacts
@@ -83,16 +153,16 @@ jobs:
         with:
           path: release-assets
 
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Create release notes
         run: |
           set -euo pipefail
-          tag="conjet-core-$(date -u +'%Y%m%d')-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
           notes="release-notes.md"
           {
-            echo "Conjet-core image release"
+            echo "Conjet Core v${{ needs.meta.outputs.version }}"
             echo
+            echo "Release tag: ${{ needs.meta.outputs.tag }}"
+            echo "Runtime: ${{ needs.meta.outputs.runtime }}"
+            echo "Root disk: ${{ needs.meta.outputs.root_disk_gb }} GiB"
             echo "Commit: ${GITHUB_SHA}"
             echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
@@ -100,14 +170,20 @@ jobs:
             find release-assets -type f -print | sort | sed 's#^#- #'
           } > "${notes}"
 
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
           mapfile -t assets < <(find release-assets -type f -print | sort)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "no release assets found" >&2
             exit 1
           fi
 
-          gh release create "${tag}" "${assets[@]}" \
+          gh release create "${{ needs.meta.outputs.tag }}" "${assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "${tag}" \
-            --notes-file "${notes}" \
-            --latest
+            --target "${GITHUB_SHA}" \
+            --title "Conjet Core v${{ needs.meta.outputs.version }}" \
+            --notes-file release-notes.md \
+            --latest=false

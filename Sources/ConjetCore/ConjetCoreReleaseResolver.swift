@@ -1,7 +1,8 @@
 import Foundation
 
 public struct ConjetCoreReleaseSource: Codable, Equatable, Sendable {
-    public static let defaultRepository = "zdxsector/conjet"
+    public static let defaultRepository = "omega13-engr/conjet"
+    public static let releaseTagPrefix = "conjet-core-v"
 
     public var repository: String
     public var apiBaseURL: String
@@ -14,8 +15,12 @@ public struct ConjetCoreReleaseSource: Codable, Equatable, Sendable {
         self.apiBaseURL = apiBaseURL
     }
 
+    public var releasesURL: String {
+        "\(apiBaseURL)/repos/\(repository)/releases?per_page=100"
+    }
+
     public var latestReleaseURL: String {
-        "\(apiBaseURL)/repos/\(repository)/releases/latest"
+        releasesURL
     }
 }
 
@@ -58,7 +63,7 @@ public enum ConjetCoreReleaseResolver {
         hostArchitecture: String,
         runtime: String = "docker"
     ) throws -> ConjetCoreReleaseArtifact {
-        let release = try ConjetJSON.decoder().decode(GitHubLatestRelease.self, from: data)
+        let release = try selectRelease(from: data)
         let imageArchitecture = try artifactArchitecture(hostArchitecture: hostArchitecture)
         let suffix = "-\(imageArchitecture)-\(runtime).raw.gz"
         let candidates = release.assets
@@ -82,14 +87,42 @@ public enum ConjetCoreReleaseResolver {
             checksumDownloadURL: checksum?.browserDownloadURL
         )
     }
+
+    private static func selectRelease(from data: Data) throws -> GitHubRelease {
+        let decoder = ConjetJSON.decoder()
+        if let releases = try? decoder.decode([GitHubRelease].self, from: data) {
+            let candidates = releases
+                .filter { !($0.draft ?? false) && !($0.prerelease ?? false) }
+                .compactMap { release -> (GitHubRelease, SemanticVersion)? in
+                    guard let version = SemanticVersion(tag: release.tagName, prefix: ConjetCoreReleaseSource.releaseTagPrefix) else {
+                        return nil
+                    }
+                    return (release, version)
+                }
+                .sorted { lhs, rhs in lhs.1 > rhs.1 }
+
+            guard let selected = candidates.first?.0 else {
+                throw ConjetError.unavailable(
+                    "no stable Conjet Core image release found with tag prefix '\(ConjetCoreReleaseSource.releaseTagPrefix)'"
+                )
+            }
+            return selected
+        }
+
+        return try decoder.decode(GitHubRelease.self, from: data)
+    }
 }
 
-private struct GitHubLatestRelease: Decodable {
+private struct GitHubRelease: Decodable {
     var tagName: String
+    var draft: Bool?
+    var prerelease: Bool?
     var assets: [GitHubReleaseAsset]
 
     private enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
+        case draft
+        case prerelease
         case assets
     }
 }
@@ -101,5 +134,35 @@ private struct GitHubReleaseAsset: Decodable {
     private enum CodingKeys: String, CodingKey {
         case name
         case browserDownloadURL = "browser_download_url"
+    }
+}
+
+private struct SemanticVersion: Comparable {
+    var major: Int
+    var minor: Int
+    var patch: Int
+
+    init?(tag: String, prefix: String) {
+        guard tag.hasPrefix(prefix) else { return nil }
+        let version = String(tag.dropFirst(prefix.count))
+        let parts = version.split(separator: ".")
+        guard parts.count == 3,
+              let major = Int(parts[0]),
+              let minor = Int(parts[1]),
+              let patch = Int(parts[2]),
+              major >= 0,
+              minor >= 0,
+              patch >= 0 else {
+            return nil
+        }
+        self.major = major
+        self.minor = minor
+        self.patch = patch
+    }
+
+    static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
+        if lhs.major != rhs.major { return lhs.major < rhs.major }
+        if lhs.minor != rhs.minor { return lhs.minor < rhs.minor }
+        return lhs.patch < rhs.patch
     }
 }
