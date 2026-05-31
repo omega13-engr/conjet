@@ -7,3 +7,6 @@ benchmarks/reports/**/work/
 DerivedData/
 *.xcuserstate
 .DS_Store
+.chum-cache/
+.chum-mem
+
