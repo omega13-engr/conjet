@@ -1,46 +1,36 @@
 # Power Methodology
 
-Conjet optimizes wakeups and energy-to-solution, not only wall time. The first
-governor implementation emits deterministic resource policies. Runtime
-benchmarking now has two host-side probes:
+Conjet optimizes wakeups and energy-to-solution, not only wall time. Energy
+claims are valid only when the standalone benchmark package records measured
+`powermetrics` data.
 
-- `conjet bench idle` samples matching processes with `ps` and reports CPU and
-  memory percent aggregates.
-- `conjet bench power` wraps `powermetrics`, parses CPU/GPU/ANE/combined power
-  rails, and records matched process energy-impact and wakeup signals when the
-  text output contains them.
-- `conjet bench energy` runs a workload while `powermetrics` samples the host,
-  then records `energy_to_solution_joules_estimate` from combined mean power
-  multiplied by workload duration.
-
-Use noninteractive sudo for release evidence:
+Run the power gate with explicit privileges:
 
 ```sh
-conjet bench power --runtime conjet --seconds 60 --interval 1 --markdown
-conjet bench power --runtime colima --seconds 60 --interval 1 --markdown
-conjet bench power --runtime orbstack --seconds 60 --interval 1 --markdown
+swift run --package-path benchmarks conjet-bench energy-gate \
+  --contexts conjet,orbstack,colima \
+  --workloads idle,container-start-loop,hot-reload-loop,compose-loop,npm-install,pnpm-install,cargo-build \
+  --samples 10 \
+  --require-power \
+  --output-dir benchmarks/reports/energy-gate-local
 ```
 
-Use active energy sampling for workload claims:
+The energy gate records, when available:
 
-```sh
-conjet bench energy --runtime conjet --workload npm-install-energy --seconds 60 --interval 1 -- \
-  docker --context conjet run --rm node:22-alpine node --version
-conjet bench energy --runtime orbstack --workload npm-install-energy --seconds 60 --interval 1 -- \
-  docker --context orbstack run --rm node:22-alpine node --version
-```
+- average power in watts
+- package and CPU power where `powermetrics` exposes them
+- wakeups per second
+- workload runtime
+- energy-to-solution in joules
+- power source, thermal state, and low power mode
 
-`conjet bench release-gate` now collects a default active
-`container-start-energy-sample` when power evidence is enabled. That sample
-runs a fixed container-start loop for each runtime and gates on
-`energy_to_solution_joules_estimate`, so a full release gate cannot pass with
-only wall-time and idle-power evidence.
+`--require-power` means missing `powermetrics` data is a failed gate. Without
+`--require-power`, missing privileges are reported as an honest skip and cannot
+support any energy superiority claim.
 
-The command runs `sudo -n powermetrics` by default. If the machine is not
-configured for noninteractive `powermetrics`, the benchmark result exits
-nonzero and the failure must stay in the report. That is intentional: missing
-power evidence cannot support the energy-to-solution part of the
-faster-than-OrbStack claim.
+Short active workloads should be repeated or padded with a minimum active
+duration so `powermetrics` can collect nonzero samples. A workload with no power
+samples is not valid energy evidence even if the wall-time command succeeded.
 
 Remaining power work:
 
@@ -48,4 +38,4 @@ Remaining power work:
   same timeline.
 - Repeat idle and energy-to-solution runs under controlled thermal and power
   conditions.
-- Keep Conjet, OrbStack, and tuned Colima measurements in the same report set.
+- Keep Conjet, OrbStack, and Colima measurements in the same report set.
