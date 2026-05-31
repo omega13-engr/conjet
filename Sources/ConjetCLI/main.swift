@@ -1610,12 +1610,95 @@ struct ConjetCLI {
     }
 
     private static func daemonExecutableURL() throws -> URL {
-        let cli = URL(fileURLWithPath: CommandLine.arguments[0])
-        let daemon = cli.deletingLastPathComponent().appendingPathComponent("conjetd")
-        if FileManager.default.isExecutableFile(atPath: daemon.path) {
-            return daemon
+        let manager = FileManager.default
+        let candidates = daemonExecutableCandidates()
+        for candidate in candidates where manager.isExecutableFile(atPath: candidate.path) {
+            return candidate
         }
-        throw ConjetError.unavailable("could not find conjetd next to \(cli.path); run 'swift build' first")
+
+        let checked = candidates.map(\.path).joined(separator: ", ")
+        throw ConjetError.unavailable(
+            "could not find conjetd next to conjet; checked: \(checked). " +
+            "If installed with Homebrew, run 'brew reinstall conjet'. If running from source, run 'swift build' first."
+        )
+    }
+
+    private static func daemonExecutableCandidates() -> [URL] {
+        var executables: [URL] = []
+        if let executable = currentExecutableURL() {
+            executables.append(executable)
+        }
+        if let executable = Bundle.main.executableURL {
+            executables.append(executable)
+        }
+        executables.append(contentsOf: commandLineExecutableCandidates())
+
+        var seen: Set<String> = []
+        var daemons: [URL] = []
+        for executable in executables {
+            for candidate in daemonCandidates(nextTo: executable) {
+                let path = candidate.standardizedFileURL.path
+                guard !seen.contains(path) else { continue }
+                seen.insert(path)
+                daemons.append(candidate)
+            }
+        }
+
+        if let pathDaemon = executableInPATH(named: "conjetd") {
+            let path = pathDaemon.standardizedFileURL.path
+            if !seen.contains(path) {
+                daemons.append(pathDaemon)
+            }
+        }
+        return daemons
+    }
+
+    private static func daemonCandidates(nextTo executable: URL) -> [URL] {
+        let standardized = executable.standardizedFileURL
+        let resolved = standardized.resolvingSymlinksInPath()
+        let rawDaemon = standardized.deletingLastPathComponent().appendingPathComponent("conjetd")
+        let resolvedDaemon = resolved.deletingLastPathComponent().appendingPathComponent("conjetd")
+        return rawDaemon.path == resolvedDaemon.path ? [rawDaemon] : [rawDaemon, resolvedDaemon]
+    }
+
+    private static func currentExecutableURL() -> URL? {
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        let buffer = UnsafeMutablePointer<CChar>.allocate(capacity: Int(size))
+        defer { buffer.deallocate() }
+        guard _NSGetExecutablePath(buffer, &size) == 0 else {
+            return nil
+        }
+        return URL(fileURLWithPath: String(cString: buffer))
+    }
+
+    private static func commandLineExecutableCandidates() -> [URL] {
+        guard let arg0 = CommandLine.arguments.first, !arg0.isEmpty else {
+            return []
+        }
+        if arg0.contains("/") {
+            return [URL(fileURLWithPath: arg0)]
+        }
+        if let executable = executableInPATH(named: arg0) {
+            return [executable]
+        }
+        return []
+    }
+
+    private static func executableInPATH(named name: String) -> URL? {
+        guard !name.contains("/") else {
+            return nil
+        }
+        let manager = FileManager.default
+        let pathValue = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for directory in pathValue.split(separator: ":") {
+            let candidate = URL(fileURLWithPath: String(directory), isDirectory: true)
+                .appendingPathComponent(name)
+            if manager.isExecutableFile(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     private static func value(after flag: String, in args: [String]) -> String? {
