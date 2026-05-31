@@ -118,10 +118,34 @@ struct ConjetBenchCLI {
             })
         }
 
-        print("conjet-bench: sudo validated; running \(jobs.count) wall-time suites in parallel")
         if includeEnergy {
-            print("conjet-bench: energy-gate will run after parallel suites to keep power samples isolated")
+            let suiteStartedAt = Date()
+            do {
+                print("conjet-bench: sudo validated; starting energy-gate before wall-time suites")
+                var outcome = try runEnergyGate(
+                    contexts: contexts,
+                    samples: samples,
+                    requirePower: requirePower,
+                    outputDirectory: outputDirectory.appendingPathComponent("energy-gate", isDirectory: true),
+                    seconds: energySeconds
+                )
+                outcome.durationSeconds = Date().timeIntervalSince(suiteStartedAt)
+                box.append(outcome)
+                print("conjet-bench: finished energy-gate (\(outcome.status))")
+            } catch {
+                box.append(BenchmarkSuiteOutcome(
+                    name: "energy-gate",
+                    status: "failed",
+                    durationSeconds: Date().timeIntervalSince(suiteStartedAt),
+                    outputDirectory: outputDirectory.appendingPathComponent("energy-gate", isDirectory: true).path,
+                    reports: [:],
+                    summary: String(describing: error)
+                ))
+                print("conjet-bench: failed energy-gate: \(error)")
+            }
         }
+
+        print("conjet-bench: running \(jobs.count) wall-time suites in parallel")
         let group = DispatchGroup()
         for job in jobs {
             group.enter()
@@ -148,33 +172,6 @@ struct ConjetBenchCLI {
             }
         }
         group.wait()
-
-        if includeEnergy {
-            let suiteStartedAt = Date()
-            do {
-                print("conjet-bench: starting energy-gate")
-                var outcome = try runEnergyGate(
-                    contexts: contexts,
-                    samples: samples,
-                    requirePower: requirePower,
-                    outputDirectory: outputDirectory.appendingPathComponent("energy-gate", isDirectory: true),
-                    seconds: energySeconds
-                )
-                outcome.durationSeconds = Date().timeIntervalSince(suiteStartedAt)
-                box.append(outcome)
-                print("conjet-bench: finished energy-gate (\(outcome.status))")
-            } catch {
-                box.append(BenchmarkSuiteOutcome(
-                    name: "energy-gate",
-                    status: "failed",
-                    durationSeconds: Date().timeIntervalSince(suiteStartedAt),
-                    outputDirectory: outputDirectory.appendingPathComponent("energy-gate", isDirectory: true).path,
-                    reports: [:],
-                    summary: String(describing: error)
-                ))
-                print("conjet-bench: failed energy-gate: \(error)")
-            }
-        }
 
         let suites = box.values.sorted { $0.name < $1.name }
         let outcome = BenchmarkRunAllOutcome(
@@ -502,6 +499,7 @@ struct ConjetBenchCLI {
 
             Notes:
               run always executes sudo -v before starting benchmark suites.
+              When enabled, energy-gate runs first so powermetrics uses a fresh sudo timestamp.
               Kubernetes is intentionally out of scope for this benchmark generation.
             """
         )

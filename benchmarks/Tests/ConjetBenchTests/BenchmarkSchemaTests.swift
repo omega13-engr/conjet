@@ -1054,6 +1054,33 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(workloads.contains("go-build"))
         XCTAssertTrue(workloads.contains("cpp-test"))
     }
+
+    func testPolyglotGoAndRustCommandsSetContainerToolchainPaths() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-polyglot-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = DockerCommandRecorder()
+        let suite = PolyglotBenchmarkSuite(
+            contexts: ["conjet"],
+            samples: 1,
+            ecosystems: ["go", "rust"],
+            runner: recorder.run
+        )
+        let results = try suite.run(workDirectory: directory)
+        let joinedCommands = recorder.commands.map { $0.joined(separator: " ") }.joined(separator: "\n")
+
+        XCTAssertEqual(results.count, 5)
+        XCTAssertTrue(joinedCommands.contains("export PATH=\"/usr/local/go/bin:$PATH\""))
+        XCTAssertTrue(joinedCommands.contains("export GOMODCACHE=/workspace/.native/go/pkg/mod"))
+        XCTAssertTrue(joinedCommands.contains("export PATH=\"/usr/local/cargo/bin:$PATH\""))
+        XCTAssertTrue(joinedCommands.contains("export CARGO_TARGET_DIR=/workspace/.native/target"))
+        XCTAssertFalse(joinedCommands.contains("cargo new --bin /tmp/poly"))
+        let goSum = try String(contentsOf: directory.appendingPathComponent("go-build/go.sum"), encoding: .utf8)
+        XCTAssertTrue(goSum.contains("github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("rust-build/Cargo.toml").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("rust-test/src/lib.rs").path))
+    }
 }
 
 private final class DockerCommandRecorder: @unchecked Sendable {
