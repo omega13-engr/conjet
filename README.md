@@ -16,6 +16,7 @@ tools.
 - Fast macOS container runtime
 - Docker-compatible developer workflow
 - Compose support for local projects
+- Secure localhost Docker TCP/UDP port publishing
 - Simple profiles for separate workspaces
 - Project sync commands for local development
 - Smart storage behavior for dependency and build-heavy projects
@@ -83,6 +84,17 @@ Use Compose:
 ```sh
 conjet compose up
 ```
+
+Inspect published ports:
+
+```sh
+conjet port list
+conjet port diagnose 3000/tcp
+conjet network status
+```
+
+Conjet publishes Docker ports to localhost by default. Use `conjet port list`
+and `conjet port diagnose` when you need to inspect a local service.
 
 Open a shell:
 
@@ -236,6 +248,15 @@ swift run --package-path benchmarks conjet-bench energy-gate \
 
 Energy measurements may require `sudo` because macOS power metrics are
 privileged.
+
+Run only the networking benchmark:
+
+```sh
+swift run --package-path benchmarks conjet-bench network-gate \
+  --contexts conjet,orbstack,colima \
+  --samples 10 \
+  --output-dir benchmarks/reports/network-gate-local
+```
 
 ---
 

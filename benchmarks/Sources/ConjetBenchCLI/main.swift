@@ -31,6 +31,10 @@ struct ConjetBenchCLI {
             try gate(args: args)
         case "energy-gate":
             try energyGate(args: args)
+        case "network-gate":
+            try networkGate(args: args)
+        case "network-segments":
+            try networkSegments(args: args)
         case "help", "-h", "--help":
             printHelp()
         default:
@@ -49,6 +53,7 @@ struct ConjetBenchCLI {
         let includeEnergy = suiteIsSelected("energy-gate", selectedSuites: selectedSuites) && !args.contains("--no-energy")
         let includePolyglot = suiteIsSelected("polyglot-gate", selectedSuites: selectedSuites) && !args.contains("--no-polyglot")
         let includeNoCache = suiteIsSelected("no-cache-gate", selectedSuites: selectedSuites) && !args.contains("--no-cache-suite")
+        let includeNetwork = suiteIsSelected("network-gate", selectedSuites: selectedSuites) && !args.contains("--no-network")
         let cleanupWork = !args.contains("--keep-work")
         let requirePower = args.contains("--require-power")
         let commandTimeout = value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 240
@@ -133,6 +138,18 @@ struct ConjetBenchCLI {
                     commandTimeout: max(commandTimeout, 300),
                     resourceScope: "\(resourceScope)-polyglot-gate",
                     cleanupWork: cleanupWork
+                )
+            })
+        }
+
+        if includeNetwork {
+            jobs.append(BenchmarkJob(name: "network-gate") {
+                try runNetworkGate(
+                    contexts: contexts,
+                    samples: samples,
+                    workloads: value(after: "--network-workloads", in: args).map(csvList) ?? NetworkBenchmarkSuite.defaultWorkloads,
+                    outputDirectory: outputDirectory.appendingPathComponent("network-gate", isDirectory: true),
+                    commandTimeout: min(max(commandTimeout, 60), 180)
                 )
             })
         }
@@ -395,6 +412,44 @@ struct ConjetBenchCLI {
         )
     }
 
+    private static func runNetworkGate(
+        contexts: [String],
+        samples: Int,
+        workloads: [String],
+        outputDirectory: URL,
+        commandTimeout: Double,
+        runtimeLabels: [String: String] = [:],
+        proxyEngineLabels: [String: String] = [:]
+    ) throws -> BenchmarkSuiteOutcome {
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        let results = try NetworkBenchmarkSuite(
+            options: NetworkBenchmarkOptions(
+                contexts: contexts,
+                samples: samples,
+                commandTimeoutSeconds: commandTimeout,
+                workloads: workloads,
+                runtimeLabels: runtimeLabels,
+                proxyEngineLabels: proxyEngineLabels
+            )
+        ).run(outputDirectory: outputDirectory)
+        let allResults = outputDirectory.appendingPathComponent("all-results.json")
+        try ConjetJSON.string(results).write(to: allResults, atomically: true, encoding: .utf8)
+        let report = outputDirectory.appendingPathComponent("network-gate.md")
+        let markdown = renderNetworkMarkdown(results: results, contexts: contexts, workloads: workloads)
+        try markdown.write(to: report, atomically: true, encoding: .utf8)
+        let finalReport = outputDirectory.appendingPathComponent("REPORT.md")
+        try markdown.write(to: finalReport, atomically: true, encoding: .utf8)
+        let suiteStatus = networkSuiteStatus(results)
+        return BenchmarkSuiteOutcome(
+            name: "network-gate",
+            status: suiteStatus.status,
+            durationSeconds: 0,
+            outputDirectory: outputDirectory.path,
+            reports: ["all-results": allResults.path, "markdown": report.path, "report": finalReport.path],
+            summary: suiteStatus.summary
+        )
+    }
+
     private static func gate(args: [String]) throws {
         guard let reportPaths = value(after: "--reports", in: args) else {
             throw ConjetError.invalidArgument("usage: conjet-bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--required-baselines orbstack] [--min-samples N]")
@@ -455,6 +510,195 @@ struct ConjetBenchCLI {
         print("  report: \(result.markdownReport)")
     }
 
+    private static func networkGate(args: [String]) throws {
+        let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack", "colima"]
+        let samples = value(after: "--samples", in: args).flatMap(Int.init) ?? 10
+        let outputDirectory = URL(
+            fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? "benchmarks/reports/network-gate-local"),
+            isDirectory: true
+        )
+        var workloads = value(after: "--workloads", in: args).map(csvList) ?? NetworkBenchmarkSuite.defaultWorkloads
+        if args.contains("--skip-udp") {
+            workloads.removeAll { $0 == "udp-echo-latency" || $0.hasPrefix("udp-echo-") || $0 == "udp-throughput" || $0 == "udp-packet-loss" }
+        }
+        if let proxyEngines = value(after: "--proxy-engines", in: args).map(csvList), !proxyEngines.isEmpty {
+            let outcome = try runProxyEngineComparison(
+                proxyEngines: proxyEngines,
+                samples: samples,
+                workloads: workloads,
+                outputDirectory: outputDirectory,
+                commandTimeout: value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 90
+            )
+            print("network proxy-engine gate: \(outcome.status)")
+            print("  results: \(outcome.reports["all-results"] ?? "")")
+            print("  report: \(outcome.reports["markdown"] ?? "")")
+            if outcome.status == "failed" {
+                throw ConjetError.unavailable(outcome.summary)
+            }
+            return
+        }
+        if let bridgeEngines = value(after: "--bridge-engines", in: args).map(csvList), !bridgeEngines.isEmpty {
+            let outcome = try runBridgeEngineComparison(
+                bridgeEngines: bridgeEngines,
+                samples: samples,
+                workloads: workloads,
+                outputDirectory: outputDirectory,
+                commandTimeout: value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 90
+            )
+            print("network bridge-engine gate: \(outcome.status)")
+            print("  results: \(outcome.reports["all-results"] ?? "")")
+            print("  report: \(outcome.reports["markdown"] ?? "")")
+            if outcome.status == "failed" {
+                throw ConjetError.unavailable(outcome.summary)
+            }
+            return
+        }
+        let outcome = try runNetworkGate(
+            contexts: contexts,
+            samples: samples,
+            workloads: workloads,
+            outputDirectory: outputDirectory,
+            commandTimeout: value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 90
+        )
+        print("network gate: \(outcome.status)")
+        print("  results: \(outcome.reports["all-results"] ?? "")")
+        print("  report: \(outcome.reports["markdown"] ?? "")")
+        if outcome.status == "failed" {
+            throw ConjetError.unavailable(outcome.summary)
+        }
+    }
+
+    private static func networkSegments(args: [String]) throws {
+        let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet"]
+        let samples = value(after: "--samples", in: args).flatMap(Int.init) ?? 30
+        let workloads = value(after: "--workloads", in: args).map(csvList) ?? NetworkSegmentBenchmarkSuite.defaultWorkloads
+        let outputDirectory = URL(
+            fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? "benchmarks/reports/network-segments"),
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        let results = try NetworkSegmentBenchmarkSuite(
+            options: NetworkSegmentBenchmarkOptions(
+                contexts: contexts,
+                samples: samples,
+                commandTimeoutSeconds: value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 90,
+                workloads: workloads
+            )
+        ).run(outputDirectory: outputDirectory)
+        let allResults = outputDirectory.appendingPathComponent("all-results.json")
+        try ConjetJSON.string(results).write(to: allResults, atomically: true, encoding: .utf8)
+        let markdown = renderNetworkSegmentsMarkdown(results: results, contexts: contexts, workloads: workloads)
+        let report = outputDirectory.appendingPathComponent("network-segments.md")
+        try markdown.write(to: report, atomically: true, encoding: .utf8)
+        try markdown.write(to: outputDirectory.appendingPathComponent("REPORT.md"), atomically: true, encoding: .utf8)
+        print("network segments: measured")
+        print("  results: \(allResults.path)")
+        print("  report: \(report.path)")
+    }
+
+    private static func runProxyEngineComparison(
+        proxyEngines: [String],
+        samples: Int,
+        workloads: [String],
+        outputDirectory: URL,
+        commandTimeout: Double
+    ) throws -> BenchmarkSuiteOutcome {
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        var allResults: [BenchmarkResult] = []
+        var failures: [String] = []
+        for engine in proxyEngines {
+            let canonical = canonicalProxyEngine(engine)
+            let expected = expectedProxyEngineStatus(canonical)
+            do {
+                try restartConjetForProxyEngine(canonical, expectedStatus: expected)
+                let runtime = "conjet-\(canonical)"
+                let engineResults = try NetworkBenchmarkSuite(
+                    options: NetworkBenchmarkOptions(
+                        contexts: ["conjet"],
+                        samples: samples,
+                        commandTimeoutSeconds: commandTimeout,
+                        workloads: workloads,
+                        runtimeLabels: ["conjet": runtime],
+                        proxyEngineLabels: ["conjet": expected]
+                    )
+                ).run(outputDirectory: outputDirectory.appendingPathComponent(runtime, isDirectory: true))
+                allResults.append(contentsOf: engineResults)
+            } catch {
+                failures.append("\(canonical): \(error)")
+                allResults.append(proxyEngineFailureResult(engine: canonical, error: error))
+            }
+            _ = try? runProcess(["/usr/bin/env", "swift", "run", "conjet", "network", "repair"], timeoutSeconds: 60)
+            _ = try? runProcess(["/usr/bin/env", "swift", "run", "conjet", "stop", "--timeout", "10"], timeoutSeconds: 60)
+        }
+        _ = try? restartConjetForProxyEngine("auto", expectedStatus: expectedProxyEngineStatus("auto"))
+
+        let allResultsURL = outputDirectory.appendingPathComponent("all-results.json")
+        try ConjetJSON.string(allResults).write(to: allResultsURL, atomically: true, encoding: .utf8)
+        let markdown = renderProxyEngineMarkdown(results: allResults, proxyEngines: proxyEngines, workloads: workloads, failures: failures)
+        let report = outputDirectory.appendingPathComponent("network-proxy-engines.md")
+        try markdown.write(to: report, atomically: true, encoding: .utf8)
+        try markdown.write(to: outputDirectory.appendingPathComponent("REPORT.md"), atomically: true, encoding: .utf8)
+        return BenchmarkSuiteOutcome(
+            name: "network-proxy-engines",
+            status: failures.isEmpty ? "measured" : "partial",
+            durationSeconds: 0,
+            outputDirectory: outputDirectory.path,
+            reports: ["all-results": allResultsURL.path, "markdown": report.path, "report": outputDirectory.appendingPathComponent("REPORT.md").path],
+            summary: failures.isEmpty ? "proxy engine comparison measured" : failures.joined(separator: "; ")
+        )
+    }
+
+    private static func runBridgeEngineComparison(
+        bridgeEngines: [String],
+        samples: Int,
+        workloads: [String],
+        outputDirectory: URL,
+        commandTimeout: Double
+    ) throws -> BenchmarkSuiteOutcome {
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        var allResults: [BenchmarkResult] = []
+        var failures: [String] = []
+        let requestedEngines = bridgeEngines.map(normalizedBridgeEngineName)
+        var activeBridge = "unknown"
+        for engine in requestedEngines {
+            do {
+                activeBridge = try restartConjetForBridgeEngine(engine)
+            } catch {
+                failures.append("\(engine): \(error)")
+                allResults.append(bridgeEngineFailureResult(engine: engine, activeBridge: activeBridge, error: error))
+                continue
+            }
+            let engineResults = try NetworkBenchmarkSuite(
+                options: NetworkBenchmarkOptions(
+                    contexts: ["conjet"],
+                    samples: samples,
+                    commandTimeoutSeconds: commandTimeout,
+                    workloads: workloads,
+                    runtimeLabels: ["conjet": "conjet-\(engine)"],
+                    proxyEngineLabels: ["conjet": "proxy-gcd-evented"]
+                )
+            ).run(outputDirectory: outputDirectory.appendingPathComponent("conjet-\(engine)", isDirectory: true))
+            allResults.append(contentsOf: engineResults)
+            _ = try? runProcess(["/usr/bin/env", "swift", "run", "conjet", "network", "repair"], timeoutSeconds: 60)
+            _ = try? runProcess(["/usr/bin/env", "swift", "run", "conjet", "stop", "--timeout", "10"], timeoutSeconds: 60)
+        }
+        _ = try? restartConjetForBridgeEngine("conjet-netd-c")
+        let allResultsURL = outputDirectory.appendingPathComponent("all-results.json")
+        try ConjetJSON.string(allResults).write(to: allResultsURL, atomically: true, encoding: .utf8)
+        let markdown = renderBridgeEngineMarkdown(results: allResults, bridgeEngines: requestedEngines, activeBridge: activeBridge, failures: failures)
+        let report = outputDirectory.appendingPathComponent("network-bridge-engines.md")
+        try markdown.write(to: report, atomically: true, encoding: .utf8)
+        try markdown.write(to: outputDirectory.appendingPathComponent("REPORT.md"), atomically: true, encoding: .utf8)
+        return BenchmarkSuiteOutcome(
+            name: "network-bridge-engines",
+            status: failures.isEmpty ? "measured" : "partial",
+            durationSeconds: 0,
+            outputDirectory: outputDirectory.path,
+            reports: ["all-results": allResultsURL.path, "markdown": report.path, "report": outputDirectory.appendingPathComponent("REPORT.md").path],
+            summary: failures.isEmpty ? "bridge engine comparison measured" : failures.joined(separator: "; ")
+        )
+    }
+
     private static func requireSudo() throws {
         print("conjet-bench: validating sudo with sudo -v")
         let process = Process()
@@ -468,6 +712,180 @@ struct ConjetBenchCLI {
         guard process.terminationStatus == 0 else {
             throw ConjetError.unavailable("sudo -v failed; benchmarks require a valid sudo timestamp")
         }
+    }
+
+    private static func canonicalProxyEngine(_ value: String) -> String {
+        switch value {
+        case "gcd", "gcd-fallback":
+            return "gcd-evented"
+        case "event-loop", "proxy-nio":
+            return "nio"
+        default:
+            return value
+        }
+    }
+
+    private static func expectedProxyEngineStatus(_ engine: String) -> String {
+        switch engine {
+        case "gcd-evented":
+            return "proxy-gcd-evented"
+        case "nio":
+            return "proxy-nio"
+        case "auto":
+            return "proxy-gcd-evented"
+        default:
+            return "proxy-\(engine)"
+        }
+    }
+
+    private static func restartConjetForProxyEngine(_ engine: String, expectedStatus: String) throws {
+        _ = try? runProcess(["/usr/bin/env", "swift", "run", "conjet", "stop", "--timeout", "10"], timeoutSeconds: 60)
+        let start = try runProcess([
+            "/usr/bin/env",
+            "swift",
+            "run",
+            "conjet",
+            "start",
+            "--proxy-engine",
+            engine
+        ], timeoutSeconds: 120)
+        guard start.succeeded else {
+            throw ConjetError.unavailable("conjet start failed for proxy engine \(engine): \(start.stderr)")
+        }
+        let deadline = Date().addingTimeInterval(60)
+        var lastStatus = ""
+        while Date() < deadline {
+            let status = try runProcess(["/usr/bin/env", "swift", "run", "conjet", "network", "status"], timeoutSeconds: 30)
+            lastStatus = status.stdout + status.stderr
+            if status.succeeded, lastStatus.contains("Proxy engine: \(expectedStatus)") {
+                return
+            }
+            Thread.sleep(forTimeInterval: 1)
+        }
+        throw ConjetError.unavailable("timed out waiting for proxy engine \(expectedStatus); last status: \(lastStatus)")
+    }
+
+    @discardableResult
+    private static func restartConjetForBridgeEngine(_ engine: String) throws -> String {
+        let normalized = normalizedBridgeEngineName(engine)
+        let switchResult = try runProcess([
+            "/usr/bin/env",
+            "swift",
+            "run",
+            "conjet",
+            "network",
+            "bridge-switch",
+            normalized,
+            "--restart"
+        ], timeoutSeconds: 240)
+        guard switchResult.succeeded else {
+            throw ConjetError.unavailable("conjet bridge-switch failed for \(normalized): \(switchResult.stderr)")
+        }
+
+        let deadline = Date().addingTimeInterval(90)
+        var lastStatus = ""
+        while Date() < deadline {
+            let status = try runProcess(["/usr/bin/env", "swift", "run", "conjet", "network", "status", "--json"], timeoutSeconds: 30)
+            lastStatus = status.stdout + status.stderr
+            let active = activeBridgeEngine(fromStatusJSON: status.stdout)
+            if status.succeeded, active == normalized {
+                return active
+            }
+            Thread.sleep(forTimeInterval: 1)
+        }
+        throw ConjetError.unavailable("timed out waiting for bridge engine \(normalized); last status: \(lastStatus)")
+    }
+
+    private static func proxyEngineFailureResult(engine: String, error: Error) -> BenchmarkResult {
+        var metrics = BenchmarkMetrics()
+        metrics.setString(expectedProxyEngineStatus(engine), for: "proxy_engine")
+        metrics.setString("engine_restart_failed", for: "failure_reason")
+        metrics.setString("pooled-vsock-prefetch", for: "bridge_engine")
+        metrics.setString("python-threaded", for: "guest_bridge_engine")
+        metrics.setString("legacy-tcp-proxy", for: "vsock_mode")
+        metrics.setString("legacy-tcp-proxy", for: "tcp_mode")
+        metrics.setString("legacy-udp-proxy", for: "udp_mode")
+        metrics.setBool(false, for: "tcp_binary_frames")
+        metrics.setBool(false, for: "persistent_tcp_vsock")
+        metrics.setBool(false, for: "tcp_vsock_pool")
+        metrics.setBool(true, for: "python_fallback_active")
+        return BenchmarkResult(
+            workload: "proxy-engine-start",
+            runtime: "conjet-\(engine)",
+            command: ["swift", "run", "conjet", "start"],
+            startedAt: Date(),
+            durationSeconds: 0,
+            exitCode: 1,
+            metrics: metrics,
+            machine: MachineProfiler.capture(cacheTTLSeconds: 60),
+            stderrTail: String(describing: error)
+        )
+    }
+
+    private static func bridgeEngineFailureResult(engine: String, activeBridge: String, error: Error? = nil) -> BenchmarkResult {
+        var metrics = BenchmarkMetrics()
+        metrics.setString(engine, for: "bridge_engine")
+        metrics.setString(activeBridge, for: "active_bridge_engine")
+        metrics.setString("bridge_engine_unavailable", for: "failure_reason")
+        metrics.setString("proxy-gcd-evented", for: "proxy_engine")
+        metrics.setString("legacy-tcp-proxy", for: "vsock_mode")
+        metrics.setString("legacy-tcp-proxy", for: "tcp_mode")
+        metrics.setString("legacy-udp-proxy", for: "udp_mode")
+        metrics.setBool(false, for: "tcp_binary_frames")
+        metrics.setBool(false, for: "persistent_tcp_vsock")
+        metrics.setBool(false, for: "tcp_vsock_pool")
+        metrics.setBool(activeBridge == "python-legacy", for: "python_fallback_active")
+        return BenchmarkResult(
+            workload: "bridge-engine-start",
+            runtime: "conjet-\(engine)",
+            command: ["swift", "run", "conjet", "network", "status"],
+            startedAt: Date(),
+            durationSeconds: 0,
+            exitCode: 1,
+            metrics: metrics,
+            machine: MachineProfiler.capture(cacheTTLSeconds: 60),
+            stderrTail: error.map(String.init(describing:)) ?? "active guest bridge is \(activeBridge)"
+        )
+    }
+
+    private static func normalizedBridgeEngineName(_ engine: String) -> String {
+        switch engine {
+        case "conjet-netd":
+            return "conjet-netd-c"
+        default:
+            return engine
+        }
+    }
+
+    private static func activeBridgeEngine(fromStatusJSON text: String) -> String {
+        if let bridge = jsonStringField("bridgeEngine", in: text), !bridge.isEmpty {
+            if bridge == "python-threaded" {
+                return "python-legacy"
+            }
+            return bridge
+        }
+        if text.contains(#""tcpProxy""#) {
+            return "python-legacy"
+        }
+        return "unknown"
+    }
+
+    private static func jsonStringField(_ field: String, in text: String) -> String? {
+        guard let fieldRange = text.range(of: "\"\(field)\"") else { return nil }
+        let suffix = text[fieldRange.upperBound...]
+        guard let colon = suffix.firstIndex(of: ":") else { return nil }
+        let afterColon = suffix[suffix.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard afterColon.first == "\"" else { return nil }
+        let body = afterColon.dropFirst()
+        guard let end = body.firstIndex(of: "\"") else { return nil }
+        return String(body[..<end])
+    }
+
+    private static func runProcess(_ command: [String], timeoutSeconds: Double?) throws -> ProcessResult {
+        guard let executable = command.first else {
+            throw ConjetError.invalidArgument("empty command")
+        }
+        return try ProcessRunner.run(executable, Array(command.dropFirst()), timeoutSeconds: timeoutSeconds)
     }
 
     private static func samplePhase(_ value: String?) throws -> BenchmarkSamplePhase {
@@ -506,6 +924,7 @@ struct ConjetBenchCLI {
             "no-cache-gate",
             "topology-gate",
             "polyglot-gate",
+            "network-gate",
             "energy-gate"
         ]
     }
@@ -524,6 +943,8 @@ struct ConjetBenchCLI {
             return "polyglot-gate"
         case "energy":
             return "energy-gate"
+        case "network":
+            return "network-gate"
         default:
             return suite
         }
@@ -567,6 +988,217 @@ struct ConjetBenchCLI {
         ].joined(separator: "\n")
     }
 
+    private static func renderNetworkMarkdown(
+        results: [BenchmarkResult],
+        contexts: [String],
+        workloads: [String]
+    ) -> String {
+        var lines = [
+            "# ConjetNet Network Gate",
+            "",
+            "ConjetNet v2 is evaluated as secure localhost Docker TCP/UDP port publishing with visible diagnostics. This report is data, not a global superiority claim.",
+            "",
+            "- Contexts: \(contexts.joined(separator: ", "))",
+            "- Workloads: \(workloads.joined(separator: ", "))",
+            "- UDP failures mean UDP is unavailable, blocked, or not supported by the active guest/context.",
+            "",
+            "## Verdicts",
+            "",
+            "| Gate | Status | Evidence | Caveat |",
+            "| --- | --- | --- | --- |"
+        ]
+        for row in networkVerdictRows(results: results, contexts: contexts) {
+            lines.append("| \(row.name) | \(row.status) | \(row.evidence) | \(row.caveat) |")
+        }
+        lines += [
+            "",
+            "## Results",
+            "",
+            "| Workload | Runtime | Samples | Failures | P50 ms | P95 ms | P99 ms | Max ms | RPS | Helper CPU % | CPU/1k req | Throughput Mbps | Proxy Engine | Bridge Engine | TCP Mode | UDP Mode | TCP Pool | Python Fallback | Verdict |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- | --- |"
+        ]
+        let grouped = Dictionary(grouping: results) { "\($0.workload)|\($0.runtime)" }
+        for key in grouped.keys.sorted() {
+            guard let group = grouped[key], let first = group.first else { continue }
+            let measured = group.filter(successfulMeasured)
+            let p50Values = measured.map { networkTableMetric($0, preferred: "latency_p50_ms") }.sorted()
+            let p95Values = measured.map { networkTableMetric($0, preferred: "latency_p95_ms") }.sorted()
+            let p99Values = measured.map { networkTableMetric($0, preferred: "latency_p99_ms") }.sorted()
+            let maxValues = measured.map { networkTableMetric($0, preferred: "max_latency_ms") }.sorted()
+            let failures = group.filter { $0.exitCode != 0 }.count
+            lines.append("| \(first.workload) | \(first.runtime) | \(group.count) | \(failures) | \(formatMS(percentile(p50Values, 0.50))) | \(formatMS(percentile(p95Values, 0.95))) | \(formatMS(percentile(p99Values, 0.99))) | \(formatMS(maxValues.last)) | \(formatGroupMetric(group, "requests_per_second")) | \(formatGroupMetric(group, "helper_cpu_percent_peak")) | \(formatGroupMetric(group, "cpu_per_1000_requests")) | \(formatGroupMetric(group, "throughput_mbps")) | \(metricString(first, "proxy_engine")) | \(metricString(first, "bridge_engine")) | \(metricString(first, "tcp_mode")) | \(metricString(first, "udp_mode")) | \(metricString(first, "tcp_vsock_pool")) | \(metricString(first, "python_fallback_active")) | \(networkRowVerdict(first: first, group: group, grouped: grouped)) |")
+        }
+        let failures = results.filter { $0.exitCode != 0 }
+        if !failures.isEmpty {
+            lines += [
+                "",
+                "## Failures",
+                "",
+                "| Workload | Runtime | Count | Reason |",
+                "| --- | --- | ---: | --- |"
+            ]
+            let failureGroups = Dictionary(grouping: failures) { "\($0.workload)|\($0.runtime)|\(failureReason($0))" }
+            for key in failureGroups.keys.sorted() {
+                guard let group = failureGroups[key], let first = group.first else { continue }
+                lines.append("| \(first.workload) | \(first.runtime) | \(group.count) | \(failureReason(first)) |")
+            }
+        }
+        lines += [
+            "",
+            "## Claims",
+            "",
+            "- Proven: only workloads with zero failures and sufficient samples in this report.",
+            "- Partial: ConjetNet functionality is measured when baseline workloads fail or candidate/baseline wins are mixed.",
+            "- Not proven: Conjet beating OrbStack or Colima unless the measured rows show lower p50/p95/p99 for the configured workload.",
+            "",
+            "## Implementation Status",
+            "",
+            "- TCP publishing: measured by localhost HTTP workloads, including high-concurrency built-in clients when selected.",
+            "- UDP publishing: measured by UDP echo workloads and payload-size variants when selected.",
+            "- CPU/request: helper CPU sampling is reported when matching helper processes are visible; otherwise rows carry `helper_cpu_metrics_skipped_reason` in JSON.",
+            "- Bind policy: secure-local is the default Conjet policy; docker-strict and lan-allowlist are CLI/profile-configurable.",
+            "- Proxy engine: Conjet `auto` reports the host listener class; the active TCP transport is reported separately as `tcp_mode` and must be `persistent-binary-tcp-pool` for the native VSOCK pool path.",
+            "- Native TCP evidence: rows expose `tcp_mode`, `tcp_vsock_pool`, and `python_fallback_active` so pooled native TCP cannot be confused with python fallback.",
+            "- Throughput: iperf3 workloads are skipped by the built-in gate unless a future external iperf3 harness is enabled.",
+            "- Turbo mode: scaffolded only, not a performance claim."
+        ]
+        return lines.joined(separator: "\n")
+    }
+
+    private static func renderProxyEngineMarkdown(
+        results: [BenchmarkResult],
+        proxyEngines: [String],
+        workloads: [String],
+        failures: [String]
+    ) -> String {
+        var lines = [
+            "# Conjet Proxy Engine Network Gate",
+            "",
+            "This report compares Conjet proxy engines by restarting Conjet per engine and verifying `conjet network status` before sampling.",
+            "",
+            "- Proxy engines: \(proxyEngines.joined(separator: ", "))",
+            "- Workloads: \(workloads.joined(separator: ", "))",
+            "- Result labels are separate runtimes such as `conjet-gcd-evented` and `conjet-nio`; they are not mixed.",
+            "",
+            "## Results",
+            "",
+            "| Workload | Runtime | Samples | Failures | P50 ms | P95 ms | P99 ms | Max ms | RPS | Proxy Engine | Bridge Engine |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
+        ]
+        let grouped = Dictionary(grouping: results) { "\($0.workload)|\($0.runtime)" }
+        for key in grouped.keys.sorted() {
+            guard let group = grouped[key], let first = group.first else { continue }
+            let values = group.filter(successfulMeasured).map { metricMilliseconds($0) }.sorted()
+            let failures = group.filter { $0.exitCode != 0 }.count
+            lines.append("| \(first.workload) | \(first.runtime) | \(group.count) | \(failures) | \(formatMS(percentile(values, 0.50))) | \(formatMS(percentile(values, 0.95))) | \(formatMS(percentile(values, 0.99))) | \(formatMS(values.last)) | \(formatGroupMetric(group, "requests_per_second")) | \(metricString(first, "proxy_engine")) | \(metricString(first, "bridge_engine")) |")
+        }
+        if !failures.isEmpty {
+            lines += [
+                "",
+                "## Engine Failures",
+                ""
+            ]
+            lines.append(contentsOf: failures.map { "- \($0)" })
+        }
+        lines += [
+            "",
+            "## Interpretation",
+            "",
+            "- Measured: only rows with zero failures and enough samples.",
+            "- Partial: engine restart or workload failures are shown explicitly.",
+            "- Not proven: NIO superiority unless NIO rows beat GCD rows on the selected p50/p95/p99 metrics."
+        ]
+        return lines.joined(separator: "\n")
+    }
+
+    private static func renderBridgeEngineMarkdown(
+        results: [BenchmarkResult],
+        bridgeEngines: [String],
+        activeBridge: String,
+        failures: [String]
+    ) -> String {
+        var lines = [
+            "# Conjet Bridge Engine Network Gate",
+            "",
+            "This report compares guest bridge engines when the requested bridge is active. It does not relabel Python results as conjet-netd results.",
+            "",
+            "- Requested bridge engines: \(bridgeEngines.joined(separator: ", "))",
+            "- Active bridge engine: \(activeBridge)",
+            "",
+            "## Results",
+            "",
+            "| Workload | Runtime | Samples | Failures | P50 ms | P95 ms | P99 ms | Max ms | RPS | Helper CPU % | Bridge Engine | UDP Frame |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
+        ]
+        let grouped = Dictionary(grouping: results) { "\($0.workload)|\($0.runtime)" }
+        for key in grouped.keys.sorted() {
+            guard let group = grouped[key], let first = group.first else { continue }
+            let values = group.filter(successfulMeasured).map { metricMilliseconds($0) }.sorted()
+            let failures = group.filter { $0.exitCode != 0 }.count
+            lines.append("| \(first.workload) | \(first.runtime) | \(group.count) | \(failures) | \(formatMS(percentile(values, 0.50))) | \(formatMS(percentile(values, 0.95))) | \(formatMS(percentile(values, 0.99))) | \(formatMS(values.last)) | \(formatGroupMetric(group, "requests_per_second")) | \(formatGroupMetric(group, "helper_cpu_percent_peak")) | \(metricString(first, "bridge_engine")) | \(metricString(first, "udp_frame_format")) |")
+        }
+        if !failures.isEmpty {
+            lines += ["", "## Bridge Engine Failures", ""]
+            lines.append(contentsOf: failures.map { "- \($0)" })
+        }
+        lines += [
+            "",
+            "## Interpretation",
+            "",
+            "- Measured: requested bridge engine was active and sampled.",
+            "- Partial: one or more requested bridge engines were unavailable.",
+            "- Not proven: conjet-netd performance unless rows show `bridge_engine=conjet-netd-c` or equivalent."
+        ]
+        return lines.joined(separator: "\n")
+    }
+
+    private static func renderNetworkSegmentsMarkdown(
+        results: [BenchmarkResult],
+        contexts: [String],
+        workloads: [String]
+    ) -> String {
+        var lines = [
+            "# ConjetNet Segment Benchmarks",
+            "",
+            "These microbenchmarks separate local loopback overhead from the full published-port path where the current guest image permits measurement.",
+            "",
+            "- Contexts: \(contexts.joined(separator: ", "))",
+            "- Workloads: \(workloads.joined(separator: ", "))",
+            "",
+            "## Current Data Path",
+            "",
+            "macOS listener -> proxy-nio/proxy-gcd-evented -> VSOCK adapter -> active guest bridge reported per row -> container",
+            "",
+            "## Suspected Bottlenecks",
+            "",
+            "- Per-connection VSOCK setup remains in the TCP fast path unless the pooled connector has idle connections.",
+            "- UDP uses a persistent binary guest session when `persistent_vsock=true`, but the full UDP path can still spend time in host session routing, guest UDP socket/NAT handling, and Docker's UDP publish path.",
+            "- The active bridge is reported per row. Python fallback remains available, while conjet-netd-c must be proven by `bridge_engine=conjet-netd-c` rows.",
+            "- Internal host-to-VSOCK echo and guest-bridge echo use `/conjet-guest-echo` when the active guest bridge exposes it; unavailable segments are reported, not hidden.",
+            "",
+            "## Results",
+            "",
+            "| Workload | Runtime | Samples | Failures | P50 ms | P95 ms | P99 ms | Max ms | Segment | Proxy Engine | Bridge Engine | Guest Bridge | Reason |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- |"
+        ]
+        let grouped = Dictionary(grouping: results) { "\($0.workload)|\($0.runtime)" }
+        for key in grouped.keys.sorted() {
+            guard let group = grouped[key], let first = group.first else { continue }
+            let values = group.filter(successfulMeasured).map { metricMilliseconds($0) }.sorted()
+            let failures = group.filter { $0.exitCode != 0 }.count
+            lines.append("| \(first.workload) | \(first.runtime) | \(group.count) | \(failures) | \(formatMS(percentile(values, 0.50))) | \(formatMS(percentile(values, 0.95))) | \(formatMS(percentile(values, 0.99))) | \(formatMS(values.last)) | \(metricString(first, "segment")) | \(metricString(first, "proxy_engine")) | \(metricString(first, "bridge_engine")) | \(metricString(first, "guest_bridge_engine")) | \(failureReason(first)) |")
+        }
+        lines += [
+            "",
+            "## Claims",
+            "",
+            "- Proven: segment rows with measured latency and zero failures.",
+            "- Not proven: muxed VSOCK or PF/vmnet turbo latency; those paths are not implemented.",
+            "- Current bridge mode is reported per row through `bridge_engine`, `guest_bridge_engine`, `tcp_mode`, `udp_mode`, `vsock_mode`, `udp_frame_format`, and `python_fallback_active`."
+        ]
+        return lines.joined(separator: "\n")
+    }
+
     private static func renderRunAllMarkdown(_ outcome: BenchmarkRunAllOutcome) -> String {
         var lines = [
             "# Conjet Benchmark Run",
@@ -602,18 +1234,31 @@ struct ConjetBenchCLI {
             Usage:
               conjet-bench run [options]
               conjet-bench energy-gate [options]
+              conjet-bench network-gate [options]
+              conjet-bench network-segments [options]
               conjet-bench gate --reports PATH[,PATH...]
 
             Commands:
               run          Run energy in isolation, then wall-time suites in parallel.
               energy-gate  Run only the powermetrics energy gate.
+              network-gate Run ConjetNet localhost TCP/UDP network gate.
+              network-segments
+                          Run ConjetNet path-segmentation microbenchmarks.
               gate         Score existing raw JSON reports.
               help         Show this help text.
 
             Run options:
               --contexts LIST          Docker contexts to measure (default: conjet,orbstack,colima)
               --samples N              Samples per wall-time workload (default: 10)
-              --suites LIST            Run only selected suites: warm-gate,cold-base-prepulled-gate,no-cache-gate,topology-gate,polyglot-gate,energy-gate
+              --suites LIST            Run only selected suites: warm-gate,cold-base-prepulled-gate,no-cache-gate,topology-gate,polyglot-gate,network-gate,energy-gate
+              --network-workloads LIST Network workloads for run-all network-gate
+              --skip-udp              Omit UDP workloads from network-gate
+              --require-udp           Reserved for strict UDP gating; baseline UDP failures are still reported
+              --proxy-engines LIST    Restart Conjet per engine and compare: gcd-evented,nio
+              --bridge-engines LIST   Compare active guest bridge engines: python-legacy,conjet-netd-c
+              --allow-baseline-failures
+                                      Keep full gate partial when baselines fail instead of failing Conjet functional gate
+              --require-iperf3        Reserved for future external iperf3 throughput gating
               --polyglot-samples N     Samples per polyglot workload (default: min(samples, 2))
               --ecosystems LIST        js,python,jvm,dotnet,go,rust,cpp
               --output-dir DIR         Report root (default: benchmarks/reports/run-all-YYYYMMDD-HHMMSS)
@@ -624,6 +1269,7 @@ struct ConjetBenchCLI {
               --require-power          Fail energy suite if powermetrics cannot measure
               --no-energy              Skip energy gate
               --no-polyglot            Skip polyglot gate
+              --no-network             Skip network gate
               --no-cache-suite         Skip no-cache gate
               --required-baselines LIST Hard-fail gate baselines for existing-report scoring
 
@@ -640,6 +1286,196 @@ struct ConjetBenchCLI {
             .split(separator: ",")
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    private static func metricMilliseconds(_ result: BenchmarkResult) -> Double {
+        if let value = result.metrics["latency_p50_ms"] {
+            return value
+        }
+        if let value = result.metrics["port_publication_latency_ms"] {
+            return value
+        }
+        return result.durationSeconds * 1_000
+    }
+
+    private static func networkTableMetric(_ result: BenchmarkResult, preferred key: String) -> Double {
+        if let value = result.metrics[key] {
+            return value
+        }
+        if let value = result.metrics["port_publication_latency_ms"] {
+            return value
+        }
+        if let value = result.metrics["latency_p50_ms"] {
+            return value
+        }
+        return result.durationSeconds * 1_000
+    }
+
+    private static func successfulMeasured(_ result: BenchmarkResult) -> Bool {
+        result.exitCode == 0 && result.metrics.value(for: "skipped") != .bool(true)
+    }
+
+    private struct NetworkSuiteStatus {
+        var status: String
+        var summary: String
+    }
+
+    private struct NetworkVerdictRow {
+        var name: String
+        var status: String
+        var evidence: String
+        var caveat: String
+    }
+
+    private static func networkSuiteStatus(_ results: [BenchmarkResult]) -> NetworkSuiteStatus {
+        let conjet = results.filter { $0.runtime == "conjet" }
+        guard !conjet.isEmpty else {
+            return NetworkSuiteStatus(status: "failed", summary: "Conjet network samples were not collected")
+        }
+        let conjetFailures = conjet.filter { $0.exitCode != 0 }.count
+        if conjetFailures > 0 {
+            return NetworkSuiteStatus(status: "failed", summary: "\(conjetFailures) Conjet network samples failed")
+        }
+        let baselineFailures = results.filter { $0.runtime != "conjet" && $0.exitCode != 0 }.count
+        if baselineFailures > 0 {
+            return NetworkSuiteStatus(status: "partial", summary: "Conjet passed; \(baselineFailures) baseline network samples failed")
+        }
+        return NetworkSuiteStatus(status: "measured", summary: "network results measured")
+    }
+
+    private static func networkVerdictRows(results: [BenchmarkResult], contexts: [String]) -> [NetworkVerdictRow] {
+        let conjet = results.filter { $0.runtime == "conjet" }
+        let conjetFailures = conjet.filter { $0.exitCode != 0 }.count
+        let conjetStatus = conjet.isEmpty ? "Not measured" : (conjetFailures == 0 ? "Pass" : "Failed")
+        var rows = [
+            NetworkVerdictRow(
+                name: "Conjet functional gate",
+                status: conjetStatus,
+                evidence: conjet.isEmpty ? "No Conjet samples" : "\(conjet.count) Conjet samples, \(conjetFailures) failures",
+                caveat: "Functional pass does not imply baseline superiority"
+            )
+        ]
+        for baseline in contexts where baseline != "conjet" {
+            let comparison = comparisonVerdict(results: results, baseline: baseline)
+            rows.append(NetworkVerdictRow(
+                name: "Conjet vs \(baseline)",
+                status: comparison.status,
+                evidence: comparison.evidence,
+                caveat: comparison.caveat
+            ))
+        }
+        let failures = results.filter { $0.exitCode != 0 }.count
+        rows.append(NetworkVerdictRow(
+            name: "Full multi-runtime gate",
+            status: failures == 0 ? "Pass" : (conjetFailures == 0 ? "Partial" : "Failed"),
+            evidence: "\(results.count) samples, \(failures) failures",
+            caveat: failures == 0 ? "All configured runtime rows completed" : "Baseline failures do not mark Conjet functional gate failed"
+        ))
+        return rows
+    }
+
+    private static func comparisonVerdict(results: [BenchmarkResult], baseline: String) -> (status: String, evidence: String, caveat: String) {
+        let workloads = Set(results.map(\.workload))
+        var candidateWins = 0
+        var baselineWins = 0
+        var unavailable = 0
+        var candidateFailed = 0
+        var baselineFailed = 0
+
+        for workload in workloads.sorted() {
+            let candidateRows = results.filter { $0.runtime == "conjet" && $0.workload == workload }
+            let baselineRows = results.filter { $0.runtime == baseline && $0.workload == workload }
+            guard !candidateRows.isEmpty, !baselineRows.isEmpty else {
+                unavailable += 1
+                continue
+            }
+            if candidateRows.contains(where: { $0.exitCode != 0 }) {
+                candidateFailed += 1
+                continue
+            }
+            if baselineRows.contains(where: { $0.exitCode != 0 }) {
+                baselineFailed += 1
+                continue
+            }
+            let candidateP95 = percentile(candidateRows.map(metricMilliseconds).sorted(), 0.95) ?? .greatestFiniteMagnitude
+            let baselineP95 = percentile(baselineRows.map(metricMilliseconds).sorted(), 0.95) ?? .greatestFiniteMagnitude
+            if candidateP95 <= baselineP95 {
+                candidateWins += 1
+            } else {
+                baselineWins += 1
+            }
+        }
+
+        if candidateFailed > 0 {
+            return ("Failed", "\(candidateFailed) candidate workload groups failed", "Fix Conjet failures before comparing against \(baseline)")
+        }
+        if candidateWins > 0, baselineWins == 0, baselineFailed == 0, unavailable == 0 {
+            return ("Pass", "Conjet won \(candidateWins) comparable workload groups by p95", "Local benchmark only")
+        }
+        if candidateWins == 0, baselineWins > 0, baselineFailed == 0 {
+            return ("Failed", "\(baseline) won \(baselineWins) comparable workload groups by p95", "No Conjet wins in comparable groups")
+        }
+        return (
+            "Partial",
+            "Conjet wins: \(candidateWins); \(baseline) wins: \(baselineWins); baseline failed: \(baselineFailed); unavailable: \(unavailable)",
+            "Mixed results or baseline failures prevent a broad superiority claim"
+        )
+    }
+
+    private static func networkRowVerdict(
+        first: BenchmarkResult,
+        group: [BenchmarkResult],
+        grouped: [String: [BenchmarkResult]]
+    ) -> String {
+        let failures = group.filter { $0.exitCode != 0 }.count
+        if failures > 0 {
+            return first.runtime == "conjet" ? "candidate_failed" : "baseline_failed"
+        }
+        guard first.runtime != "conjet" else { return "candidate_measured" }
+        guard let candidate = grouped["\(first.workload)|conjet"],
+              candidate.allSatisfy({ $0.exitCode == 0 }) else {
+            return "comparison_unavailable"
+        }
+        let candidateP95 = percentile(candidate.map(metricMilliseconds).sorted(), 0.95) ?? .greatestFiniteMagnitude
+        let baselineP95 = percentile(group.map(metricMilliseconds).sorted(), 0.95) ?? .greatestFiniteMagnitude
+        return candidateP95 <= baselineP95 ? "candidate_wins" : "baseline_wins"
+    }
+
+    private static func metricString(_ result: BenchmarkResult, _ key: String) -> String {
+        result.metrics.value(for: key)?.summaryValue ?? "null"
+    }
+
+    private static func formatMetric(_ result: BenchmarkResult, _ key: String) -> String {
+        guard let value = result.metrics[key] else { return "null" }
+        return String(format: "%.3f", value)
+    }
+
+    private static func formatGroupMetric(_ group: [BenchmarkResult], _ key: String) -> String {
+        let values = group.compactMap { $0.metrics[key] }.sorted()
+        guard let value = percentile(values, 0.50) else { return "null" }
+        return String(format: "%.3f", value)
+    }
+
+    private static func failureReason(_ result: BenchmarkResult) -> String {
+        if case .string(let reason)? = result.metrics.value(for: "failure_reason") {
+            return reason
+        }
+        let stderr = result.stderrTail
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        return stderr ?? "unknown"
+    }
+
+    private static func percentile(_ values: [Double], _ quantile: Double) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let index = min(values.count - 1, max(0, Int((Double(values.count) * quantile).rounded(.down))))
+        return values[index]
+    }
+
+    private static func formatMS(_ value: Double?) -> String {
+        guard let value else { return "null" }
+        return String(format: "%.3f", value)
     }
 
     private static func value(after flag: String, in args: [String]) -> String? {

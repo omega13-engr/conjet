@@ -75,6 +75,65 @@ final class DockerSocketBridgeTests: XCTestCase {
         XCTAssertTrue(GuestBridgeCapabilityProbe.supportsPooledConnections(connector: connector))
     }
 
+    func testCapabilityProbeDetectsPublishedPortTCPProxy() {
+        let connector = CapabilityResponseGuestConnectionConnector(response: """
+        HTTP/1.1 200 OK\r
+        Content-Type: application/json\r
+        Content-Length: 67\r
+        \r
+        {"lazy_upstream":true,"docker_ready_cache":true,"tcp_proxy":true}
+
+        """)
+
+        let capabilities = GuestBridgeCapabilityProbe.capabilities(connector: connector)
+        XCTAssertTrue(capabilities.lazyUpstream)
+        XCTAssertTrue(capabilities.dockerReadyCache)
+        XCTAssertTrue(capabilities.tcpProxy)
+    }
+
+    func testCapabilityProbeDetectsConjetNetV2Capabilities() {
+        let connector = CapabilityResponseGuestConnectionConnector(response: """
+        HTTP/1.1 200 OK\r
+        Content-Type: application/json\r
+        Content-Length: 220\r
+        \r
+        {"version":2,"capabilities":{"tcp_proxy":true,"udp_proxy":true,"docker_events":true,"container_ip_lookup":true,"port_probe":true,"proxy_metrics":true},"tcp_proxy":true,"udp_proxy":true}
+
+        """)
+
+        let capabilities = GuestBridgeCapabilityProbe.capabilities(connector: connector)
+        XCTAssertEqual(capabilities.version, 2)
+        XCTAssertTrue(capabilities.tcpProxy)
+        XCTAssertTrue(capabilities.udpProxy)
+        XCTAssertTrue(capabilities.dockerEvents)
+        XCTAssertTrue(capabilities.containerIPLookup)
+        XCTAssertTrue(capabilities.portProbe)
+        XCTAssertTrue(capabilities.proxyMetrics)
+    }
+
+    func testCapabilityProbeDetectsConjetNetdCapabilities() {
+        let connector = CapabilityResponseGuestConnectionConnector(response: """
+        HTTP/1.1 200 OK\r
+        Content-Type: application/json\r
+        Content-Length: 350\r
+        \r
+        {"version":5,"capabilities":{"tcp_proxy":true,"udp_proxy":true,"guest_echo":true,"guest_metrics":true,"binary_frames":true,"udp_binary_frames":true,"persistent_vsock":true,"tcp_binary_frames":true,"persistent_tcp_vsock":true,"tcp_vsock_pool":true,"proxy_metrics":true,"bridge_engine":"conjet-netd-c"},"tcp_proxy":true,"udp_proxy":true,"guest_echo":true,"guest_metrics":true,"binary_frames":true,"udp_binary_frames":true,"persistent_vsock":true,"tcp_binary_frames":true,"persistent_tcp_vsock":true,"tcp_vsock_pool":true}
+
+        """)
+
+        let capabilities = GuestBridgeCapabilityProbe.capabilities(connector: connector)
+        XCTAssertEqual(capabilities.version, 5)
+        XCTAssertTrue(capabilities.guestEcho)
+        XCTAssertTrue(capabilities.guestMetrics)
+        XCTAssertTrue(capabilities.binaryFrames)
+        XCTAssertTrue(capabilities.udpBinaryFrames)
+        XCTAssertTrue(capabilities.persistentVsock)
+        XCTAssertTrue(capabilities.tcpBinaryFrames)
+        XCTAssertTrue(capabilities.persistentTCPVsock)
+        XCTAssertTrue(capabilities.tcpVsockPool)
+        XCTAssertEqual(capabilities.bridgeEngine, "conjet-netd-c")
+    }
+
     func testCapabilityProbeRejectsLegacyDockerForwarder() {
         let connector = CapabilityResponseGuestConnectionConnector(response: """
         HTTP/1.1 404 Not Found\r

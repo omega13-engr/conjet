@@ -17,6 +17,10 @@ CLIENT_DOCKER_WAIT_SECONDS = 60
 BUILDKIT_REPAIR_TIMEOUT_SECONDS = 120
 DOCKER_READY = threading.Event()
 CAPABILITIES_PATH = b"/conjet-bridge-capabilities"
+GUEST_ECHO_PATH = b"/conjet-guest-echo"
+METRICS_PATH = b"/conjet-bridge-metrics"
+TCP_PROXY_PREFIX = b"CONJET-TCP "
+UDP_PROXY_PREFIX = b"CONJET-UDP "
 BUILDKIT_HEALTHCHECK_DOCKERFILE = b"""# syntax=docker/dockerfile:1.7
 FROM scratch
 LABEL org.conjet.buildkit-healthcheck=1
@@ -69,7 +73,50 @@ def write_http_unavailable(client, message):
 
 
 def write_bridge_capabilities(client):
-    body = b'{"lazy_upstream":true,"docker_ready_cache":true}\n'
+    body = (
+        b'{"version":2,'
+        b'"capabilities":{"tcp_proxy":true,"udp_proxy":true,"docker_events":true,'
+        b'"container_ip_lookup":true,"port_probe":true,"proxy_metrics":true,'
+        b'"guest_echo":true,"guest_metrics":true,"binary_frames":false,'
+        b'"persistent_vsock":false,"tcp_mux":false,"udp_binary_frames":false,'
+        b'"tcp_binary_frames":false,"persistent_tcp_vsock":false,"tcp_vsock_pool":false,'
+        b'"bridge_engine":"python-legacy"},'
+        b'"lazy_upstream":true,"docker_ready_cache":true,'
+        b'"tcp_proxy":true,"udp_proxy":true,'
+        b'"guest_echo":true,"guest_metrics":true,'
+        b'"docker_events":true,"container_ip_lookup":true,'
+        b'"port_probe":true,"proxy_metrics":true}\n'
+    )
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Connection: close\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        b"\r\n" + body
+    )
+    try:
+        client.sendall(response)
+    except OSError:
+        pass
+
+
+def write_guest_echo(client):
+    body = b"conjet-guest-echo\n"
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/octet-stream\r\n"
+        b"Connection: close\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        b"\r\n" + body
+    )
+    try:
+        client.sendall(response)
+    except OSError:
+        pass
+
+
+def write_bridge_metrics(client):
+    body = b'{"bridge_engine":"python-legacy","vsock_mode":"pooled","binary_frames":false}\n'
     response = (
         b"HTTP/1.1 200 OK\r\n"
         b"Content-Type: application/json\r\n"
@@ -107,6 +154,119 @@ def is_bridge_capabilities_request(first_chunk):
     request_line = first_chunk.split(b"\r\n", 1)[0]
     parts = request_line.split()
     return len(parts) >= 2 and parts[0] == b"GET" and parts[1] == CAPABILITIES_PATH
+
+
+def request_path(first_chunk):
+    request_line = first_chunk.split(b"\r\n", 1)[0]
+    parts = request_line.split()
+    if len(parts) >= 2 and parts[0] == b"GET":
+        return parts[1]
+    return b""
+
+
+def write_tcp_proxy_unavailable(client, message):
+    body = f"Conjet guest TCP proxy is not ready: {message}\n".encode()
+    response = (
+        b"HTTP/1.1 502 Bad Gateway\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"Connection: close\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        b"\r\n" + body
+    )
+    try:
+        client.sendall(response)
+    except OSError:
+        pass
+
+
+def parse_tcp_proxy_request(first_chunk):
+    line, separator, remainder = first_chunk.partition(b"\n")
+    if not separator or not line.startswith(TCP_PROXY_PREFIX):
+        return None, None, remainder
+    target = line[len(TCP_PROXY_PREFIX):].decode("ascii", errors="ignore").strip()
+    host, separator, port_text = target.rpartition(":")
+    if not separator or host not in ("127.0.0.1", "localhost"):
+        return None, None, remainder
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None, None, remainder
+    if port <= 0 or port > 65535:
+        return None, None, remainder
+    return host, port, remainder
+
+
+def parse_udp_proxy_request(first_chunk):
+    line, separator, payload = first_chunk.partition(b"\n")
+    if not separator or not line.startswith(UDP_PROXY_PREFIX):
+        return None, None, payload
+    target = line[len(UDP_PROXY_PREFIX):].decode("ascii", errors="ignore").strip()
+    host, separator, port_text = target.rpartition(":")
+    if not separator or host not in ("127.0.0.1", "localhost"):
+        return None, None, payload
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None, None, payload
+    if port <= 0 or port > 65535:
+        return None, None, payload
+    return host, port, payload
+
+
+def handle_tcp_proxy(client, first_chunk):
+    host, port, remainder = parse_tcp_proxy_request(first_chunk)
+    if host is None:
+        write_tcp_proxy_unavailable(client, "invalid TCP proxy request")
+        close_socket(client)
+        return
+
+    try:
+        upstream = socket.create_connection((host, port), timeout=10)
+        try:
+            upstream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+    except OSError as exc:
+        write_tcp_proxy_unavailable(client, f"could not connect to {host}:{port}: {exc}")
+        close_socket(client)
+        return
+
+    if remainder:
+        try:
+            upstream.sendall(remainder)
+        except OSError:
+            close_socket(upstream)
+            close_socket(client)
+            return
+
+    client_to_upstream = threading.Thread(target=pump, args=(client, upstream))
+    upstream_to_client = threading.Thread(target=pump, args=(upstream, client))
+    client_to_upstream.start()
+    upstream_to_client.start()
+    client_to_upstream.join()
+    upstream_to_client.join()
+    close_socket(upstream)
+    close_socket(client)
+
+
+def handle_udp_proxy(client, first_chunk):
+    host, port, payload = parse_udp_proxy_request(first_chunk)
+    if host is None:
+        close_socket(client)
+        return
+
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    upstream.settimeout(2.0)
+    try:
+        upstream.sendto(payload, (host, port))
+        response, _ = upstream.recvfrom(65507)
+        if response:
+            client.sendall(response)
+    except OSError as exc:
+        log(f"UDP proxy failed for {host}:{port}: {exc}")
+    finally:
+        close_socket(upstream)
+        close_socket(client)
 
 
 def docker_ready_status(timeout=2.0):
@@ -272,6 +432,24 @@ def handle_client(client):
         close_socket(client)
         return
 
+    path = request_path(first_chunk)
+    if path == GUEST_ECHO_PATH:
+        write_guest_echo(client)
+        close_socket(client)
+        return
+    if path == METRICS_PATH:
+        write_bridge_metrics(client)
+        close_socket(client)
+        return
+
+    if first_chunk.startswith(TCP_PROXY_PREFIX):
+        handle_tcp_proxy(client, first_chunk)
+        return
+
+    if first_chunk.startswith(UDP_PROXY_PREFIX):
+        handle_udp_proxy(client, first_chunk)
+        return
+
     try:
         upstream = connect_docker_with_retry()
     except TimeoutError as exc:
@@ -324,7 +502,7 @@ def main():
         pass
     try:
         listener.bind((VMADDR_CID_ANY, VSOCK_PORT))
-        listener.listen(128)
+        listener.listen(1024)
     except OSError as exc:
         log(f"failed to bind VSOCK port {VSOCK_PORT}: {exc}")
         raise

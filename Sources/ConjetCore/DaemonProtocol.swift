@@ -18,6 +18,7 @@ public enum DaemonCommand: String, Codable, Equatable, Sendable {
     case vmStop = "vm-stop"
     case vmStatus = "vm-status"
     case dockerRun = "docker-run"
+    case networkRepair = "network-repair"
 }
 
 public struct DaemonRequest: Codable, Equatable, Sendable {
@@ -130,6 +131,7 @@ public struct DaemonStatus: Codable, Equatable, Sendable {
     public var host: HostCapabilities
     public var config: ConjetConfig
     public var vm: VMRuntimeStatus?
+    public var network: ConjetNetworkStatus?
 
     public init(
         pid: Int32,
@@ -138,7 +140,8 @@ public struct DaemonStatus: Codable, Equatable, Sendable {
         socketPath: String,
         host: HostCapabilities,
         config: ConjetConfig,
-        vm: VMRuntimeStatus? = nil
+        vm: VMRuntimeStatus? = nil,
+        network: ConjetNetworkStatus? = nil
     ) {
         self.pid = pid
         self.startedAt = startedAt
@@ -147,6 +150,7 @@ public struct DaemonStatus: Codable, Equatable, Sendable {
         self.host = host
         self.config = config
         self.vm = vm
+        self.network = network
     }
 }
 

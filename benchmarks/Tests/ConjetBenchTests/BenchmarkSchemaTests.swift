@@ -64,6 +64,18 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(markdown.contains("mount source path does not exist"))
     }
 
+    func testNetworkGateDefaultsIncludeHighConcurrencyHTTP() {
+        XCTAssertTrue(NetworkBenchmarkSuite.defaultWorkloads.contains("http-localhost-c100"))
+        XCTAssertTrue(NetworkBenchmarkSuite.defaultWorkloads.contains("udp-echo-latency"))
+    }
+
+    func testNetworkSegmentsDefaultWorkloadsExposePathBreakdown() {
+        XCTAssertTrue(NetworkSegmentBenchmarkSuite.defaultWorkloads.contains("host-to-conjetd-loopback-echo"))
+        XCTAssertTrue(NetworkSegmentBenchmarkSuite.defaultWorkloads.contains("host-to-vsock-echo"))
+        XCTAssertTrue(NetworkSegmentBenchmarkSuite.defaultWorkloads.contains("full-tcp-forward-echo"))
+        XCTAssertTrue(NetworkSegmentBenchmarkSuite.defaultWorkloads.contains("tcp-keepalive-request-latency"))
+    }
+
     func testDockerBenchmarkSuiteBuildsRepeatableContextCommands() throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("conjet-docker-bench-test-\(UUID().uuidString)", isDirectory: true)

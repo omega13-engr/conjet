@@ -14,6 +14,9 @@ let package = Package(
         .library(name: "ConjetPower", targets: ["ConjetPower"]),
         .library(name: "ConjetVZ", targets: ["ConjetVZ"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.78.0")
+    ],
     targets: [
         .target(
             name: "ConjetCore",
@@ -24,7 +27,11 @@ let package = Package(
         .target(name: "ConjetPower", dependencies: ["ConjetCore"]),
         .target(
             name: "ConjetVZ",
-            dependencies: ["ConjetCore"],
+            dependencies: [
+                "ConjetCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio")
+            ],
             linkerSettings: [
                 .linkedFramework("Virtualization", .when(platforms: [.macOS]))
             ]

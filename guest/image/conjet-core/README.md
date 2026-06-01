@@ -10,8 +10,12 @@ The output is intentionally Conjet-specific:
 - Ubuntu minimal cloud image base.
 - EFI/GPT raw disk suitable for `VZEFIBootLoader`.
 - Docker Engine from Ubuntu packages.
-- Conjet guest VSOCK bridge listening on port `2375` and forwarding to
-  `/var/run/docker.sock`.
+- Conjet guest VSOCK bridge listening on port `2375`, forwarding Docker API
+  traffic to `/var/run/docker.sock`, and proxying published TCP/UDP ports back
+  to macOS localhost.
+- `conjet-netd`, the compiled guest bridge used by new images for capability
+  reporting, guest echo, bridge metrics, binary frame probes, and the next UDP
+  fast path. The Python bridge remains installed as fallback.
 - DHCP netplan fallback for the VZ NAT interface.
 - Cloud-init disabled by default to avoid first-boot datasource waits.
 - `vsock` and `virtio_vsock` modules requested on boot.

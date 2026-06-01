@@ -113,6 +113,13 @@ private final class DaemonRuntime {
             } catch {
                 return DaemonResponse(ok: false, message: String(describing: error), status: status(state: .warmIdle))
             }
+        case .networkRepair:
+            let network = vmController.repairNetwork(config: config)
+            return DaemonResponse(
+                ok: true,
+                message: "network repair completed",
+                status: status(state: .warmIdle, network: network)
+            )
         case .stop:
             stopping = true
             let cleanupTimeout = request.parameters["timeout_seconds"].flatMap(Double.init)
@@ -143,7 +150,11 @@ private final class DaemonRuntime {
         }
     }
 
-    private func status(state: RuntimeState, vm: VMRuntimeStatus? = nil) -> DaemonStatus {
+    private func status(
+        state: RuntimeState,
+        vm: VMRuntimeStatus? = nil,
+        network: ConjetNetworkStatus? = nil
+    ) -> DaemonStatus {
         DaemonStatus(
             pid: getpid(),
             startedAt: startedAt,
@@ -151,7 +162,8 @@ private final class DaemonRuntime {
             socketPath: socketPath,
             host: host,
             config: config,
-            vm: vm ?? vmController.status(store: vmStore)
+            vm: vm ?? vmController.status(store: vmStore),
+            network: network ?? vmController.networkStatus(config: config)
         )
     }
 

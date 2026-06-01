@@ -43,7 +43,7 @@ struct ConjetCLI {
 
         switch command {
         case "doctor":
-            try doctor(json: json)
+            try doctor(args: args, json: json)
         case "status":
             try status(json: json)
         case "start":
@@ -66,6 +66,10 @@ struct ConjetCLI {
             try power(args: args, json: json)
         case "profile":
             try profile(args: args, json: json)
+        case "port":
+            try port(args: args, json: json)
+        case "network":
+            try network(args: args, json: json)
         case "-h", "--help":
             printHelp()
         default:
@@ -73,7 +77,20 @@ struct ConjetCLI {
         }
     }
 
-    private static func doctor(json: Bool) throws {
+    private static func doctor(args: [String] = [], json: Bool) throws {
+        if args.contains("--repair-network") {
+            let response = try UnixSocketClient(socketPath: try socketPath(paths: ConjetPaths.default()))
+                .send(DaemonRequest(command: .networkRepair), timeoutSeconds: 15)
+            if json {
+                print(try ConjetJSON.string(response))
+            } else {
+                print(response.message)
+                if let network = response.status?.network {
+                    printNetworkSummary(network, indent: "  ")
+                }
+            }
+            return
+        }
         let paths = ConjetPaths.default()
         let config = try ConjetConfig.loadOrCreate(paths: paths)
         let host = HostCapabilities.detect()
@@ -123,6 +140,9 @@ struct ConjetCLI {
                     }
                     print("  docker socket: \(vm.dockerSocketPath ?? "unknown")")
                 }
+                if let network = status.network {
+                    printNetworkSummary(network, indent: "  ")
+                }
             } else {
                 print(response.message)
             }
@@ -165,6 +185,267 @@ struct ConjetCLI {
         }
     }
 
+    private static func port(args: [String], json: Bool) throws {
+        let subcommand = args.first ?? "list"
+        switch subcommand {
+        case "list":
+            let response = try UnixSocketClient(socketPath: try socketPath(paths: ConjetPaths.default()))
+                .send(DaemonRequest(command: .status), timeoutSeconds: 10)
+            guard let network = response.status?.network else {
+                throw ConjetError.unavailable("network status is unavailable")
+            }
+            if json {
+                print(try ConjetJSON.string(network.forwards))
+            } else {
+                printPortList(network.forwards, verbose: args.contains("--verbose"))
+            }
+        case "diagnose":
+            guard args.count >= 2 else {
+                throw ConjetError.invalidArgument("usage: conjet port diagnose PORT[/tcp|/udp]")
+            }
+            let query = try parsePortQuery(args[1])
+            let response = try UnixSocketClient(socketPath: try socketPath(paths: ConjetPaths.default()))
+                .send(DaemonRequest(command: .status), timeoutSeconds: 10)
+            guard let network = response.status?.network else {
+                throw ConjetError.unavailable("network status is unavailable")
+            }
+            let matches = network.forwards.filter {
+                $0.hostPort == query.port && (query.protocol == nil || $0.protocol == query.protocol)
+            }
+            let diagnosis = portDiagnosis(query: query, network: network, matches: matches)
+            if json {
+                print(try ConjetJSON.string(diagnosis))
+            } else {
+                printPortDiagnosis(diagnosis)
+            }
+        default:
+            throw ConjetError.invalidArgument("unknown port command '\(subcommand)'")
+        }
+    }
+
+    private static func network(args: [String], json: Bool) throws {
+        let subcommand = args.first ?? "status"
+        switch subcommand {
+        case "status":
+            let response = try UnixSocketClient(socketPath: try socketPath(paths: ConjetPaths.default()))
+                .send(DaemonRequest(command: .status), timeoutSeconds: 10)
+            guard let network = response.status?.network else {
+                throw ConjetError.unavailable("network status is unavailable")
+            }
+            if json {
+                print(try ConjetJSON.string(network))
+            } else {
+                printNetworkSummary(network, indent: "")
+                if !network.messages.isEmpty {
+                    print("Messages:")
+                    for message in network.messages.suffix(10) {
+                        print("  - \(message)")
+                    }
+                }
+            }
+        case "repair":
+            let response = try UnixSocketClient(socketPath: try socketPath(paths: ConjetPaths.default()))
+                .send(DaemonRequest(command: .networkRepair), timeoutSeconds: 20)
+            if json {
+                print(try ConjetJSON.string(response))
+            } else {
+                print(response.message)
+                if let network = response.status?.network {
+                    printNetworkSummary(network, indent: "  ")
+                }
+            }
+        case "bridge-test":
+            let output = try networkBridgeTest()
+            if json {
+                print(try ConjetJSON.string(output))
+            } else {
+                print("Conjet network bridge test")
+                print("  requested bridge: \(output.requestedBridgeEngine)")
+                print("  active bridge: \(output.activeBridgeEngine)")
+                print("  guest echo: \(output.guestEcho)")
+                print("  guest metrics: \(output.guestMetrics)")
+                print("  binary frames: \(output.binaryFrames)")
+                print("  udp binary frames: \(output.udpBinaryFrames)")
+                print("  persistent vsock: \(output.persistentVsock)")
+                print("  tcp mode: \(output.tcpMode)")
+                print("  udp mode: \(output.udpMode)")
+                print("  tcp binary frames: \(output.tcpBinaryFrames)")
+                print("  persistent TCP vsock: \(output.persistentTCPVsock)")
+                print("  TCP vsock pool: \(output.tcpVsockPool)")
+                print("  python fallback active: \(output.pythonFallbackActive)")
+                print("  docker API passthrough: \(output.dockerApiPassthrough)")
+                print("  tcp guest echo: \(output.tcpGuestEcho)")
+                print("  binary ping: \(output.binaryPing)")
+                print("  udp binary echo: \(output.udpBinaryEcho)")
+                if let fallbackReason = output.fallbackReason {
+                    print("  fallback: \(fallbackReason)")
+                }
+                if !output.errors.isEmpty {
+                    print("  errors:")
+                    for error in output.errors {
+                        print("    - \(error)")
+                    }
+                }
+            }
+        case "bridge-switch":
+            try networkBridgeSwitch(args: Array(args.dropFirst()), json: json)
+        case "policy":
+            try networkPolicy(args: Array(args.dropFirst()), json: json)
+        case "enable-turbo":
+            throw ConjetError.unavailable("ConjetNet turbo mode is experimental and not available in this build")
+        default:
+            throw ConjetError.invalidArgument("unknown network command '\(subcommand)'")
+        }
+    }
+
+    private static func networkBridgeSwitch(args: [String], json: Bool) throws {
+        guard let rawEngine = args.first else {
+            throw ConjetError.invalidArgument("usage: conjet network bridge-switch python-legacy|conjet-netd-c [--restart]")
+        }
+        let engine = try parseNetworkBridgeEngine(rawEngine)
+        guard engine != .auto else {
+            throw ConjetError.invalidArgument("bridge-switch requires python-legacy or conjet-netd-c")
+        }
+        let restart = args.contains("--restart")
+        let paths = ConjetPaths.default()
+        var config = try ConjetConfig.loadOrCreate(paths: paths)
+        config.networkBridgeEngine = engine
+        try config.save(paths: paths)
+        try writeBridgeSelectorToBootstrap(paths: paths, engine: engine)
+
+        if !FileManager.default.fileExists(atPath: paths.dockerSocket.path) {
+            try start(args: ["--bridge-engine", engine.rawValue], json: false)
+        }
+
+        let script = "mkdir -p /etc/conjet && printf '%s\\n' \(shellSingleQuote(engine.rawValue)) > /etc/conjet/network-bridge-engine && cat /etc/conjet/network-bridge-engine"
+        let write = try runGuestRootShell(script)
+        guard write.succeeded else {
+            throw ConjetError.unavailable("failed to write guest bridge selector: \(write.stderr)")
+        }
+
+        if restart {
+            try stop(args: ["--timeout", "10"], json: false)
+            try start(args: ["--bridge-engine", engine.rawValue], json: false)
+        }
+
+        let output = try networkBridgeTest()
+        if json {
+            print(try ConjetJSON.string(output))
+        } else {
+            print("Conjet network bridge switched")
+            print("  requested bridge: \(output.requestedBridgeEngine)")
+            print("  active bridge: \(output.activeBridgeEngine)")
+            print("  restart: \(restart)")
+            if output.activeBridgeEngine != engine.rawValue {
+                print("  warning: active bridge does not match requested bridge")
+            }
+        }
+    }
+
+    private static func networkPolicy(args: [String], json: Bool) throws {
+        let paths = ConjetPaths.default()
+        var config = try ConjetConfig.loadOrCreate(paths: paths)
+        guard args.first == "set" else {
+            if json {
+                print(try ConjetJSON.string(config))
+            } else {
+                print("Network policy")
+                print("  bind policy: \(config.networkBindPolicy.rawValue)")
+                print("  proxy engine: \(config.networkProxyEngine.rawValue)")
+                if !config.networkLANAllowedCIDRs.isEmpty {
+                    print("  LAN CIDRs: \(config.networkLANAllowedCIDRs.joined(separator: ", "))")
+                }
+                if !config.networkLANAllowedPorts.isEmpty {
+                    print("  LAN ports: \(config.networkLANAllowedPorts.map(String.init).joined(separator: ", "))")
+                }
+            }
+            return
+        }
+
+        guard args.count >= 2 else {
+            throw ConjetError.invalidArgument("usage: conjet network policy set secure-local|docker-strict|lan-allowlist [--allow-cidr CIDR] [--allow-port PORT]")
+        }
+        config.networkBindPolicy = try parseNetworkBindPolicy(args[1])
+        var remaining = Array(args.dropFirst(2))
+        while !remaining.isEmpty {
+            let flag = remaining.removeFirst()
+            switch flag {
+            case "--allow-cidr":
+                config.networkLANAllowedCIDRs.append(try consumeValue(flag, from: &remaining))
+            case "--allow-port":
+                config.networkLANAllowedPorts.append(try parsePortNumber(consumeValue(flag, from: &remaining), flag: flag))
+            case "--clear-allowlist":
+                config.networkLANAllowedCIDRs.removeAll()
+                config.networkLANAllowedPorts.removeAll()
+            default:
+                throw ConjetError.invalidArgument("unknown network policy option '\(flag)'")
+            }
+        }
+        try config.save(paths: paths)
+        if json {
+            print(try ConjetJSON.string(config))
+        } else {
+            print("network policy saved: \(config.networkBindPolicy.rawValue)")
+            print("  restart Conjet for running listeners to adopt the new policy")
+        }
+    }
+
+    private static func networkBridgeTest() throws -> BridgeTestOutput {
+        let paths = ConjetPaths.default()
+        let config = try ConjetConfig.loadOrCreate(paths: paths)
+        let response = try UnixSocketClient(socketPath: try socketPath(paths: paths))
+            .send(DaemonRequest(command: .status), timeoutSeconds: 10)
+        let network = response.status?.network
+        let socket = try ensureConjetDockerSocket()
+
+        var errors: [String] = []
+        let dockerApiPassthrough = bridgeHTTPCheck(
+            socketPath: socket,
+            path: "/_ping",
+            expectedBodySubstring: "OK",
+            errors: &errors,
+            label: "Docker API passthrough"
+        )
+        let tcpGuestEcho = bridgeHTTPCheck(
+            socketPath: socket,
+            path: "/conjet-guest-echo",
+            expectedBodySubstring: "conjet-guest-echo",
+            errors: &errors,
+            label: "guest echo"
+        )
+        let metricsHTTP = bridgeHTTPCheck(
+            socketPath: socket,
+            path: "/conjet-bridge-metrics",
+            expectedBodySubstring: "bridge_engine",
+            errors: &errors,
+            label: "guest metrics"
+        )
+        let binaryPing = bridgeBinaryPing(socketPath: socket, errors: &errors)
+        let udpBinaryEcho = bridgeUDPBinaryEcho(socketPath: socket, errors: &errors)
+
+        return BridgeTestOutput(
+            requestedBridgeEngine: network?.requestedBridgeEngine ?? config.networkBridgeEngine.rawValue,
+            activeBridgeEngine: network?.bridgeEngine ?? network?.capabilities.bridgeEngine ?? "unknown",
+            fallbackReason: network?.fallbackReason,
+            guestEcho: network?.capabilities.guestEcho ?? tcpGuestEcho,
+            guestMetrics: network?.capabilities.guestMetrics ?? metricsHTTP,
+            binaryFrames: network?.capabilities.binaryFrames ?? binaryPing,
+            udpBinaryFrames: network?.capabilities.udpBinaryFrames ?? udpBinaryEcho,
+            persistentVsock: network?.capabilities.persistentVsock ?? false,
+            tcpMode: network?.tcpMode ?? "legacy-tcp-proxy",
+            udpMode: network?.udpMode ?? "legacy-udp-proxy",
+            tcpBinaryFrames: network?.capabilities.tcpBinaryFrames ?? false,
+            persistentTCPVsock: network?.capabilities.persistentTCPVsock ?? false,
+            tcpVsockPool: network?.capabilities.tcpVsockPool ?? false,
+            pythonFallbackActive: network?.pythonFallbackActive ?? false,
+            dockerApiPassthrough: dockerApiPassthrough,
+            tcpGuestEcho: tcpGuestEcho,
+            binaryPing: binaryPing,
+            udpBinaryEcho: udpBinaryEcho,
+            errors: errors
+        )
+    }
+
     private static func start(args: [String] = [], json: Bool = false) throws {
         let paths = ConjetPaths.default()
         let config = try updateProfileConfigFromStartArgs(args, paths: paths, json: json)
@@ -175,6 +456,14 @@ struct ConjetCLI {
 
     private static func updateProfileConfigFromStartArgs(_ args: [String], paths: ConjetPaths, json: Bool) throws -> ConjetConfig {
         var config = try ConjetConfig.loadOrCreate(paths: paths)
+        if let envProxyEngine = ProcessInfo.processInfo.environment["CONJET_NET_PROXY_ENGINE"],
+           !envProxyEngine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            config.networkProxyEngine = try parseNetworkProxyEngine(envProxyEngine)
+        }
+        if let envBridgeEngine = ProcessInfo.processInfo.environment["CONJET_NET_BRIDGE_ENGINE"],
+           !envBridgeEngine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            config.networkBridgeEngine = try parseNetworkBridgeEngine(envBridgeEngine)
+        }
         let original = config
         var remaining = args
 
@@ -201,6 +490,16 @@ struct ConjetCLI {
                 config.runtime = try normalizeRuntime(consumeValue(flag, from: &remaining))
             case "--arch", "--architecture":
                 config.architecture = try normalizeArchitecture(consumeValue(flag, from: &remaining))
+            case "--network-bind-policy":
+                config.networkBindPolicy = try parseNetworkBindPolicy(consumeValue(flag, from: &remaining))
+            case "--proxy-engine", "--network-proxy-engine":
+                config.networkProxyEngine = try parseNetworkProxyEngine(consumeValue(flag, from: &remaining))
+            case "--bridge-engine", "--network-bridge-engine":
+                config.networkBridgeEngine = try parseNetworkBridgeEngine(consumeValue(flag, from: &remaining))
+            case "--allow-cidr":
+                config.networkLANAllowedCIDRs.append(try consumeValue(flag, from: &remaining))
+            case "--allow-port":
+                config.networkLANAllowedPorts.append(try parsePortNumber(consumeValue(flag, from: &remaining), flag: flag))
             default:
                 throw ConjetError.invalidArgument("unknown start option '\(flag)'")
             }
@@ -273,6 +572,7 @@ struct ConjetCLI {
             }
             return
         }
+        try writeBridgeSelectorToBootstrap(paths: ConjetPaths.default(), engine: config.networkBridgeEngine)
         let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
         let dockerContext = configureDockerContextIfStarted(response, json: json)
         let hostShares = mountHostSharesIfStarted(response, dockerContext: dockerContext, config: config, json: json)
@@ -925,6 +1225,328 @@ struct ConjetCLI {
             print("  disk image: \(diskImagePath)")
         }
         print("  runtime: \(config.runtime)")
+        print("  network bind policy: \(config.networkBindPolicy.rawValue)")
+        print("  network proxy engine: \(config.networkProxyEngine.rawValue)")
+        print("  network bridge engine: \(config.networkBridgeEngine.rawValue)")
+    }
+
+    private static func printNetworkSummary(_ network: ConjetNetworkStatus, indent: String) {
+        print("\(indent)Network:")
+        print("\(indent)  Bind policy: \(network.bindPolicy.rawValue)")
+        print("\(indent)  Proxy engine: \(network.proxyEngine)")
+        print("\(indent)  Requested bridge: \(network.requestedBridgeEngine ?? "unknown")")
+        print("\(indent)  Bridge engine: \(network.bridgeEngine)")
+        print("\(indent)  TCP mode: \(network.tcpMode)")
+        print("\(indent)  UDP mode: \(network.udpMode)")
+        print("\(indent)  TCP forwards: \(network.activeTCPForwards) listening")
+        print("\(indent)  UDP forwards: \(network.activeUDPForwards) listening")
+        print("\(indent)  Failed forwards: \(network.failedForwards)")
+        print("\(indent)  Conflicts: \(network.conflictCount)")
+        print("\(indent)  Docker events: \(network.eventWatcherState)")
+        print("\(indent)  Guest capabilities: tcp_proxy=\(network.capabilities.tcpProxy) udp_proxy=\(network.capabilities.udpProxy)")
+        print("\(indent)  Guest bridge: \(network.capabilities.bridgeEngine ?? "unknown")")
+        print("\(indent)  Binary frames: \(network.capabilities.binaryFrames) udp_binary_frames=\(network.capabilities.udpBinaryFrames)")
+        print("\(indent)  TCP binary: frames=\(network.tcpBinaryFrames) persistent_vsock=\(network.persistentTCPVsock) pool=\(network.tcpVsockPool)")
+        print("\(indent)  Python fallback active: \(network.pythonFallbackActive)")
+        if let fallbackReason = network.fallbackReason {
+            print("\(indent)  Bridge fallback: \(fallbackReason)")
+        }
+        if let lastReconcileAt = network.lastReconcileAt {
+            print("\(indent)  Last reconcile: \(lastReconcileAt)")
+        }
+    }
+
+    private static func printPortList(_ forwards: [ConjetPortForwardStatus], verbose: Bool) {
+        guard !forwards.isEmpty else {
+            print("No Docker published ports are currently tracked.")
+            return
+        }
+        print([
+            padded("PORT", width: 8),
+            padded("PROTO", width: 5),
+            padded("BIND", width: 15),
+            padded("TARGET", width: 21),
+            padded("STATE", width: 22),
+            padded("CONTAINER", width: 18)
+        ].joined(separator: " "))
+        for forward in forwards.sorted(by: portSort) {
+            let target = "\(forward.targetIP ?? "unknown"):\(forward.targetPort)"
+            let container = forward.containerName ?? forward.containerID?.prefix(12).description ?? "-"
+            print([
+                padded(String(forward.hostPort), width: 8),
+                padded(forward.protocol.rawValue, width: 5),
+                padded(forward.hostIP, width: 15),
+                padded(target, width: 21),
+                padded(forward.state.rawValue, width: 22),
+                padded(container, width: 18)
+            ].joined(separator: " "))
+            if verbose {
+                if let warning = forward.warning {
+                    print("  warning: \(warning)")
+                }
+                if let error = forward.error {
+                    print("  error: \(error)")
+                }
+            }
+        }
+    }
+
+    private static func printPortDiagnosis(_ diagnosis: PortDiagnosis) {
+        let proto = diagnosis.queryProtocol ?? "tcp/udp"
+        print("Port \(diagnosis.queryPort)/\(proto)")
+        guard !diagnosis.matches.isEmpty else {
+            print("  State: not tracked")
+            print("  Policy: \(diagnosis.bindPolicy)")
+            print("  Guest capability: tcp_proxy=\(diagnosis.tcpProxy) udp_proxy=\(diagnosis.udpProxy)")
+            print("  Guest bridge: \(diagnosis.bridgeEngine)")
+            print("  Suggested fix: verify the container is running and published through the conjet Docker context.")
+            return
+        }
+        for forward in diagnosis.matches.sorted(by: portSort) {
+            print("  State: \(forward.state.rawValue)")
+            print("  Host bind: \(forward.hostIP):\(forward.hostPort)")
+            print("  Target: \(forward.containerName ?? forward.containerID ?? "container") \(forward.targetIP ?? "unknown"):\(forward.targetPort)")
+            print("  Protocol: \(forward.protocol.rawValue)")
+            print("  Policy: \(forward.policy.rawValue)")
+            print("  Proxy engine: \(forward.proxyEngine)")
+            print("  Guest capability: tcp_proxy=\(diagnosis.tcpProxy) udp_proxy=\(diagnosis.udpProxy)")
+            print("  Guest bridge: \(diagnosis.bridgeEngine)")
+            if let warning = forward.warning {
+                print("  Warning: \(warning)")
+            }
+            if let error = forward.error {
+                print("  Error: \(error)")
+                print("  Suggested fix: stop the process using the port, change the Compose mapping, or run conjet network repair.")
+            } else {
+                print("  Last check: ok")
+            }
+        }
+        if !diagnosis.activeChecks.isEmpty {
+            print("  Active checks:")
+            for check in diagnosis.activeChecks {
+                let status = check.ok ? "ok" : "failed"
+                if let detail = check.detail {
+                    print("    \(check.name): \(status) - \(detail)")
+                } else {
+                    print("    \(check.name): \(status)")
+                }
+            }
+        }
+    }
+
+    private static func portDiagnosis(
+        query: PortQuery,
+        network: ConjetNetworkStatus,
+        matches: [ConjetPortForwardStatus]
+    ) -> PortDiagnosis {
+        let activeChecks = matches.sorted(by: portSort).flatMap { forward -> [PortActiveCheck] in
+            guard forward.state == .listening else {
+                return [
+                    PortActiveCheck(
+                        name: "\(forward.protocol.rawValue)_listener",
+                        ok: false,
+                        detail: "tracked state is \(forward.state.rawValue)",
+                        protocol: forward.protocol.rawValue,
+                        host: forward.hostIP,
+                        port: forward.hostPort
+                    )
+                ]
+            }
+            switch forward.protocol {
+            case .tcp:
+                return [activeTCPPortCheck(forward)]
+            case .udp:
+                return [activeUDPPortCheck(forward)]
+            }
+        }
+        return PortDiagnosis(
+            queryPort: query.port,
+            queryProtocol: query.protocol?.rawValue,
+            bindPolicy: network.bindPolicy.rawValue,
+            bridgeEngine: network.bridgeEngine,
+            tcpMode: network.tcpMode,
+            udpMode: network.udpMode,
+            tcpProxy: network.capabilities.tcpProxy,
+            udpProxy: network.capabilities.udpProxy,
+            tcpBinaryFrames: network.tcpBinaryFrames,
+            persistentTCPVsock: network.persistentTCPVsock,
+            tcpVsockPool: network.tcpVsockPool,
+            pythonFallbackActive: network.pythonFallbackActive,
+            matches: matches,
+            activeChecks: activeChecks
+        )
+    }
+
+    private static func activeTCPPortCheck(_ forward: ConjetPortForwardStatus) -> PortActiveCheck {
+        let host = activeCheckHost(forward.hostIP)
+        let result = tcpConnect(host: host, port: forward.hostPort, timeoutSeconds: 1)
+        return PortActiveCheck(
+            name: "tcp_connect",
+            ok: result.ok,
+            detail: result.detail,
+            protocol: "tcp",
+            host: host,
+            port: forward.hostPort
+        )
+    }
+
+    private static func activeUDPPortCheck(_ forward: ConjetPortForwardStatus) -> PortActiveCheck {
+        let host = activeCheckHost(forward.hostIP)
+        let result = udpProbe(host: host, port: forward.hostPort, timeoutSeconds: 1)
+        return PortActiveCheck(
+            name: "udp_datagram",
+            ok: result.ok,
+            detail: result.detail,
+            protocol: "udp",
+            host: host,
+            port: forward.hostPort
+        )
+    }
+
+    private static func activeCheckHost(_ hostIP: String) -> String {
+        switch hostIP {
+        case "0.0.0.0", "::", "":
+            return "127.0.0.1"
+        default:
+            return hostIP
+        }
+    }
+
+    private static func tcpConnect(host: String, port: Int, timeoutSeconds: Int) -> (ok: Bool, detail: String) {
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            return (false, "socket failed: \(String(cString: strerror(errno)))")
+        }
+        defer { Darwin.close(fd) }
+        disableCLISigpipe(fd)
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        }
+        guard var address = ipv4Address(host: host, port: port) else {
+            return (false, "unsupported or invalid IPv4 host \(host)")
+        }
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if connected == 0 {
+            return (true, "connected")
+        }
+        guard errno == EINPROGRESS else {
+            return (false, "connect failed: \(String(cString: strerror(errno)))")
+        }
+        var writeSet = fd_set()
+        fdZero(&writeSet)
+        fdSet(fd, set: &writeSet)
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
+        let selected = Darwin.select(fd + 1, nil, &writeSet, nil, &timeout)
+        if selected <= 0 {
+            return (false, selected == 0 ? "connect timed out" : "select failed: \(String(cString: strerror(errno)))")
+        }
+        var socketError: Int32 = 0
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0 else {
+            return (false, "SO_ERROR failed: \(String(cString: strerror(errno)))")
+        }
+        if socketError == 0 {
+            return (true, "connected")
+        }
+        return (false, "connect failed: \(String(cString: strerror(socketError)))")
+    }
+
+    private static func udpProbe(host: String, port: Int, timeoutSeconds: Int) -> (ok: Bool, detail: String) {
+        let fd = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else {
+            return (false, "socket failed: \(String(cString: strerror(errno)))")
+        }
+        defer { Darwin.close(fd) }
+        guard var address = ipv4Address(host: host, port: port) else {
+            return (false, "unsupported or invalid IPv4 host \(host)")
+        }
+        let payload = Data("conjet-diagnose".utf8)
+        let sent = payload.withUnsafeBytes { raw -> Int in
+            guard let base = raw.baseAddress else { return 0 }
+            return withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.sendto(fd, base, raw.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+        guard sent == payload.count else {
+            return (false, "sendto failed: \(String(cString: strerror(errno)))")
+        }
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var buffer = [UInt8](repeating: 0, count: 512)
+        let count = Darwin.recv(fd, &buffer, buffer.count, 0)
+        if count > 0 {
+            return (true, "datagram sent and \(count) byte response received")
+        }
+        if errno == EAGAIN || errno == EWOULDBLOCK {
+            return (true, "datagram sent; no response required")
+        }
+        return (true, "datagram sent")
+    }
+
+    private static func ipv4Address(host: String, port: Int) -> sockaddr_in? {
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+            return nil
+        }
+        return address
+    }
+
+    private static func fdZero(_ set: inout fd_set) {
+        set.fds_bits = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+
+    private static func fdSet(_ fd: Int32, set: inout fd_set) {
+        let intOffset = Int(fd) / (MemoryLayout<Int32>.size * 8)
+        let bitOffset = Int(fd) % (MemoryLayout<Int32>.size * 8)
+        let mask = Int32(1 << bitOffset)
+        withUnsafeMutablePointer(to: &set.fds_bits) { pointer in
+            pointer.withMemoryRebound(to: Int32.self, capacity: 32) { bits in
+                bits[intOffset] |= mask
+            }
+        }
+    }
+
+    private static func disableCLISigpipe(_ fd: Int32) {
+        var enabled: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+    }
+
+    private static func portSort(_ lhs: ConjetPortForwardStatus, _ rhs: ConjetPortForwardStatus) -> Bool {
+        if lhs.hostPort != rhs.hostPort { return lhs.hostPort < rhs.hostPort }
+        if lhs.protocol != rhs.protocol { return lhs.protocol.rawValue < rhs.protocol.rawValue }
+        return lhs.hostIP < rhs.hostIP
+    }
+
+    private static func padded(_ value: String, width: Int) -> String {
+        if value.count >= width { return value }
+        return value + String(repeating: " ", count: width - value.count)
+    }
+
+    private static func parsePortQuery(_ value: String) throws -> PortQuery {
+        let parts = value.split(separator: "/", maxSplits: 1).map(String.init)
+        guard let port = Int(parts[0]), port > 0, port <= 65_535 else {
+            throw ConjetError.invalidArgument("port must be between 1 and 65535")
+        }
+        let proto: ConjetPortProtocol?
+        if parts.count == 2 {
+            guard let parsed = ConjetPortProtocol(rawValue: parts[1].lowercased()) else {
+                throw ConjetError.invalidArgument("protocol must be tcp or udp")
+            }
+            proto = parsed
+        } else {
+            proto = nil
+        }
+        return PortQuery(port: port, protocol: proto)
     }
 
     private static func consumeValue(_ flag: String, from args: inout [String]) throws -> String {
@@ -940,6 +1562,48 @@ struct ConjetCLI {
             throw ConjetError.invalidArgument("\(flag) must be a positive integer")
         }
         return integer
+    }
+
+    private static func parsePortNumber(_ value: String, flag: String) throws -> Int {
+        let port = try parsePositiveInt(value, flag: flag)
+        guard port <= 65_535 else {
+            throw ConjetError.invalidArgument("\(flag) must be between 1 and 65535")
+        }
+        return port
+    }
+
+    private static func parseNetworkBindPolicy(_ value: String) throws -> ConjetNetworkBindPolicy {
+        guard let policy = ConjetNetworkBindPolicy(rawValue: value) else {
+            throw ConjetError.invalidArgument("network bind policy must be secure-local, docker-strict, or lan-allowlist")
+        }
+        return policy
+    }
+
+    private static func parseNetworkProxyEngine(_ value: String) throws -> ConjetNetworkProxyEngine {
+        if let engine = ConjetNetworkProxyEngine(rawValue: value) {
+            return engine
+        }
+        switch value {
+        case "nio":
+            return .eventLoop
+        case "gcd-evented":
+            return .gcdFallback
+        default:
+            throw ConjetError.invalidArgument("network proxy engine must be auto, nio, event-loop, gcd-evented, gcd-fallback, or turbo")
+        }
+    }
+
+    private static func parseNetworkBridgeEngine(_ value: String) throws -> ConjetNetworkBridgeEngine {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "auto":
+            return .auto
+        case "python", "python-legacy":
+            return .pythonLegacy
+        case "conjet-netd", "conjet-netd-c":
+            return .conjetNetdC
+        default:
+            throw ConjetError.invalidArgument("network bridge engine must be auto, python-legacy, or conjet-netd-c")
+        }
     }
 
     private static func parseMemoryMiB(_ value: String, flag: String) throws -> Int {
@@ -1170,6 +1834,274 @@ struct ConjetCLI {
             throw ConjetError.unavailable("Conjet Docker socket is not available yet at \(socket)")
         }
         return socket
+    }
+
+    private static func bridgeHTTPCheck(
+        socketPath: String,
+        path: String,
+        expectedBodySubstring: String,
+        errors: inout [String],
+        label: String
+    ) -> Bool {
+        do {
+            let response = try unixSocketHTTPRequest(socketPath: socketPath, path: path)
+            guard response.statusCode >= 200, response.statusCode < 300 else {
+                errors.append("\(label) returned HTTP \(response.statusCode)")
+                return false
+            }
+            guard response.body.contains(expectedBodySubstring) else {
+                errors.append("\(label) did not include expected response")
+                return false
+            }
+            return true
+        } catch {
+            errors.append("\(label) failed: \(error)")
+            return false
+        }
+    }
+
+    private static func bridgeBinaryPing(socketPath: String, errors: inout [String]) -> Bool {
+        do {
+            let fd = try connectUnixSocket(path: socketPath, timeoutSeconds: 2)
+            defer { Darwin.close(fd) }
+            let payload = Data("bridge-test".utf8)
+            try writeBinaryFrameForBridgeTest(
+                ConjetBinaryFrame(type: .ping, streamID: 1, payload: payload),
+                to: fd
+            )
+            let response = try readBinaryFrameForBridgeTest(from: fd)
+            guard response.type == .pong, response.payload == payload else {
+                errors.append("binary ping returned \(response.type)")
+                return false
+            }
+            return true
+        } catch {
+            errors.append("binary ping failed: \(error)")
+            return false
+        }
+    }
+
+    private static func bridgeUDPBinaryEcho(socketPath: String, errors: inout [String]) -> Bool {
+        do {
+            let fd = try connectUnixSocket(path: socketPath, timeoutSeconds: 2)
+            defer { Darwin.close(fd) }
+            let portForwardID: UInt32 = 4_242
+            let target = Data("\(portForwardID) udp 127.0.0.1 0".utf8)
+            try writeBinaryFrameForBridgeTest(
+                ConjetBinaryFrame(type: .registerTarget, portForwardID: portForwardID, payload: target),
+                to: fd
+            )
+            let registration = try readBinaryFrameForBridgeTest(from: fd)
+            guard registration.type == .helloAck else {
+                errors.append("UDP binary target registration returned \(registration.type)")
+                return false
+            }
+            let payload = Data("conjet-udp-binary-echo".utf8)
+            try writeBinaryFrameForBridgeTest(
+                ConjetBinaryFrame(type: .udp, streamID: 2, portForwardID: portForwardID, payload: payload),
+                to: fd
+            )
+            let response = try readBinaryFrameForBridgeTest(from: fd)
+            guard response.type == .udp, response.payload == payload else {
+                errors.append("UDP binary echo returned \(response.type)")
+                return false
+            }
+            return true
+        } catch {
+            errors.append("UDP binary echo failed: \(error)")
+            return false
+        }
+    }
+
+    private static func unixSocketHTTPRequest(socketPath: String, path: String) throws -> BridgeHTTPResponse {
+        let fd = try connectUnixSocket(path: socketPath, timeoutSeconds: 3)
+        defer { Darwin.close(fd) }
+        let request = "GET \(path) HTTP/1.1\r\nHost: conjet\r\nConnection: close\r\n\r\n"
+        try writeAllForBridgeTest(Data(request.utf8), to: fd)
+        Darwin.shutdown(fd, SHUT_WR)
+        let data = try readAllForBridgeTest(from: fd, maxBytes: 256 * 1024)
+        guard let text = String(data: data, encoding: .utf8),
+              let statusLine = text.components(separatedBy: "\r\n").first else {
+            throw ConjetError.decoding("bridge HTTP response was not UTF-8")
+        }
+        let pieces = statusLine.split(separator: " ")
+        let statusCode = pieces.count >= 2 ? Int(pieces[1]) ?? 0 : 0
+        let body = text.components(separatedBy: "\r\n\r\n").dropFirst().joined(separator: "\r\n\r\n")
+        return BridgeHTTPResponse(statusCode: statusCode, body: body)
+    }
+
+    private static func connectUnixSocket(path: String, timeoutSeconds: Double) throws -> Int32 {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw ConjetError.socket("socket() failed: \(lastErrnoForBridgeTest())")
+        }
+        var enabled: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+        setSocketTimeoutForBridgeTest(fd, timeoutSeconds: timeoutSeconds)
+        do {
+            try withUnixSocketAddressForBridgeTest(path: path) { address, length in
+                guard Darwin.connect(fd, address, length) == 0 else {
+                    throw ConjetError.socket("connect(\(path)) failed: \(lastErrnoForBridgeTest())")
+                }
+            }
+            return fd
+        } catch {
+            Darwin.close(fd)
+            throw error
+        }
+    }
+
+    private static func withUnixSocketAddressForBridgeTest<Result>(
+        path: String,
+        _ body: (UnsafePointer<sockaddr>, socklen_t) throws -> Result
+    ) throws -> Result {
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = path.utf8CString.map { UInt8(bitPattern: $0) }
+        let maxPathLength = MemoryLayout.size(ofValue: address.sun_path)
+        guard pathBytes.count <= maxPathLength else {
+            throw ConjetError.socket("Unix socket path is too long: \(path)")
+        }
+        withUnsafeMutableBytes(of: &address.sun_path) { rawBuffer in
+            rawBuffer.copyBytes(from: pathBytes)
+        }
+        return try withUnsafePointer(to: &address) { pointer in
+            try pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                try body(socketAddress, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+    }
+
+    private static func setSocketTimeoutForBridgeTest(_ fd: Int32, timeoutSeconds: Double) {
+        let timeout = max(0.1, timeoutSeconds)
+        var value = timeval(
+            tv_sec: Int(timeout),
+            tv_usec: Int32((timeout - floor(timeout)) * 1_000_000)
+        )
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
+    }
+
+    private static func writeAllForBridgeTest(_ data: Data, to fd: Int32) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var written = 0
+            while written < data.count {
+                let result = Darwin.write(fd, baseAddress.advanced(by: written), data.count - written)
+                if result > 0 {
+                    written += result
+                } else if result < 0, errno == EINTR {
+                    continue
+                } else {
+                    throw ConjetError.socket("write() failed: \(lastErrnoForBridgeTest())")
+                }
+            }
+        }
+    }
+
+    private static func readAllForBridgeTest(from fd: Int32, maxBytes: Int) throws -> Data {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while data.count < maxBytes {
+            let count = Darwin.read(fd, &buffer, min(buffer.count, maxBytes - data.count))
+            if count > 0 {
+                data.append(buffer, count: count)
+            } else if count < 0, errno == EINTR {
+                continue
+            } else if count < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+                break
+            } else if count < 0 {
+                throw ConjetError.socket("read() failed: \(lastErrnoForBridgeTest())")
+            } else {
+                break
+            }
+        }
+        return data
+    }
+
+    private static func writeBinaryFrameForBridgeTest(_ frame: ConjetBinaryFrame, to fd: Int32) throws {
+        try writeAllForBridgeTest(try frame.encode(), to: fd)
+    }
+
+    private static func readBinaryFrameForBridgeTest(from fd: Int32) throws -> ConjetBinaryFrame {
+        let header = try readExactForBridgeTest(from: fd, byteCount: ConjetBinaryFrame.headerSize)
+        let payloadLength = binaryPayloadLengthForBridgeTest(header)
+        guard payloadLength <= ConjetBinaryFrame.maxPayloadBytes else {
+            throw ConjetError.socket("binary frame payload too large: \(payloadLength)")
+        }
+        let payload = payloadLength > 0 ? try readExactForBridgeTest(from: fd, byteCount: payloadLength) : Data()
+        return try ConjetBinaryFrame.decode(header + payload)
+    }
+
+    private static func readExactForBridgeTest(from fd: Int32, byteCount: Int) throws -> Data {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: min(4096, max(1, byteCount)))
+        while data.count < byteCount {
+            let count = Darwin.read(fd, &buffer, min(buffer.count, byteCount - data.count))
+            if count > 0 {
+                data.append(buffer, count: count)
+            } else if count < 0, errno == EINTR {
+                continue
+            } else {
+                throw ConjetError.socket("binary frame read failed: \(lastErrnoForBridgeTest())")
+            }
+        }
+        return data
+    }
+
+    private static func binaryPayloadLengthForBridgeTest(_ header: Data) -> Int {
+        guard header.count >= ConjetBinaryFrame.headerSize else { return 0 }
+        let bytes = [UInt8](header)
+        return (Int(bytes[16]) << 24) | (Int(bytes[17]) << 16) | (Int(bytes[18]) << 8) | Int(bytes[19])
+    }
+
+    private static func lastErrnoForBridgeTest() -> String {
+        String(cString: strerror(errno))
+    }
+
+    private static func runGuestRootShell(_ script: String) throws -> ProcessResult {
+        let socket = try ensureConjetDockerSocket()
+        return try ProcessRunner.run("/usr/bin/env", [
+            "docker",
+            "--host",
+            "unix://\(socket)",
+            "run",
+            "--rm",
+            "--privileged",
+            "--pid=host",
+            "--net=host",
+            "--ipc=host",
+            "--uts=host",
+            "ubuntu:24.04",
+            "nsenter",
+            "-t",
+            "1",
+            "-m",
+            "-u",
+            "-i",
+            "-n",
+            "-p",
+            "--",
+            "sh",
+            "-lc",
+            script
+        ], timeoutSeconds: 120)
+    }
+
+    private static func writeBridgeSelectorToBootstrap(paths: ConjetPaths, engine: ConjetNetworkBridgeEngine) throws {
+        try FileManager.default.createDirectory(
+            at: paths.bootstrapShare,
+            withIntermediateDirectories: true
+        )
+        try "\(engine.rawValue)\n".write(
+            to: paths.bootstrapShare.appendingPathComponent("network-bridge-engine"),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    private static func shellSingleQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
     private static func runInheritedProcess(_ executable: String, _ arguments: [String]) throws {
@@ -1716,7 +2648,7 @@ struct ConjetCLI {
         guard !args.isEmpty else { return false }
         if isHelpFlag(args[0]) { return true }
         switch command {
-        case "vm", "sync", "project", "profile", "power":
+        case "vm", "sync", "project", "profile", "power", "port", "network":
             return args.indices.contains(1) && isHelpFlag(args[1])
         default:
             return false
@@ -1738,6 +2670,7 @@ struct ConjetCLI {
 
                 Usage:
                   conjet start [--cpus N] [--memory SIZE] [--disk SIZE_OR_PATH] [--runtime NAME] [--arch ARCH]
+                               [--network-bind-policy POLICY] [--proxy-engine ENGINE]
 
                 Options:
                   --cpus, --cpu N       Set VM CPU count
@@ -1745,6 +2678,10 @@ struct ConjetCLI {
                   --disk SIZE_OR_PATH   Set VM data disk size or use a custom disk image path
                   --runtime NAME        Set container runtime preference
                   --arch ARCH           Set guest architecture
+                  --network-bind-policy secure-local|docker-strict|lan-allowlist
+                  --proxy-engine auto|nio|event-loop|gcd-evented|gcd-fallback|turbo
+                  --allow-cidr CIDR     Add a LAN allowlist CIDR for lan-allowlist mode
+                  --allow-port PORT     Add a LAN allowlist port for lan-allowlist mode
                   --profile NAME        Use an isolated Conjet profile
                   --json                Emit machine-readable JSON where supported
                   -h, --help            Show this help text
@@ -1785,9 +2722,10 @@ struct ConjetCLI {
                 Check host capabilities and Conjet configuration.
 
                 Usage:
-                  conjet doctor [--json]
+                  conjet doctor [--repair-network] [--json]
 
                 Options:
+                  --repair-network      Reconcile ConjetNet state and restart network tracking
                   --profile NAME        Use an isolated Conjet profile
                   --json                Emit machine-readable JSON
                   -h, --help            Show this help text
@@ -1842,6 +2780,10 @@ struct ConjetCLI {
             printProfileHelp(parts: parts)
         case "power":
             printPowerHelp(parts: parts)
+        case "port":
+            printPortHelp(parts: parts)
+        case "network":
+            printNetworkHelp(parts: parts)
         default:
             printHelp()
         }
@@ -2066,6 +3008,72 @@ struct ConjetCLI {
         )
     }
 
+    private static func printPortHelp(parts: [String]) {
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "list":
+                print("Usage:\n  conjet port list [--verbose] [--json]")
+            case "diagnose":
+                print("Usage:\n  conjet port diagnose PORT[/tcp|/udp] [--json]")
+            default:
+                printPortHelp(parts: ["port"])
+            }
+            return
+        }
+
+        print(
+            """
+            Inspect Docker published ports exposed by ConjetNet.
+
+            Usage:
+              conjet port <command> [options]
+
+            Commands:
+              list       Show tracked TCP and UDP published ports
+              diagnose   Explain listener, policy, capability, and conflict state for a port
+            """
+        )
+    }
+
+    private static func printNetworkHelp(parts: [String]) {
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "status":
+                print("Usage:\n  conjet network status [--json]")
+            case "repair":
+                print("Usage:\n  conjet network repair [--json]")
+            case "bridge-test":
+                print("Usage:\n  conjet network bridge-test [--json]")
+            case "bridge-switch":
+                print("Usage:\n  conjet network bridge-switch python-legacy|conjet-netd-c [--restart] [--json]")
+            case "policy":
+                print("Usage:\n  conjet network policy\n  conjet network policy set secure-local|docker-strict|lan-allowlist [--allow-cidr CIDR] [--allow-port PORT] [--clear-allowlist]")
+            case "enable-turbo":
+                print("Usage:\n  conjet network enable-turbo")
+            default:
+                printNetworkHelp(parts: ["network"])
+            }
+            return
+        }
+
+        print(
+            """
+            Manage ConjetNet port publishing and bind policy.
+
+            Usage:
+              conjet network <command> [options]
+
+            Commands:
+              status       Show ConjetNet state and guest capabilities
+              repair       Clear stale state and reconcile published ports
+              bridge-test  Verify the active guest bridge and Docker passthrough
+              bridge-switch Select python-legacy or conjet-netd-c inside the guest
+              policy       Inspect or set the network bind policy
+              enable-turbo Show turbo-mode availability
+            """
+        )
+    }
+
     private static func printHelp() {
         print(
             """
@@ -2082,6 +3090,15 @@ struct ConjetCLI {
               shell       Open a privileged Linux shell through the Conjet Docker socket
               run         Run a Docker image through Conjet
               compose     Pass through to docker compose using Conjet
+
+            Networking:
+              port list        Show Docker published ports on macOS
+              port diagnose    Diagnose a published TCP or UDP port
+              network status   Show ConjetNet policy, capabilities, and watcher state
+              network repair   Reconcile stale port-forwarding state
+              network bridge-test Verify native bridge activation and Docker passthrough
+              network bridge-switch Switch the active guest bridge engine
+              network policy   Inspect or change the network bind policy
 
             VM Images:
               vm fetch-conjet-core   Download a Conjet Core VM image
@@ -2151,6 +3168,37 @@ private struct ConjetFetchUI {
         guard enabled else { return nil }
         return DownloadProgressRenderer(stage: stage)
     }
+}
+
+private struct PortQuery {
+    var port: Int
+    var `protocol`: ConjetPortProtocol?
+}
+
+private struct PortDiagnosis: Codable {
+    var queryPort: Int
+    var queryProtocol: String?
+    var bindPolicy: String
+    var bridgeEngine: String
+    var tcpMode: String
+    var udpMode: String
+    var tcpProxy: Bool
+    var udpProxy: Bool
+    var tcpBinaryFrames: Bool
+    var persistentTCPVsock: Bool
+    var tcpVsockPool: Bool
+    var pythonFallbackActive: Bool
+    var matches: [ConjetPortForwardStatus]
+    var activeChecks: [PortActiveCheck]
+}
+
+private struct PortActiveCheck: Codable {
+    var name: String
+    var ok: Bool
+    var detail: String?
+    var `protocol`: String
+    var host: String
+    var port: Int
 }
 
 private final class DownloadProgressRenderer: @unchecked Sendable {
@@ -2387,6 +3435,33 @@ private struct ProfileStatus: Codable, Equatable {
     var profile: String
     var home: String
     var config: ConjetConfig
+}
+
+private struct BridgeTestOutput: Codable, Equatable {
+    var requestedBridgeEngine: String
+    var activeBridgeEngine: String
+    var fallbackReason: String?
+    var guestEcho: Bool
+    var guestMetrics: Bool
+    var binaryFrames: Bool
+    var udpBinaryFrames: Bool
+    var persistentVsock: Bool
+    var tcpMode: String
+    var udpMode: String
+    var tcpBinaryFrames: Bool
+    var persistentTCPVsock: Bool
+    var tcpVsockPool: Bool
+    var pythonFallbackActive: Bool
+    var dockerApiPassthrough: Bool
+    var tcpGuestEcho: Bool
+    var binaryPing: Bool
+    var udpBinaryEcho: Bool
+    var errors: [String]
+}
+
+private struct BridgeHTTPResponse: Equatable {
+    var statusCode: Int
+    var body: String
 }
 
 private struct ConjetFSProjectRunResult: Codable, Equatable {

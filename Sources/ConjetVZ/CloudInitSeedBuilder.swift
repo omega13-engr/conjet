@@ -222,6 +222,8 @@ public enum CloudInitSeedBuilder {
               DOCKER_WAIT_LOG_SECONDS = 10
               CLIENT_DOCKER_WAIT_SECONDS = 30
               CAPABILITIES_PATH = b"/conjet-bridge-capabilities"
+              TCP_PROXY_PREFIX = b"CONJET-TCP "
+              UDP_PROXY_PREFIX = b"CONJET-UDP "
 
               def log(message):
                   sys.stderr.write(f"conjet-docker-vsock: {message}\\n")
@@ -264,7 +266,18 @@ public enum CloudInitSeedBuilder {
                       pass
 
               def write_bridge_capabilities(client):
-                  body = b'{"lazy_upstream":true,"docker_ready_cache":true}\\n'
+                  body = (
+                      b'{"version":2,'
+                      b'"capabilities":{"tcp_proxy":true,"udp_proxy":true,"docker_events":true,'
+                      b'"container_ip_lookup":true,"port_probe":true,"proxy_metrics":true,'
+                      b'"persistent_vsock":false,"tcp_mux":false,"udp_binary_frames":false,'
+                      b'"tcp_binary_frames":false,"persistent_tcp_vsock":false,"tcp_vsock_pool":false,'
+                      b'"bridge_engine":"python-legacy"},'
+                      b'"lazy_upstream":true,"docker_ready_cache":true,'
+                      b'"tcp_proxy":true,"udp_proxy":true,'
+                      b'"docker_events":true,"container_ip_lookup":true,'
+                      b'"port_probe":true,"proxy_metrics":true}\\n'
+                  )
                   response = (
                       b"HTTP/1.1 200 OK\\r\\n"
                       b"Content-Type: application/json\\r\\n"
@@ -299,6 +312,106 @@ public enum CloudInitSeedBuilder {
                   request_line = first_chunk.split(b"\\r\\n", 1)[0]
                   parts = request_line.split()
                   return len(parts) >= 2 and parts[0] == b"GET" and parts[1] == CAPABILITIES_PATH
+
+              def write_tcp_proxy_unavailable(client, message):
+                  body = f"Conjet guest TCP proxy is not ready: {message}\\n".encode()
+                  response = (
+                      b"HTTP/1.1 502 Bad Gateway\\r\\n"
+                      b"Content-Type: text/plain; charset=utf-8\\r\\n"
+                      b"Connection: close\\r\\n"
+                      b"Content-Length: " + str(len(body)).encode() + b"\\r\\n"
+                      b"\\r\\n" + body
+                  )
+                  try:
+                      client.sendall(response)
+                  except OSError:
+                      pass
+
+              def parse_tcp_proxy_request(first_chunk):
+                  line, separator, remainder = first_chunk.partition(b"\\n")
+                  if not separator or not line.startswith(TCP_PROXY_PREFIX):
+                      return None, None, remainder
+                  target = line[len(TCP_PROXY_PREFIX):].decode("ascii", errors="ignore").strip()
+                  host, separator, port_text = target.rpartition(":")
+                  if not separator or host not in ("127.0.0.1", "localhost"):
+                      return None, None, remainder
+                  try:
+                      port = int(port_text)
+                  except ValueError:
+                      return None, None, remainder
+                  if port <= 0 or port > 65535:
+                      return None, None, remainder
+                  return host, port, remainder
+
+              def parse_udp_proxy_request(first_chunk):
+                  line, separator, payload = first_chunk.partition(b"\\n")
+                  if not separator or not line.startswith(UDP_PROXY_PREFIX):
+                      return None, None, payload
+                  target = line[len(UDP_PROXY_PREFIX):].decode("ascii", errors="ignore").strip()
+                  host, separator, port_text = target.rpartition(":")
+                  if not separator or host not in ("127.0.0.1", "localhost"):
+                      return None, None, payload
+                  try:
+                      port = int(port_text)
+                  except ValueError:
+                      return None, None, payload
+                  if port <= 0 or port > 65535:
+                      return None, None, payload
+                  return host, port, payload
+
+              def handle_tcp_proxy(client, first_chunk):
+                  host, port, remainder = parse_tcp_proxy_request(first_chunk)
+                  if host is None:
+                      write_tcp_proxy_unavailable(client, "invalid TCP proxy request")
+                      close_socket(client)
+                      return
+
+                  try:
+                      upstream = socket.create_connection((host, port), timeout=10)
+                      try:
+                          upstream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                      except OSError:
+                          pass
+                  except OSError as exc:
+                      write_tcp_proxy_unavailable(client, f"could not connect to {host}:{port}: {exc}")
+                      close_socket(client)
+                      return
+
+                  if remainder:
+                      try:
+                          upstream.sendall(remainder)
+                      except OSError:
+                          close_socket(upstream)
+                          close_socket(client)
+                          return
+
+                  left = threading.Thread(target=pump, args=(client, upstream), daemon=True)
+                  right = threading.Thread(target=pump, args=(upstream, client), daemon=True)
+                  left.start()
+                  right.start()
+                  left.join()
+                  right.join()
+                  close_socket(upstream)
+                  close_socket(client)
+
+              def handle_udp_proxy(client, first_chunk):
+                  host, port, payload = parse_udp_proxy_request(first_chunk)
+                  if host is None:
+                      close_socket(client)
+                      return
+
+                  upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                  upstream.settimeout(2.0)
+                  try:
+                      upstream.sendto(payload, (host, port))
+                      response, _ = upstream.recvfrom(65507)
+                      if response:
+                          client.sendall(response)
+                  except OSError as exc:
+                      log(f"UDP proxy failed for {host}:{port}: {exc}")
+                  finally:
+                      close_socket(upstream)
+                      close_socket(client)
 
               def docker_api_ping(timeout=2.0):
                   upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -368,6 +481,14 @@ public enum CloudInitSeedBuilder {
                       close_socket(client)
                       return
 
+                  if first_chunk.startswith(TCP_PROXY_PREFIX):
+                      handle_tcp_proxy(client, first_chunk)
+                      return
+
+                  if first_chunk.startswith(UDP_PROXY_PREFIX):
+                      handle_udp_proxy(client, first_chunk)
+                      return
+
                   try:
                       upstream = connect_docker_with_retry()
                   except TimeoutError as exc:
@@ -404,7 +525,7 @@ public enum CloudInitSeedBuilder {
               except OSError:
                   pass
               listener.bind((VMADDR_CID_ANY, VSOCK_PORT))
-              listener.listen(128)
+                  listener.listen(1024)
               log(f"listening on VSOCK port {VSOCK_PORT}")
               open("/run/conjet/docker-vsock-ready", "w").write(str(VSOCK_PORT) + "\\n")
               while True:
@@ -423,8 +544,8 @@ public enum CloudInitSeedBuilder {
               Type=simple
               Environment=PYTHONUNBUFFERED=1
               ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
-              ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet; rm -f /run/conjet/docker-vsock-ready'
-              ExecStart=/bin/sh -c 'mkdir -p /run/conjet; exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1 | /usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0'
+              ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; mountpoint -q /mnt/conjetboot || mount -t virtiofs conjetboot /mnt/conjetboot 2>/dev/null || true; rm -f /run/conjet/docker-vsock-ready'
+              ExecStart=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; engine="${CONJET_NET_BRIDGE_ENGINE:-$(cat /mnt/conjetboot/network-bridge-engine 2>/dev/null || cat /etc/conjet/network-bridge-engine 2>/dev/null || echo python-legacy)}"; case "$engine" in auto|python|python-legacy|"") exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1 ;; conjet-netd|conjet-netd-c) if [ -x /usr/local/sbin/conjet-netd ]; then exec /usr/local/sbin/conjet-netd 2>&1; else echo "conjet-netd-c requested but /usr/local/sbin/conjet-netd is missing" >&2; exit 42; fi ;; *) echo "unsupported CONJET_NET_BRIDGE_ENGINE=$engine" >&2; exit 43 ;; esac | /usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0'
               Restart=always
               RestartSec=2
               StandardOutput=journal

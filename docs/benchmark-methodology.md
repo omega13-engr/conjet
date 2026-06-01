@@ -27,6 +27,7 @@ parallel and then runs energy in isolation:
 - no-cache gate
 - topology gate
 - polyglot real-project gate
+- network gate
 - energy gate
 
 Each suite writes raw `all-results.json` and a suite Markdown report. The root
@@ -113,6 +114,52 @@ swift run --package-path benchmarks conjet-bench energy-gate \
 If `powermetrics` is unavailable and `--require-power` is not passed, the report
 must mark the energy verdict as skipped. Skipped power data is not evidence for
 lower energy or lower power.
+
+## Network Gate
+
+ConjetNet networking is measured with:
+
+```sh
+swift run --package-path benchmarks conjet-bench network-gate \
+  --contexts conjet,orbstack,colima \
+  --samples 10 \
+  --output-dir benchmarks/reports/network-gate-local
+```
+
+The network gate reports localhost TCP publication latency, localhost HTTP
+latency, high-concurrency HTTP rows such as `http-localhost-c100`, UDP echo
+latency, and selected UDP payload-size rows when requested. Reports split the
+Conjet functional gate from baseline failures, so a Colima UDP failure is
+classified as a baseline failure instead of a Conjet TCP/UDP failure.
+
+It does not prove global networking superiority by itself. Claims must name the
+specific workload, sample count, and compared contexts.
+
+Proxy engines can be compared by restarting Conjet per engine:
+
+```sh
+swift run --package-path benchmarks conjet-bench network-gate \
+  --contexts conjet \
+  --proxy-engines gcd-evented,nio \
+  --samples 10 \
+  --output-dir benchmarks/reports/network-proxy-engines
+```
+
+The runner verifies `conjet network status` before sampling and labels results
+as separate runtimes, for example `conjet-gcd-evented` and `conjet-nio`.
+
+Path segmentation is measured separately:
+
+```sh
+swift run --package-path benchmarks conjet-bench network-segments \
+  --contexts conjet \
+  --samples 30 \
+  --output-dir benchmarks/reports/network-segments
+```
+
+Segment reports distinguish measured full-path rows from unavailable internal
+segments. Current guest images do not expose a VSOCK-only echo endpoint, so
+those rows are skipped explicitly instead of inferred.
 
 ## Claim Gate
 

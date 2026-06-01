@@ -12,6 +12,11 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     public var enableHostMounts: Bool
     public var socketPath: String?
     public var conjetCoreRepository: String
+    public var networkBindPolicy: ConjetNetworkBindPolicy
+    public var networkProxyEngine: ConjetNetworkProxyEngine
+    public var networkBridgeEngine: ConjetNetworkBridgeEngine
+    public var networkLANAllowedCIDRs: [String]
+    public var networkLANAllowedPorts: [Int]
 
     public init(
         vmCPUs: Int = 4,
@@ -24,7 +29,12 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         enableRosetta: Bool = true,
         enableHostMounts: Bool = true,
         socketPath: String? = nil,
-        conjetCoreRepository: String = ConjetCoreReleaseSource.defaultRepository
+        conjetCoreRepository: String = ConjetCoreReleaseSource.defaultRepository,
+        networkBindPolicy: ConjetNetworkBindPolicy = .secureLocal,
+        networkProxyEngine: ConjetNetworkProxyEngine = .auto,
+        networkBridgeEngine: ConjetNetworkBridgeEngine = .auto,
+        networkLANAllowedCIDRs: [String] = [],
+        networkLANAllowedPorts: [Int] = []
     ) {
         self.vmCPUs = vmCPUs
         self.memoryMiB = memoryMiB
@@ -37,9 +47,56 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         self.enableHostMounts = enableHostMounts
         self.socketPath = socketPath
         self.conjetCoreRepository = conjetCoreRepository
+        self.networkBindPolicy = networkBindPolicy
+        self.networkProxyEngine = networkProxyEngine
+        self.networkBridgeEngine = networkBridgeEngine
+        self.networkLANAllowedCIDRs = networkLANAllowedCIDRs
+        self.networkLANAllowedPorts = networkLANAllowedPorts
     }
 
     public static let `default` = ConjetConfig()
+
+    private enum CodingKeys: String, CodingKey {
+        case vmCPUs
+        case memoryMiB
+        case architecture
+        case diskGiB
+        case diskImagePath
+        case runtime
+        case quietStopMinutes
+        case enableRosetta
+        case enableHostMounts
+        case socketPath
+        case conjetCoreRepository
+        case networkBindPolicy
+        case networkProxyEngine
+        case networkBridgeEngine
+        case networkLANAllowedCIDRs
+        case networkLANAllowedPorts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let defaults = ConjetConfig.default
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            vmCPUs: try container.decodeIfPresent(Int.self, forKey: .vmCPUs) ?? defaults.vmCPUs,
+            memoryMiB: try container.decodeIfPresent(Int.self, forKey: .memoryMiB) ?? defaults.memoryMiB,
+            architecture: try container.decodeIfPresent(String.self, forKey: .architecture) ?? defaults.architecture,
+            diskGiB: try container.decodeIfPresent(Int.self, forKey: .diskGiB) ?? defaults.diskGiB,
+            diskImagePath: try container.decodeIfPresent(String.self, forKey: .diskImagePath) ?? defaults.diskImagePath,
+            runtime: try container.decodeIfPresent(String.self, forKey: .runtime) ?? defaults.runtime,
+            quietStopMinutes: try container.decodeIfPresent(Int.self, forKey: .quietStopMinutes) ?? defaults.quietStopMinutes,
+            enableRosetta: try container.decodeIfPresent(Bool.self, forKey: .enableRosetta) ?? defaults.enableRosetta,
+            enableHostMounts: try container.decodeIfPresent(Bool.self, forKey: .enableHostMounts) ?? defaults.enableHostMounts,
+            socketPath: try container.decodeIfPresent(String.self, forKey: .socketPath) ?? defaults.socketPath,
+            conjetCoreRepository: try container.decodeIfPresent(String.self, forKey: .conjetCoreRepository) ?? defaults.conjetCoreRepository,
+            networkBindPolicy: try container.decodeIfPresent(ConjetNetworkBindPolicy.self, forKey: .networkBindPolicy) ?? defaults.networkBindPolicy,
+            networkProxyEngine: try container.decodeIfPresent(ConjetNetworkProxyEngine.self, forKey: .networkProxyEngine) ?? defaults.networkProxyEngine,
+            networkBridgeEngine: try container.decodeIfPresent(ConjetNetworkBridgeEngine.self, forKey: .networkBridgeEngine) ?? defaults.networkBridgeEngine,
+            networkLANAllowedCIDRs: try container.decodeIfPresent([String].self, forKey: .networkLANAllowedCIDRs) ?? defaults.networkLANAllowedCIDRs,
+            networkLANAllowedPorts: try container.decodeIfPresent([Int].self, forKey: .networkLANAllowedPorts) ?? defaults.networkLANAllowedPorts
+        )
+    }
 
     public static func loadOrCreate(paths: ConjetPaths = .default()) throws -> ConjetConfig {
         try paths.ensureBaseDirectories()
@@ -84,6 +141,17 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         lines.append("")
         lines.append("[images]")
         lines.append("conjet_core_repository = \"\(escapeTOML(conjetCoreRepository))\"")
+        lines.append("")
+        lines.append("[network]")
+        lines.append("bind_policy = \"\(networkBindPolicy.rawValue)\"")
+        lines.append("proxy_engine = \"\(networkProxyEngine.rawValue)\"")
+        lines.append("bridge_engine = \"\(networkBridgeEngine.rawValue)\"")
+        if !networkLANAllowedCIDRs.isEmpty {
+            lines.append("lan_allowed_cidrs = \"\(escapeTOML(networkLANAllowedCIDRs.joined(separator: ",")))\"")
+        }
+        if !networkLANAllowedPorts.isEmpty {
+            lines.append("lan_allowed_ports = \"\(networkLANAllowedPorts.map(String.init).joined(separator: ","))\"")
+        }
         lines.append("")
         return lines.joined(separator: "\n")
     }
@@ -133,6 +201,51 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                 config.socketPath = parseString(value)
             case "images.conjet_core_repository":
                 config.conjetCoreRepository = parseString(value)
+            case "network.bind_policy":
+                let parsed = parseString(value)
+                guard let policy = ConjetNetworkBindPolicy(rawValue: parsed) else {
+                    throw ConjetError.decoding("network.bind_policy must be secure-local, docker-strict, or lan-allowlist")
+                }
+                config.networkBindPolicy = policy
+            case "network.proxy_engine":
+                let parsed = parseString(value)
+                let engine: ConjetNetworkProxyEngine
+                if let parsedEngine = ConjetNetworkProxyEngine(rawValue: parsed) {
+                    engine = parsedEngine
+                } else {
+                    switch parsed {
+                    case "nio":
+                        engine = .eventLoop
+                    case "gcd-evented":
+                        engine = .gcdFallback
+                    default:
+                        throw ConjetError.decoding("network.proxy_engine must be auto, nio, event-loop, gcd-evented, gcd-fallback, or turbo")
+                    }
+                }
+                config.networkProxyEngine = engine
+            case "network.bridge_engine":
+                let parsed = parseString(value)
+                let engine: ConjetNetworkBridgeEngine
+                switch parsed {
+                case "auto":
+                    engine = .auto
+                case "python", "python-legacy":
+                    engine = .pythonLegacy
+                case "conjet-netd", "conjet-netd-c":
+                    engine = .conjetNetdC
+                default:
+                    throw ConjetError.decoding("network.bridge_engine must be auto, python-legacy, or conjet-netd-c")
+                }
+                config.networkBridgeEngine = engine
+            case "network.lan_allowed_cidrs":
+                config.networkLANAllowedCIDRs = parseCSVString(value)
+            case "network.lan_allowed_ports":
+                config.networkLANAllowedPorts = try parseCSVString(value).map {
+                    guard let port = Int($0), port > 0, port <= 65_535 else {
+                        throw ConjetError.decoding("network.lan_allowed_ports must contain TCP/UDP port numbers")
+                    }
+                    return port
+                }
             default:
                 continue
             }
@@ -155,6 +268,10 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         }
         guard isValidGitHubRepository(config.conjetCoreRepository) else {
             throw ConjetError.decoding("images.conjet_core_repository must use OWNER/REPO format")
+        }
+        if config.networkBindPolicy == .lanAllowlist,
+           (!config.networkLANAllowedPorts.isEmpty && config.networkLANAllowedCIDRs.isEmpty) {
+            throw ConjetError.decoding("network.lan_allowed_cidrs is required when lan_allowed_ports is set")
         }
         return config
     }
@@ -181,6 +298,13 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             text.removeLast()
         }
         return text.replacingOccurrences(of: "\\\"", with: "\"")
+    }
+
+    private static func parseCSVString(_ value: String) -> [String] {
+        parseString(value)
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private static func stripComment(_ line: String) -> String {

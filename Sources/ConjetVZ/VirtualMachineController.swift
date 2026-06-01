@@ -13,6 +13,7 @@ public final class VirtualMachineController {
     private var machine: VZVirtualMachine?
     private var retainedResources: VZRuntimeResources?
     private var dockerBridge: DockerSocketBridge?
+    private var publishedPortForwarder: DockerPublishedPortForwarder?
     #endif
 
     public init() {}
@@ -24,6 +25,33 @@ public final class VirtualMachineController {
         }
         #endif
         return store.status(state: state, message: "VZ virtual machine is \(state.rawValue)")
+    }
+
+    public func networkStatus(config: ConjetConfig) -> ConjetNetworkStatus {
+        #if canImport(Virtualization)
+        if let publishedPortForwarder {
+            return publishedPortForwarder.status()
+        }
+        #endif
+        return ConjetNetworkStatus(
+            bindPolicy: config.networkBindPolicy,
+            proxyEngine: config.networkProxyEngine.rawValue,
+            requestedBridgeEngine: config.networkBridgeEngine.rawValue,
+            fallbackReason: "network proxy is not running",
+            eventWatcherState: "stopped",
+            capabilities: ConjetNetworkCapabilities(),
+            messages: ["network proxy is not running"]
+        )
+    }
+
+    public func repairNetwork(config: ConjetConfig) -> ConjetNetworkStatus {
+        #if canImport(Virtualization)
+        if let publishedPortForwarder {
+            publishedPortForwarder.repair()
+            return publishedPortForwarder.status()
+        }
+        #endif
+        return networkStatus(config: config)
     }
 
     public func start(manifest: VMAssetManifest, config: ConjetConfig, store: VMImageStore) throws -> VMRuntimeStatus {
@@ -63,7 +91,7 @@ public final class VirtualMachineController {
             state = .error
             throw ConjetError.unavailable("failed to start VZ VM: \(startError)")
         }
-        try startDockerBridge(for: vm, manifest: manifest)
+        try startDockerBridge(for: vm, manifest: manifest, config: config)
         state = .running
         return manifest.runtimeStatus(state: .running, message: "VM started", manifestPath: store.paths.vmManifest.path)
         #else
@@ -73,6 +101,8 @@ public final class VirtualMachineController {
 
     public func stop(store: VMImageStore) throws -> VMRuntimeStatus {
         #if canImport(Virtualization)
+        publishedPortForwarder?.stop()
+        publishedPortForwarder = nil
         dockerBridge?.stop()
         dockerBridge = nil
 
@@ -135,7 +165,11 @@ public final class VirtualMachineController {
         }
     }
 
-    private func startDockerBridge(for machine: VZVirtualMachine, manifest: VMAssetManifest) throws {
+    private func startDockerBridge(
+        for machine: VZVirtualMachine,
+        manifest: VMAssetManifest,
+        config: ConjetConfig
+    ) throws {
         guard let socketDevice = machine.socketDevices.compactMap({ $0 as? VZVirtioSocketDevice }).first else {
             throw ConjetError.unavailable("VM started without a virtio socket device; cannot expose Docker socket")
         }
@@ -145,12 +179,14 @@ public final class VirtualMachineController {
             timeoutSeconds: 90,
             intervalSeconds: 0.5
         )
+        let capabilities = GuestBridgeCapabilityProbe.capabilities(connector: retryingConnector)
+        let bridgeFallbackReason = Self.bridgeFallbackReason(requested: config.networkBridgeEngine, capabilities: capabilities)
         let connector: any GuestConnectionConnector
-        if GuestBridgeCapabilityProbe.supportsPooledConnections(connector: retryingConnector) {
+        if capabilities.lazyUpstream {
             connector = PooledGuestConnectionConnector(
                 base: retryingConnector,
-                capacity: 4,
-                refillDelaySeconds: 0.25
+                capacity: 16,
+                refillDelaySeconds: 0.05
             )
         } else {
             connector = retryingConnector
@@ -161,6 +197,26 @@ public final class VirtualMachineController {
         )
         try bridge.start()
         dockerBridge = bridge
+
+        if capabilities.tcpProxy {
+            let forwarder = DockerPublishedPortForwarder(
+                socketPath: manifest.dockerSocketPath,
+                connector: connector,
+                policy: ConjetPortPolicy(
+                    bindPolicy: config.networkBindPolicy,
+                    lanAllowedCIDRs: config.networkLANAllowedCIDRs,
+                    lanAllowedPorts: config.networkLANAllowedPorts
+                ),
+                proxyEngine: config.networkProxyEngine,
+                capabilities: capabilities.conjetNetworkCapabilities,
+                requestedBridgeEngine: config.networkBridgeEngine,
+                bridgeFallbackReason: bridgeFallbackReason
+            )
+            forwarder.start()
+            publishedPortForwarder = forwarder
+        } else {
+            publishedPortForwarder = nil
+        }
     }
     #endif
 }
@@ -168,6 +224,21 @@ public final class VirtualMachineController {
 extension VirtualMachineController: @unchecked Sendable {}
 
 #if canImport(Virtualization)
+private extension VirtualMachineController {
+    static func bridgeFallbackReason(
+        requested: ConjetNetworkBridgeEngine,
+        capabilities: GuestBridgeCapabilities
+    ) -> String? {
+        guard requested != .auto else { return nil }
+        let active = capabilities.bridgeEngine ?? "python-legacy"
+        guard active != requested.rawValue else { return nil }
+        if requested == .conjetNetdC {
+            return "requested conjet-netd-c but active bridge is \(active); rebuild/import a Conjet Core image with /usr/local/sbin/conjet-netd or set the guest bridge engine"
+        }
+        return "requested \(requested.rawValue) but active bridge is \(active)"
+    }
+}
+
 private struct VZRuntimeResources {
     var serialLogHandle: FileHandle
 }

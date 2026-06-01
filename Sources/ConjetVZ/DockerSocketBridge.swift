@@ -10,6 +10,88 @@ public enum ConjetRuntimePorts {
     public static let dockerVsockPort: UInt32 = 2375
 }
 
+public struct GuestBridgeCapabilities: Equatable, Sendable {
+    public var version: Int
+    public var lazyUpstream: Bool
+    public var dockerReadyCache: Bool
+    public var tcpProxy: Bool
+    public var udpProxy: Bool
+    public var dockerEvents: Bool
+    public var containerIPLookup: Bool
+    public var portProbe: Bool
+    public var proxyMetrics: Bool
+    public var guestEcho: Bool
+    public var guestMetrics: Bool
+    public var binaryFrames: Bool
+    public var udpBinaryFrames: Bool
+    public var persistentVsock: Bool
+    public var tcpBinaryFrames: Bool
+    public var persistentTCPVsock: Bool
+    public var tcpVsockPool: Bool
+    public var bridgeEngine: String?
+
+    public init(
+        version: Int = 1,
+        lazyUpstream: Bool = false,
+        dockerReadyCache: Bool = false,
+        tcpProxy: Bool = false,
+        udpProxy: Bool = false,
+        dockerEvents: Bool = false,
+        containerIPLookup: Bool = false,
+        portProbe: Bool = false,
+        proxyMetrics: Bool = false,
+        guestEcho: Bool = false,
+        guestMetrics: Bool = false,
+        binaryFrames: Bool = false,
+        udpBinaryFrames: Bool = false,
+        persistentVsock: Bool = false,
+        tcpBinaryFrames: Bool = false,
+        persistentTCPVsock: Bool = false,
+        tcpVsockPool: Bool = false,
+        bridgeEngine: String? = nil
+    ) {
+        self.version = version
+        self.lazyUpstream = lazyUpstream
+        self.dockerReadyCache = dockerReadyCache
+        self.tcpProxy = tcpProxy
+        self.udpProxy = udpProxy
+        self.dockerEvents = dockerEvents
+        self.containerIPLookup = containerIPLookup
+        self.portProbe = portProbe
+        self.proxyMetrics = proxyMetrics
+        self.guestEcho = guestEcho
+        self.guestMetrics = guestMetrics
+        self.binaryFrames = binaryFrames
+        self.udpBinaryFrames = udpBinaryFrames
+        self.persistentVsock = persistentVsock
+        self.tcpBinaryFrames = tcpBinaryFrames
+        self.persistentTCPVsock = persistentTCPVsock
+        self.tcpVsockPool = tcpVsockPool
+        self.bridgeEngine = bridgeEngine
+    }
+
+    public var conjetNetworkCapabilities: ConjetNetworkCapabilities {
+        ConjetNetworkCapabilities(
+            version: version,
+            tcpProxy: tcpProxy,
+            udpProxy: udpProxy,
+            dockerEvents: dockerEvents,
+            containerIPLookup: containerIPLookup,
+            portProbe: portProbe,
+            proxyMetrics: proxyMetrics,
+            guestEcho: guestEcho,
+            guestMetrics: guestMetrics,
+            binaryFrames: binaryFrames,
+            udpBinaryFrames: udpBinaryFrames,
+            persistentVsock: persistentVsock,
+            tcpBinaryFrames: tcpBinaryFrames,
+            persistentTCPVsock: persistentTCPVsock,
+            tcpVsockPool: tcpVsockPool,
+            bridgeEngine: bridgeEngine
+        )
+    }
+}
+
 public final class GuestConnection: @unchecked Sendable {
     public let fileDescriptor: Int32
     private let closeHandler: @Sendable () -> Void
@@ -186,19 +268,19 @@ public final class PooledGuestConnectionConnector: GuestConnectionConnector, @un
 }
 
 enum GuestBridgeCapabilityProbe {
-    static func supportsPooledConnections(
+    static func capabilities(
         connector: any GuestConnectionConnector,
         timeoutSeconds: Double = 1
-    ) -> Bool {
+    ) -> GuestBridgeCapabilities {
         guard let connection = try? connector.connect() else {
-            return false
+            return GuestBridgeCapabilities()
         }
         defer { connection.close() }
 
         setSocketTimeout(connection.fileDescriptor, timeoutSeconds: timeoutSeconds)
         let request = "GET /conjet-bridge-capabilities HTTP/1.1\r\nHost: conjet\r\nConnection: close\r\n\r\n"
         guard writeAll(Data(request.utf8), to: connection.fileDescriptor) else {
-            return false
+            return GuestBridgeCapabilities()
         }
         Darwin.shutdown(connection.fileDescriptor, SHUT_WR)
 
@@ -215,11 +297,53 @@ enum GuestBridgeCapabilityProbe {
             }
         }
 
-        guard let text = String(data: response, encoding: .utf8) else {
-            return false
+        guard let text = String(data: response, encoding: .utf8),
+              text.contains("200 OK") else {
+            return GuestBridgeCapabilities()
         }
-        return text.contains("200 OK") && text.contains(#""lazy_upstream":true"#)
+        return GuestBridgeCapabilities(
+            version: bridgeVersion(in: text),
+            lazyUpstream: text.contains(#""lazy_upstream":true"#),
+            dockerReadyCache: text.contains(#""docker_ready_cache":true"#),
+            tcpProxy: text.contains(#""tcp_proxy":true"#),
+            udpProxy: text.contains(#""udp_proxy":true"#),
+            dockerEvents: text.contains(#""docker_events":true"#),
+            containerIPLookup: text.contains(#""container_ip_lookup":true"#),
+            portProbe: text.contains(#""port_probe":true"#),
+            proxyMetrics: text.contains(#""proxy_metrics":true"#),
+            guestEcho: text.contains(#""guest_echo":true"#),
+            guestMetrics: text.contains(#""guest_metrics":true"#),
+            binaryFrames: text.contains(#""binary_frames":true"#),
+            udpBinaryFrames: text.contains(#""udp_binary_frames":true"#),
+            persistentVsock: text.contains(#""persistent_vsock":true"#),
+            tcpBinaryFrames: text.contains(#""tcp_binary_frames":true"#),
+            persistentTCPVsock: text.contains(#""persistent_tcp_vsock":true"#),
+            tcpVsockPool: text.contains(#""tcp_vsock_pool":true"#),
+            bridgeEngine: bridgeEngine(in: text)
+        )
     }
+
+    static func supportsPooledConnections(
+        connector: any GuestConnectionConnector,
+        timeoutSeconds: Double = 1
+    ) -> Bool {
+        capabilities(connector: connector, timeoutSeconds: timeoutSeconds).lazyUpstream
+    }
+}
+
+private func bridgeVersion(in text: String) -> Int {
+    if text.contains(#""version":5"#) { return 5 }
+    if text.contains(#""version":4"#) { return 4 }
+    if text.contains(#""version":3"#) { return 3 }
+    if text.contains(#""version":2"#) { return 2 }
+    return 1
+}
+
+private func bridgeEngine(in text: String) -> String? {
+    guard let range = text.range(of: "\"bridge_engine\":\"") else { return nil }
+    let rest = text[range.upperBound...]
+    guard let end = rest.firstIndex(of: "\"") else { return nil }
+    return String(rest[..<end])
 }
 
 public final class DockerSocketBridge: @unchecked Sendable {

@@ -164,9 +164,11 @@ apt-get install -y --no-install-recommends \
     ca-certificates \
     cloud-init \
     curl \
+    gcc \
     gnupg \
     iproute2 \
     iptables \
+    libc6-dev \
     netcat-openbsd \
     netplan.io \
     openssh-server \
@@ -180,15 +182,23 @@ CHROOT
 
 rm -f "${MOUNT_DIR}/usr/sbin/policy-rc.d"
 
-mkdir -p "${MOUNT_DIR}/usr/local/sbin" "${MOUNT_DIR}/etc/systemd/system" \
+mkdir -p "${MOUNT_DIR}/usr/local/sbin" "${MOUNT_DIR}/usr/local/src" "${MOUNT_DIR}/etc/systemd/system" \
     "${MOUNT_DIR}/etc/modules-load.d" "${MOUNT_DIR}/etc/netplan" "${MOUNT_DIR}/etc/cloud" \
     "${MOUNT_DIR}/etc/conjet"
 install -m 0755 "${BUILD_DIR}/scripts/conjet-docker-vsock-bridge.py" \
     "${MOUNT_DIR}/usr/local/sbin/conjet-docker-vsock-bridge.py"
+install -m 0644 "${BUILD_DIR}/src/conjet-netd.c" \
+    "${MOUNT_DIR}/usr/local/src/conjet-netd.c"
 install -m 0755 "${BUILD_DIR}/scripts/conjet-data-disk.sh" \
     "${MOUNT_DIR}/usr/local/sbin/conjet-data-disk.sh"
 install -m 0755 "${BUILD_DIR}/scripts/conjet-boot-diagnostics.sh" \
     "${MOUNT_DIR}/usr/local/sbin/conjet-boot-diagnostics.sh"
+
+chroot "${MOUNT_DIR}" /usr/bin/env \
+    /usr/bin/gcc -O2 -Wall -Wextra -pthread \
+    -o /usr/local/sbin/conjet-netd \
+    /usr/local/src/conjet-netd.c
+chroot "${MOUNT_DIR}" /usr/local/sbin/conjet-netd --capabilities >/dev/null
 
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-data-disk.service" <<'UNIT'
 [Unit]
@@ -216,10 +226,9 @@ Wants=conjet-data-disk.service containerd.service docker.service docker.socket
 
 [Service]
 Type=simple
-Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
-ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet; rm -f /run/conjet/docker-vsock-ready'
-ExecStart=/bin/sh -c 'mkdir -p /run/conjet; exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1 | /usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0'
+ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; mountpoint -q /mnt/conjetboot || mount -t virtiofs conjetboot /mnt/conjetboot 2>/dev/null || true; rm -f /run/conjet/docker-vsock-ready'
+ExecStart=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; engine="${CONJET_NET_BRIDGE_ENGINE:-$(cat /mnt/conjetboot/network-bridge-engine 2>/dev/null || cat /etc/conjet/network-bridge-engine 2>/dev/null || echo auto)}"; case "$engine" in auto|"") if [ -x /usr/local/sbin/conjet-netd ]; then exec /usr/local/sbin/conjet-netd 2>&1; else exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1; fi ;; conjet-netd|conjet-netd-c) if [ -x /usr/local/sbin/conjet-netd ]; then exec /usr/local/sbin/conjet-netd 2>&1; else echo "conjet-netd-c requested but /usr/local/sbin/conjet-netd is missing" >&2; exit 42; fi ;; python|python-legacy) exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1 ;; *) echo "unsupported CONJET_NET_BRIDGE_ENGINE=$engine" >&2; exit 43 ;; esac | /usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0'
 Restart=always
 RestartSec=2
 StandardOutput=journal
