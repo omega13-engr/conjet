@@ -50,6 +50,10 @@ struct ConjetCLI {
             try start(args: args, json: json)
         case "stop":
             try stop(args: args, json: json)
+        case "restart":
+            try restart(args: args, json: json)
+        case "update":
+            try update(args: args, json: json)
         case "shell":
             try shell(args: args)
         case "vm":
@@ -447,11 +451,19 @@ struct ConjetCLI {
     }
 
     private static func start(args: [String] = [], json: Bool = false) throws {
+        let response = try startRuntime(args: args, json: json)
+        if json {
+            print(try ConjetJSON.string(response))
+        }
+    }
+
+    @discardableResult
+    private static func startRuntime(args: [String] = [], json: Bool = false) throws -> DaemonResponse {
         let paths = ConjetPaths.default()
         let config = try updateProfileConfigFromStartArgs(args, paths: paths, json: json)
         try ensureVMConfiguredForStart(json: json, config: config)
         let socketPath = try startDaemonOnly(printStatus: !json)
-        try startVMIfConfigured(socketPath: socketPath, config: config, json: json)
+        return try startVMIfConfigured(socketPath: socketPath, config: config, json: json)
     }
 
     private static func updateProfileConfigFromStartArgs(_ args: [String], paths: ConjetPaths, json: Bool) throws -> ConjetConfig {
@@ -549,14 +561,14 @@ struct ConjetCLI {
     }
 
     private static func stop(args: [String] = [], json: Bool = false) throws {
-        let paths = ConjetPaths.default()
-        let timeout = value(after: "--timeout", in: args).flatMap(Double.init)
-            ?? ProcessInfo.processInfo.environment["CONJET_STOP_TIMEOUT_SECONDS"].flatMap(Double.init)
-            ?? 25
-        let response = try UnixSocketClient(socketPath: try socketPath(paths: paths)).send(
-            DaemonRequest(command: .stop, parameters: ["timeout_seconds": String(timeout)]),
-            timeoutSeconds: timeout
-        )
+        var stopArgs = args
+        let timeout = try stopTimeout(from: takeValueOption("--timeout", from: &stopArgs))
+        if let unknown = stopArgs.first {
+            throw ConjetError.invalidArgument("unknown stop option '\(unknown)'")
+        }
+        guard let response = try stopRuntime(timeout: timeout, requireRunning: true) else {
+            throw ConjetError.unavailable("conjetd is not running")
+        }
         if json {
             print(try ConjetJSON.string(response))
         } else {
@@ -564,26 +576,147 @@ struct ConjetCLI {
         }
     }
 
-    private static func startVMIfConfigured(socketPath: String, config: ConjetConfig, json: Bool) throws {
+    private static func stopRuntime(timeout: Double, requireRunning: Bool) throws -> DaemonResponse? {
+        let paths = ConjetPaths.default()
+        let currentSocketPath = try socketPath(paths: paths)
+        guard daemonIsRunning(socketPath: currentSocketPath) else {
+            if requireRunning {
+                throw ConjetError.unavailable("conjetd is not running at \(currentSocketPath)")
+            }
+            return nil
+        }
+
+        let response = try UnixSocketClient(socketPath: currentSocketPath).send(
+            DaemonRequest(command: .stop, parameters: ["timeout_seconds": String(timeout)]),
+            timeoutSeconds: max(timeout, 1) + 1
+        )
+        waitForDaemonStop(socketPath: currentSocketPath, timeoutSeconds: max(timeout, 5))
+        return response
+    }
+
+    private static func daemonIsRunning(socketPath: String) -> Bool {
+        (try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .ping), timeoutSeconds: 1).ok) == true
+    }
+
+    private static func stopTimeout(from value: String?) throws -> Double {
+        let text = value ?? ProcessInfo.processInfo.environment["CONJET_STOP_TIMEOUT_SECONDS"]
+        guard let text else { return 25 }
+        guard let timeout = Double(text), timeout > 0 else {
+            throw ConjetError.invalidArgument("--timeout must be a positive number of seconds")
+        }
+        return timeout
+    }
+
+    private static func restart(args: [String] = [], json: Bool = false) throws {
+        var startArgs = args
+        let timeout = try stopTimeout(from: takeValueOption("--timeout", from: &startArgs))
+        let stopped = try stopRuntime(timeout: timeout, requireRunning: false)
+        if !json {
+            if let stopped {
+                print(stopped.message)
+            } else {
+                print("conjetd is not running; starting")
+            }
+        }
+        let started = try startRuntime(args: startArgs, json: json)
+        if json {
+            print(try ConjetJSON.string(ConjetRestartResult(stopped: stopped, started: started)))
+        }
+    }
+
+    private static func update(args: [String] = [], json: Bool = false) throws {
+        var updateArgs = args
+        let force = updateArgs.removeAllOccurrences("--force")
+        let restartRequested = updateArgs.removeAllOccurrences("--restart")
+        let noRestart = updateArgs.removeAllOccurrences("--no-restart")
+        if restartRequested && noRestart {
+            throw ConjetError.invalidArgument("use either --restart or --no-restart, not both")
+        }
+        let timeout = try stopTimeout(from: takeValueOption("--timeout", from: &updateArgs))
+        try validateUpdateArgs(updateArgs)
+
+        let paths = ConjetPaths.default()
+        let config = try ConjetConfig.loadOrCreate(paths: paths)
+        let currentSocketPath = try socketPath(paths: paths)
+        let wasRunning = daemonIsRunning(socketPath: currentSocketPath)
+        let stopped = try stopRuntime(timeout: timeout, requireRunning: false)
+        if !json, wasRunning, let stopped {
+            print(stopped.message)
+        }
+
+        let artifact = try conjetCoreArtifactPath(
+            args: updateArgs,
+            force: force,
+            printStatus: !json
+        )
+
+        let ui = ConjetFetchUI(enabled: !json)
+        ui.step("[conjet-core 4/4] importing img")
+        let manifest = try VMImageStore(paths: paths).importEFIBootDisk(
+            sourcePath: artifact,
+            name: "conjet-core",
+            force: true,
+            cloudInitSeedPath: nil,
+            bootDiskMinimumSizeBytes: bootDiskMinimumSizeBytes(args: updateArgs, defaultGiB: nil),
+            dataDiskSizeBytes: gibibytes(config.diskGiB)
+        )
+        if !json {
+            try printVMManifest(
+                manifest,
+                json: false,
+                headline: "=> [conjet-core 4/4] VM assets updated: \(manifest.name)"
+            )
+        }
+
+        let shouldRestart = restartRequested || (wasRunning && !noRestart)
+        let started = shouldRestart ? try startRuntime(args: [], json: json) : nil
+        if !json, !shouldRestart {
+            print("Conjet Core image updated; run 'conjet start' to boot it.")
+        }
+        if json {
+            print(try ConjetJSON.string(ConjetUpdateResult(
+                artifactPath: artifact,
+                previousDaemonRunning: wasRunning,
+                stopped: stopped,
+                manifest: manifest,
+                restarted: shouldRestart,
+                started: started
+            )))
+        }
+    }
+
+    private static func validateUpdateArgs(_ args: [String]) throws {
+        var remaining = args
+        while !remaining.isEmpty {
+            let element = remaining.removeFirst()
+            switch element {
+            case "--image", "--url", "--repository", "--boot-disk-gb":
+                _ = try consumeValue(element, from: &remaining)
+            default:
+                throw ConjetError.invalidArgument("unknown update option '\(element)'")
+            }
+        }
+    }
+
+    private static func startVMIfConfigured(socketPath: String, config: ConjetConfig, json: Bool) throws -> DaemonResponse {
         let store = VMImageStore()
         guard store.manifestExists() else {
             if !json {
                 ConjetFetchUI(enabled: true).step("[vm 2/2] not configured; no Conjet-core image imported")
             }
-            return
+            return DaemonResponse(ok: false, message: "VM is not configured", vm: store.status())
         }
         try writeBridgeSelectorToBootstrap(paths: ConjetPaths.default(), engine: config.networkBridgeEngine)
         let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
         let dockerContext = configureDockerContextIfStarted(response, json: json)
         let hostShares = mountHostSharesIfStarted(response, dockerContext: dockerContext, config: config, json: json)
-        if json {
-            print(try ConjetJSON.string(response))
-        } else {
+        if !json {
             printStartVMResponse(response, dockerContext: dockerContext, hostShares: hostShares)
         }
         if !response.ok {
             try throwResponseError(response.message)
         }
+        return response
     }
 
     private static func vm(args: [String], json: Bool) throws {
@@ -2225,12 +2358,14 @@ struct ConjetCLI {
         let imagePath = try downloadConjetCoreArtifact(
             urlString: artifact.downloadURL,
             force: force,
+            cacheName: "\(artifact.releaseTag)-\(artifact.name)",
             progress: ui.progress(stage: "[conjet-core 1/4] downloading img")
         )
         if let checksumURL = artifact.checksumDownloadURL {
             let checksumPath = try downloadConjetCoreArtifact(
                 urlString: checksumURL,
                 force: force,
+                cacheName: "\(artifact.releaseTag)-\(artifact.name).sha512sum",
                 progress: ui.progress(stage: "[conjet-core 2/4] downloading checksum")
             )
             ui.step("[conjet-core 3/4] verifying checksum")
@@ -2271,6 +2406,7 @@ struct ConjetCLI {
     private static func downloadConjetCoreArtifact(
         urlString: String,
         force: Bool,
+        cacheName: String? = nil,
         progress: DownloadProgressRenderer? = nil
     ) throws -> String {
         guard let remote = URL(string: urlString),
@@ -2279,10 +2415,16 @@ struct ConjetCLI {
               !remote.lastPathComponent.isEmpty else {
             throw ConjetError.invalidArgument("Conjet-core image URL must be a public https:// URL with a file name")
         }
+        let destinationName = cacheName ?? remote.lastPathComponent
+        guard !destinationName.isEmpty,
+              !destinationName.contains("/"),
+              !destinationName.contains("\0") else {
+            throw ConjetError.invalidArgument("Conjet-core cache file name is invalid")
+        }
 
         let paths = ConjetPaths.default()
         try paths.ensureBaseDirectories()
-        let destination = paths.vmDirectory.appendingPathComponent(remote.lastPathComponent)
+        let destination = paths.vmDirectory.appendingPathComponent(destinationName)
         if FileManager.default.fileExists(atPath: destination.path), !force {
             progress?.cached()
             return destination.path
@@ -2527,8 +2669,9 @@ struct ConjetCLI {
         }
     }
 
-    private static func waitForDaemonStop(socketPath: String) {
-        for _ in 0..<50 {
+    private static func waitForDaemonStop(socketPath: String, timeoutSeconds: Double = 5) {
+        let attempts = max(1, Int((timeoutSeconds / 0.1).rounded(.up)))
+        for _ in 0..<attempts {
             let response = try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .ping))
             if response == nil {
                 return
@@ -2640,6 +2783,18 @@ struct ConjetCLI {
         return args[index + 1]
     }
 
+    private static func takeValueOption(_ flag: String, from args: inout [String]) throws -> String? {
+        guard let index = args.firstIndex(of: flag) else {
+            return nil
+        }
+        guard args.indices.contains(index + 1) else {
+            throw ConjetError.invalidArgument("\(flag) requires a value")
+        }
+        let value = args[index + 1]
+        args.removeSubrange(index...(index + 1))
+        return value
+    }
+
     private static func isHelpFlag(_ value: String) -> Bool {
         value == "--help" || value == "-h"
     }
@@ -2700,6 +2855,51 @@ struct ConjetCLI {
                   --profile NAME        Use an isolated Conjet profile
                   --json                Emit machine-readable JSON where supported
                   -h, --help            Show this help text
+                """
+            )
+        case "restart":
+            print(
+                """
+                Restart the VM and daemon, or start Conjet if it is stopped.
+
+                Usage:
+                  conjet restart [--timeout SECONDS] [start options]
+
+                Options:
+                  --timeout SECONDS     Bound graceful shutdown wait time
+                  --cpus, --cpu N       Set VM CPU count before starting
+                  --memory SIZE         Set VM memory before starting
+                  --disk SIZE_OR_PATH   Set VM data disk size or use a custom disk image path
+                  --runtime NAME        Set container runtime preference
+                  --arch ARCH           Set guest architecture
+                  --network-bind-policy secure-local|docker-strict|lan-allowlist
+                  --proxy-engine auto|nio|event-loop|gcd-evented|gcd-fallback|turbo
+                  --profile NAME        Use an isolated Conjet profile
+                  --json                Emit machine-readable JSON
+                  -h, --help            Show this help text
+                """
+            )
+        case "update":
+            print(
+                """
+                Update the Conjet Core VM image, preserving the data disk.
+
+                Usage:
+                  conjet update [--repository OWNER/REPO] [--image PATH|--url HTTPS_URL] [--force]
+                                [--restart|--no-restart] [--timeout SECONDS]
+
+                Options:
+                  --repository OWNER/REPO Fetch Conjet Core from a GitHub repository
+                  --image PATH           Import a local Conjet Core image artifact
+                  --url HTTPS_URL        Download a Conjet Core image artifact from a URL
+                  --boot-disk-gb N       Expand imported boot disk to at least N GiB
+                  --force                Redownload remote artifacts even when cached
+                  --restart              Start Conjet after updating, even if it was stopped
+                  --no-restart           Leave Conjet stopped after updating
+                  --timeout SECONDS      Bound graceful shutdown wait time
+                  --profile NAME         Use an isolated Conjet profile
+                  --json                 Emit machine-readable JSON
+                  -h, --help             Show this help text
                 """
             )
         case "status":
@@ -3085,6 +3285,8 @@ struct ConjetCLI {
             Runtime:
               start       Start conjetd and the configured VM
               stop        Stop the VM and daemon
+              restart     Stop and start the VM and daemon
+              update      Update the Conjet Core VM image
               status      Show daemon, VM, and Docker socket status
               doctor      Check host capabilities and Conjet configuration
               shell       Open a privileged Linux shell through the Conjet Docker socket
@@ -3435,6 +3637,20 @@ private struct ProfileStatus: Codable, Equatable {
     var profile: String
     var home: String
     var config: ConjetConfig
+}
+
+private struct ConjetRestartResult: Codable, Equatable {
+    var stopped: DaemonResponse?
+    var started: DaemonResponse
+}
+
+private struct ConjetUpdateResult: Codable, Equatable {
+    var artifactPath: String
+    var previousDaemonRunning: Bool
+    var stopped: DaemonResponse?
+    var manifest: VMAssetManifest
+    var restarted: Bool
+    var started: DaemonResponse?
 }
 
 private struct BridgeTestOutput: Codable, Equatable {

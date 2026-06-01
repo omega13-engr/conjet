@@ -73,6 +73,18 @@ Check status:
 conjet status
 ```
 
+Restart the runtime:
+
+```sh
+conjet restart
+```
+
+Update the Conjet Core VM image:
+
+```sh
+conjet update
+```
+
 Run a container:
 
 ```sh

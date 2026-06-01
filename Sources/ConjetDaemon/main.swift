@@ -135,7 +135,7 @@ private final class DaemonRuntime {
                 }
                 semaphore.signal()
             }
-            let boundedWait = min(cleanupTimeout, 5)
+            let boundedWait = cleanupTimeout
             let cleanupTimedOut = semaphore.wait(timeout: .now() + boundedWait) == .timedOut
             let message: String
             if cleanupTimedOut {

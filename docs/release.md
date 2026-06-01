@@ -64,3 +64,14 @@ Use semantic versioning for both lanes:
 Keep the two versions independent. A Conjet CLI release does not require a
 Conjet Core image release, and a Conjet Core image release does not require a
 Conjet CLI release.
+
+## Runtime Updates
+
+`conjet update` updates the active profile's Conjet Core VM image from the
+latest stable `conjet-core-vX.Y.Z` release, preserving the profile data disk.
+If Conjet is running, the command stops it before replacing the boot image and
+starts it again after the update. Use `--no-restart` to leave the runtime
+stopped, or `--restart` to start it even when it was previously stopped.
+
+`conjet restart` performs the matching stop/start lifecycle operation for the
+active profile and accepts the same configuration flags as `conjet start`.
