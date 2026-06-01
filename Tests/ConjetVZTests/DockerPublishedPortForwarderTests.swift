@@ -33,6 +33,59 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         ])
     }
 
+    func testDiscoveryCacheKeepsPublishedPortsAcrossFullReconcile() throws {
+        let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
+        FileManager.default.createFile(atPath: socketURL.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: socketURL) }
+
+        let fullID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        let shortID = String(fullID.prefix(12))
+        let inspectJSON = """
+        [
+          {
+            "Id": "\(fullID)",
+            "Name": "/api",
+            "State": {"Running": true},
+            "NetworkSettings": {
+              "Ports": {
+                "63001/tcp": [{"HostIp": "0.0.0.0", "HostPort": "63001"}]
+              },
+              "Networks": {
+                "default": {"IPAddress": "172.18.0.5"}
+              }
+            }
+          }
+        ]
+        """
+
+        let runner = DockerDiscoveryRunner(fullID: fullID, shortID: shortID, inspectJSON: inspectJSON)
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketURL.path,
+            connector: UnavailableGuestConnectionConnector(),
+            runner: runner.run
+        )
+        defer { forwarder.stop() }
+
+        let first = forwarder.discoverPublishedPortsForTesting()
+        let second = forwarder.discoverPublishedPortsForTesting()
+
+        XCTAssertEqual(first, [
+            DockerPublishedPort(
+                hostIP: "0.0.0.0",
+                hostPort: 63001,
+                containerPort: 63001,
+                protocol: .tcp,
+                containerID: fullID,
+                containerName: "api",
+                targetIP: "172.18.0.5"
+            )
+        ])
+        XCTAssertEqual(second, first)
+        XCTAssertEqual(runner.inspectCalls, 1)
+        XCTAssertTrue(runner.psArguments.allSatisfy { $0.contains("--no-trunc") })
+    }
+
     func testReconcileStartsAndStopsListeners() throws {
         let connector = UnavailableGuestConnectionConnector()
         let forwarder = DockerPublishedPortForwarder(
@@ -402,6 +455,52 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
             tcpVsockPool: true,
             bridgeEngine: "conjet-netd-c"
         )
+    }
+}
+
+private final class DockerDiscoveryRunner: @unchecked Sendable {
+    private let fullID: String
+    private let shortID: String
+    private let inspectJSON: String
+    private let lock = NSLock()
+    private var recordedInspectCalls = 0
+    private var recordedPSArguments: [[String]] = []
+
+    init(fullID: String, shortID: String, inspectJSON: String) {
+        self.fullID = fullID
+        self.shortID = shortID
+        self.inspectJSON = inspectJSON
+    }
+
+    var inspectCalls: Int {
+        lock.lock()
+        let value = recordedInspectCalls
+        lock.unlock()
+        return value
+    }
+
+    var psArguments: [[String]] {
+        lock.lock()
+        let value = recordedPSArguments
+        lock.unlock()
+        return value
+    }
+
+    func run(executable: String, arguments: [String], timeoutSeconds: Double?) throws -> ProcessResult {
+        if arguments.contains("ps") {
+            lock.lock()
+            recordedPSArguments.append(arguments)
+            lock.unlock()
+            let id = arguments.contains("--no-trunc") ? fullID : shortID
+            return ProcessResult(executable: executable, arguments: arguments, exitCode: 0, stdout: "\(id)\n", stderr: "")
+        }
+        if arguments.contains("inspect") {
+            lock.lock()
+            recordedInspectCalls += 1
+            lock.unlock()
+            return ProcessResult(executable: executable, arguments: arguments, exitCode: 0, stdout: inspectJSON, stderr: "")
+        }
+        return ProcessResult(executable: executable, arguments: arguments, exitCode: 1, stdout: "", stderr: "unexpected command")
     }
 }
 

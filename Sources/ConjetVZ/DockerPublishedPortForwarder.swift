@@ -174,6 +174,10 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         reconcile(publishedPorts: ports)
     }
 
+    func discoverPublishedPortsForTesting() -> Set<DockerPublishedPort> {
+        discoverPublishedPorts()
+    }
+
     private var actualProxyEngine: String {
         switch configuredProxyEngine {
         case .auto, .gcdFallback:
@@ -369,7 +373,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         }
 
         do {
-            let ps = try runner("/usr/bin/env", ["docker", "--host", "unix://\(socketPath)", "ps", "-q"], 3)
+            let ps = try runner("/usr/bin/env", ["docker", "--host", "unix://\(socketPath)", "ps", "-q", "--no-trunc"], 3)
             guard ps.succeeded else { return [] }
             let containerIDs = ps.stdout.split(whereSeparator: \.isNewline).map(String.init).filter { !$0.isEmpty }
             guard !containerIDs.isEmpty else { return [] }
