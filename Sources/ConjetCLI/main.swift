@@ -707,11 +707,27 @@ struct ConjetCLI {
             return DaemonResponse(ok: false, message: "VM is not configured", vm: store.status())
         }
         try writeBridgeSelectorToBootstrap(paths: ConjetPaths.default(), engine: config.networkBridgeEngine)
-        let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
+        let renderer = json ? nil : VMStartLiveRenderer(serialLogPath: store.status().serialLogPath)
+        renderer?.start()
+        let response: DaemonResponse
+        do {
+            response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
+        } catch {
+            renderer?.stop(finalLine: "\(JetTerminal.symbolError) [vm 2/2] failed: \(error)")
+            throw error
+        }
+        renderer?.setState(vmStartHeadline(response))
         let dockerContext = configureDockerContextIfStarted(response, json: json)
+        if dockerContext != nil {
+            renderer?.setState("\(JetTerminal.symbolStep) [docker context internal] configured")
+        }
         let hostShares = mountHostSharesIfStarted(response, dockerContext: dockerContext, config: config, json: json)
+        if hostShares != nil {
+            renderer?.setState("\(JetTerminal.symbolStep) [host shares internal] mounted")
+        }
         if !json {
-            printStartVMResponse(response, dockerContext: dockerContext, hostShares: hostShares)
+            renderer?.stop(finalLine: vmStartHeadline(response))
+            printStartVMResponseDetails(response, dockerContext: dockerContext, hostShares: hostShares)
         }
         if !response.ok {
             try throwResponseError(response.message)
@@ -874,17 +890,40 @@ struct ConjetCLI {
             try ensureVMConfiguredForStart(json: json, config: config)
             try ensureDaemon()
             let socketPath = try socketPath(paths: ConjetPaths.default())
-            let response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
+            let renderer = json ? nil : VMStartLiveRenderer(serialLogPath: VMImageStore().status().serialLogPath)
+            renderer?.start()
+            let response: DaemonResponse
+            do {
+                response = try vmStartResponseWithDebugSigningRepair(socketPath: socketPath, json: json)
+            } catch {
+                renderer?.stop(finalLine: "\(JetTerminal.symbolError) [vm 2/2] failed: \(error)")
+                throw error
+            }
+            renderer?.setState(vmStartHeadline(response))
             let dockerContext = configureDockerContextIfStarted(response, json: json)
+            if dockerContext != nil {
+                renderer?.setState("\(JetTerminal.symbolStep) [docker context internal] configured")
+            }
             let hostShares = mountHostSharesIfStarted(response, dockerContext: dockerContext, config: config, json: json)
-            try printDaemonResponse(
-                response,
-                json: json,
-                failOnError: true,
-                dockerContext: dockerContext,
-                hostShares: hostShares,
-                headline: vmStartHeadline(response)
-            )
+            if hostShares != nil {
+                renderer?.setState("\(JetTerminal.symbolStep) [host shares internal] mounted")
+            }
+            if json {
+                try printDaemonResponse(
+                    response,
+                    json: json,
+                    failOnError: true,
+                    dockerContext: dockerContext,
+                    hostShares: hostShares,
+                    headline: vmStartHeadline(response)
+                )
+            } else {
+                renderer?.stop(finalLine: vmStartHeadline(response))
+                printStartVMResponseDetails(response, dockerContext: dockerContext, hostShares: hostShares)
+                if !response.ok {
+                    try throwResponseError(response.message)
+                }
+            }
         case "stop":
             try ensureDaemon()
             let response = try daemonRequest(.vmStop)
@@ -1895,26 +1934,19 @@ struct ConjetCLI {
         }
     }
 
-    private static func printStartVMResponse(
+    private static func printStartVMResponseDetails(
         _ response: DaemonResponse,
         dockerContext: DockerContextResult?,
         hostShares: HostShareMountResult?
     ) {
-        print(vmStartHeadline(response))
-        if let dockerContext {
-            ConjetFetchUI(enabled: true).step("[docker context internal] using \(dockerContext.contextName)")
-        }
-        if let hostShares {
-            ConjetFetchUI(enabled: true).step("[host shares internal] mounted \(hostShares.mountedPaths.joined(separator: ", "))")
-        }
         if let vm = response.vm ?? response.status?.vm {
-            print("  vm: \(vm.state.rawValue)")
-            print("  serial log: \(vm.serialLogPath ?? "unknown")")
+            JetTerminal.line("  \(JetTerminal.symbolState) vm: \(vm.state.rawValue)")
+            JetTerminal.dimLine("  \(JetTerminal.symbolLog) serial log: \(vm.serialLogPath ?? "unknown")")
             if let dockerContext {
-                print("  docker context: \(dockerContext.contextName)")
+                JetTerminal.dimLine("  \(JetTerminal.symbolDetail) docker context: \(dockerContext.contextName)")
             }
             if let hostShares {
-                print("  host shares: \(hostShares.mountedPaths.joined(separator: ", "))")
+                JetTerminal.dimLine("  \(JetTerminal.symbolDetail) host shares: \(hostShares.mountedPaths.joined(separator: ", "))")
             }
         }
     }
@@ -3353,17 +3385,221 @@ struct ConjetCLI {
     }
 }
 
+private enum JetTerminal {
+    static let symbolStep = "◆"
+    static let symbolCached = "◇"
+    static let symbolDone = "✓"
+    static let symbolError = "✗"
+    static let symbolRetry = "↻"
+    static let symbolState = "▶"
+    static let symbolLog = "╰"
+    static let symbolDetail = "·"
+
+    private static let dimGray = "\u{001B}[2;90m"
+    private static let neonGreen = "\u{001B}[38;5;46m"
+    private static let reset = "\u{001B}[0m"
+    private static let clearLine = "\u{001B}[2K"
+    private static let outputLock = NSLock()
+
+    static func line(_ text: String) {
+        write("\(colorizeBrand(text))\n")
+    }
+
+    static func dimLine(_ text: String) {
+        write("\(dim(text))\n")
+    }
+
+    static func renderProgress(_ text: String) {
+        write("\r\(clearLine)\(colorizeBrand(text))")
+    }
+
+    static func finishProgress() {
+        write("\n")
+    }
+
+    static func redrawBlock(previousLineCount: Int, lines: [String]) {
+        var text = ""
+        if previousLineCount > 0 {
+            text += "\u{001B}[\(previousLineCount)A"
+        }
+        for line in lines {
+            text += "\(clearLine)\(line)\n"
+        }
+        write(text)
+    }
+
+    static func dim(_ text: String) -> String {
+        "\(dimGray)\(colorizeBrand(text, restoreStyle: dimGray))\(reset)"
+    }
+
+    private static func write(_ text: String) {
+        guard let data = text.data(using: .utf8) else { return }
+        outputLock.lock()
+        defer { outputLock.unlock() }
+        FileHandle.standardOutput.write(data)
+    }
+
+    private static func colorizeBrand(_ text: String, restoreStyle: String = "") -> String {
+        text.replacingOccurrences(of: "conjet", with: "\(neonGreen)conjet\(reset)\(restoreStyle)")
+    }
+}
+
+private final class VMStartLiveRenderer: @unchecked Sendable {
+    private let serialLogPath: String?
+    private let serialStartOffset: UInt64?
+    private let lock = NSLock()
+    private var running = false
+    private var renderedLineCount = 0
+    private var spinnerIndex = 0
+    private var state = "[vm 2/2] starting"
+    private var thread: Thread?
+
+    init(serialLogPath: String?) {
+        self.serialLogPath = serialLogPath
+        self.serialStartOffset = serialLogPath.flatMap(Self.fileSize)
+    }
+
+    func start() {
+        lock.lock()
+        guard !running else {
+            lock.unlock()
+            return
+        }
+        running = true
+        lock.unlock()
+
+        redraw()
+        let worker = Thread { [weak self] in
+            while true {
+                Thread.sleep(forTimeInterval: 0.16)
+                guard self?.isRunning() == true else { break }
+                self?.redraw()
+            }
+        }
+        thread = worker
+        worker.start()
+    }
+
+    func setState(_ state: String) {
+        lock.lock()
+        self.state = state
+        lock.unlock()
+        redraw()
+    }
+
+    func stop(finalLine: String) {
+        lock.lock()
+        running = false
+        state = finalLine
+        lock.unlock()
+        redraw()
+    }
+
+    private func isRunning() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return running
+    }
+
+    private func redraw() {
+        let frame = spinner()
+        let currentState: String
+        lock.lock()
+        currentState = state
+        lock.unlock()
+
+        var lines = ["\(frame) \(currentState)"]
+        if let serialLogPath {
+            lines.append(JetTerminal.dim("  \(JetTerminal.symbolLog) serial: \(serialLogPath)"))
+            let serialLines = Self.tailLines(
+                path: serialLogPath,
+                limit: 5,
+                containing: "conjet-boot-diagnostics",
+                fromOffset: serialStartOffset
+            )
+            if serialLines.isEmpty {
+                lines.append(JetTerminal.dim("  \(JetTerminal.symbolDetail) waiting for serial status..."))
+            } else {
+                lines += serialLines.map { JetTerminal.dim("  \(JetTerminal.symbolDetail) \($0)") }
+            }
+        } else {
+            lines.append(JetTerminal.dim("  \(JetTerminal.symbolDetail) serial log unavailable"))
+        }
+
+        lock.lock()
+        let previous = renderedLineCount
+        renderedLineCount = lines.count
+        lock.unlock()
+        JetTerminal.redrawBlock(previousLineCount: previous, lines: lines)
+    }
+
+    private func spinner() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        let frame = frames[spinnerIndex % frames.count]
+        spinnerIndex += 1
+        return running ? frame : JetTerminal.symbolDone
+    }
+
+    private static func fileSize(path: String) -> UInt64? {
+        guard FileManager.default.fileExists(atPath: path),
+              let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else {
+            return nil
+        }
+        defer { try? handle.close() }
+        return try? handle.seekToEnd()
+    }
+
+    private static func tailLines(
+        path: String,
+        limit: Int,
+        containing filter: String? = nil,
+        fromOffset: UInt64? = nil
+    ) -> [String] {
+        guard FileManager.default.fileExists(atPath: path),
+              let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else {
+            return []
+        }
+        defer { try? handle.close() }
+
+        let size = (try? handle.seekToEnd()) ?? 0
+        let maxReadSize = UInt64(64 * 1024)
+        let startOffset: UInt64
+        if let fromOffset, fromOffset <= size {
+            startOffset = size - fromOffset > maxReadSize ? size - maxReadSize : fromOffset
+        } else {
+            startOffset = size > UInt64(8 * 1024) ? size - UInt64(8 * 1024) : 0
+        }
+        do {
+            try handle.seek(toOffset: startOffset)
+            let data = try handle.readToEnd() ?? Data()
+            guard let text = String(data: data, encoding: .utf8) else { return [] }
+            let lines = text
+                .split(whereSeparator: \.isNewline)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let filtered = filter.map { needle in
+                lines.filter { $0.contains(needle) }
+            } ?? lines
+            return Array(filtered.suffix(limit))
+        } catch {
+            return []
+        }
+    }
+}
+
 private struct ConjetFetchUI {
     var enabled: Bool
 
     func step(_ message: String) {
         guard enabled else { return }
-        print("=> \(message)")
+        JetTerminal.line("\(JetTerminal.symbolStep) \(message)")
     }
 
     func cached(_ message: String) {
         guard enabled else { return }
-        print("=> CACHED \(message)")
+        JetTerminal.line("\(JetTerminal.symbolCached) CACHED \(message)")
     }
 
     func progress(stage: String) -> DownloadProgressRenderer? {
@@ -3409,6 +3645,7 @@ private final class DownloadProgressRenderer: @unchecked Sendable {
     private var lastPercent: Int?
     private var lastBytes: Int64 = 0
     private var emitted = false
+    private var spinnerIndex = 0
 
     init(stage: String) {
         self.stage = stage
@@ -3422,21 +3659,21 @@ private final class DownloadProgressRenderer: @unchecked Sendable {
             let percent = min(100, Int((Double(bytesWritten) / Double(totalBytes)) * 100))
             let shouldEmit = !emitted
                 || percent == 100
-                || lastPercent.map { percent >= $0 + 5 } ?? true
+                || lastPercent.map { percent != $0 } ?? true
             guard shouldEmit else { return }
             lastPercent = percent
             emitted = true
-            print(
-                "=> \(stage): \(Self.formatBytes(bytesWritten)) / \(Self.formatBytes(totalBytes)) (\(percent)%)"
+            JetTerminal.renderProgress(
+                "\(spinner()) \(stage) \(Self.progressBar(percent: percent)) \(percent)% \(Self.formatBytes(bytesWritten))/\(Self.formatBytes(totalBytes))"
             )
             return
         }
 
-        let shouldEmit = !emitted || bytesWritten - lastBytes >= 16 * 1024 * 1024
+        let shouldEmit = !emitted || bytesWritten - lastBytes >= 1024 * 1024
         guard shouldEmit else { return }
         lastBytes = bytesWritten
         emitted = true
-        print("=> \(stage): \(Self.formatBytes(bytesWritten))")
+        JetTerminal.renderProgress("\(spinner()) \(stage) \(Self.formatBytes(bytesWritten))")
     }
 
     func retry(attempt: Int, maxAttempts: Int) {
@@ -3444,12 +3681,14 @@ private final class DownloadProgressRenderer: @unchecked Sendable {
         lastPercent = nil
         lastBytes = 0
         emitted = false
+        spinnerIndex = 0
         lock.unlock()
-        print("=> \(stage): retrying (\(attempt)/\(maxAttempts))")
+        JetTerminal.finishProgress()
+        JetTerminal.line("\(JetTerminal.symbolRetry) \(stage): retrying (\(attempt)/\(maxAttempts))")
     }
 
     func cached() {
-        print("=> CACHED \(stage)")
+        JetTerminal.line("\(JetTerminal.symbolCached) CACHED \(stage)")
     }
 
     func finish(bytesWritten: Int64?) {
@@ -3457,10 +3696,18 @@ private final class DownloadProgressRenderer: @unchecked Sendable {
         defer { lock.unlock() }
 
         if let bytesWritten {
-            print("=> \(stage): done \(Self.formatBytes(bytesWritten))")
+            JetTerminal.renderProgress("\(JetTerminal.symbolDone) \(stage) done \(Self.formatBytes(bytesWritten))")
         } else {
-            print("=> \(stage): done")
+            JetTerminal.renderProgress("\(JetTerminal.symbolDone) \(stage) done")
         }
+        JetTerminal.finishProgress()
+    }
+
+    private func spinner() -> String {
+        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        let frame = frames[spinnerIndex % frames.count]
+        spinnerIndex += 1
+        return frame
     }
 
     private static func formatBytes(_ bytes: Int64) -> String {
@@ -3482,6 +3729,12 @@ private final class DownloadProgressRenderer: @unchecked Sendable {
             return String(format: "%.1f%@", value, units[unitIndex])
         }
         return String(format: "%.2f%@", value, units[unitIndex])
+    }
+
+    private static func progressBar(percent: Int) -> String {
+        let width = 18
+        let filled = max(0, min(width, Int((Double(percent) / 100.0) * Double(width))))
+        return String(repeating: "▰", count: filled) + String(repeating: "▱", count: width - filled)
     }
 }
 
