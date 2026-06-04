@@ -14,7 +14,8 @@ final class ConfigTests: XCTestCase {
             enableRosetta: false,
             enableHostMounts: false,
             socketPath: "/tmp/conjet.sock",
-            conjetCoreRepository: "omega13-engr/conjet"
+            conjetCoreRepository: "omega13-engr/conjet",
+            energyMode: .eco
         )
         let parsed = try ConjetConfig.parseTOML(config.renderTOML())
         XCTAssertEqual(parsed, config)
@@ -36,7 +37,14 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.architecture, "aarch64")
         XCTAssertEqual(config.diskGiB, 100)
         XCTAssertEqual(config.runtime, "docker")
+        XCTAssertEqual(config.energyMode, .balanced)
         XCTAssertTrue(config.enableHostMounts)
+    }
+
+    func testEnergyModeIsValidated() throws {
+        let parsed = try ConjetConfig.parseTOML("[daemon]\nenergy_mode = \"performance\"\n")
+        XCTAssertEqual(parsed.energyMode, .performance)
+        XCTAssertThrowsError(try ConjetConfig.parseTOML("[daemon]\nenergy_mode = \"turbo\"\n"))
     }
 
     func testNamedProfilePathsAreIsolatedUnderProfilesDirectory() {

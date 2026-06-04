@@ -11,7 +11,7 @@ final class EnergyGovernorTests: XCTestCase {
     }
 
     func testBuildIsPerformanceBiased() {
-        let governor = EnergyGovernor(configuredVCPUs: 8)
+        let governor = EnergyGovernor(configuredVCPUs: 8, mode: .performance)
         let snapshot = ActivitySnapshot(vmRunning: true, activeBuilds: 1)
         let state = governor.classify(snapshot: snapshot)
         let policy = governor.policy(for: state, snapshot: snapshot)
@@ -26,5 +26,30 @@ final class EnergyGovernorTests: XCTestCase {
         let policy = governor.policy(for: .interactive, snapshot: snapshot)
         XCTAssertEqual(policy.maxVCPUs, 4)
         XCTAssertFalse(policy.allowIdleStop)
+    }
+
+    func testBalancedAndEcoReduceBackgroundCadence() {
+        let performance = EnergyGovernor(configuredVCPUs: 8, mode: .performance)
+            .policy(for: .warmIdle)
+        let balanced = EnergyGovernor(configuredVCPUs: 8, mode: .balanced)
+            .policy(for: .warmIdle)
+        let eco = EnergyGovernor(configuredVCPUs: 8, mode: .eco)
+            .policy(for: .warmIdle)
+
+        XCTAssertLessThan(performance.statusPersistenceMinIntervalMilliseconds, balanced.statusPersistenceMinIntervalMilliseconds)
+        XCTAssertLessThan(balanced.statusPersistenceMinIntervalMilliseconds, eco.statusPersistenceMinIntervalMilliseconds)
+        XCTAssertLessThan(performance.metricsPersistenceMinIntervalMilliseconds, balanced.metricsPersistenceMinIntervalMilliseconds)
+        XCTAssertLessThan(balanced.networkReconcileIntervalSeconds, eco.networkReconcileIntervalSeconds)
+    }
+
+    func testEcoConstrainsActiveCPUAndDisablesPrefetch() {
+        let governor = EnergyGovernor(configuredVCPUs: 8, mode: .eco)
+        let snapshot = ActivitySnapshot(vmRunning: true, activeBuilds: 1)
+        let policy = governor.policy(for: .build, snapshot: snapshot)
+
+        XCTAssertEqual(policy.energyMode, .eco)
+        XCTAssertEqual(policy.maxVCPUs, 2)
+        XCTAssertFalse(policy.allowPrefetch)
+        XCTAssertFalse(policy.performanceBias)
     }
 }

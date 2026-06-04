@@ -1,5 +1,11 @@
 import Foundation
 
+public enum ConjetEnergyMode: String, Codable, CaseIterable, Sendable {
+    case performance
+    case balanced
+    case eco
+}
+
 public struct ConjetConfig: Codable, Equatable, Sendable {
     public var vmCPUs: Int
     public var memoryMiB: Int
@@ -17,6 +23,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     public var networkBridgeEngine: ConjetNetworkBridgeEngine
     public var networkLANAllowedCIDRs: [String]
     public var networkLANAllowedPorts: [Int]
+    public var energyMode: ConjetEnergyMode
 
     public init(
         vmCPUs: Int = 4,
@@ -34,7 +41,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkProxyEngine: ConjetNetworkProxyEngine = .auto,
         networkBridgeEngine: ConjetNetworkBridgeEngine = .auto,
         networkLANAllowedCIDRs: [String] = [],
-        networkLANAllowedPorts: [Int] = []
+        networkLANAllowedPorts: [Int] = [],
+        energyMode: ConjetEnergyMode = .balanced
     ) {
         self.vmCPUs = vmCPUs
         self.memoryMiB = memoryMiB
@@ -52,6 +60,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         self.networkBridgeEngine = networkBridgeEngine
         self.networkLANAllowedCIDRs = networkLANAllowedCIDRs
         self.networkLANAllowedPorts = networkLANAllowedPorts
+        self.energyMode = energyMode
     }
 
     public static let `default` = ConjetConfig()
@@ -73,6 +82,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         case networkBridgeEngine
         case networkLANAllowedCIDRs
         case networkLANAllowedPorts
+        case energyMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -94,7 +104,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             networkProxyEngine: try container.decodeIfPresent(ConjetNetworkProxyEngine.self, forKey: .networkProxyEngine) ?? defaults.networkProxyEngine,
             networkBridgeEngine: try container.decodeIfPresent(ConjetNetworkBridgeEngine.self, forKey: .networkBridgeEngine) ?? defaults.networkBridgeEngine,
             networkLANAllowedCIDRs: try container.decodeIfPresent([String].self, forKey: .networkLANAllowedCIDRs) ?? defaults.networkLANAllowedCIDRs,
-            networkLANAllowedPorts: try container.decodeIfPresent([Int].self, forKey: .networkLANAllowedPorts) ?? defaults.networkLANAllowedPorts
+            networkLANAllowedPorts: try container.decodeIfPresent([Int].self, forKey: .networkLANAllowedPorts) ?? defaults.networkLANAllowedPorts,
+            energyMode: try container.decodeIfPresent(ConjetEnergyMode.self, forKey: .energyMode) ?? defaults.energyMode
         )
     }
 
@@ -121,7 +132,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             "# This file is intentionally small until the VM and sync engines are stable.",
             "",
             "[daemon]",
-            "quiet_stop_minutes = \(quietStopMinutes)"
+            "quiet_stop_minutes = \(quietStopMinutes)",
+            "energy_mode = \"\(energyMode.rawValue)\""
         ]
         if let socketPath {
             lines.append("socket_path = \"\(escapeTOML(socketPath))\"")
@@ -197,6 +209,12 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                 config.enableHostMounts = try parseBool(value, key: key)
             case "daemon.quiet_stop_minutes":
                 config.quietStopMinutes = try parseInt(value, key: key)
+            case "daemon.energy_mode":
+                let parsed = parseString(value)
+                guard let mode = ConjetEnergyMode(rawValue: parsed) else {
+                    throw ConjetError.decoding("daemon.energy_mode must be performance, balanced, or eco")
+                }
+                config.energyMode = mode
             case "daemon.socket_path":
                 config.socketPath = parseString(value)
             case "images.conjet_core_repository":
