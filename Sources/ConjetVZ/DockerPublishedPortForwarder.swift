@@ -16,6 +16,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
     private let capabilities: ConjetNetworkCapabilities
     private let requestedBridgeEngine: ConjetNetworkBridgeEngine
     private let bridgeFallbackReason: String?
+    private let energyMode: ConjetEnergyMode
     private let periodicReconcileIntervalSeconds: TimeInterval
     private let runner: Runner
     private let nioGroup: MultiThreadedEventLoopGroup
@@ -42,7 +43,8 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         capabilities: ConjetNetworkCapabilities = ConjetNetworkCapabilities(tcpProxy: true),
         requestedBridgeEngine: ConjetNetworkBridgeEngine = .auto,
         bridgeFallbackReason: String? = nil,
-        periodicReconcileIntervalSeconds: TimeInterval = 45,
+        energyMode: ConjetEnergyMode = .balanced,
+        periodicReconcileIntervalSeconds: TimeInterval? = nil,
         runner: @escaping Runner = { executable, arguments, timeoutSeconds in
             try ProcessRunner.run(executable, arguments, timeoutSeconds: timeoutSeconds)
         }
@@ -54,7 +56,8 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         self.capabilities = capabilities
         self.requestedBridgeEngine = requestedBridgeEngine
         self.bridgeFallbackReason = bridgeFallbackReason
-        self.periodicReconcileIntervalSeconds = max(5, periodicReconcileIntervalSeconds)
+        self.energyMode = energyMode
+        self.periodicReconcileIntervalSeconds = max(5, periodicReconcileIntervalSeconds ?? energyMode.defaultNetworkReconcileIntervalSeconds)
         self.runner = runner
         self.nioGroup = MultiThreadedEventLoopGroup(numberOfThreads: max(1, min(4, System.coreCount)))
     }
@@ -114,6 +117,16 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         lock.unlock()
         reconcile()
         startEventWatcher()
+    }
+
+    public func pruneCache() {
+        lock.lock()
+        publishedPortCache.removeAll()
+        statuses = statuses.filter { _, status in
+            status.state != .stale && status.state != .stopped
+        }
+        messages.append("network cache pruned")
+        lock.unlock()
     }
 
     public func status() -> ConjetNetworkStatus {
@@ -176,6 +189,13 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
 
     func discoverPublishedPortsForTesting() -> Set<DockerPublishedPort> {
         discoverPublishedPorts()
+    }
+
+    func reconcileContainerIDsForTesting(_ containerIDs: Set<String>) {
+        lock.lock()
+        running = true
+        lock.unlock()
+        reconcile(containerIDs: containerIDs)
     }
 
     private var actualProxyEngine: String {
@@ -268,14 +288,14 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             }
             lock.unlock()
             if isRunning() {
-                Thread.sleep(forTimeInterval: 1)
+                Thread.sleep(forTimeInterval: energyMode.eventWatcherReconnectDelaySeconds)
             }
         }
     }
 
     private func runDockerEventStream() {
         guard FileManager.default.fileExists(atPath: socketPath) else {
-            Thread.sleep(forTimeInterval: 1)
+            Thread.sleep(forTimeInterval: energyMode.eventWatcherReconnectDelaySeconds)
             return
         }
         let process = Process()
@@ -383,11 +403,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                 prunePublishedPortCache(activeContainerIDs: Set(containerIDs))
                 return knownPorts
             }
-            let inspect = try runner("/usr/bin/env", ["docker", "--host", "unix://\(socketPath)", "inspect"] + missingContainerIDs, 5)
-            guard inspect.succeeded, let data = inspect.stdout.data(using: .utf8) else {
-                return knownPorts
-            }
-            let inspectedPorts = Self.publishedPorts(fromDockerInspectJSON: data)
+            let inspectedPorts = try inspectPublishedPorts(containerIDs: missingContainerIDs, timeoutSeconds: 5)
             updatePublishedPortCache(inspectedPorts, for: missingContainerIDs)
             prunePublishedPortCache(activeContainerIDs: Set(containerIDs))
             return knownPorts.union(inspectedPorts)
@@ -405,11 +421,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         }
 
         do {
-            let inspect = try runner("/usr/bin/env", ["docker", "--host", "unix://\(socketPath)", "inspect"] + containerIDs, 3)
-            guard inspect.succeeded, let data = inspect.stdout.data(using: .utf8) else {
-                return cachedPublishedPorts(for: Set(containerIDs))
-            }
-            let ports = Self.publishedPorts(fromDockerInspectJSON: data)
+            let ports = try inspectPublishedPorts(containerIDs: containerIDs, timeoutSeconds: 3)
             updatePublishedPortCache(ports, for: containerIDs)
             return ports
         } catch {
@@ -418,6 +430,61 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             lock.unlock()
             return cachedPublishedPorts(for: Set(containerIDs))
         }
+    }
+
+    private func inspectPublishedPorts(containerIDs: [String], timeoutSeconds: Double) throws -> Set<DockerPublishedPort> {
+        guard !containerIDs.isEmpty else { return [] }
+
+        let inspect = try runner("/usr/bin/env", dockerInspectArguments(containerIDs), timeoutSeconds)
+        if inspect.succeeded, let data = inspect.stdout.data(using: .utf8) {
+            return Self.publishedPorts(fromDockerInspectJSON: data)
+        }
+
+        let vanishedContainerIDs = missingContainerIDs(fromDockerInspect: inspect, requestedContainerIDs: containerIDs)
+        guard !vanishedContainerIDs.isEmpty else {
+            return []
+        }
+
+        for containerID in vanishedContainerIDs {
+            removeForContainer(containerID)
+        }
+
+        let retryContainerIDs = containerIDs.filter { !vanishedContainerIDs.contains($0) }
+        guard !retryContainerIDs.isEmpty else {
+            return []
+        }
+        return try retryContainerIDs.reduce(into: Set<DockerPublishedPort>()) { ports, containerID in
+            let retry = try runner("/usr/bin/env", dockerInspectArguments([containerID]), timeoutSeconds)
+            if retry.succeeded, let data = retry.stdout.data(using: .utf8) {
+                ports.formUnion(Self.publishedPorts(fromDockerInspectJSON: data))
+            } else if !missingContainerIDs(fromDockerInspect: retry, requestedContainerIDs: [containerID]).isEmpty {
+                removeForContainer(containerID)
+            }
+        }
+    }
+
+    private func dockerInspectArguments(_ containerIDs: [String]) -> [String] {
+        ["docker", "--host", "unix://\(socketPath)", "inspect"] + containerIDs
+    }
+
+    private func missingContainerIDs(
+        fromDockerInspect result: ProcessResult,
+        requestedContainerIDs: [String]
+    ) -> Set<String> {
+        let output = result.stderr + "\n" + result.stdout
+        guard output.range(of: "No such container", options: .caseInsensitive) != nil ||
+              output.range(of: "No such object", options: .caseInsensitive) != nil else {
+            return []
+        }
+
+        let requested = Set(requestedContainerIDs)
+        let tokens = output
+            .split { character in
+                character.isWhitespace || character == ":" || character == "\"" || character == "'" || character == "," || character == "[" || character == "]"
+            }
+            .map(String.init)
+        let matched = Set(tokens.filter { requested.contains($0) })
+        return matched.isEmpty ? requested : matched
     }
 
     private func cachedPublishedPorts(for containerIDs: Set<String>) -> Set<DockerPublishedPort> {
@@ -439,21 +506,29 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
     private func updatePublishedPortCache(_ ports: Set<DockerPublishedPort>, for containerIDs: [String]) {
         lock.lock()
         for containerID in containerIDs {
-            publishedPortCache[containerID] = ports.filter { $0.containerID == containerID }
+            publishedPortCache[containerID] = ports.filter { port in
+                guard let portContainerID = port.containerID else { return false }
+                return containerIDsMatch(portContainerID, containerID)
+            }
         }
         lock.unlock()
     }
 
     private func prunePublishedPortCache(activeContainerIDs: Set<String>) {
         lock.lock()
-        publishedPortCache = publishedPortCache.filter { activeContainerIDs.contains($0.key) }
+        publishedPortCache = publishedPortCache.filter { cachedContainerID, _ in
+            activeContainerIDs.contains { activeContainerID in
+                containerIDsMatch(activeContainerID, cachedContainerID)
+            }
+        }
         lock.unlock()
     }
 
     private func removeForContainer(_ containerID: String) {
         lock.lock()
-        let keys = statuses.compactMap { key, status in
-            status.containerID == containerID ? key : nil
+        let keys = statuses.compactMap { key, status -> ForwardKey? in
+            guard let statusContainerID = status.containerID else { return nil }
+            return containerIDsMatch(statusContainerID, containerID) ? key : nil
         }
         let staleTCP = keys.compactMap { tcpListeners.removeValue(forKey: $0) }
         let staleUDP = keys.compactMap { udpListeners.removeValue(forKey: $0) }
@@ -462,7 +537,9 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             statuses[key]?.state = .stale
             statuses[key]?.updatedAt = now
         }
-        publishedPortCache.removeValue(forKey: containerID)
+        publishedPortCache = publishedPortCache.filter { cachedContainerID, _ in
+            !containerIDsMatch(cachedContainerID, containerID)
+        }
         lastReconcileAt = now
         lock.unlock()
         staleTCP.forEach { $0.stop() }
@@ -508,7 +585,9 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         if let scopedContainerIDs {
             scopedStaleKeys = Set(candidateStaleKeys.filter { key in
                 guard let containerID = statuses[key]?.containerID else { return false }
-                return scopedContainerIDs.contains(containerID)
+                return scopedContainerIDs.contains { scopedContainerID in
+                    containerIDsMatch(scopedContainerID, containerID)
+                }
             })
         } else {
             scopedStaleKeys = candidateStaleKeys
@@ -739,6 +818,11 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         "Port \(port)/\(proto.rawValue) cannot be published on \(bindAddress) because it is already in use or unavailable. Suggested fix: stop the process using the port or change your Compose port mapping. Detail: \(error)"
     }
 
+    private func containerIDsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
+        return lhs == rhs || lhs.hasPrefix(rhs) || rhs.hasPrefix(lhs)
+    }
+
     public static func publishedPorts(fromDockerInspectJSON data: Data) -> Set<DockerPublishedPort> {
         guard let containers = try? JSONDecoder().decode([DockerInspectContainer].self, from: data) else {
             return []
@@ -783,6 +867,30 @@ private struct ForwardKey: Hashable {
     var hostIP: String
     var hostPort: Int
     var proto: ConjetPortProtocol
+}
+
+private extension ConjetEnergyMode {
+    var defaultNetworkReconcileIntervalSeconds: TimeInterval {
+        switch self {
+        case .performance:
+            return 45
+        case .balanced:
+            return 90
+        case .eco:
+            return 180
+        }
+    }
+
+    var eventWatcherReconnectDelaySeconds: TimeInterval {
+        switch self {
+        case .performance:
+            return 1
+        case .balanced:
+            return 2
+        case .eco:
+            return 5
+        }
+    }
 }
 
 private final class ProxyMetrics: @unchecked Sendable {

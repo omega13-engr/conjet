@@ -86,6 +86,106 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertTrue(runner.psArguments.allSatisfy { $0.contains("--no-trunc") })
     }
 
+    func testPruneCacheForcesNextDiscoveryToInspectAgain() throws {
+        let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
+        FileManager.default.createFile(atPath: socketURL.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: socketURL) }
+
+        let fullID = "bcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789a"
+        let shortID = String(fullID.prefix(12))
+        let inspectJSON = """
+        [
+          {
+            "Id": "\(fullID)",
+            "Name": "/api",
+            "State": {"Running": true},
+            "NetworkSettings": {
+              "Ports": {
+                "63002/tcp": [{"HostIp": "0.0.0.0", "HostPort": "63002"}]
+              }
+            }
+          }
+        ]
+        """
+
+        let runner = DockerDiscoveryRunner(fullID: fullID, shortID: shortID, inspectJSON: inspectJSON)
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketURL.path,
+            connector: UnavailableGuestConnectionConnector(),
+            runner: runner.run
+        )
+        defer { forwarder.stop() }
+
+        _ = forwarder.discoverPublishedPortsForTesting()
+        _ = forwarder.discoverPublishedPortsForTesting()
+        XCTAssertEqual(runner.inspectCalls, 1)
+
+        forwarder.pruneCache()
+        _ = forwarder.discoverPublishedPortsForTesting()
+
+        XCTAssertEqual(runner.inspectCalls, 2)
+        XCTAssertTrue(forwarder.status().messages.contains("network cache pruned"))
+    }
+
+    func testTargetedReconcilePrunesContainerWhenInspectReportsNoSuchContainer() throws {
+        let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
+        FileManager.default.createFile(atPath: socketURL.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: socketURL) }
+
+        let containerID = "cab5d0c4e47275282ce694468988ad4c357246db31085e701da6fd4082afb66b"
+        let hostPort = try reserveLoopbackPort()
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketURL.path,
+            connector: UnavailableGuestConnectionConnector(),
+            runner: DockerNoSuchContainerRunner(containerID: containerID).run
+        )
+        defer { forwarder.stop() }
+
+        let eventContainerID = String(containerID.prefix(12))
+        forwarder.reconcileForTesting([
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: hostPort,
+                containerPort: 80,
+                protocol: .tcp,
+                containerID: containerID,
+                containerName: "web"
+            )
+        ])
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+
+        forwarder.reconcileContainerIDsForTesting([eventContainerID])
+
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().isEmpty })
+        let status = forwarder.status()
+        XCTAssertEqual(status.activeTCPForwards, 0)
+        XCTAssertEqual(status.staleForwards, 1)
+        XCTAssertEqual(status.forwards.first?.containerID, containerID)
+        XCTAssertEqual(status.forwards.first?.state, .stale)
+    }
+
+    func testEnergyModeControlsBackgroundReconcileInterval() {
+        let balanced = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: UnavailableGuestConnectionConnector(),
+            energyMode: .balanced
+        )
+        let eco = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: UnavailableGuestConnectionConnector(),
+            energyMode: .eco
+        )
+        defer {
+            balanced.stop()
+            eco.stop()
+        }
+
+        XCTAssertEqual(balanced.status().periodicReconcileIntervalSeconds, 90)
+        XCTAssertEqual(eco.status().periodicReconcileIntervalSeconds, 180)
+    }
+
     func testReconcileStartsAndStopsListeners() throws {
         let connector = UnavailableGuestConnectionConnector()
         let forwarder = DockerPublishedPortForwarder(
@@ -501,6 +601,27 @@ private final class DockerDiscoveryRunner: @unchecked Sendable {
             return ProcessResult(executable: executable, arguments: arguments, exitCode: 0, stdout: inspectJSON, stderr: "")
         }
         return ProcessResult(executable: executable, arguments: arguments, exitCode: 1, stdout: "", stderr: "unexpected command")
+    }
+}
+
+private final class DockerNoSuchContainerRunner: @unchecked Sendable {
+    private let containerID: String
+
+    init(containerID: String) {
+        self.containerID = containerID
+    }
+
+    func run(executable: String, arguments: [String], timeoutSeconds: Double?) throws -> ProcessResult {
+        if arguments.contains("inspect") {
+            return ProcessResult(
+                executable: executable,
+                arguments: arguments,
+                exitCode: 1,
+                stdout: "",
+                stderr: "Error response from daemon: No such container: \(containerID)"
+            )
+        }
+        return ProcessResult(executable: executable, arguments: arguments, exitCode: 0, stdout: "", stderr: "")
     }
 }
 

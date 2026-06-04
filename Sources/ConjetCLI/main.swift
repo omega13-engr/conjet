@@ -476,6 +476,10 @@ struct ConjetCLI {
            !envBridgeEngine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             config.networkBridgeEngine = try parseNetworkBridgeEngine(envBridgeEngine)
         }
+        if let envEnergyMode = ProcessInfo.processInfo.environment["CONJET_ENERGY_MODE"],
+           !envEnergyMode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            config.energyMode = try parseEnergyMode(envEnergyMode)
+        }
         let original = config
         var remaining = args
 
@@ -508,6 +512,8 @@ struct ConjetCLI {
                 config.networkProxyEngine = try parseNetworkProxyEngine(consumeValue(flag, from: &remaining))
             case "--bridge-engine", "--network-bridge-engine":
                 config.networkBridgeEngine = try parseNetworkBridgeEngine(consumeValue(flag, from: &remaining))
+            case "--energy-mode":
+                config.energyMode = try parseEnergyMode(consumeValue(flag, from: &remaining))
             case "--allow-cidr":
                 config.networkLANAllowedCIDRs.append(try consumeValue(flag, from: &remaining))
             case "--allow-port":
@@ -594,6 +600,18 @@ struct ConjetCLI {
         return response
     }
 
+    private static func pruneRuntimeCacheIfRunning() throws -> DaemonResponse? {
+        let paths = ConjetPaths.default()
+        let currentSocketPath = try socketPath(paths: paths)
+        guard daemonIsRunning(socketPath: currentSocketPath) else {
+            return nil
+        }
+        return try UnixSocketClient(socketPath: currentSocketPath).send(
+            DaemonRequest(command: .pruneCache),
+            timeoutSeconds: 10
+        )
+    }
+
     private static func daemonIsRunning(socketPath: String) -> Bool {
         (try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .ping), timeoutSeconds: 1).ok) == true
     }
@@ -610,8 +628,12 @@ struct ConjetCLI {
     private static func restart(args: [String] = [], json: Bool = false) throws {
         var startArgs = args
         let timeout = try stopTimeout(from: takeValueOption("--timeout", from: &startArgs))
+        let pruned = try pruneRuntimeCacheIfRunning()
         let stopped = try stopRuntime(timeout: timeout, requireRunning: false)
         if !json {
+            if let pruned {
+                print(pruned.message)
+            }
             if let stopped {
                 print(stopped.message)
             } else {
@@ -620,7 +642,7 @@ struct ConjetCLI {
         }
         let started = try startRuntime(args: startArgs, json: json)
         if json {
-            print(try ConjetJSON.string(ConjetRestartResult(stopped: stopped, started: started)))
+            print(try ConjetJSON.string(ConjetRestartResult(pruned: pruned, stopped: stopped, started: started)))
         }
     }
 
@@ -1397,6 +1419,7 @@ struct ConjetCLI {
             print("  disk image: \(diskImagePath)")
         }
         print("  runtime: \(config.runtime)")
+        print("  energy mode: \(config.energyMode.rawValue)")
         print("  network bind policy: \(config.networkBindPolicy.rawValue)")
         print("  network proxy engine: \(config.networkProxyEngine.rawValue)")
         print("  network bridge engine: \(config.networkBridgeEngine.rawValue)")
@@ -1776,6 +1799,13 @@ struct ConjetCLI {
         default:
             throw ConjetError.invalidArgument("network bridge engine must be auto, python-legacy, or conjet-netd-c")
         }
+    }
+
+    private static func parseEnergyMode(_ value: String) throws -> ConjetEnergyMode {
+        guard let mode = ConjetEnergyMode(rawValue: value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
+            throw ConjetError.invalidArgument("energy mode must be performance, balanced, or eco")
+        }
+        return mode
     }
 
     private static func parseMemoryMiB(_ value: String, flag: String) throws -> Int {
@@ -2857,7 +2887,7 @@ struct ConjetCLI {
 
                 Usage:
                   conjet start [--cpus N] [--memory SIZE] [--disk SIZE_OR_PATH] [--runtime NAME] [--arch ARCH]
-                               [--network-bind-policy POLICY] [--proxy-engine ENGINE]
+                               [--energy-mode MODE] [--network-bind-policy POLICY] [--proxy-engine ENGINE]
 
                 Options:
                   --cpus, --cpu N       Set VM CPU count
@@ -2865,6 +2895,7 @@ struct ConjetCLI {
                   --disk SIZE_OR_PATH   Set VM data disk size or use a custom disk image path
                   --runtime NAME        Set container runtime preference
                   --arch ARCH           Set guest architecture
+                  --energy-mode performance|balanced|eco
                   --network-bind-policy secure-local|docker-strict|lan-allowlist
                   --proxy-engine auto|nio|event-loop|gcd-evented|gcd-fallback|turbo
                   --allow-cidr CIDR     Add a LAN allowlist CIDR for lan-allowlist mode
@@ -2893,6 +2924,7 @@ struct ConjetCLI {
             print(
                 """
                 Restart the VM and daemon, or start Conjet if it is stopped.
+                Restart prunes runtime cache before shutdown when conjetd is running.
 
                 Usage:
                   conjet restart [--timeout SECONDS] [start options]
@@ -2904,6 +2936,7 @@ struct ConjetCLI {
                   --disk SIZE_OR_PATH   Set VM data disk size or use a custom disk image path
                   --runtime NAME        Set container runtime preference
                   --arch ARCH           Set guest architecture
+                  --energy-mode performance|balanced|eco
                   --network-bind-policy secure-local|docker-strict|lan-allowlist
                   --proxy-engine auto|nio|event-loop|gcd-evented|gcd-fallback|turbo
                   --profile NAME        Use an isolated Conjet profile
@@ -3893,6 +3926,7 @@ private struct ProfileStatus: Codable, Equatable {
 }
 
 private struct ConjetRestartResult: Codable, Equatable {
+    var pruned: DaemonResponse?
     var stopped: DaemonResponse?
     var started: DaemonResponse
 }

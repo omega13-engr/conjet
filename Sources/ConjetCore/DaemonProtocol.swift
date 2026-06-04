@@ -19,6 +19,7 @@ public enum DaemonCommand: String, Codable, Equatable, Sendable {
     case vmStatus = "vm-status"
     case dockerRun = "docker-run"
     case networkRepair = "network-repair"
+    case pruneCache = "prune-cache"
 }
 
 public struct DaemonRequest: Codable, Equatable, Sendable {

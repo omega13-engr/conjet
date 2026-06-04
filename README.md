@@ -22,6 +22,7 @@ tools.
 - Smart storage behavior for dependency and build-heavy projects
 - Benchmark tooling for comparing Conjet, OrbStack, and Colima
 - Energy benchmark path when macOS power metrics are available
+- User-selectable energy modes: `performance`, `balanced`, and `eco`
 
 Kubernetes is not supported yet. It is planned for a later iteration.
 
@@ -78,6 +79,8 @@ Restart the runtime:
 ```sh
 conjet restart
 ```
+
+Restart prunes runtime cache before shutdown when `conjetd` is already running.
 
 Update the Conjet Core VM image:
 
@@ -226,6 +229,11 @@ It reports timing, failures, topology labels, and energy data when power
 measurement is available. The benchmark output is comparison data, not a global
 performance claim.
 
+Current benchmark positioning: Conjet can be described as faster than OrbStack
+on the measured warm, cold/no-cache, topology, and most cross-language local
+Docker workflow gates. Conjet has shown very low idle power in directional
+measurements, but active energy optimization is still ongoing.
+
 Build the benchmark package:
 
 ```sh
@@ -261,6 +269,18 @@ swift run --package-path benchmarks conjet-bench energy-gate \
 Energy measurements may require `sudo` because macOS power metrics are
 privileged.
 
+Energy modes are selected on start:
+
+```sh
+conjet start --energy-mode balanced
+conjet start --energy-mode performance
+conjet start --energy-mode eco
+```
+
+`balanced` is the default. `performance` preserves the most aggressive latency
+posture, while `eco` backs off background reconciliation and persistence and
+can cap VM CPU allocation.
+
 Run only the networking benchmark:
 
 ```sh
@@ -281,7 +301,7 @@ Current focus:
 - faster local container workflows
 - better project sync behavior
 - broader benchmark comparisons
-- clearer energy measurements
+- active energy optimization
 - production-ready macOS developer experience
 
 ---

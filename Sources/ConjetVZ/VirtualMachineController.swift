@@ -54,6 +54,16 @@ public final class VirtualMachineController {
         return networkStatus(config: config)
     }
 
+    public func pruneCache(config: ConjetConfig) -> ConjetNetworkStatus {
+        #if canImport(Virtualization)
+        if let publishedPortForwarder {
+            publishedPortForwarder.pruneCache()
+            return publishedPortForwarder.status()
+        }
+        #endif
+        return networkStatus(config: config)
+    }
+
     public func start(manifest: VMAssetManifest, config: ConjetConfig, store: VMImageStore) throws -> VMRuntimeStatus {
         #if canImport(Virtualization)
         if let machine, mapState(machine.state) == .running || mapState(machine.state) == .starting {
@@ -210,7 +220,8 @@ public final class VirtualMachineController {
                 proxyEngine: config.networkProxyEngine,
                 capabilities: capabilities.conjetNetworkCapabilities,
                 requestedBridgeEngine: config.networkBridgeEngine,
-                bridgeFallbackReason: bridgeFallbackReason
+                bridgeFallbackReason: bridgeFallbackReason,
+                energyMode: config.energyMode
             )
             forwarder.start()
             publishedPortForwarder = forwarder
@@ -260,7 +271,14 @@ private enum VZConfigurationBuilder {
         vmConfig.bootLoader = try bootLoader(manifest: manifest)
         let minimumCPUCount = Int(VZVirtualMachineConfiguration.minimumAllowedCPUCount)
         let maximumCPUCount = Int(VZVirtualMachineConfiguration.maximumAllowedCPUCount)
-        vmConfig.cpuCount = max(minimumCPUCount, min(config.vmCPUs, maximumCPUCount))
+        let requestedCPUs: Int
+        switch config.energyMode {
+        case .performance, .balanced:
+            requestedCPUs = config.vmCPUs
+        case .eco:
+            requestedCPUs = max(1, config.vmCPUs / 2)
+        }
+        vmConfig.cpuCount = max(minimumCPUCount, min(requestedCPUs, maximumCPUCount))
         vmConfig.memorySize = UInt64(config.memoryMiB) * 1024 * 1024
 
         vmConfig.storageDevices = try storageDevices(manifest: manifest)

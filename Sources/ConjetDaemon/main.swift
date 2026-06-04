@@ -20,7 +20,15 @@ struct ConjetDaemon {
         try paths.ensureBaseDirectories()
         let config = try ConjetConfig.loadOrCreate(paths: paths)
         let socketPath = config.socketPath ?? paths.socket.path
-        let logger = try DaemonLogger(path: paths.daemonLog)
+        let policy = EnergyGovernor(
+            configuredVCPUs: config.vmCPUs,
+            quietStopSeconds: Double(config.quietStopMinutes) * 60,
+            mode: config.energyMode
+        ).policy(for: .warmIdle)
+        let logger = try DaemonLogger(
+            path: paths.daemonLog,
+            flushInterval: TimeInterval(policy.statusPersistenceMinIntervalMilliseconds) / 1_000
+        )
         let runtime = DaemonRuntime(
             startedAt: Date(),
             socketPath: socketPath,
@@ -34,7 +42,8 @@ struct ConjetDaemon {
             "memoryMiB": String(config.memoryMiB),
             "architecture": config.architecture,
             "diskGiB": String(config.diskGiB),
-            "runtime": config.runtime
+            "runtime": config.runtime,
+            "energyMode": config.energyMode.rawValue
         ])
 
         let server = UnixSocketServer(socketPath: socketPath)
@@ -55,6 +64,11 @@ struct ConjetDaemon {
 }
 
 private final class DaemonRuntime {
+    private struct CachedStatus {
+        var status: DaemonStatus
+        var createdAt: Date
+    }
+
     let startedAt: Date
     let socketPath: String
     let config: ConjetConfig
@@ -62,6 +76,10 @@ private final class DaemonRuntime {
     let paths: ConjetPaths
     let vmStore: VMImageStore
     let vmController: VirtualMachineController
+    let governor: EnergyGovernor
+    private let statusCacheLock = NSLock()
+    private var cachedStatus: CachedStatus?
+    private let statusCacheTTL: TimeInterval
 
     init(startedAt: Date, socketPath: String, config: ConjetConfig, paths: ConjetPaths = .default()) {
         self.startedAt = startedAt
@@ -70,6 +88,12 @@ private final class DaemonRuntime {
         self.paths = paths
         self.vmStore = VMImageStore(paths: paths)
         self.vmController = VirtualMachineController()
+        self.governor = EnergyGovernor(
+            configuredVCPUs: config.vmCPUs,
+            quietStopSeconds: Double(config.quietStopMinutes) * 60,
+            mode: config.energyMode
+        )
+        self.statusCacheTTL = TimeInterval(governor.policy(for: .warmIdle).statusPersistenceMinIntervalMilliseconds) / 1_000
         self.host = HostCapabilities.detect()
         _ = VirtualizationProbe.inspect(config: config, host: host)
     }
@@ -77,26 +101,32 @@ private final class DaemonRuntime {
     func handle(request: DaemonRequest, stopping: inout Bool) -> DaemonResponse {
         switch request.command {
         case .ping:
-            return DaemonResponse(ok: true, message: "pong", status: status(state: .warmIdle))
+            return DaemonResponse(ok: true, message: "pong", status: status(state: .warmIdle, allowCache: true))
         case .status:
-            return DaemonResponse(ok: true, message: "running", status: status(state: .warmIdle))
+            return DaemonResponse(ok: true, message: "running", status: status(state: .warmIdle, allowCache: true))
         case .vmStatus:
             let vm = vmController.status(store: vmStore)
             return DaemonResponse(ok: vm.configured, message: vm.message, status: status(state: runtimeState(for: vm), vm: vm), vm: vm)
         case .vmStart:
             do {
+                invalidateStatusCache()
                 let manifest = try vmStore.loadManifest()
                 let vm = try vmController.start(manifest: manifest, config: config, store: vmStore)
+                invalidateStatusCache()
                 return DaemonResponse(ok: true, message: vm.message, status: status(state: runtimeState(for: vm), vm: vm), vm: vm)
             } catch {
+                invalidateStatusCache()
                 let vm = vmStore.status(state: .error, message: String(describing: error))
                 return DaemonResponse(ok: false, message: vm.message, status: status(state: .warmIdle, vm: vm), vm: vm)
             }
         case .vmStop:
             do {
+                invalidateStatusCache()
                 let vm = try vmController.stop(store: vmStore)
+                invalidateStatusCache()
                 return DaemonResponse(ok: true, message: vm.message, status: status(state: .warmIdle, vm: vm), vm: vm)
             } catch {
+                invalidateStatusCache()
                 let vm = vmStore.status(state: .error, message: String(describing: error))
                 return DaemonResponse(ok: false, message: vm.message, status: status(state: .warmIdle, vm: vm), vm: vm)
             }
@@ -114,13 +144,25 @@ private final class DaemonRuntime {
                 return DaemonResponse(ok: false, message: String(describing: error), status: status(state: .warmIdle))
             }
         case .networkRepair:
+            invalidateStatusCache()
             let network = vmController.repairNetwork(config: config)
+            invalidateStatusCache()
             return DaemonResponse(
                 ok: true,
                 message: "network repair completed",
                 status: status(state: .warmIdle, network: network)
             )
+        case .pruneCache:
+            invalidateStatusCache()
+            let network = vmController.pruneCache(config: config)
+            invalidateStatusCache()
+            return DaemonResponse(
+                ok: true,
+                message: "runtime cache pruned",
+                status: status(state: .warmIdle, network: network)
+            )
         case .stop:
+            invalidateStatusCache()
             stopping = true
             let cleanupTimeout = request.parameters["timeout_seconds"].flatMap(Double.init)
                 .map { min(max($0, 0.1), 25) }
@@ -153,9 +195,14 @@ private final class DaemonRuntime {
     private func status(
         state: RuntimeState,
         vm: VMRuntimeStatus? = nil,
-        network: ConjetNetworkStatus? = nil
+        network: ConjetNetworkStatus? = nil,
+        allowCache: Bool = false
     ) -> DaemonStatus {
-        DaemonStatus(
+        if allowCache, vm == nil, network == nil, let cached = currentCachedStatus() {
+            return cached
+        }
+
+        let snapshot = DaemonStatus(
             pid: getpid(),
             startedAt: startedAt,
             state: state,
@@ -165,6 +212,33 @@ private final class DaemonRuntime {
             vm: vm ?? vmController.status(store: vmStore),
             network: network ?? vmController.networkStatus(config: config)
         )
+        if allowCache, vm == nil, network == nil {
+            storeCachedStatus(snapshot)
+        }
+        return snapshot
+    }
+
+    private func currentCachedStatus() -> DaemonStatus? {
+        statusCacheLock.lock()
+        defer { statusCacheLock.unlock() }
+        guard let cachedStatus,
+              Date().timeIntervalSince(cachedStatus.createdAt) <= statusCacheTTL else {
+            self.cachedStatus = nil
+            return nil
+        }
+        return cachedStatus.status
+    }
+
+    private func storeCachedStatus(_ status: DaemonStatus) {
+        statusCacheLock.lock()
+        cachedStatus = CachedStatus(status: status, createdAt: Date())
+        statusCacheLock.unlock()
+    }
+
+    private func invalidateStatusCache() {
+        statusCacheLock.lock()
+        cachedStatus = nil
+        statusCacheLock.unlock()
     }
 
     private func runtimeState(for vm: VMRuntimeStatus) -> RuntimeState {
@@ -198,26 +272,64 @@ private final class AsyncErrorBox: @unchecked Sendable {
     }
 }
 
-private final class DaemonLogger {
-    private let url: URL
+private final class DaemonLogger: @unchecked Sendable {
+    private let handle: FileHandle
+    private let formatter = ISO8601DateFormatter()
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "dev.conjet.daemon-log", qos: .utility)
+    private let flushInterval: TimeInterval
+    private var bufferedLines: [String] = []
+    private var flushScheduled = false
 
-    init(path: URL) throws {
-        self.url = path
+    init(path: URL, flushInterval: TimeInterval = 0.25) throws {
         if !FileManager.default.fileExists(atPath: path.path) {
             FileManager.default.createFile(atPath: path.path, contents: nil)
         }
+        self.handle = try FileHandle(forWritingTo: path)
+        self.flushInterval = max(0.05, flushInterval)
+        try handle.seekToEnd()
+    }
+
+    deinit {
+        flushSync()
+        try? handle.close()
     }
 
     func log(_ event: String, _ fields: [String: String]) throws {
         var payload = fields
         payload["event"] = event
-        payload["at"] = ISO8601DateFormatter().string(from: Date())
+        payload["at"] = formatter.string(from: Date())
         let data = try JSONSerialization.data(withJSONObject: payload.sortedDictionary(), options: [.sortedKeys])
         guard let line = String(data: data, encoding: .utf8) else { return }
-        let handle = try FileHandle(forWritingTo: url)
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data((line + "\n").utf8))
-        try handle.close()
+        queue.async { [weak self] in
+            self?.enqueue(line)
+        }
+    }
+
+    private func enqueue(_ line: String) {
+        lock.lock()
+        bufferedLines.append(line)
+        let shouldSchedule = !flushScheduled
+        if shouldSchedule {
+            flushScheduled = true
+        }
+        lock.unlock()
+
+        if shouldSchedule {
+            queue.asyncAfter(deadline: .now() + flushInterval) { [weak self] in
+                self?.flushSync()
+            }
+        }
+    }
+
+    private func flushSync() {
+        lock.lock()
+        let lines = bufferedLines
+        bufferedLines.removeAll(keepingCapacity: true)
+        flushScheduled = false
+        lock.unlock()
+        guard !lines.isEmpty else { return }
+        try? handle.write(contentsOf: Data((lines.joined(separator: "\n") + "\n").utf8))
     }
 }
 

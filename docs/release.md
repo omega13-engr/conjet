@@ -74,4 +74,5 @@ starts it again after the update. Use `--no-restart` to leave the runtime
 stopped, or `--restart` to start it even when it was previously stopped.
 
 `conjet restart` performs the matching stop/start lifecycle operation for the
-active profile and accepts the same configuration flags as `conjet start`.
+active profile, prunes runtime cache before shutdown when `conjetd` is running,
+and accepts the same configuration flags as `conjet start`.
