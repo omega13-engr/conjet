@@ -62,6 +62,8 @@ struct ConjetCLI {
             try runContainer(args: args, json: json)
         case "compose":
             try compose(args: args)
+        case "docker":
+            try docker(args: args, json: json)
         case "sync":
             try sync(args: args, json: json)
         case "project":
@@ -997,6 +999,50 @@ struct ConjetCLI {
         print(result.stdout, terminator: result.stdout.hasSuffix("\n") ? "" : "\n")
         if !result.succeeded {
             throw ConjetError.processFailed(executable: compose, exitCode: result.exitCode, stderr: result.stderr)
+        }
+    }
+
+    private static func docker(args: [String], json: Bool) throws {
+        let subcommand = args.first ?? "repair"
+        switch subcommand {
+        case "repair":
+            var repairArgs = Array(args.dropFirst())
+            let dryRun = repairArgs.removeAllOccurrences("--dry-run")
+            let apply = repairArgs.removeAllOccurrences("--apply")
+            let restartAfterRepair = repairArgs.removeAllOccurrences("--restart")
+            if dryRun && apply {
+                throw ConjetError.invalidArgument("use either --dry-run or --apply, not both")
+            }
+            if json && restartAfterRepair {
+                throw ConjetError.invalidArgument("use --restart without --json, or run 'conjet restart' after JSON repair")
+            }
+            let project = try takeValueOption("--project", from: &repairArgs)
+            var containerIDs: [String] = []
+            while let id = try takeValueOption("--id", from: &repairArgs) {
+                containerIDs.append(id)
+            }
+            if let unknown = repairArgs.first {
+                throw ConjetError.invalidArgument("unknown docker repair option '\(unknown)'")
+            }
+
+            let result = try DockerMetadataRepairer(dockerContext: dockerContextName(profileName: ConjetPaths.default().profileName))
+                .repair(dryRun: !apply, project: project, containerIDs: containerIDs)
+            if json {
+                print(try ConjetJSON.string(result))
+            } else {
+                printDockerMetadataRepairResult(result)
+            }
+            if restartAfterRepair && result.repairedCount > 0 {
+                let stopped = try stopRuntime(timeout: stopTimeout(from: nil), requireRunning: false)
+                if !json, let stopped {
+                    print(stopped.message)
+                }
+                _ = try startRuntime(args: [], json: json)
+            } else if !json, result.repairedCount > 0 {
+                print("Run 'conjet restart' so guest Docker reloads repaired metadata.")
+            }
+        default:
+            throw ConjetError.invalidArgument("unknown docker command '\(subcommand)'")
         }
     }
 
@@ -2003,6 +2049,43 @@ struct ConjetCLI {
         }
     }
 
+    private static func printDockerMetadataRepairResult(_ result: DockerMetadataRepairResult) {
+        let headline = result.dryRun ? "Docker metadata repair dry run" : "Docker metadata repair"
+        print(headline)
+        print("  docker context: \(result.dockerContext)")
+        if let project = result.project {
+            print("  project: \(project)")
+        }
+        if result.records.isEmpty {
+            print("  stale records: 0")
+            return
+        }
+        let interesting = result.records.filter { $0.action == .stale || $0.action == .repaired || $0.action == .skipped }
+        print("  stale records: \(result.dryRun ? result.staleCount : result.repairedCount)")
+        for record in interesting {
+            let id = String(record.containerID.prefix(12))
+            switch record.action {
+            case .stale:
+                print("  - stale \(id): \(record.reason)")
+                if let backupPath = record.backupPath {
+                    print("    backup: \(backupPath)")
+                }
+            case .repaired:
+                print("  - repaired \(id): \(record.reason)")
+                if let backupPath = record.backupPath {
+                    print("    backup: \(backupPath)")
+                }
+            case .skipped:
+                print("  - skipped \(id): \(record.reason)")
+            case .healthy:
+                continue
+            }
+        }
+        if result.dryRun, result.staleCount > 0 {
+            print("Run again with --apply to back up and remove stale metadata.")
+        }
+    }
+
     private static func vmStartHeadline(_ response: DaemonResponse) -> String {
         guard response.ok else {
             return "=> ERROR [vm 2/2] \(response.message)"
@@ -2869,7 +2952,7 @@ struct ConjetCLI {
         guard !args.isEmpty else { return false }
         if isHelpFlag(args[0]) { return true }
         switch command {
-        case "vm", "sync", "project", "profile", "power", "port", "network":
+        case "vm", "sync", "project", "profile", "power", "port", "network", "docker":
             return args.indices.contains(1) && isHelpFlag(args[1])
         default:
             return false
@@ -3053,6 +3136,8 @@ struct ConjetCLI {
             printPortHelp(parts: parts)
         case "network":
             printNetworkHelp(parts: parts)
+        case "docker":
+            printDockerHelp(parts: parts)
         default:
             printHelp()
         }
@@ -3343,6 +3428,44 @@ struct ConjetCLI {
         )
     }
 
+    private static func printDockerHelp(parts: [String]) {
+        if parts.count >= 2 {
+            switch parts[1] {
+            case "repair":
+                print(
+                    """
+                    Repair stale Docker metadata inside the Conjet VM.
+
+                    Usage:
+                      conjet docker repair [--dry-run|--apply] [--restart] [--project NAME] [--id CONTAINER_ID]... [--json]
+
+                    Options:
+                      --dry-run       Detect stale metadata without removing it (default)
+                      --apply         Back up and remove verified stale metadata directories
+                      --restart       Restart Conjet after successful repair so dockerd reloads metadata
+                      --project NAME  Limit scan to a Docker Compose project label
+                      --id ID         Limit repair to one container id; may be repeated
+                    """
+                )
+            default:
+                printDockerHelp(parts: ["docker"])
+            }
+            return
+        }
+
+        print(
+            """
+            Inspect and repair Docker daemon state inside Conjet.
+
+            Usage:
+              conjet docker <command> [options]
+
+            Commands:
+              repair   Detect and repair stale Docker container metadata
+            """
+        )
+    }
+
     private static func printHelp() {
         print(
             """
@@ -3361,6 +3484,7 @@ struct ConjetCLI {
               shell       Open a privileged Linux shell through the Conjet Docker socket
               run         Run a Docker image through Conjet
               compose     Pass through to docker compose using Conjet
+              docker      Inspect and repair Docker daemon metadata
 
             Networking:
               port list        Show Docker published ports on macOS
@@ -3370,6 +3494,7 @@ struct ConjetCLI {
               network bridge-test Verify native bridge activation and Docker passthrough
               network bridge-switch Switch the active guest bridge engine
               network policy   Inspect or change the network bind policy
+              docker repair    Repair stale Docker container metadata
 
             VM Images:
               vm fetch-conjet-core   Download a Conjet Core VM image

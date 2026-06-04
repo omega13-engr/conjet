@@ -100,6 +100,18 @@ Use Compose:
 conjet compose up
 ```
 
+Repair stale Docker metadata:
+
+```sh
+conjet docker repair --project my-compose-project
+conjet docker repair --project my-compose-project --apply --restart
+```
+
+Use this when Docker lists stopped Compose containers but `inspect`, `rm`, or
+`compose up` fails with `No such container`. The repair command defaults to a
+dry run, verifies containerd has no matching object or task, and backs up stale
+metadata before removal.
+
 Inspect published ports:
 
 ```sh
