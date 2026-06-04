@@ -176,3 +176,14 @@ public struct DaemonResponse: Codable, Equatable, Sendable {
         self.dockerRun = dockerRun
     }
 }
+
+public enum DaemonCompatibility {
+    public static func isUnsupportedCommandResponse(_ response: DaemonResponse, command: DaemonCommand) -> Bool {
+        guard !response.ok else { return false }
+        return isUnsupportedCommandMessage(response.message, command: command)
+    }
+
+    public static func isUnsupportedCommandMessage(_ message: String, command: DaemonCommand) -> Bool {
+        message.contains("Cannot initialize DaemonCommand from invalid String value \(command.rawValue)")
+    }
+}

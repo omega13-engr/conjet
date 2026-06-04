@@ -606,10 +606,14 @@ struct ConjetCLI {
         guard daemonIsRunning(socketPath: currentSocketPath) else {
             return nil
         }
-        return try UnixSocketClient(socketPath: currentSocketPath).send(
+        let response = try UnixSocketClient(socketPath: currentSocketPath).send(
             DaemonRequest(command: .pruneCache),
             timeoutSeconds: 10
         )
+        if DaemonCompatibility.isUnsupportedCommandResponse(response, command: .pruneCache) {
+            return nil
+        }
+        return response
     }
 
     private static func daemonIsRunning(socketPath: String) -> Bool {

@@ -16,4 +16,19 @@ final class DaemonProtocolTests: XCTestCase {
 
         XCTAssertEqual(decoded.command, .pruneCache)
     }
+
+    func testUnsupportedCommandCompatibilityDetectsOldDaemonDecodeFailure() {
+        let response = DaemonResponse(
+            ok: false,
+            message: "DecodingError.dataCorrupted: Data was corrupted. Path: command. Debug description: Cannot initialize DaemonCommand from invalid String value prune-cache"
+        )
+
+        XCTAssertTrue(DaemonCompatibility.isUnsupportedCommandResponse(response, command: .pruneCache))
+    }
+
+    func testUnsupportedCommandCompatibilityIgnoresSuccessfulResponses() {
+        let response = DaemonResponse(ok: true, message: "runtime cache pruned")
+
+        XCTAssertFalse(DaemonCompatibility.isUnsupportedCommandResponse(response, command: .pruneCache))
+    }
 }
