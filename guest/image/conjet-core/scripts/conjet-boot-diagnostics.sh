@@ -19,7 +19,7 @@ mkdir -p /run/conjet
     lsmod | grep -E '(^vsock|vsock|virtio)' || true
 
     echo "conjet-boot-diagnostics: service states"
-    for unit in systemd-resolved.service conjet-data-disk.service containerd.service docker.socket docker.service conjet-docker-vsock.service; do
+    for unit in systemd-resolved.service conjet-data-disk.service conjet-docker-lifecycle.service containerd.service docker.socket docker.service conjet-docker-vsock.service; do
         echo "unit=${unit}"
         systemctl is-enabled "${unit}" 2>&1 || true
         systemctl is-active "${unit}" 2>&1 || true
@@ -39,6 +39,9 @@ mkdir -p /run/conjet
     echo "conjet-boot-diagnostics: sockets"
     ls -l /var/run/docker.sock /run/conjet/docker-vsock-ready 2>&1 || true
     ss -lx 2>&1 | grep -E 'docker|containerd|conjet' || true
+
+    echo "conjet-boot-diagnostics: docker service guard"
+    tail -n 80 /run/conjet/docker-service-guard.log 2>&1 || true
 
     echo "conjet-boot-diagnostics: virtiofs mounts"
     mount | grep -E 'conjethost|conjetboot|virtiofs' || true

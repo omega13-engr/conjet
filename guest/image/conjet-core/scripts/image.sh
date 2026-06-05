@@ -191,6 +191,8 @@ install -m 0644 "${BUILD_DIR}/src/conjet-netd.c" \
     "${MOUNT_DIR}/usr/local/src/conjet-netd.c"
 install -m 0755 "${BUILD_DIR}/scripts/conjet-data-disk.sh" \
     "${MOUNT_DIR}/usr/local/sbin/conjet-data-disk.sh"
+install -m 0755 "${BUILD_DIR}/scripts/conjet-docker-service-guard.sh" \
+    "${MOUNT_DIR}/usr/local/sbin/conjet-docker-service-guard.sh"
 install -m 0755 "${BUILD_DIR}/scripts/conjet-boot-diagnostics.sh" \
     "${MOUNT_DIR}/usr/local/sbin/conjet-boot-diagnostics.sh"
 
@@ -218,15 +220,34 @@ RemainAfterExit=yes
 WantedBy=local-fs.target
 UNIT
 
+cat >"${MOUNT_DIR}/etc/systemd/system/conjet-docker-lifecycle.service" <<'UNIT'
+[Unit]
+Description=Conjet Docker lifecycle marker
+DefaultDependencies=no
+After=conjet-data-disk.service
+Before=containerd.service docker.socket docker.service
+Requires=conjet-data-disk.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/conjet-docker-service-guard.sh mark-start
+ExecStop=/usr/local/sbin/conjet-docker-service-guard.sh mark-stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=local-fs.target
+UNIT
+
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-docker-vsock.service" <<'UNIT'
 [Unit]
 Description=Conjet Docker VSOCK bridge
-After=conjet-data-disk.service containerd.service docker.service docker.socket
-Wants=conjet-data-disk.service containerd.service docker.service docker.socket
+After=conjet-data-disk.service conjet-docker-lifecycle.service containerd.service docker.service docker.socket
+Wants=conjet-data-disk.service conjet-docker-lifecycle.service containerd.service docker.service docker.socket
 
 [Service]
 Type=simple
 ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
+ExecStartPre=/usr/local/sbin/conjet-docker-service-guard.sh repair-if-required
 ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; mountpoint -q /mnt/conjetboot || mount -t virtiofs conjetboot /mnt/conjetboot 2>/dev/null || true; rm -f /run/conjet/docker-vsock-ready'
 ExecStart=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; engine="${CONJET_NET_BRIDGE_ENGINE:-$(cat /mnt/conjetboot/network-bridge-engine 2>/dev/null || cat /etc/conjet/network-bridge-engine 2>/dev/null || echo auto)}"; case "$engine" in auto|"") if [ -x /usr/local/sbin/conjet-netd ]; then exec /usr/local/sbin/conjet-netd 2>&1; else exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1; fi ;; conjet-netd|conjet-netd-c) if [ -x /usr/local/sbin/conjet-netd ]; then exec /usr/local/sbin/conjet-netd 2>&1; else echo "conjet-netd-c requested but /usr/local/sbin/conjet-netd is missing" >&2; exit 42; fi ;; python|python-legacy) exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1 ;; *) echo "unsupported CONJET_NET_BRIDGE_ENGINE=$engine" >&2; exit 43 ;; esac | /usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0'
 Restart=always
@@ -375,6 +396,7 @@ if [ "${RUNTIME}" = "docker" ]; then
 
     enable_unit systemd-resolved.service multi-user.target
     enable_unit conjet-data-disk.service local-fs.target
+    enable_unit conjet-docker-lifecycle.service local-fs.target
     enable_unit containerd.service multi-user.target
     enable_unit docker.service multi-user.target
     enable_unit docker.socket sockets.target

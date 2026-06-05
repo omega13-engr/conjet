@@ -111,17 +111,20 @@ public final class VirtualMachineController {
 
     public func stop(store: VMImageStore) throws -> VMRuntimeStatus {
         #if canImport(Virtualization)
-        publishedPortForwarder?.stop()
-        publishedPortForwarder = nil
-        dockerBridge?.stop()
-        dockerBridge = nil
-
         guard let machine else {
+            publishedPortForwarder?.stop()
+            publishedPortForwarder = nil
+            dockerBridge?.stop()
+            dockerBridge = nil
             state = .stopped
             return store.status(state: .stopped, message: "VM is not running")
         }
 
         if mapState(machine.state) == .stopped {
+            publishedPortForwarder?.stop()
+            publishedPortForwarder = nil
+            dockerBridge?.stop()
+            dockerBridge = nil
             self.machine = nil
             retainedResources = nil
             state = .stopped
@@ -129,6 +132,14 @@ public final class VirtualMachineController {
         }
 
         state = .stopping
+        if let manifest = try? store.loadManifest() {
+            try? DockerServiceQuiescer(socketPath: manifest.dockerSocketPath).quiesceForVMStop()
+        }
+        publishedPortForwarder?.stop()
+        publishedPortForwarder = nil
+        dockerBridge?.stop()
+        dockerBridge = nil
+
         let semaphore = DispatchSemaphore(value: 0)
         let stopError = AsyncErrorBox()
         let vmBox = VZMachineBox(machine)
