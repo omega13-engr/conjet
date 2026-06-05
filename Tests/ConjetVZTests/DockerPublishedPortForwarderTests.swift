@@ -128,6 +128,472 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertTrue(forwarder.status().messages.contains("network cache pruned"))
     }
 
+    func testCreatePublicationIntentPrimesPendingPortMetadataAndPruneClearsIt() {
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: UnavailableGuestConnectionConnector()
+        )
+        defer { forwarder.stop() }
+
+        let ports: Set<DockerPublishedPort> = [
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: 8080,
+                containerPort: 80,
+                protocol: .tcp,
+                containerName: "web"
+            )
+        ]
+        forwarder.observeCreatePublicationIntent(DockerCreatePublicationIntent(
+            requestPath: "/v1.52/containers/create?name=web",
+            containerName: "web",
+            ports: ports
+        ))
+
+        XCTAssertEqual(forwarder.pendingCreatePortsForTesting(containerName: "web"), ports)
+        XCTAssertTrue(forwarder.status().messages.contains("observed Docker create port intent web [8080:80/tcp]"))
+
+        forwarder.pruneCache()
+
+        XCTAssertTrue(forwarder.pendingCreatePortsForTesting(containerName: "web").isEmpty)
+    }
+
+    func testCreatePublicationResolutionAssociatesContainerID() {
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: UnavailableGuestConnectionConnector()
+        )
+        defer { forwarder.stop() }
+
+        let intent = DockerCreatePublicationIntent(
+            requestPath: "/containers/create?name=web",
+            containerName: "web",
+            ports: [
+                DockerPublishedPort(
+                    hostIP: "127.0.0.1",
+                    hostPort: 8080,
+                    containerPort: 80,
+                    protocol: .tcp,
+                    containerName: "web"
+                )
+            ]
+        )
+
+        forwarder.observeCreatePublicationIntent(intent)
+        forwarder.resolveCreatePublication(DockerCreatePublicationResolution(
+            intent: intent,
+            containerID: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        ))
+
+        XCTAssertTrue(forwarder.pendingCreatePortsForTesting(containerName: "web").isEmpty)
+        XCTAssertEqual(forwarder.pendingCreatePortsForTesting(containerID: "abcdef012345"), [
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: 8080,
+                containerPort: 80,
+                protocol: .tcp,
+                containerID: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                containerName: "web"
+            )
+        ])
+        XCTAssertTrue(forwarder.status().messages.contains("resolved Docker create port intent abcdef012345"))
+    }
+
+    func testTargetedReconcileUsesCreateIntentAndDirectDockerAPIWithoutRunnerInspect() throws {
+        let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
+        FileManager.default.createFile(atPath: socketURL.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: socketURL) }
+
+        let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        let hostPort = try reserveLoopbackPort()
+        let connector = DockerAPIInspectConnector(
+            containerID: containerID,
+            containerName: "web",
+            hostPort: hostPort,
+            containerPort: 80,
+            targetIP: "172.18.0.9"
+        )
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketURL.path,
+            connector: connector,
+            runner: { _, arguments, _ in
+                XCTFail("runner should not be used for targeted reconcile when create metadata is resolved: \(arguments)")
+                return ProcessResult(
+                    executable: "/usr/bin/env",
+                    arguments: arguments,
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "unexpected runner call"
+                )
+            }
+        )
+        defer { forwarder.stop() }
+
+        let intent = DockerCreatePublicationIntent(
+            requestPath: "/containers/create?name=web",
+            containerName: "web",
+            ports: [
+                DockerPublishedPort(
+                    hostIP: "127.0.0.1",
+                    hostPort: hostPort,
+                    containerPort: 80,
+                    protocol: .tcp,
+                    containerName: "web"
+                )
+            ]
+        )
+        forwarder.resolveCreatePublication(DockerCreatePublicationResolution(
+            intent: intent,
+            containerID: containerID
+        ))
+
+        forwarder.reconcileContainerIDsForTesting([String(containerID.prefix(12))])
+
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+        let status = forwarder.status()
+        XCTAssertEqual(status.activeTCPForwards, 1)
+        XCTAssertEqual(status.forwards.first?.targetIP, "172.18.0.9")
+        XCTAssertEqual(status.forwards.first?.containerID, containerID)
+        XCTAssertGreaterThanOrEqual(connector.requests.filter { $0.contains("/containers/\(containerID)/json") }.count, 1)
+    }
+
+    func testContainerStartFastAttachesResolvedCreateIntentWithoutRunnerInspect() throws {
+        let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
+        FileManager.default.createFile(atPath: socketURL.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: socketURL) }
+
+        let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        let hostPort = try reserveLoopbackPort()
+        let connector = DockerAPIInspectConnector(
+            containerID: containerID,
+            containerName: "web",
+            hostPort: hostPort,
+            containerPort: 80,
+            targetIP: "172.18.0.9"
+        )
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketURL.path,
+            connector: connector,
+            capabilities: nativeTCPCapabilities(),
+            runner: { _, arguments, _ in
+                XCTFail("runner should not be used during start-driven fast attach: \(arguments)")
+                return ProcessResult(
+                    executable: "/usr/bin/env",
+                    arguments: arguments,
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "unexpected runner call"
+                )
+            }
+        )
+        defer { forwarder.stop() }
+        forwarder.reconcileForTesting([])
+
+        let intent = DockerCreatePublicationIntent(
+            requestPath: "/containers/create?name=web",
+            containerName: "web",
+            ports: [
+                DockerPublishedPort(
+                    hostIP: "127.0.0.1",
+                    hostPort: hostPort,
+                    containerPort: 80,
+                    protocol: .tcp,
+                    containerName: "web"
+                )
+            ]
+        )
+        forwarder.observeCreatePublicationIntent(intent)
+        forwarder.resolveCreatePublication(DockerCreatePublicationResolution(
+            intent: intent,
+            containerID: containerID
+        ))
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+
+        forwarder.observeContainerStart(DockerContainerStartRequest(
+            requestPath: "/v1.52/containers/\(String(containerID.prefix(12)))/start",
+            containerID: String(containerID.prefix(12))
+        ))
+
+        XCTAssertTrue(waitUntil { forwarder.status().forwards.first?.targetIP == "172.18.0.9" })
+        XCTAssertEqual(forwarder.status().forwards.first?.containerID, containerID)
+        XCTAssertEqual(connector.requests.filter { $0.contains("/containers/\(containerID)/json") }.count, 0)
+        XCTAssertEqual(connector.requests.filter { $0.contains("/conjet-container-targets") }.count, 1)
+    }
+
+    func testContainerTargetEventStreamWarmsStartAttachCache() throws {
+        let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
+        FileManager.default.createFile(atPath: socketURL.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: socketURL) }
+
+        let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        let hostPort = try reserveLoopbackPort()
+        let connector = DockerAPIInspectConnector(
+            containerID: containerID,
+            containerName: "web",
+            hostPort: hostPort,
+            containerPort: 80,
+            targetIP: "172.18.0.9"
+        )
+        var capabilities = nativeTCPCapabilities()
+        capabilities.containerTargetEvents = true
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketURL.path,
+            connector: connector,
+            capabilities: capabilities,
+            runner: { _, arguments, _ in
+                if arguments.contains("ps") {
+                    return ProcessResult(
+                        executable: "/usr/bin/env",
+                        arguments: arguments,
+                        exitCode: 0,
+                        stdout: "",
+                        stderr: ""
+                    )
+                }
+                XCTFail("runner should not be used during target event fast attach: \(arguments)")
+                return ProcessResult(
+                    executable: "/usr/bin/env",
+                    arguments: arguments,
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "unexpected runner call"
+                )
+            }
+        )
+        defer { forwarder.stop() }
+        forwarder.start()
+        XCTAssertTrue(waitUntil {
+            forwarder.status().messages.contains("refreshed guest container target event stream (1 containers)")
+        })
+
+        let intent = DockerCreatePublicationIntent(
+            requestPath: "/containers/create?name=web",
+            containerName: "web",
+            ports: [
+                DockerPublishedPort(
+                    hostIP: "127.0.0.1",
+                    hostPort: hostPort,
+                    containerPort: 80,
+                    protocol: .tcp,
+                    containerName: "web"
+                )
+            ]
+        )
+        forwarder.observeCreatePublicationIntent(intent)
+        forwarder.resolveCreatePublication(DockerCreatePublicationResolution(
+            intent: intent,
+            containerID: containerID
+        ))
+        forwarder.observeContainerStart(DockerContainerStartRequest(
+            requestPath: "/v1.52/containers/\(String(containerID.prefix(12)))/start",
+            containerID: String(containerID.prefix(12))
+        ))
+
+        XCTAssertTrue(waitUntil { forwarder.status().forwards.first?.targetIP == "172.18.0.9" })
+        XCTAssertEqual(connector.requests.filter { $0.contains("/conjet-container-targets") }.count, 0)
+        XCTAssertEqual(connector.requests.filter { $0.contains("/containers/\(containerID)/json") }.count, 0)
+    }
+
+    func testContainerTargetEventStreamAttachesPendingCreateIntentWithoutStartDiscovery() throws {
+        let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
+        FileManager.default.createFile(atPath: socketURL.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: socketURL) }
+
+        let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        let hostPort = try reserveLoopbackPort()
+        let connector = DockerAPIInspectConnector(
+            containerID: containerID,
+            containerName: "web",
+            hostPort: hostPort,
+            containerPort: 80,
+            targetIP: "172.18.0.9",
+            eventResponseDelaySeconds: 0.05
+        )
+        var capabilities = nativeTCPCapabilities()
+        capabilities.containerTargetEvents = true
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketURL.path,
+            connector: connector,
+            capabilities: capabilities,
+            runner: { _, arguments, _ in
+                if arguments.contains("ps") {
+                    return ProcessResult(
+                        executable: "/usr/bin/env",
+                        arguments: arguments,
+                        exitCode: 0,
+                        stdout: "",
+                        stderr: ""
+                    )
+                }
+                XCTFail("runner should not be used during target event attach: \(arguments)")
+                return ProcessResult(
+                    executable: "/usr/bin/env",
+                    arguments: arguments,
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "unexpected runner call"
+                )
+            }
+        )
+        defer { forwarder.stop() }
+
+        let intent = DockerCreatePublicationIntent(
+            requestPath: "/containers/create?name=web",
+            containerName: "web",
+            ports: [
+                DockerPublishedPort(
+                    hostIP: "127.0.0.1",
+                    hostPort: hostPort,
+                    containerPort: 80,
+                    protocol: .tcp,
+                    containerName: "web"
+                )
+            ]
+        )
+        forwarder.start()
+        forwarder.observeCreatePublicationIntent(intent)
+        forwarder.resolveCreatePublication(DockerCreatePublicationResolution(
+            intent: intent,
+            containerID: containerID
+        ))
+
+        XCTAssertTrue(waitUntil { forwarder.status().forwards.first?.targetIP == "172.18.0.9" })
+        XCTAssertTrue(forwarder.status().messages.contains("target-event attached published ports for abcdef012345 from event stream"))
+        XCTAssertEqual(connector.requests.filter { $0.contains("/conjet-container-targets") }.count, 0)
+        XCTAssertEqual(connector.requests.filter { $0.contains("/containers/\(containerID)/json") }.count, 0)
+    }
+
+    func testContainerStartIntentPrepublishesConfiguredPortsBeforeContainerIsRunning() throws {
+        let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
+        FileManager.default.createFile(atPath: socketURL.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: socketURL) }
+
+        let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        let hostPort = try reserveLoopbackPort()
+        let connector = DockerAPIInspectConnector(
+            containerID: containerID,
+            containerName: "web",
+            hostPort: hostPort,
+            containerPort: 80,
+            targetIP: "",
+            running: false
+        )
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketURL.path,
+            connector: connector,
+            capabilities: nativeTCPCapabilities(),
+            runner: { _, arguments, _ in
+                XCTFail("runner should not be used during start-intent prepublication: \(arguments)")
+                return ProcessResult(
+                    executable: "/usr/bin/env",
+                    arguments: arguments,
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "unexpected runner call"
+                )
+            }
+        )
+        defer { forwarder.stop() }
+        forwarder.reconcileForTesting([])
+
+        forwarder.observeContainerStartIntent(DockerContainerStartRequest(
+            requestPath: "/v1.52/containers/\(String(containerID.prefix(12)))/start",
+            containerID: String(containerID.prefix(12))
+        ))
+
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+        XCTAssertEqual(forwarder.status().activeTCPForwards, 1)
+        XCTAssertNil(forwarder.status().forwards.first?.targetIP)
+        XCTAssertEqual(forwarder.pendingCreatePortsForTesting(containerID: containerID).first?.hostPort, hostPort)
+        XCTAssertTrue(forwarder.status().messages.contains("prepublished Docker start port intent abcdef012345"))
+    }
+
+    func testCreateIntentPrepublishesNativeTCPListenerBeforeTargetIsResolved() throws {
+        let connector = BinaryTCPEchoConnector()
+        let hostPort = try reserveLoopbackPort()
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: connector,
+            capabilities: nativeTCPCapabilities()
+        )
+        defer { forwarder.stop() }
+        forwarder.start()
+
+        forwarder.observeCreatePublicationIntent(DockerCreatePublicationIntent(
+            requestPath: "/containers/create?name=web",
+            containerName: "web",
+            ports: [
+                DockerPublishedPort(
+                    hostIP: "127.0.0.1",
+                    hostPort: hostPort,
+                    containerPort: 80,
+                    protocol: .tcp,
+                    containerName: "web"
+                )
+            ]
+        ))
+
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+        XCTAssertEqual(forwarder.status().activeTCPForwards, 1)
+        XCTAssertNil(forwarder.status().forwards.first?.targetIP)
+    }
+
+    func testPrepublishedNativeTCPListenerWaitsForTargetAndThenForwards() throws {
+        let connector = BinaryTCPEchoConnector()
+        let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        let hostPort = try reserveLoopbackPort()
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: connector,
+            capabilities: nativeTCPCapabilities()
+        )
+        defer { forwarder.stop() }
+        forwarder.start()
+
+        let intent = DockerCreatePublicationIntent(
+            requestPath: "/containers/create?name=web",
+            containerName: "web",
+            ports: [
+                DockerPublishedPort(
+                    hostIP: "127.0.0.1",
+                    hostPort: hostPort,
+                    containerPort: 80,
+                    protocol: .tcp,
+                    containerName: "web"
+                )
+            ]
+        )
+        forwarder.observeCreatePublicationIntent(intent)
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+
+        let fd = try connectLoopback(port: hostPort)
+        defer { Darwin.close(fd) }
+        forwarder.reconcileForTesting([
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: hostPort,
+                containerPort: 80,
+                protocol: .tcp,
+                containerID: containerID,
+                containerName: "web",
+                targetIP: "172.18.0.9"
+            )
+        ])
+        XCTAssertTrue(waitUntil { forwarder.status().forwards.first?.targetIP == "172.18.0.9" })
+        XCTAssertTrue(writeAllTestBytes(Data("ping".utf8), to: fd))
+        Darwin.shutdown(fd, SHUT_WR)
+        let response = readAllTestBytes(from: fd)
+
+        XCTAssertEqual(String(data: response, encoding: .utf8), "pong")
+        XCTAssertTrue(waitUntil { connector.openTargets.contains("172.18.0.9:80") })
+        XCTAssertEqual(forwarder.status().forwards.first?.targetIP, "172.18.0.9")
+    }
+
     func testTargetedReconcilePrunesContainerWhenInspectReportsNoSuchContainer() throws {
         let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
@@ -545,6 +1011,8 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         ConjetNetworkCapabilities(
             tcpProxy: true,
             udpProxy: true,
+            containerIPLookup: true,
+            portProbe: true,
             guestEcho: true,
             guestMetrics: true,
             binaryFrames: true,
@@ -731,6 +1199,131 @@ private final class TCPProxyEchoConnector: GuestConnectionConnector, @unchecked 
     }
 }
 
+private final class DockerAPIInspectConnector: GuestConnectionConnector, @unchecked Sendable {
+    private let lock = NSLock()
+    private let containerID: String
+    private let containerName: String
+    private let hostPort: Int
+    private let containerPort: Int
+    private let targetIP: String
+    private let running: Bool
+    private let eventResponseDelaySeconds: Double
+    private var seenRequests: [String] = []
+
+    init(
+        containerID: String,
+        containerName: String,
+        hostPort: Int,
+        containerPort: Int,
+        targetIP: String,
+        running: Bool = true,
+        eventResponseDelaySeconds: Double = 0
+    ) {
+        self.containerID = containerID
+        self.containerName = containerName
+        self.hostPort = hostPort
+        self.containerPort = containerPort
+        self.targetIP = targetIP
+        self.running = running
+        self.eventResponseDelaySeconds = eventResponseDelaySeconds
+    }
+
+    var requests: [String] {
+        lock.lock()
+        let value = seenRequests
+        lock.unlock()
+        return value
+    }
+
+    func connect() throws -> GuestConnection {
+        let fds = try makeTestSocketPair()
+        let clientFD = fds[0]
+        let serverFD = fds[1]
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { Darwin.close(serverFD) }
+            let request = readHTTPHeaderTestBytes(from: serverFD)
+            let requestText = String(data: request, encoding: .utf8) ?? ""
+            self.lock.lock()
+            self.seenRequests.append(requestText)
+            self.lock.unlock()
+
+            if requestText.contains("/conjet-container-target-events") {
+                if self.eventResponseDelaySeconds > 0 {
+                    Thread.sleep(forTimeInterval: self.eventResponseDelaySeconds)
+                }
+                let body = """
+                [{"Id":"\(self.containerID)","Names":["/\(self.containerName)"],"NetworkSettings":{"Networks":{"default":{"IPAddress":"\(self.targetIP)"}}}}]
+
+                """
+                let response = """
+                HTTP/1.1 200 OK\r
+                Content-Type: application/x-ndjson\r
+                \r
+                \(body)
+                """
+                _ = writeAllTestBytes(Data(response.utf8), to: serverFD)
+                Darwin.shutdown(serverFD, SHUT_WR)
+                return
+            }
+
+            if requestText.contains("/conjet-container-targets") {
+                let body = """
+                [{"Id":"\(self.containerID)","Names":["/\(self.containerName)"],"NetworkSettings":{"Networks":{"default":{"IPAddress":"\(self.targetIP)"}}}}]
+                """
+                let response = """
+                HTTP/1.1 200 OK\r
+                Content-Type: application/json\r
+                Content-Length: \(Data(body.utf8).count)\r
+                \r
+                \(body)
+                """
+                _ = writeAllTestBytes(Data(response.utf8), to: serverFD)
+                Darwin.shutdown(serverFD, SHUT_WR)
+                return
+            }
+
+            if requestText.contains("/conjet-port-probe?") {
+                let body = "{\"ready\":true}\n"
+                let response = """
+                HTTP/1.1 200 OK\r
+                Content-Type: application/json\r
+                Content-Length: \(Data(body.utf8).count)\r
+                \r
+                \(body)
+                """
+                _ = writeAllTestBytes(Data(response.utf8), to: serverFD)
+                Darwin.shutdown(serverFD, SHUT_WR)
+                return
+            }
+
+            let networkPorts = self.running
+                ? "\"\(self.containerPort)/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"\(self.hostPort)\"}]"
+                : ""
+            let body = """
+            {"Id":"\(self.containerID)","Name":"/\(self.containerName)","State":{"Running":\(self.running ? "true" : "false")},"HostConfig":{"PortBindings":{"\(self.containerPort)/tcp":[{"HostIp":"127.0.0.1","HostPort":"\(self.hostPort)"}]}},"NetworkSettings":{"Ports":{\(networkPorts)},"Networks":{"default":{"IPAddress":"\(self.targetIP)"}}}}
+            """
+            let shortID = String(self.containerID.prefix(12))
+            let statusLine = requestText.contains("/containers/\(self.containerID)/json") ||
+                requestText.contains("/containers/\(shortID)/json")
+                ? "HTTP/1.1 200 OK"
+                : "HTTP/1.1 404 Not Found"
+            let response = """
+            \(statusLine)\r
+            Content-Type: application/json\r
+            Content-Length: \(Data(body.utf8).count)\r
+            \r
+            \(body)
+            """
+            _ = writeAllTestBytes(Data(response.utf8), to: serverFD)
+            Darwin.shutdown(serverFD, SHUT_WR)
+        }
+
+        return GuestConnection(fileDescriptor: clientFD) {
+            Darwin.close(clientFD)
+        }
+    }
+}
+
 private final class BinaryTCPEchoConnector: GuestConnectionConnector, @unchecked Sendable {
     private let lock = NSLock()
     private let errorOnOpen: Bool
@@ -852,6 +1445,25 @@ private func readAllTestBytes(from fd: Int32) -> Data {
         let count = Darwin.read(fd, &buffer, buffer.count)
         if count > 0 {
             data.append(buffer, count: count)
+        } else if count < 0, errno == EINTR {
+            continue
+        } else {
+            break
+        }
+    }
+    return data
+}
+
+private func readHTTPHeaderTestBytes(from fd: Int32) -> Data {
+    var data = Data()
+    var byte: UInt8 = 0
+    while data.count < 64 * 1024 {
+        let count = Darwin.read(fd, &byte, 1)
+        if count == 1 {
+            data.append(byte)
+            if data.count >= 4 && data.suffix(4) == Data([13, 10, 13, 10]) {
+                break
+            }
         } else if count < 0, errno == EINTR {
             continue
         } else {

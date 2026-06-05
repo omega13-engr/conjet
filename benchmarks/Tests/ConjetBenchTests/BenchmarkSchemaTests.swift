@@ -98,6 +98,14 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(recorder.commands.contains(["docker", "--context", "conjet", "pull", "node:22-alpine"]))
         XCTAssertTrue(recorder.commands.contains(["docker", "--context", "conjet", "pull", "rust:1-alpine"]))
         XCTAssertTrue(recorder.commands.contains { command in
+            command.contains("conjet-bench-rust-llvm:1") &&
+                command.contains(where: { $0.contains("RUSTFLAGS") && $0.contains("-fuse-ld=lld") })
+        })
+        XCTAssertTrue(results.contains { result in
+            result.workload == "cargo-build" &&
+                result.metrics.value(for: "rust_toolchain") == .string("llvm-lld")
+        })
+        XCTAssertTrue(recorder.commands.contains { command in
             command.starts(with: ["docker", "--context", "conjet", "build"]) &&
                 command.contains("CONJET_BENCH_ITERATION=1")
         })
@@ -1072,6 +1080,7 @@ final class BenchmarkSchemaTests: XCTestCase {
     func testEnergyGateDefaultsUseComparableActiveMeasurementBounds() {
         let options = BenchmarkEnergyGateOptions()
 
+        XCTAssertEqual(options.samples, 10)
         XCTAssertEqual(options.minimumActiveSeconds, 10)
         XCTAssertEqual(options.workloadTimeoutSeconds, 180)
         XCTAssertTrue(options.prepullImages)
@@ -1137,14 +1146,50 @@ final class BenchmarkSchemaTests: XCTestCase {
 
         XCTAssertEqual(results.count, 5)
         XCTAssertTrue(joinedCommands.contains("export PATH=\"/usr/local/go/bin:$PATH\""))
+        XCTAssertTrue(joinedCommands.contains("export GOTOOLCHAIN=local"))
+        XCTAssertTrue(joinedCommands.contains("export CGO_ENABLED=0"))
+        XCTAssertTrue(joinedCommands.contains("go build -p \"$CONJET_BENCH_GO_JOBS\" ./..."))
         XCTAssertTrue(joinedCommands.contains("export GOMODCACHE=/workspace/.native/go/pkg/mod"))
         XCTAssertTrue(joinedCommands.contains("export PATH=\"/usr/local/cargo/bin:$PATH\""))
         XCTAssertTrue(joinedCommands.contains("export CARGO_TARGET_DIR=/workspace/.native/target"))
+        XCTAssertTrue(joinedCommands.contains("conjet-bench-rust-llvm:1"))
+        XCTAssertTrue(joinedCommands.contains("-fuse-ld=lld"))
+        XCTAssertTrue(results.contains { result in
+            result.workload == "go-build" &&
+                result.metrics.value(for: "go_build_mode") == .string("cache-native-cgo-off")
+        })
+        XCTAssertTrue(results.contains { result in
+            result.workload == "rust-build" &&
+                result.metrics.value(for: "rust_toolchain") == .string("llvm-lld")
+        })
         XCTAssertFalse(joinedCommands.contains("cargo new --bin /tmp/poly"))
         let goSum = try String(contentsOf: directory.appendingPathComponent("go-build/go.sum"), encoding: .utf8)
         XCTAssertTrue(goSum.contains("github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0="))
         XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("rust-build/Cargo.toml").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("rust-test/src/lib.rs").path))
+    }
+
+    func testPolyglotCppConfigureKeepsBuildArtifactsNative() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-polyglot-cpp-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = DockerCommandRecorder()
+        let results = try PolyglotBenchmarkSuite(
+            contexts: ["conjet"],
+            samples: 1,
+            ecosystems: ["cpp"],
+            runner: recorder.run
+        ).run(workDirectory: directory)
+        let joinedCommands = recorder.commands.map { $0.joined(separator: " ") }.joined(separator: "\n")
+
+        XCTAssertTrue(joinedCommands.contains("CONJET_BENCH_CMAKE_BUILD_DIR"))
+        XCTAssertTrue(joinedCommands.contains("/workspace/.native/cmake-build"))
+        XCTAssertTrue(joinedCommands.contains("CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"))
+        XCTAssertTrue(results.contains { result in
+            result.workload == "cpp-configure" &&
+                result.metrics.value(for: "cmake_build_dir") == .string("/workspace/.native/cmake-build")
+        })
     }
 
     func testPolyglotSuiteScopesAndCleansNativeVolumes() throws {

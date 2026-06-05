@@ -28,6 +28,13 @@ public struct NetworkBenchmarkOptions: Sendable {
     }
 }
 
+private struct PublicationProbe {
+    var result: ProcessResult
+    var durationSeconds: Double
+    var listenerVisibleSeconds: Double?
+    var firstConnectSuccessSeconds: Double?
+}
+
 public struct NetworkBenchmarkSuite: Sendable {
     public static let defaultWorkloads = [
         "port-publication-latency",
@@ -114,18 +121,18 @@ public struct NetworkBenchmarkSuite: Sendable {
         }
         defer { _ = runProcess(dockerArgs(context, ["rm", "-f", name]), timeoutSeconds: 20) }
 
-        let publication = waitForHTTP(port: port, timeoutSeconds: 20)
+        let publication = waitForHTTPPublication(port: port, timeoutSeconds: 20)
         var results: [BenchmarkResult] = []
         if options.workloads.contains("port-publication-latency") || options.workloads.contains("port-publication-breakdown") {
             var publicationMetrics = metrics
-            addPublicationMetrics(&publicationMetrics, durationSeconds: publication.durationSeconds)
+            addPublicationMetrics(&publicationMetrics, publication: publication)
             if options.workloads.contains("port-publication-latency") {
                 results.append(BenchmarkResult(
                     workload: "port-publication-latency",
                     runtime: runtime,
                     command: command,
                     startedAt: startedAt,
-                    durationSeconds: publication.durationSeconds,
+                    durationSeconds: publication.listenerVisibleSeconds ?? publication.firstConnectSuccessSeconds ?? publication.durationSeconds,
                     exitCode: publication.result.exitCode,
                     metrics: publicationMetrics,
                     machine: machine,
@@ -506,10 +513,14 @@ public struct NetworkBenchmarkSuite: Sendable {
         return ["/usr/bin/env", "python3", "-c", clientScript, String(port), String(timeoutSeconds), String(payloadBytes), String(packets)]
     }
 
-    private func waitForHTTP(port: Int, timeoutSeconds: Double) -> (result: ProcessResult, durationSeconds: Double) {
+    private func waitForHTTPPublication(port: Int, timeoutSeconds: Double) -> PublicationProbe {
         let startedAt = Date()
+        var listenerVisibleSeconds: Double?
         var last = ProcessResult(executable: "benchmark-http-probe", arguments: [], exitCode: 1, stdout: "", stderr: "not attempted")
         while Date().timeIntervalSince(startedAt) < timeoutSeconds {
+            if listenerVisibleSeconds == nil, tcpListenerVisible(port: port, timeoutSeconds: 0.005) {
+                listenerVisibleSeconds = Date().timeIntervalSince(startedAt)
+            }
             if let milliseconds = measureSingleHTTP(port: port) {
                 last = ProcessResult(
                     executable: "benchmark-http-probe",
@@ -518,7 +529,13 @@ public struct NetworkBenchmarkSuite: Sendable {
                     stdout: String(format: "%.3f ms", milliseconds),
                     stderr: ""
                 )
-                return (last, Date().timeIntervalSince(startedAt))
+                let elapsed = Date().timeIntervalSince(startedAt)
+                return PublicationProbe(
+                    result: last,
+                    durationSeconds: elapsed,
+                    listenerVisibleSeconds: listenerVisibleSeconds ?? elapsed,
+                    firstConnectSuccessSeconds: elapsed
+                )
             }
             last = ProcessResult(
                 executable: "benchmark-http-probe",
@@ -529,20 +546,29 @@ public struct NetworkBenchmarkSuite: Sendable {
             )
             Thread.sleep(forTimeInterval: 0.002)
         }
-        return (last, Date().timeIntervalSince(startedAt))
+        return PublicationProbe(
+            result: last,
+            durationSeconds: Date().timeIntervalSince(startedAt),
+            listenerVisibleSeconds: listenerVisibleSeconds,
+            firstConnectSuccessSeconds: nil
+        )
     }
 
-    private func addPublicationMetrics(_ metrics: inout BenchmarkMetrics, durationSeconds: Double) {
-        let milliseconds = durationSeconds * 1_000
-        metrics["port_publication_latency_ms"] = milliseconds
-        metrics["total_publication_ms"] = milliseconds
-        metrics["port_publication_listener_visible_ms"] = milliseconds
-        metrics["port_publication_first_connect_ms"] = milliseconds
-        metrics["first_connect_success_ms"] = milliseconds
-        metrics["latency_p50_ms"] = milliseconds
-        metrics["latency_p95_ms"] = milliseconds
-        metrics["latency_p99_ms"] = milliseconds
-        metrics["max_latency_ms"] = milliseconds
+    private func addPublicationMetrics(_ metrics: inout BenchmarkMetrics, publication: PublicationProbe) {
+        let totalMilliseconds = publication.durationSeconds * 1_000
+        let listenerMilliseconds = publication.listenerVisibleSeconds.map { $0 * 1_000 }
+        let firstConnectMilliseconds = publication.firstConnectSuccessSeconds.map { $0 * 1_000 }
+        let publicationMilliseconds = listenerMilliseconds ?? firstConnectMilliseconds ?? totalMilliseconds
+        metrics["port_publication_latency_ms"] = publicationMilliseconds
+        metrics["total_publication_ms"] = totalMilliseconds
+        setOptionalMetric(listenerMilliseconds, for: "listener_visible_ms", in: &metrics)
+        setOptionalMetric(firstConnectMilliseconds, for: "first_connect_success_ms", in: &metrics)
+        setOptionalMetric(listenerMilliseconds, for: "port_publication_listener_visible_ms", in: &metrics)
+        setOptionalMetric(firstConnectMilliseconds, for: "port_publication_first_connect_ms", in: &metrics)
+        metrics["latency_p50_ms"] = publicationMilliseconds
+        metrics["latency_p95_ms"] = publicationMilliseconds
+        metrics["latency_p99_ms"] = publicationMilliseconds
+        metrics["max_latency_ms"] = publicationMilliseconds
         metrics.setNull(for: "docker_event_to_inspect_ms")
         metrics.setNull(for: "inspect_duration_ms")
         metrics.setNull(for: "policy_resolution_ms")
@@ -550,6 +576,31 @@ public struct NetworkBenchmarkSuite: Sendable {
         metrics.setNull(for: "host_listener_bind_ms")
         metrics.setNull(for: "guest_proxy_registration_ms")
         metrics.setNull(for: "state_store_update_ms")
+    }
+
+    private func setOptionalMetric(_ value: Double?, for key: String, in metrics: inout BenchmarkMetrics) {
+        if let value {
+            metrics[key] = value
+        } else {
+            metrics.setNull(for: key)
+        }
+    }
+
+    private func tcpListenerVisible(port: Int, timeoutSeconds: Double) -> Bool {
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        setBenchmarkSocketTimeout(fd, timeoutSeconds: timeoutSeconds)
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(port).bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+        return withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.connect(fd, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        } == 0
     }
 
     private func measureSingleHTTP(port: Int) -> Double? {

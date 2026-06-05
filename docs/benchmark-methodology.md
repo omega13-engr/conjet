@@ -90,13 +90,37 @@ generalize beyond synthetic Node/Cargo workloads:
 swift run --package-path benchmarks conjet-bench run \
   --contexts conjet,orbstack,colima \
   --samples 10 \
-  --polyglot-samples 5 \
+  --polyglot-samples 10 \
   --ecosystems js,python,jvm,dotnet,go,rust,cpp \
   --output-dir benchmarks/reports/polyglot-local
 ```
 
 The minimum acceptable coverage is at least three non-JS ecosystems. Strong
 coverage includes JS, Python, JVM, .NET, Go, Rust, and C/C++.
+
+Rust rows use the local `conjet-bench-rust-llvm:1` image. It is built from
+`rust:1-alpine` with `clang` and `lld`, then Cargo is run with
+`RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=lld"` appended to any existing
+flags. Result metadata records `cargo_llvm_lld=1`, `rust_toolchain=llvm-lld`,
+and the benchmark image name.
+
+Go rows use the stock `golang:1.23-alpine` image but disable avoidable benchmark
+overhead with `GOTOOLCHAIN=local`, `CGO_ENABLED=0`, and
+`GOFLAGS="-buildvcs=false -trimpath"`. Build and test rows pass `-p` using the
+container CPU count. Result metadata records the Go cache/toolchain mode so
+reports can distinguish this fast path from a default Go invocation.
+
+C/C++ configure rows are measured across the same topology labels as other
+polyglot rows. The current root-cause hypothesis for slow configure runs is
+metadata amplification from CMake compiler detection and `CMakeFiles` writes on
+shared/bind-mounted paths. Smart-bind runs therefore keep generated configure
+state under `/workspace/.native/cmake-build`, set `CC=cc`, `CXX=c++`,
+`CMAKE_GENERATOR=Unix Makefiles`, and set
+`CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY`.
+
+Use 10 samples for initial confidence. Use 30 samples for publication-grade
+core ecosystems, especially `cpp-configure`, `python-install`, `python-test`,
+`go-test`, `js-install`, `js-build`, and `rust-build`.
 
 ## Energy Claims
 
@@ -115,6 +139,11 @@ If `powermetrics` is unavailable and `--require-power` is not passed, the report
 must mark the energy verdict as skipped. Skipped power data is not evidence for
 lower energy or lower power.
 
+Energy publication runs must use at least 10 samples per workload. Conjet has
+shown very low idle power in directional measurements, but active energy
+optimization is ongoing until measured active joules are at or below OrbStack
+on the target workloads.
+
 ## Network Gate
 
 ConjetNet networking is measured with:
@@ -131,6 +160,10 @@ latency, high-concurrency HTTP rows such as `http-localhost-c100`, UDP echo
 latency, and selected UDP payload-size rows when requested. Reports split the
 Conjet functional gate from baseline failures, so a Colima UDP failure is
 classified as a baseline failure instead of a Conjet TCP/UDP failure.
+
+Port publication rows report both `listener_visible_ms` and
+`first_connect_success_ms`. The first measures host listener registration; the
+second measures the first successful request through the full forwarding path.
 
 It does not prove global networking superiority by itself. Claims must name the
 specific workload, sample count, and compared contexts.

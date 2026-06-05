@@ -5,6 +5,7 @@ import Foundation
 struct NativeTCPBridgeForwardResult: Sendable {
     var reusable: Bool
     var hadError: Bool
+    var opened: Bool = true
 }
 
 final class NativeTCPBridgePool: @unchecked Sendable {
@@ -20,9 +21,9 @@ final class NativeTCPBridgePool: @unchecked Sendable {
 
     init(
         connector: any GuestConnectionConnector,
-        maxConnections: Int = 160,
-        minimumIdleConnections: Int = 64,
-        refillDelaySeconds: TimeInterval = 0.05
+        maxConnections: Int = 96,
+        minimumIdleConnections: Int = 8,
+        refillDelaySeconds: TimeInterval = 0.01
     ) {
         self.connector = connector
         self.maxConnections = max(1, maxConnections)
@@ -155,6 +156,7 @@ final class NativeTCPBridgePool: @unchecked Sendable {
     private func makeConnection() throws -> NativeTCPBridgeConnection {
         let guest = try connector.connect()
         nativeTCPDisableSigpipe(guest.fileDescriptor)
+        nativeTCPSetNoDelayIfSupported(guest.fileDescriptor)
         return NativeTCPBridgeConnection(guest: guest)
     }
 }
@@ -195,13 +197,16 @@ final class NativeTCPBridgeConnection: @unchecked Sendable {
         do {
             let target = try ConjetTCPFrameTarget(host: targetHost, port: targetPort).encode()
             try writeFrame(ConjetBinaryFrame(type: .tcpOpen, streamID: streamID, payload: target))
+            guard try waitForOpenAck(streamID: streamID) else {
+                return NativeTCPBridgeForwardResult(reusable: true, hadError: true, opened: false)
+            }
         } catch {
-            return NativeTCPBridgeForwardResult(reusable: false, hadError: true)
+            return NativeTCPBridgeForwardResult(reusable: false, hadError: true, opened: false)
         }
 
         let group = DispatchGroup()
         group.enter()
-        let clientReader = Thread { [weak self, state] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, state] in
             defer { group.leave() }
             guard let self else { return }
             var buffer = [UInt8](repeating: 0, count: 64 * 1024)
@@ -210,8 +215,12 @@ final class NativeTCPBridgeConnection: @unchecked Sendable {
                 if count > 0 {
                     onClientBytes(count)
                     do {
-                        let payload = Data(buffer.prefix(count))
-                        try self.writeFrame(ConjetBinaryFrame(type: .tcpData, streamID: streamID, payload: payload))
+                        try writeFrame(
+                            type: .tcpData,
+                            streamID: streamID,
+                            pointer: buffer,
+                            count: count
+                        )
                     } catch {
                         state.markError()
                         Darwin.shutdown(clientFD, SHUT_RDWR)
@@ -220,11 +229,15 @@ final class NativeTCPBridgeConnection: @unchecked Sendable {
                 } else if count < 0, errno == EINTR {
                     continue
                 } else if count < 0, errno == EAGAIN || errno == EWOULDBLOCK {
-                    Thread.sleep(forTimeInterval: 0.0005)
+                    if !nativeTCPWaitForFD(clientFD, events: Int16(POLLIN), timeoutMilliseconds: 5_000) {
+                        state.markError()
+                        Darwin.shutdown(clientFD, SHUT_RDWR)
+                        return
+                    }
                     continue
                 } else {
                     do {
-                        try self.writeFrame(ConjetBinaryFrame(type: .tcpHalfClose, streamID: streamID))
+                        try writeFrame(type: .tcpHalfClose, streamID: streamID)
                     } catch {
                         state.markError()
                     }
@@ -232,16 +245,14 @@ final class NativeTCPBridgeConnection: @unchecked Sendable {
                 }
             }
         }
-        clientReader.name = "dev.conjet.native-tcp-client-reader"
-        clientReader.start()
 
         group.enter()
-        let bridgeReader = Thread { [weak self, state] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, state] in
             defer { group.leave() }
             guard let self else { return }
             while !state.isFinished {
                 do {
-                    let frame = try self.readFrame()
+                    let frame = try readFrame()
                     guard frame.streamID == streamID else {
                         continue
                     }
@@ -281,8 +292,6 @@ final class NativeTCPBridgeConnection: @unchecked Sendable {
                 }
             }
         }
-        bridgeReader.name = "dev.conjet.native-tcp-bridge-reader"
-        bridgeReader.start()
 
         group.wait()
         if state.hasError {
@@ -290,6 +299,23 @@ final class NativeTCPBridgeConnection: @unchecked Sendable {
             hadError = true
         }
         return NativeTCPBridgeForwardResult(reusable: reusable, hadError: hadError)
+    }
+
+    private func waitForOpenAck(streamID: UInt32) throws -> Bool {
+        while true {
+            let frame = try readFrame()
+            guard frame.streamID == streamID else {
+                continue
+            }
+            switch frame.type {
+            case .tcpOpen:
+                return true
+            case .tcpError:
+                return false
+            default:
+                continue
+            }
+        }
     }
 
     private func allocateStreamID() -> UInt32 {
@@ -311,17 +337,78 @@ final class NativeTCPBridgeConnection: @unchecked Sendable {
         }
     }
 
-    private func readFrame() throws -> ConjetBinaryFrame {
+    private func writeFrame(type: ConjetBinaryFrameType, streamID: UInt32, portForwardID: UInt32 = 0) throws {
+        try writeFrame(type: type, streamID: streamID, portForwardID: portForwardID, pointer: nil, count: 0)
+    }
+
+    private func writeFrame(
+        type: ConjetBinaryFrameType,
+        streamID: UInt32,
+        portForwardID: UInt32 = 0,
+        pointer: UnsafeRawPointer?,
+        count: Int
+    ) throws {
+        guard !isClosed else {
+            throw ConjetError.socket("native TCP bridge connection is closed")
+        }
+        guard count <= ConjetBinaryFrame.maxPayloadBytes else {
+            throw ConjetBinaryFrameError.oversizedPayload(count)
+        }
+        var header = [UInt8](repeating: 0, count: ConjetBinaryFrame.headerSize)
+        nativeTCPWriteUInt32BE(ConjetBinaryFrame.magic, into: &header, at: 0)
+        header[4] = ConjetBinaryFrame.version
+        header[5] = type.rawValue
+        nativeTCPWriteUInt16BE(0, into: &header, at: 6)
+        nativeTCPWriteUInt32BE(streamID, into: &header, at: 8)
+        nativeTCPWriteUInt32BE(portForwardID, into: &header, at: 12)
+        nativeTCPWriteUInt32BE(UInt32(count), into: &header, at: 16)
+
+        guard nativeTCPWriteAll(header, to: guest.fileDescriptor) else {
+            close()
+            throw ConjetError.socket("failed to write native TCP frame header")
+        }
+        if count > 0 {
+            guard let pointer, nativeTCPWriteAll(pointer, count: count, to: guest.fileDescriptor) else {
+                close()
+                throw ConjetError.socket("failed to write native TCP frame payload")
+            }
+        }
+    }
+
+    private func writeFrame(
+        type: ConjetBinaryFrameType,
+        streamID: UInt32,
+        portForwardID: UInt32 = 0,
+        pointer: [UInt8],
+        count: Int
+    ) throws {
+        try pointer.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else {
+                try writeFrame(type: type, streamID: streamID, portForwardID: portForwardID)
+                return
+            }
+            try writeFrame(type: type, streamID: streamID, portForwardID: portForwardID, pointer: base, count: count)
+        }
+    }
+
+    private func readFrame() throws -> NativeTCPFrame {
         guard !isClosed else {
             throw ConjetError.socket("native TCP bridge connection is closed")
         }
         let header = try nativeTCPReadExact(from: guest.fileDescriptor, byteCount: ConjetBinaryFrame.headerSize)
-        let payloadLength = nativeTCPPayloadLength(fromHeader: header)
+        let decodedHeader = try NativeTCPFrameHeader(header)
+        let payloadLength = Int(decodedHeader.payloadLength)
         if payloadLength > ConjetBinaryFrame.maxPayloadBytes {
             throw ConjetError.socket("native TCP frame payload too large: \(payloadLength)")
         }
         let payload = payloadLength > 0 ? try nativeTCPReadExact(from: guest.fileDescriptor, byteCount: payloadLength) : Data()
-        return try ConjetBinaryFrame.decode(header + payload)
+        return NativeTCPFrame(
+            type: decodedHeader.type,
+            flags: decodedHeader.flags,
+            streamID: decodedHeader.streamID,
+            portForwardID: decodedHeader.portForwardID,
+            payload: payload
+        )
     }
 
     private var isClosed: Bool {
@@ -379,6 +466,55 @@ private final class NativeTCPForwardState: @unchecked Sendable {
     }
 }
 
+private struct NativeTCPFrame {
+    var type: ConjetBinaryFrameType
+    var flags: UInt16
+    var streamID: UInt32
+    var portForwardID: UInt32
+    var payload: Data
+}
+
+private struct NativeTCPFrameHeader {
+    var type: ConjetBinaryFrameType
+    var flags: UInt16
+    var streamID: UInt32
+    var portForwardID: UInt32
+    var payloadLength: UInt32
+
+    init(_ data: Data) throws {
+        guard data.count >= ConjetBinaryFrame.headerSize else {
+            throw ConjetBinaryFrameError.truncatedHeader
+        }
+        let bytes = [UInt8](data)
+        let magic = nativeTCPReadUInt32BE(bytes, at: 0)
+        guard magic == ConjetBinaryFrame.magic else {
+            throw ConjetBinaryFrameError.badMagic
+        }
+        guard bytes[4] == ConjetBinaryFrame.version else {
+            throw ConjetBinaryFrameError.badVersion(bytes[4])
+        }
+        guard let type = ConjetBinaryFrameType(rawValue: bytes[5]) else {
+            throw ConjetBinaryFrameError.unknownType(bytes[5])
+        }
+        let payloadLength = nativeTCPReadUInt32BE(bytes, at: 16)
+        guard payloadLength <= UInt32(ConjetBinaryFrame.maxPayloadBytes) else {
+            throw ConjetBinaryFrameError.oversizedPayload(Int(payloadLength))
+        }
+        self.type = type
+        self.flags = nativeTCPReadUInt16BE(bytes, at: 6)
+        self.streamID = nativeTCPReadUInt32BE(bytes, at: 8)
+        self.portForwardID = nativeTCPReadUInt32BE(bytes, at: 12)
+        self.payloadLength = payloadLength
+    }
+}
+
+private func nativeTCPWriteAll(_ bytes: [UInt8], to fd: Int32) -> Bool {
+    bytes.withUnsafeBytes { rawBuffer in
+        guard let baseAddress = rawBuffer.baseAddress else { return true }
+        return nativeTCPWriteAll(baseAddress, count: bytes.count, to: fd)
+    }
+}
+
 private func nativeTCPWriteAll(_ data: Data, to fd: Int32) -> Bool {
     data.withUnsafeBytes { rawBuffer in
         guard let baseAddress = rawBuffer.baseAddress else { return true }
@@ -395,7 +531,9 @@ private func nativeTCPWriteAll(_ pointer: UnsafeRawPointer, count: Int, to fd: I
         } else if result < 0, errno == EINTR {
             continue
         } else if result < 0, errno == EAGAIN || errno == EWOULDBLOCK {
-            Thread.sleep(forTimeInterval: 0.0005)
+            if !nativeTCPWaitForFD(fd, events: Int16(POLLOUT), timeoutMilliseconds: 5_000) {
+                return false
+            }
             continue
         } else {
             return false
@@ -415,7 +553,9 @@ private func nativeTCPReadExact(from fd: Int32, byteCount: Int) throws -> Data {
         } else if count < 0, errno == EINTR {
             continue
         } else if count < 0, errno == EAGAIN || errno == EWOULDBLOCK {
-            Thread.sleep(forTimeInterval: 0.0005)
+            guard nativeTCPWaitForFD(fd, events: Int16(POLLIN), timeoutMilliseconds: 5_000) else {
+                throw ConjetError.socket("native TCP frame read timed out waiting for data")
+            }
             continue
         } else {
             throw ConjetError.socket("native TCP frame read failed: \(String(cString: strerror(errno)))")
@@ -424,21 +564,51 @@ private func nativeTCPReadExact(from fd: Int32, byteCount: Int) throws -> Data {
     return data
 }
 
-private func nativeTCPPayloadLength(fromHeader header: Data) -> Int {
-    guard header.count >= ConjetBinaryFrame.headerSize else {
-        return 0
+private func nativeTCPWaitForFD(_ fd: Int32, events: Int16, timeoutMilliseconds: Int32) -> Bool {
+    var descriptor = pollfd(fd: fd, events: events, revents: 0)
+    while true {
+        let result = Darwin.poll(&descriptor, 1, timeoutMilliseconds)
+        if result > 0 {
+            return (descriptor.revents & (events | Int16(POLLHUP) | Int16(POLLERR))) != 0
+        }
+        if result < 0, errno == EINTR {
+            continue
+        }
+        return false
     }
-    let start = header.index(header.startIndex, offsetBy: 16)
-    let b0 = UInt32(header[start])
-    let b1 = UInt32(header[header.index(start, offsetBy: 1)])
-    let b2 = UInt32(header[header.index(start, offsetBy: 2)])
-    let b3 = UInt32(header[header.index(start, offsetBy: 3)])
-    return Int((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+}
+
+private func nativeTCPReadUInt16BE(_ bytes: [UInt8], at offset: Int) -> UInt16 {
+    (UInt16(bytes[offset]) << 8) | UInt16(bytes[offset + 1])
+}
+
+private func nativeTCPReadUInt32BE(_ bytes: [UInt8], at offset: Int) -> UInt32 {
+    (UInt32(bytes[offset]) << 24)
+        | (UInt32(bytes[offset + 1]) << 16)
+        | (UInt32(bytes[offset + 2]) << 8)
+        | UInt32(bytes[offset + 3])
+}
+
+private func nativeTCPWriteUInt16BE(_ value: UInt16, into bytes: inout [UInt8], at offset: Int) {
+    bytes[offset] = UInt8((value >> 8) & 0xff)
+    bytes[offset + 1] = UInt8(value & 0xff)
+}
+
+private func nativeTCPWriteUInt32BE(_ value: UInt32, into bytes: inout [UInt8], at offset: Int) {
+    bytes[offset] = UInt8((value >> 24) & 0xff)
+    bytes[offset + 1] = UInt8((value >> 16) & 0xff)
+    bytes[offset + 2] = UInt8((value >> 8) & 0xff)
+    bytes[offset + 3] = UInt8(value & 0xff)
 }
 
 private func nativeTCPDisableSigpipe(_ fd: Int32) {
     var enabled: Int32 = 1
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+}
+
+private func nativeTCPSetNoDelayIfSupported(_ fd: Int32) {
+    var enabled: Int32 = 1
+    _ = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, socklen_t(MemoryLayout<Int32>.size))
 }
 
 private func nativeTCPWriteHTTPBadGateway(_ payload: Data, to fd: Int32) {

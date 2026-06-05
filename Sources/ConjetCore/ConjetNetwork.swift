@@ -44,6 +44,7 @@ public struct ConjetNetworkCapabilities: Codable, Equatable, Sendable {
     public var udpProxy: Bool
     public var dockerEvents: Bool
     public var containerIPLookup: Bool
+    public var containerTargetEvents: Bool
     public var portProbe: Bool
     public var proxyMetrics: Bool
     public var guestEcho: Bool
@@ -62,6 +63,7 @@ public struct ConjetNetworkCapabilities: Codable, Equatable, Sendable {
         case udpProxy
         case dockerEvents
         case containerIPLookup
+        case containerTargetEvents
         case portProbe
         case proxyMetrics
         case guestEcho
@@ -81,6 +83,7 @@ public struct ConjetNetworkCapabilities: Codable, Equatable, Sendable {
         udpProxy: Bool = false,
         dockerEvents: Bool = false,
         containerIPLookup: Bool = false,
+        containerTargetEvents: Bool = false,
         portProbe: Bool = false,
         proxyMetrics: Bool = false,
         guestEcho: Bool = false,
@@ -98,6 +101,7 @@ public struct ConjetNetworkCapabilities: Codable, Equatable, Sendable {
         self.udpProxy = udpProxy
         self.dockerEvents = dockerEvents
         self.containerIPLookup = containerIPLookup
+        self.containerTargetEvents = containerTargetEvents
         self.portProbe = portProbe
         self.proxyMetrics = proxyMetrics
         self.guestEcho = guestEcho
@@ -118,6 +122,7 @@ public struct ConjetNetworkCapabilities: Codable, Equatable, Sendable {
         self.udpProxy = try container.decodeIfPresent(Bool.self, forKey: .udpProxy) ?? false
         self.dockerEvents = try container.decodeIfPresent(Bool.self, forKey: .dockerEvents) ?? false
         self.containerIPLookup = try container.decodeIfPresent(Bool.self, forKey: .containerIPLookup) ?? false
+        self.containerTargetEvents = try container.decodeIfPresent(Bool.self, forKey: .containerTargetEvents) ?? false
         self.portProbe = try container.decodeIfPresent(Bool.self, forKey: .portProbe) ?? false
         self.proxyMetrics = try container.decodeIfPresent(Bool.self, forKey: .proxyMetrics) ?? false
         self.guestEcho = try container.decodeIfPresent(Bool.self, forKey: .guestEcho) ?? false
@@ -368,6 +373,8 @@ public struct ConjetNetworkStatus: Codable, Equatable, Sendable {
     public var eventWatcherState: String
     public var eventWatcherLastEventAt: Date?
     public var eventWatcherReconnects: Int
+    public var targetEventWatcherState: String
+    public var targetEventReconnects: Int
     public var periodicReconcileIntervalSeconds: Double
     public var capabilities: ConjetNetworkCapabilities
     public var activeTCPForwards: Int
@@ -397,6 +404,8 @@ public struct ConjetNetworkStatus: Codable, Equatable, Sendable {
         case eventWatcherState
         case eventWatcherLastEventAt
         case eventWatcherReconnects
+        case targetEventWatcherState
+        case targetEventReconnects
         case periodicReconcileIntervalSeconds
         case capabilities
         case activeTCPForwards
@@ -427,6 +436,8 @@ public struct ConjetNetworkStatus: Codable, Equatable, Sendable {
         eventWatcherState: String = "stopped",
         eventWatcherLastEventAt: Date? = nil,
         eventWatcherReconnects: Int = 0,
+        targetEventWatcherState: String = "stopped",
+        targetEventReconnects: Int = 0,
         periodicReconcileIntervalSeconds: Double = 45,
         capabilities: ConjetNetworkCapabilities = ConjetNetworkCapabilities(),
         activeTCPForwards: Int = 0,
@@ -455,6 +466,8 @@ public struct ConjetNetworkStatus: Codable, Equatable, Sendable {
         self.eventWatcherState = eventWatcherState
         self.eventWatcherLastEventAt = eventWatcherLastEventAt
         self.eventWatcherReconnects = eventWatcherReconnects
+        self.targetEventWatcherState = targetEventWatcherState
+        self.targetEventReconnects = targetEventReconnects
         self.periodicReconcileIntervalSeconds = periodicReconcileIntervalSeconds
         self.capabilities = capabilities
         self.activeTCPForwards = activeTCPForwards
@@ -500,6 +513,8 @@ public struct ConjetNetworkStatus: Codable, Equatable, Sendable {
         self.eventWatcherState = try container.decodeIfPresent(String.self, forKey: .eventWatcherState) ?? "stopped"
         self.eventWatcherLastEventAt = try container.decodeIfPresent(Date.self, forKey: .eventWatcherLastEventAt)
         self.eventWatcherReconnects = try container.decodeIfPresent(Int.self, forKey: .eventWatcherReconnects) ?? 0
+        self.targetEventWatcherState = try container.decodeIfPresent(String.self, forKey: .targetEventWatcherState) ?? "stopped"
+        self.targetEventReconnects = try container.decodeIfPresent(Int.self, forKey: .targetEventReconnects) ?? 0
         self.periodicReconcileIntervalSeconds = try container.decodeIfPresent(Double.self, forKey: .periodicReconcileIntervalSeconds) ?? 45
         self.capabilities = decodedCapabilities
         self.activeTCPForwards = try container.decodeIfPresent(Int.self, forKey: .activeTCPForwards) ?? 0

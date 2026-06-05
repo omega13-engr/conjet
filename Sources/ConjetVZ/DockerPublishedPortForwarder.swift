@@ -20,19 +20,28 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
     private let periodicReconcileIntervalSeconds: TimeInterval
     private let runner: Runner
     private let nioGroup: MultiThreadedEventLoopGroup
+    private let fastAttachQueue = DispatchQueue(label: "dev.conjet.port-forward.fast-attach", qos: .userInitiated)
     private let lock = NSLock()
     private var running = false
     private var eventWatcherRunning = false
+    private var targetEventWatcherRunning = false
     private var eventWatcherLastEventAt: Date?
     private var eventWatcherReconnects = 0
+    private var targetEventReconnects = 0
     private var lastReconcileAt: Date?
     private var pollThread: Thread?
     private var eventThread: Thread?
     private var eventProcess: Process?
+    private var targetEventThread: Thread?
     private var tcpListeners: [ForwardKey: any PortListener] = [:]
     private var udpListeners: [ForwardKey: any PortListener] = [:]
     private var statuses: [ForwardKey: ConjetPortForwardStatus] = [:]
     private var publishedPortCache: [String: Set<DockerPublishedPort>] = [:]
+    private var containerTargetIPCache: [String: String] = [:]
+    private var containerTargetSnapshotAt: Date?
+    private var pendingCreatePortsByName: [String: Set<DockerPublishedPort>] = [:]
+    private var pendingCreatePortsByID: [String: Set<DockerPublishedPort>] = [:]
+    private var pendingAnonymousCreatePorts: [Set<DockerPublishedPort>] = []
     private var messages: [String] = []
 
     public init(
@@ -77,6 +86,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         lock.unlock()
 
         reconcile()
+        startTargetEventWatcher()
         startEventWatcher()
         startPeriodicReconcile()
     }
@@ -84,6 +94,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
     public func stop() {
         lock.lock()
         running = false
+        targetEventWatcherRunning = false
         let process = eventProcess
         eventProcess = nil
         let tcp = tcpListeners
@@ -116,17 +127,132 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         }
         lock.unlock()
         reconcile()
+        startTargetEventWatcher()
         startEventWatcher()
     }
 
     public func pruneCache() {
         lock.lock()
         publishedPortCache.removeAll()
+        containerTargetIPCache.removeAll()
+        containerTargetSnapshotAt = nil
+        pendingCreatePortsByName.removeAll()
+        pendingCreatePortsByID.removeAll()
+        pendingAnonymousCreatePorts.removeAll()
         statuses = statuses.filter { _, status in
             status.state != .stale && status.state != .stopped
         }
         messages.append("network cache pruned")
         lock.unlock()
+    }
+
+    public func observeCreatePublicationIntent(_ intent: DockerCreatePublicationIntent) {
+        guard !intent.ports.isEmpty else { return }
+        lock.lock()
+        if let name = intent.containerName, !name.isEmpty {
+            pendingCreatePortsByName[name] = intent.ports
+        } else {
+            pendingAnonymousCreatePorts.append(intent.ports)
+        }
+        let sortedPorts = intent.ports
+            .sorted { lhs, rhs in
+                (lhs.hostPort, lhs.protocol.rawValue, lhs.containerPort) < (rhs.hostPort, rhs.protocol.rawValue, rhs.containerPort)
+            }
+            .map { "\($0.hostPort):\($0.containerPort)/\($0.protocol.rawValue)" }
+            .joined(separator: ",")
+        messages.append("observed Docker create port intent \(intent.containerName ?? "<anonymous>") [\(sortedPorts)]")
+        lock.unlock()
+
+        prepublishCreateIntent(intent)
+    }
+
+    public func resolveCreatePublication(_ resolution: DockerCreatePublicationResolution) {
+        guard !resolution.containerID.isEmpty, !resolution.intent.ports.isEmpty else { return }
+        let resolvedPorts = Set(resolution.intent.ports.map { port in
+            DockerPublishedPort(
+                hostIP: port.hostIP,
+                hostPort: port.hostPort,
+                containerPort: port.containerPort,
+                protocol: port.protocol,
+                containerID: resolution.containerID,
+                containerName: port.containerName ?? resolution.intent.containerName,
+                targetIP: port.targetIP
+            )
+        })
+        lock.lock()
+        pendingCreatePortsByID[resolution.containerID] = resolvedPorts
+        pendingCreatePortsByID[String(resolution.containerID.prefix(12))] = resolvedPorts
+        if let name = resolution.intent.containerName {
+            pendingCreatePortsByName.removeValue(forKey: name)
+        } else if let index = pendingAnonymousCreatePorts.firstIndex(of: resolution.intent.ports) {
+            pendingAnonymousCreatePorts.remove(at: index)
+        }
+        messages.append("resolved Docker create port intent \(String(resolution.containerID.prefix(12)))")
+        lock.unlock()
+    }
+
+    public func observeContainerStartIntent(_ request: DockerContainerStartRequest) {
+        guard !request.containerID.isEmpty else { return }
+        lock.lock()
+        let shouldRun = running
+        messages.append("observed Docker container start intent \(String(request.containerID.prefix(12)))")
+        lock.unlock()
+        guard shouldRun else { return }
+
+        let pending = pendingCreatePorts(for: [request.containerID])
+        if !pending.isEmpty {
+            let ports = pending.reduce(into: Set<DockerPublishedPort>()) { partial, item in
+                partial.formUnion(item.ports)
+            }
+            lock.lock()
+            messages.append("start-intent used cached create publication \(String(request.containerID.prefix(12)))")
+            lock.unlock()
+            prepublishPendingTCPPorts(ports)
+            return
+        }
+
+        let ports: Set<DockerPublishedPort>
+        do {
+            ports = try inspectConfiguredPublishedPortsViaDockerAPI(
+                containerID: request.containerID,
+                timeoutSeconds: 0.05
+            )
+        } catch {
+            lock.lock()
+            messages.append("start-intent prepublish inspect failed \(String(request.containerID.prefix(12))): \(error)")
+            lock.unlock()
+            return
+        }
+        guard !ports.isEmpty else {
+            lock.lock()
+            messages.append("start-intent prepublish found no published ports \(String(request.containerID.prefix(12)))")
+            lock.unlock()
+            return
+        }
+        let containerID = ports.compactMap(\.containerID).first ?? request.containerID
+        lock.lock()
+        pendingCreatePortsByID[containerID] = ports
+        pendingCreatePortsByID[String(containerID.prefix(12))] = ports
+        messages.append("prepublished Docker start port intent \(String(containerID.prefix(12)))")
+        lock.unlock()
+        prepublishPendingTCPPorts(ports)
+    }
+
+    public func observeContainerStart(_ request: DockerContainerStartRequest) {
+        guard !request.containerID.isEmpty else { return }
+        lock.lock()
+        let shouldRun = running
+        messages.append("observed Docker container start \(String(request.containerID.prefix(12)))")
+        lock.unlock()
+        guard shouldRun else { return }
+
+        if hasPendingCreatePorts(for: request.containerID) {
+            fastAttachStartedContainer(request.containerID)
+        } else {
+            fastAttachQueue.async { [weak self] in
+                self?.fastAttachStartedContainer(request.containerID)
+            }
+        }
     }
 
     public func status() -> ConjetNetworkStatus {
@@ -140,6 +266,16 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         let conflicts = snapshot.filter { $0.state == .failedConflict }.count
         let stale = snapshot.filter { $0.state == .stale }.count
         let eventState = eventWatcherRunning ? "connected" : (running ? "reconnecting" : "stopped")
+        let targetEventState: String
+        if targetEventWatcherRunning {
+            targetEventState = "connected"
+        } else if !capabilities.containerIPLookup {
+            targetEventState = "unsupported"
+        } else if running {
+            targetEventState = "reconnecting"
+        } else {
+            targetEventState = "stopped"
+        }
         let result = ConjetNetworkStatus(
             bindPolicy: policy.bindPolicy,
             proxyEngine: actualProxyEngine,
@@ -155,6 +291,8 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             eventWatcherState: eventState,
             eventWatcherLastEventAt: eventWatcherLastEventAt,
             eventWatcherReconnects: eventWatcherReconnects,
+            targetEventWatcherState: targetEventState,
+            targetEventReconnects: targetEventReconnects,
             periodicReconcileIntervalSeconds: periodicReconcileIntervalSeconds,
             capabilities: capabilities,
             activeTCPForwards: activeTCP,
@@ -180,6 +318,29 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         return ports
     }
 
+    func pendingCreatePortsForTesting(containerName: String? = nil) -> Set<DockerPublishedPort> {
+        lock.lock()
+        let ports: Set<DockerPublishedPort>
+        if let containerName {
+            ports = pendingCreatePortsByName[containerName] ?? []
+        } else {
+            ports = pendingAnonymousCreatePorts.reduce(into: Set<DockerPublishedPort>()) { partial, values in
+                partial.formUnion(values)
+            }
+        }
+        lock.unlock()
+        return ports
+    }
+
+    func pendingCreatePortsForTesting(containerID: String) -> Set<DockerPublishedPort> {
+        lock.lock()
+        let ports = pendingCreatePortsByID.first { cachedID, _ in
+            containerIDsMatch(cachedID, containerID)
+        }?.value ?? []
+        lock.unlock()
+        return ports
+    }
+
     func reconcileForTesting(_ ports: Set<DockerPublishedPort>) {
         lock.lock()
         running = true
@@ -196,6 +357,13 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         running = true
         lock.unlock()
         reconcile(containerIDs: containerIDs)
+    }
+
+    func observeContainerStartForTesting(_ request: DockerContainerStartRequest) {
+        lock.lock()
+        running = true
+        lock.unlock()
+        observeContainerStart(request)
     }
 
     private var actualProxyEngine: String {
@@ -273,6 +441,136 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         thread.name = "dev.conjet.docker-event-watcher"
         eventThread = thread
         thread.start()
+    }
+
+    private func startTargetEventWatcher() {
+        guard capabilities.containerTargetEvents else { return }
+        lock.lock()
+        guard running, targetEventThread == nil else {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        let thread = Thread { [weak self] in
+            self?.targetEventLoop()
+        }
+        thread.name = "dev.conjet.container-target-event-watcher"
+        targetEventThread = thread
+        thread.start()
+    }
+
+    private func targetEventLoop() {
+        while isRunning() {
+            autoreleasepool {
+                runContainerTargetEventStream()
+            }
+            lock.lock()
+            if running {
+                targetEventWatcherRunning = false
+                targetEventReconnects += 1
+                messages.append("container target event stream reconnecting")
+            }
+            lock.unlock()
+            if isRunning() {
+                Thread.sleep(forTimeInterval: min(0.25, energyMode.eventWatcherReconnectDelaySeconds))
+            }
+        }
+        lock.lock()
+        targetEventThread = nil
+        targetEventWatcherRunning = false
+        lock.unlock()
+    }
+
+    private func runContainerTargetEventStream() {
+        let connection: GuestConnection
+        do {
+            connection = try connector.connect()
+        } catch {
+            lock.lock()
+            messages.append("container target event stream failed to connect: \(error)")
+            lock.unlock()
+            return
+        }
+        defer { connection.close() }
+
+        setSocketTimeoutForDockerAPI(connection.fileDescriptor, timeoutSeconds: 5)
+        let request = "GET /conjet-container-target-events HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\n\r\n"
+        guard writeAllForDockerAPI(Data(request.utf8), to: connection.fileDescriptor) else {
+            lock.lock()
+            messages.append("container target event stream request failed")
+            lock.unlock()
+            return
+        }
+
+        var buffer = Data()
+        var headerParsed = false
+        var streamConnectedMessageSent = false
+        var scratch = [UInt8](repeating: 0, count: 16 * 1024)
+        while isRunning() {
+            let count = Darwin.read(connection.fileDescriptor, &scratch, scratch.count)
+            if count > 0 {
+                buffer.append(scratch, count: count)
+            } else if count < 0, errno == EINTR {
+                continue
+            } else if count < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+                continue
+            } else {
+                break
+            }
+
+            if !headerParsed {
+                let delimiter = Data([13, 10, 13, 10])
+                guard let headerRange = buffer.range(of: delimiter) else {
+                    continue
+                }
+                let headerData = buffer[..<headerRange.lowerBound]
+                guard let headerText = String(data: headerData, encoding: .utf8),
+                      let statusLine = headerText.split(separator: "\r\n").first,
+                      statusLine.contains(" 200 ") else {
+                    lock.lock()
+                    messages.append("container target event stream returned invalid response")
+                    lock.unlock()
+                    return
+                }
+                buffer.removeSubrange(buffer.startIndex..<headerRange.upperBound)
+                headerParsed = true
+                lock.lock()
+                targetEventWatcherRunning = true
+                messages.append("container target event stream connected")
+                lock.unlock()
+                streamConnectedMessageSent = true
+            }
+
+            while let newline = buffer.firstIndex(of: 10) {
+                let line = buffer.prefix(upTo: newline)
+                buffer.removeSubrange(buffer.startIndex...newline)
+                let trimmed = Data(line).trimmedASCIIWhitespace()
+                guard !trimmed.isEmpty else { continue }
+                do {
+                    try applyContainerTargetSnapshotData(trimmed, source: "event stream")
+                } catch {
+                    lock.lock()
+                    messages.append("container target event decode failed: \(error)")
+                    lock.unlock()
+                }
+            }
+        }
+
+        if headerParsed, !buffer.trimmedASCIIWhitespace().isEmpty {
+            do {
+                try applyContainerTargetSnapshotData(buffer.trimmedASCIIWhitespace(), source: "event stream")
+            } catch {
+                lock.lock()
+                messages.append("container target event decode failed: \(error)")
+                lock.unlock()
+            }
+        }
+        if streamConnectedMessageSent {
+            lock.lock()
+            targetEventWatcherRunning = false
+            lock.unlock()
+        }
     }
 
     private func eventLoop() {
@@ -420,20 +718,285 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             return []
         }
 
+        let pendingPorts = resolvePendingCreatePorts(containerIDs: containerIDs)
+        let pendingContainerIDs = Set(pendingPorts.compactMap(\.containerID))
+        let unresolvedContainerIDs = containerIDs.filter { containerID in
+            !pendingContainerIDs.contains { pendingID in
+                containerIDsMatch(pendingID, containerID)
+            }
+        }
+
+        if unresolvedContainerIDs.isEmpty {
+            updatePublishedPortCache(pendingPorts, for: containerIDs)
+            return pendingPorts
+        }
+
         do {
-            let ports = try inspectPublishedPorts(containerIDs: containerIDs, timeoutSeconds: 3)
-            updatePublishedPortCache(ports, for: containerIDs)
-            return ports
+            let ports = try inspectPublishedPorts(containerIDs: unresolvedContainerIDs, timeoutSeconds: 3)
+            let allPorts = pendingPorts.union(ports)
+            updatePublishedPortCache(allPorts, for: containerIDs)
+            return allPorts
         } catch {
             lock.lock()
             messages.append("targeted port reconcile failed: \(error)")
             lock.unlock()
-            return cachedPublishedPorts(for: Set(containerIDs))
+            return pendingPorts.union(cachedPublishedPorts(for: Set(containerIDs)))
         }
+    }
+
+    private func resolvePendingCreatePorts(containerIDs: [String]) -> Set<DockerPublishedPort> {
+        let pending = pendingCreatePorts(for: containerIDs)
+        guard !pending.isEmpty else { return [] }
+
+        return pending.reduce(into: Set<DockerPublishedPort>()) { resolved, item in
+            let targetIP = containerTargetIP(containerID: item.containerID, allowDockerFallback: true)
+            for port in item.ports {
+                resolved.insert(DockerPublishedPort(
+                    hostIP: port.hostIP,
+                    hostPort: port.hostPort,
+                    containerPort: port.containerPort,
+                    protocol: port.protocol,
+                    containerID: item.containerID,
+                    containerName: port.containerName,
+                    targetIP: targetIP
+                ))
+            }
+        }
+    }
+
+    private func fastAttachStartedContainer(_ containerID: String) {
+        guard isRunning() else { return }
+
+        let deadline = Date().addingTimeInterval(0.035)
+        var pending = pendingCreatePorts(for: [containerID])
+        if pending.isEmpty {
+            fastReconcileViaDockerAPI(containerID: containerID)
+            return
+        }
+
+        while isRunning() {
+            for item in pending {
+                if let ports = resolvedPendingCreatePorts(containerID: item.containerID, ports: item.ports) {
+                    updatePublishedPortCache(ports, for: [item.containerID])
+                    reconcile(publishedPorts: ports, scopedContainerIDs: [item.containerID])
+                    waitForTCPPublishedTargetsReady(ports, timeoutSeconds: 0.15)
+                    lock.lock()
+                    messages.append("fast-attached published ports for \(String(item.containerID.prefix(12)))")
+                    lock.unlock()
+                    return
+                }
+            }
+
+            guard Date() < deadline else { break }
+            Thread.sleep(forTimeInterval: 0.001)
+            pending = pendingCreatePorts(for: [containerID])
+            guard !pending.isEmpty else {
+                fastReconcileViaDockerAPI(containerID: containerID)
+                return
+            }
+        }
+
+        reconcile(containerIDs: [containerID])
+    }
+
+    private func resolvedPendingCreatePorts(
+        containerID: String,
+        ports: Set<DockerPublishedPort>
+    ) -> Set<DockerPublishedPort>? {
+        guard let targetIP = containerTargetIP(containerID: containerID, allowDockerFallback: false) else {
+            return nil
+        }
+        return ports.reduce(into: Set<DockerPublishedPort>()) { resolved, port in
+            resolved.insert(DockerPublishedPort(
+                hostIP: port.hostIP,
+                hostPort: port.hostPort,
+                containerPort: port.containerPort,
+                protocol: port.protocol,
+                containerID: containerID,
+                containerName: port.containerName,
+                targetIP: targetIP
+            ))
+        }
+    }
+
+    private func fastReconcileViaDockerAPI(containerID: String) {
+        guard let ports = try? inspectPublishedPortsViaDockerAPI(containerIDs: [containerID], timeoutSeconds: 0.05),
+              !ports.isEmpty else {
+            reconcile(containerIDs: [containerID])
+            return
+        }
+        updatePublishedPortCache(ports, for: [containerID])
+        reconcile(publishedPorts: ports, scopedContainerIDs: [containerID])
+    }
+
+    private func containerTargetIP(containerID: String, allowDockerFallback: Bool) -> String? {
+        if let targetIP = cachedContainerTargetIP(containerID: containerID) {
+            return targetIP
+        }
+        guard allowDockerFallback else {
+            return nil
+        }
+        if refreshGuestContainerTargetSnapshot(timeoutSeconds: 0.025),
+           let targetIP = cachedContainerTargetIP(containerID: containerID) {
+            return targetIP
+        }
+        return containerTargetIPViaDockerAPI(containerID: containerID)
+    }
+
+    private func waitForTCPPublishedTargetsReady(_ ports: Set<DockerPublishedPort>, timeoutSeconds: Double) {
+        let tcpTargets = ports.compactMap { port -> (host: String, port: Int)? in
+            guard port.protocol == .tcp,
+                  let targetIP = port.targetIP,
+                  !targetIP.isEmpty else {
+                return nil
+            }
+            return (targetIP, port.containerPort)
+        }
+        guard !tcpTargets.isEmpty else { return }
+
+        let deadline = Date().addingTimeInterval(max(0, timeoutSeconds))
+        for target in tcpTargets {
+            while Date() < deadline {
+                if guestTCPPortProbe(host: target.host, port: target.port) {
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+        }
+    }
+
+    private func guestTCPPortProbe(host: String, port: Int) -> Bool {
+        guard capabilities.portProbe else { return false }
+        guard port > 0, port <= 65_535 else { return false }
+        let escapedHost = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? host
+        return (try? dockerAPIResponseBody(
+            path: "/conjet-port-probe?host=\(escapedHost)&port=\(port)",
+            timeoutSeconds: 0.02
+        )) != nil
+    }
+
+    @discardableResult
+    private func refreshGuestContainerTargetSnapshot(timeoutSeconds: Double) -> Bool {
+        guard capabilities.containerIPLookup else { return false }
+        do {
+            let data = try dockerAPIResponseBody(
+                path: "/conjet-container-targets",
+                timeoutSeconds: timeoutSeconds
+            )
+            try applyContainerTargetSnapshotData(data, source: "snapshot")
+            return true
+        } catch {
+            lock.lock()
+            messages.append("guest container target snapshot failed: \(error)")
+            lock.unlock()
+            return false
+        }
+    }
+
+    private func applyContainerTargetSnapshotData(_ data: Data, source: String) throws {
+        let containers = try JSONDecoder().decode([DockerContainerTargetSnapshot].self, from: data)
+        applyContainerTargetSnapshot(containers, source: source)
+    }
+
+    private func applyContainerTargetSnapshot(_ containers: [DockerContainerTargetSnapshot], source: String) {
+        let now = Date()
+        var snapshot: [String: String] = [:]
+        var attachCandidates: [(containerID: String, targetIP: String)] = []
+        for container in containers {
+            guard let targetIP = container.targetIPAddress, !targetIP.isEmpty else {
+                continue
+            }
+            snapshot[container.id] = targetIP
+            snapshot[String(container.id.prefix(12))] = targetIP
+            attachCandidates.append((container.id, targetIP))
+            for name in container.names ?? [] {
+                let trimmedName = name.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                if !trimmedName.isEmpty {
+                    snapshot[trimmedName] = targetIP
+                }
+            }
+        }
+        lock.lock()
+        for (key, value) in snapshot {
+            containerTargetIPCache[key] = value
+        }
+        containerTargetSnapshotAt = now
+        eventWatcherLastEventAt = now
+        messages.append("refreshed guest container target \(source) (\(containers.count) containers)")
+        lock.unlock()
+
+        for candidate in attachCandidates {
+            attachPendingCreatePortsFromTargetEvent(
+                containerID: candidate.containerID,
+                targetIP: candidate.targetIP,
+                source: source
+            )
+        }
+    }
+
+    private func attachPendingCreatePortsFromTargetEvent(
+        containerID: String,
+        targetIP: String,
+        source: String
+    ) {
+        guard isRunning() else { return }
+        let pending = pendingCreatePorts(for: [containerID])
+        guard !pending.isEmpty else { return }
+
+        for item in pending {
+            let resolvedPorts = item.ports.reduce(into: Set<DockerPublishedPort>()) { resolved, port in
+                resolved.insert(DockerPublishedPort(
+                    hostIP: port.hostIP,
+                    hostPort: port.hostPort,
+                    containerPort: port.containerPort,
+                    protocol: port.protocol,
+                    containerID: item.containerID,
+                    containerName: port.containerName,
+                    targetIP: targetIP
+                ))
+            }
+            updatePublishedPortCache(resolvedPorts, for: [item.containerID])
+            reconcile(publishedPorts: resolvedPorts, scopedContainerIDs: [item.containerID])
+            lock.lock()
+            messages.append("target-event attached published ports for \(String(item.containerID.prefix(12))) from \(source)")
+            lock.unlock()
+        }
+    }
+
+    private func cachedContainerTargetIP(containerID: String) -> String? {
+        lock.lock()
+        let targetIP = containerTargetIPCache.first { cachedID, _ in
+            containerIDsMatch(cachedID, containerID)
+        }?.value
+        lock.unlock()
+        return targetIP
+    }
+
+    private func pendingCreatePorts(for containerIDs: [String]) -> [(containerID: String, ports: Set<DockerPublishedPort>)] {
+        lock.lock()
+        let snapshot = pendingCreatePortsByID
+        lock.unlock()
+        return containerIDs.compactMap { containerID in
+            guard let match = snapshot.first(where: { cachedID, _ in
+                containerIDsMatch(cachedID, containerID)
+            }) else {
+                return nil
+            }
+            let canonicalID = match.value.compactMap(\.containerID).first ?? match.key
+            return (containerID: canonicalID, ports: match.value)
+        }
+    }
+
+    private func hasPendingCreatePorts(for containerID: String) -> Bool {
+        !pendingCreatePorts(for: [containerID]).isEmpty
     }
 
     private func inspectPublishedPorts(containerIDs: [String], timeoutSeconds: Double) throws -> Set<DockerPublishedPort> {
         guard !containerIDs.isEmpty else { return [] }
+
+        if let ports = try? inspectPublishedPortsViaDockerAPI(containerIDs: containerIDs, timeoutSeconds: timeoutSeconds) {
+            return ports
+        }
 
         let inspect = try runner("/usr/bin/env", dockerInspectArguments(containerIDs), timeoutSeconds)
         if inspect.succeeded, let data = inspect.stdout.data(using: .utf8) {
@@ -461,6 +1024,62 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                 removeForContainer(containerID)
             }
         }
+    }
+
+    private func inspectPublishedPortsViaDockerAPI(
+        containerIDs: [String],
+        timeoutSeconds: Double
+    ) throws -> Set<DockerPublishedPort> {
+        try containerIDs.reduce(into: Set<DockerPublishedPort>()) { ports, containerID in
+            let container = try inspectContainerViaDockerAPI(containerID: containerID, timeoutSeconds: timeoutSeconds)
+            ports.formUnion(Self.publishedPorts(fromDockerInspectContainers: [container], requireRunning: true))
+        }
+    }
+
+    private func inspectConfiguredPublishedPortsViaDockerAPI(
+        containerID: String,
+        timeoutSeconds: Double
+    ) throws -> Set<DockerPublishedPort> {
+        let container = try inspectContainerViaDockerAPI(containerID: containerID, timeoutSeconds: timeoutSeconds)
+        return Self.publishedPorts(fromDockerInspectContainers: [container], requireRunning: false)
+    }
+
+    private func containerTargetIPViaDockerAPI(containerID: String, timeoutSeconds: Double = 1) -> String? {
+        guard let container = try? inspectContainerViaDockerAPI(containerID: containerID, timeoutSeconds: timeoutSeconds),
+              container.state?.running == true else {
+            return nil
+        }
+        return container.networkSettings?.networks?.values.compactMap(\.ipAddress).first { !$0.isEmpty }
+    }
+
+    private func inspectContainerViaDockerAPI(
+        containerID: String,
+        timeoutSeconds: Double
+    ) throws -> DockerInspectContainer {
+        let data = try dockerAPIResponseBody(
+            path: "/containers/\(containerID)/json",
+            timeoutSeconds: timeoutSeconds
+        )
+        return try JSONDecoder().decode(DockerInspectContainer.self, from: data)
+    }
+
+    private func dockerAPIResponseBody(path: String, timeoutSeconds: Double) throws -> Data {
+        let connection = try connector.connect()
+        defer { connection.close() }
+        setSocketTimeoutForDockerAPI(connection.fileDescriptor, timeoutSeconds: timeoutSeconds)
+        let request = "GET \(path) HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n"
+        guard writeAllForDockerAPI(Data(request.utf8), to: connection.fileDescriptor) else {
+            throw ConjetError.socket("failed to write Docker API request \(path)")
+        }
+        Darwin.shutdown(connection.fileDescriptor, SHUT_WR)
+        let response = readAllForDockerAPI(from: connection.fileDescriptor, maxBytes: 4 * 1024 * 1024)
+        guard let parsed = DockerAPIHTTPResponse(data: response) else {
+            throw ConjetError.socket("invalid Docker API response for \(path)")
+        }
+        guard parsed.statusCode >= 200, parsed.statusCode < 300 else {
+            throw ConjetError.socket("Docker API \(path) returned HTTP \(parsed.statusCode)")
+        }
+        return parsed.body
     }
 
     private func dockerInspectArguments(_ containerIDs: [String]) -> [String] {
@@ -521,6 +1140,11 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                 containerIDsMatch(activeContainerID, cachedContainerID)
             }
         }
+        containerTargetIPCache = containerTargetIPCache.filter { cachedContainerID, _ in
+            activeContainerIDs.contains { activeContainerID in
+                containerIDsMatch(activeContainerID, cachedContainerID)
+            }
+        }
         lock.unlock()
     }
 
@@ -538,6 +1162,9 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             statuses[key]?.updatedAt = now
         }
         publishedPortCache = publishedPortCache.filter { cachedContainerID, _ in
+            !containerIDsMatch(cachedContainerID, containerID)
+        }
+        containerTargetIPCache = containerTargetIPCache.filter { cachedContainerID, _ in
             !containerIDsMatch(cachedContainerID, containerID)
         }
         lastReconcileAt = now
@@ -620,29 +1247,87 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         lock.unlock()
     }
 
+    private func prepublishCreateIntent(_ intent: DockerCreatePublicationIntent) {
+        guard capabilities.tcpProxy else { return }
+        guard isRunning() else { return }
+        prepublishPendingTCPPorts(intent.ports)
+    }
+
+    private func prepublishPendingTCPPorts(_ ports: Set<DockerPublishedPort>) {
+        guard capabilities.tcpProxy else { return }
+        guard isRunning() else { return }
+
+        for publishedPort in ports where publishedPort.protocol == .tcp {
+            let decision = policy.evaluate(publishedPort)
+            if !decision.allowed {
+                let key = ForwardKey(
+                    hostIP: publishedPort.hostIP ?? "0.0.0.0",
+                    hostPort: publishedPort.hostPort,
+                    proto: publishedPort.protocol
+                )
+                setStatus(for: key, status(
+                    for: publishedPort,
+                    bindAddress: key.hostIP,
+                    state: .failedPolicyDenied,
+                    error: decision.deniedReason,
+                    warning: decision.warning
+                ))
+                continue
+            }
+
+            for bindAddress in decision.bindAddresses {
+                let key = ForwardKey(
+                    hostIP: bindAddress,
+                    hostPort: publishedPort.hostPort,
+                    proto: publishedPort.protocol
+                )
+                reconcileTCP(
+                    key: key,
+                    publishedPort: publishedPort,
+                    bindAddress: bindAddress,
+                    warning: decision.warning,
+                    allowPendingTarget: true
+                )
+            }
+        }
+    }
+
     private func reconcileTCP(
         key: ForwardKey,
         publishedPort: DockerPublishedPort,
         bindAddress: String,
-        warning: String?
+        warning: String?,
+        allowPendingTarget: Bool = false
     ) {
         guard capabilities.tcpProxy else {
             setStatus(for: key, status(for: publishedPort, bindAddress: bindAddress, state: .failedGuestCapability, error: "guest image does not advertise tcp_proxy", warning: warning))
             return
         }
         lock.lock()
-        let exists = tcpListeners[key] != nil
+        let existing = tcpListeners[key]
         lock.unlock()
-        guard !exists else { return }
+        if let existing {
+            if let target = concreteNativeTCPTarget(for: publishedPort) {
+                existing.updateTarget(host: target.host, port: target.port)
+            }
+            setStatus(for: key, status(for: publishedPort, bindAddress: bindAddress, state: .listening, warning: warning))
+            return
+        }
 
         let listener: any PortListener
         if nativeTCPPoolAvailable {
-            let target = tcpTarget(for: publishedPort)
+            let target = allowPendingTarget
+                ? concreteNativeTCPTarget(for: publishedPort)
+                : tcpTarget(for: publishedPort)
+            if target == nil, !allowPendingTarget {
+                setStatus(for: key, status(for: publishedPort, bindAddress: bindAddress, state: .pending, warning: warning))
+                return
+            }
             listener = NativeTCPPooledPortListener(
                 bindAddress: bindAddress,
                 hostPort: publishedPort.hostPort,
-                targetHost: target.host,
-                targetPort: target.port,
+                targetHost: target?.host,
+                targetPort: target?.port,
                 connector: connector,
                 statusHandler: { [weak self] metrics in
                     self?.updateMetrics(key: key, metrics: metrics)
@@ -693,6 +1378,13 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             return (targetIP, publishedPort.containerPort)
         }
         return ("127.0.0.1", publishedPort.hostPort)
+    }
+
+    private func concreteNativeTCPTarget(for publishedPort: DockerPublishedPort) -> (host: String, port: Int)? {
+        guard let targetIP = publishedPort.targetIP, !targetIP.isEmpty else {
+            return nil
+        }
+        return (targetIP, publishedPort.containerPort)
     }
 
     private func reconcileUDP(
@@ -827,10 +1519,21 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         guard let containers = try? JSONDecoder().decode([DockerInspectContainer].self, from: data) else {
             return []
         }
+        return publishedPorts(fromDockerInspectContainers: containers, requireRunning: true)
+    }
 
+    private static func publishedPorts(
+        fromDockerInspectContainers containers: [DockerInspectContainer],
+        requireRunning: Bool
+    ) -> Set<DockerPublishedPort> {
         var ports: Set<DockerPublishedPort> = []
-        for container in containers where container.state?.running == true {
-            guard let mappedPorts = container.networkSettings?.ports else { continue }
+        for container in containers {
+            if requireRunning, container.state?.running != true {
+                continue
+            }
+            let networkPorts = container.networkSettings?.ports
+            let mappedPorts = networkPorts?.isEmpty == false ? networkPorts : container.hostConfig?.portBindings
+            guard let mappedPorts else { continue }
             let targetIP = container.networkSettings?.networks?.values.compactMap(\.ipAddress).first { !$0.isEmpty }
             for (containerPortKey, bindings) in mappedPorts {
                 let keyParts = containerPortKey.split(separator: "/", maxSplits: 1).map(String.init)
@@ -932,6 +1635,43 @@ private final class ProxyMetrics: @unchecked Sendable {
 private protocol PortListener: AnyObject, Sendable {
     func start() throws
     func stop()
+    func updateTarget(host: String, port: Int)
+}
+
+private extension PortListener {
+    func updateTarget(host: String, port: Int) {}
+}
+
+private final class MutablePortTarget: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var target: (host: String, port: Int)?
+
+    init(host: String?, port: Int?) {
+        if let host, let port {
+            target = (host, port)
+        }
+    }
+
+    func update(host: String, port: Int) {
+        condition.lock()
+        target = (host, port)
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func wait(timeoutSeconds: TimeInterval) -> (host: String, port: Int)? {
+        let deadline = Date().addingTimeInterval(max(0, timeoutSeconds))
+        condition.lock()
+        while target == nil {
+            let shouldContinue = condition.wait(until: deadline)
+            if !shouldContinue || Date() >= deadline {
+                break
+            }
+        }
+        let value = target
+        condition.unlock()
+        return value
+    }
 }
 
 private final class BinaryUDPGuestSession: @unchecked Sendable {
@@ -1410,8 +2150,7 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
 private final class NativeTCPPooledPortListener: PortListener, @unchecked Sendable {
     private let bindAddress: String
     private let hostPort: Int
-    private let targetHost: String
-    private let targetPort: Int
+    private let target: MutablePortTarget
     private let connector: any GuestConnectionConnector
     private let statusHandler: @Sendable (ProxyMetrics) -> Void
     private let metrics = ProxyMetrics()
@@ -1424,20 +2163,23 @@ private final class NativeTCPPooledPortListener: PortListener, @unchecked Sendab
     init(
         bindAddress: String,
         hostPort: Int,
-        targetHost: String,
-        targetPort: Int,
+        targetHost: String?,
+        targetPort: Int?,
         connector: any GuestConnectionConnector,
         statusHandler: @escaping @Sendable (ProxyMetrics) -> Void
     ) {
         self.bindAddress = bindAddress
         self.hostPort = hostPort
-        self.targetHost = targetHost
-        self.targetPort = targetPort
+        self.target = MutablePortTarget(host: targetHost, port: targetPort)
         self.connector = connector
         self.statusHandler = statusHandler
     }
 
     deinit { stop() }
+
+    func updateTarget(host: String, port: Int) {
+        target.update(host: host, port: port)
+    }
 
     func start() throws {
         lock.lock()
@@ -1490,14 +2232,13 @@ private final class NativeTCPPooledPortListener: PortListener, @unchecked Sendab
                 break
             }
             disableSigpipeForPortProxy(clientFD)
+            setTCPNoDelayIfSupported(clientFD)
             setNonBlocking(clientFD)
             metrics.accepted()
             statusHandler(metrics)
-            let thread = Thread { [weak self] in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.handleClient(clientFD)
             }
-            thread.name = "dev.conjet.native-tcp-client.\(hostPort)"
-            thread.start()
         }
     }
 
@@ -1522,24 +2263,41 @@ private final class NativeTCPPooledPortListener: PortListener, @unchecked Sendab
             Darwin.close(clientFD)
             return
         }
-        do {
-            let connection = try pool.borrow()
-            let result = connection.forward(
-                clientFD: clientFD,
-                targetHost: targetHost,
-                targetPort: targetPort,
-                onClientBytes: { [metrics] count in metrics.inBytes(count) },
-                onTargetBytes: { [metrics] count in metrics.outBytes(count) }
-            )
-            if result.hadError {
-                metrics.error()
-            }
-            pool.recycle(connection, reusable: result.reusable)
-            Darwin.close(clientFD)
-        } catch {
+        guard let target = target.wait(timeoutSeconds: 3) else {
             metrics.error()
-            writeHTTPBadGateway("Conjet native TCP bridge is unavailable: \(error)\n", to: clientFD)
+            writeHTTPBadGateway("Conjet native TCP target is not ready\n", to: clientFD)
             Darwin.close(clientFD)
+            return
+        }
+        let openDeadline = Date().addingTimeInterval(0.15)
+        while true {
+            do {
+                let connection = try pool.borrow()
+                let result = connection.forward(
+                    clientFD: clientFD,
+                    targetHost: target.host,
+                    targetPort: target.port,
+                    onClientBytes: { [metrics] count in metrics.inBytes(count) },
+                    onTargetBytes: { [metrics] count in metrics.outBytes(count) }
+                )
+                pool.recycle(connection, reusable: result.reusable)
+                if result.opened || Date() >= openDeadline {
+                    if result.hadError {
+                        metrics.error()
+                    }
+                    if !result.opened {
+                        writeHTTPBadGateway("Conjet native TCP target did not accept the connection yet\n", to: clientFD)
+                    }
+                    Darwin.close(clientFD)
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.001)
+            } catch {
+                metrics.error()
+                writeHTTPBadGateway("Conjet native TCP bridge is unavailable: \(error)\n", to: clientFD)
+                Darwin.close(clientFD)
+                return
+            }
         }
     }
 }
@@ -1842,12 +2600,14 @@ private struct DockerInspectContainer: Decodable {
     var id: String?
     var name: String?
     var state: DockerInspectState?
+    var hostConfig: DockerInspectHostConfig?
     var networkSettings: DockerInspectNetworkSettings?
 
     private enum CodingKeys: String, CodingKey {
         case id = "Id"
         case name = "Name"
         case state = "State"
+        case hostConfig = "HostConfig"
         case networkSettings = "NetworkSettings"
     }
 }
@@ -1870,6 +2630,14 @@ private struct DockerInspectNetworkSettings: Decodable {
     }
 }
 
+private struct DockerInspectHostConfig: Decodable {
+    var portBindings: [String: [DockerInspectPortBinding]?]?
+
+    private enum CodingKeys: String, CodingKey {
+        case portBindings = "PortBindings"
+    }
+}
+
 private struct DockerInspectNetwork: Decodable {
     var ipAddress: String?
 
@@ -1885,6 +2653,87 @@ private struct DockerInspectPortBinding: Decodable {
     private enum CodingKeys: String, CodingKey {
         case hostIP = "HostIp"
         case hostPort = "HostPort"
+    }
+}
+
+private struct DockerContainerTargetSnapshot: Decodable {
+    var id: String
+    var names: [String]?
+    var networkSettings: DockerInspectNetworkSettings?
+
+    var targetIPAddress: String? {
+        networkSettings?.networks?.values.compactMap(\.ipAddress).first { !$0.isEmpty }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id = "Id"
+        case names = "Names"
+        case networkSettings = "NetworkSettings"
+    }
+}
+
+private struct DockerAPIHTTPResponse {
+    var statusCode: Int
+    var body: Data
+
+    init?(data: Data) {
+        let delimiter = Data([13, 10, 13, 10])
+        guard let headerRange = data.range(of: delimiter),
+              let headerText = String(data: data[..<headerRange.lowerBound], encoding: .utf8) else {
+            return nil
+        }
+        let lines = headerText.split(separator: "\r\n", omittingEmptySubsequences: false).map(String.init)
+        guard let statusLine = lines.first else { return nil }
+        let statusParts = statusLine.split(separator: " ", maxSplits: 2).map(String.init)
+        guard statusParts.count >= 2, let statusCode = Int(statusParts[1]) else { return nil }
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let separator = line.firstIndex(of: ":") else { continue }
+            let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            headers[key] = value
+        }
+        self.statusCode = statusCode
+        let rawBody = Data(data[headerRange.upperBound...])
+        if headers["transfer-encoding"]?.lowercased().contains("chunked") == true {
+            guard let decoded = Self.decodeChunkedBody(rawBody) else { return nil }
+            self.body = decoded
+        } else {
+            self.body = rawBody
+        }
+    }
+
+    private static func decodeChunkedBody(_ data: Data) -> Data? {
+        var index = data.startIndex
+        var decoded = Data()
+        while true {
+            guard index < data.endIndex,
+                  let lineEnd = data[index...].range(of: Data([13, 10]))?.lowerBound,
+                  let line = String(data: data[index..<lineEnd], encoding: .utf8) else {
+                return nil
+            }
+            let sizeText = line
+                .split(separator: ";", maxSplits: 1)
+                .first
+                .map(String.init)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let size = Int(sizeText, radix: 16) else {
+                return nil
+            }
+            index = lineEnd + 2
+            if size == 0 {
+                return decoded
+            }
+            let chunkEnd = index + size
+            guard chunkEnd + 2 <= data.endIndex else {
+                return nil
+            }
+            decoded.append(data[index..<chunkEnd])
+            guard data[chunkEnd] == 13, data[chunkEnd + 1] == 10 else {
+                return nil
+            }
+            index = chunkEnd + 2
+        }
     }
 }
 
@@ -1917,6 +2766,52 @@ private struct DockerEventActor: Decodable {
     private enum CodingKeys: String, CodingKey {
         case id = "ID"
     }
+}
+
+private func setSocketTimeoutForDockerAPI(_ fd: Int32, timeoutSeconds: Double) {
+    let seconds = max(0, timeoutSeconds)
+    var timeout = timeval(
+        tv_sec: Int(seconds),
+        tv_usec: Int32((seconds.truncatingRemainder(dividingBy: 1)) * 1_000_000)
+    )
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+}
+
+private func writeAllForDockerAPI(_ data: Data, to fd: Int32) -> Bool {
+    data.withUnsafeBytes { rawBuffer in
+        guard let baseAddress = rawBuffer.baseAddress else {
+            return true
+        }
+        var written = 0
+        while written < data.count {
+            let count = Darwin.write(fd, baseAddress.advanced(by: written), data.count - written)
+            if count > 0 {
+                written += count
+            } else if count < 0, errno == EINTR {
+                continue
+            } else {
+                return false
+            }
+        }
+        return true
+    }
+}
+
+private func readAllForDockerAPI(from fd: Int32, maxBytes: Int) -> Data {
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while data.count < maxBytes {
+        let count = Darwin.read(fd, &buffer, min(buffer.count, maxBytes - data.count))
+        if count > 0 {
+            data.append(buffer, count: count)
+        } else if count < 0, errno == EINTR {
+            continue
+        } else {
+            break
+        }
+    }
+    return data
 }
 
 private func makeTCPListener(bindAddress: String, port: Int) throws -> Int32 {
@@ -2024,6 +2919,11 @@ private func setNonBlocking(_ fd: Int32) {
 private func disableSigpipeForPortProxy(_ fd: Int32) {
     var enabled: Int32 = 1
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, socklen_t(MemoryLayout<Int32>.size))
+}
+
+private func setTCPNoDelayIfSupported(_ fd: Int32) {
+    var enabled: Int32 = 1
+    _ = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, socklen_t(MemoryLayout<Int32>.size))
 }
 
 private func writeHTTPBadGateway(_ message: String, to fd: Int32) {
@@ -2209,6 +3109,28 @@ private func binaryFramePayloadLength(fromHeader header: Data) -> Int {
     let b2 = UInt32(header[header.index(start, offsetBy: 2)])
     let b3 = UInt32(header[header.index(start, offsetBy: 3)])
     return Int((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+}
+
+private extension Data {
+    func trimmedASCIIWhitespace() -> Data {
+        var start = startIndex
+        var end = endIndex
+        while start < end, self[start].isASCIIWhitespace {
+            start = index(after: start)
+        }
+        while end > start {
+            let previous = index(before: end)
+            guard self[previous].isASCIIWhitespace else { break }
+            end = previous
+        }
+        return Data(self[start..<end])
+    }
+}
+
+private extension UInt8 {
+    var isASCIIWhitespace: Bool {
+        self == 9 || self == 10 || self == 13 || self == 32
+    }
 }
 
 private func lastErrnoForPortProxy() -> String {

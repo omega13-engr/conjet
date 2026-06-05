@@ -41,5 +41,7 @@ final class ConjetNetworkStatusTests: XCTestCase {
         XCTAssertFalse(status.persistentTCPVsock)
         XCTAssertFalse(status.tcpVsockPool)
         XCTAssertFalse(status.pythonFallbackActive)
+        XCTAssertEqual(status.targetEventWatcherState, "stopped")
+        XCTAssertEqual(status.targetEventReconnects, 0)
     }
 }

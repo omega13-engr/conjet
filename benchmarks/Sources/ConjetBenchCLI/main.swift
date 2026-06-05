@@ -44,7 +44,7 @@ struct ConjetBenchCLI {
 
     private static func runAll(args: [String]) throws -> BenchmarkRunAllOutcome {
         let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack", "colima"]
-        let samples = value(after: "--samples", in: args).flatMap(Int.init) ?? 10
+        let samples = benchmarkSamples()
         let outputDirectory = URL(
             fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? defaultRunAllDirectory().path),
             isDirectory: true
@@ -58,12 +58,11 @@ struct ConjetBenchCLI {
         let requirePower = args.contains("--require-power")
         let commandTimeout = value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 240
         let energySeconds = value(after: "--energy-seconds", in: args).flatMap(Double.init) ?? 10
-        let energySamples = value(after: "--energy-samples", in: args).flatMap(Int.init) ?? min(samples, 2)
-        let polyglotSamples = value(after: "--polyglot-samples", in: args).flatMap(Int.init) ?? min(samples, 2)
+        let energySamples = benchmarkSamples()
+        let polyglotSamples = benchmarkSamples()
         let ecosystems = value(after: "--ecosystems", in: args).map(csvList) ?? PolyglotBenchmarkSuite.defaultEcosystems
         let resourceScope = benchmarkResourceScope(outputDirectory: outputDirectory)
 
-        try requireSudo()
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
         let startedAt = Date()
@@ -157,6 +156,7 @@ struct ConjetBenchCLI {
         if includeEnergy {
             let suiteStartedAt = Date()
             do {
+                try requireSudo()
                 print("conjet-bench: sudo validated; starting energy-gate before wall-time suites")
                 var outcome = try runEnergyGate(
                     contexts: contexts,
@@ -493,7 +493,7 @@ struct ConjetBenchCLI {
             options: BenchmarkEnergyGateOptions(
                 contexts: value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack", "colima"],
                 workloads: value(after: "--workloads", in: args).map(csvList) ?? ["idle", "container-start-loop", "hot-reload-loop", "compose-loop", "npm-install", "pnpm-install", "cargo-build"],
-                samples: value(after: "--samples", in: args).flatMap(Int.init) ?? 10,
+                samples: benchmarkSamples(),
                 requirePower: args.contains("--require-power"),
                 useSudo: true,
                 seconds: value(after: "--seconds", in: args).flatMap(Double.init) ?? 30,
@@ -512,7 +512,7 @@ struct ConjetBenchCLI {
 
     private static func networkGate(args: [String]) throws {
         let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack", "colima"]
-        let samples = value(after: "--samples", in: args).flatMap(Int.init) ?? 10
+        let samples = benchmarkSamples()
         let outputDirectory = URL(
             fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? "benchmarks/reports/network-gate-local"),
             isDirectory: true
@@ -570,7 +570,7 @@ struct ConjetBenchCLI {
 
     private static func networkSegments(args: [String]) throws {
         let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet"]
-        let samples = value(after: "--samples", in: args).flatMap(Int.init) ?? 30
+        let samples = benchmarkSamples()
         let workloads = value(after: "--workloads", in: args).map(csvList) ?? NetworkSegmentBenchmarkSuite.defaultWorkloads
         let outputDirectory = URL(
             fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? "benchmarks/reports/network-segments"),
@@ -712,6 +712,10 @@ struct ConjetBenchCLI {
         guard process.terminationStatus == 0 else {
             throw ConjetError.unavailable("sudo -v failed; benchmarks require a valid sudo timestamp")
         }
+    }
+
+    private static func benchmarkSamples() -> Int {
+        5
     }
 
     private static func canonicalProxyEngine(_ value: String) -> String {
@@ -1249,7 +1253,7 @@ struct ConjetBenchCLI {
 
             Run options:
               --contexts LIST          Docker contexts to measure (default: conjet,orbstack,colima)
-              --samples N              Samples per wall-time workload (default: 10)
+              --samples N              Accepted for compatibility; benchmark runs use 5 samples
               --suites LIST            Run only selected suites: warm-gate,cold-base-prepulled-gate,no-cache-gate,topology-gate,polyglot-gate,network-gate,energy-gate
               --network-workloads LIST Network workloads for run-all network-gate
               --skip-udp              Omit UDP workloads from network-gate
@@ -1259,11 +1263,11 @@ struct ConjetBenchCLI {
               --allow-baseline-failures
                                       Keep full gate partial when baselines fail instead of failing Conjet functional gate
               --require-iperf3        Reserved for future external iperf3 throughput gating
-              --polyglot-samples N     Samples per polyglot workload (default: min(samples, 2))
+              --polyglot-samples N     Accepted for compatibility; benchmark runs use 5 samples
               --ecosystems LIST        js,python,jvm,dotnet,go,rust,cpp
               --output-dir DIR         Report root (default: benchmarks/reports/run-all-YYYYMMDD-HHMMSS)
               --command-timeout N      Docker workload timeout in seconds (default: 240)
-              --energy-samples N       Samples per energy workload (default: min(samples, 2))
+              --energy-samples N       Accepted for compatibility; benchmark runs use 5 samples
               --energy-seconds N       Idle energy sample duration (default: 10)
               --keep-work              Keep generated workload directories for debugging
               --require-power          Fail energy suite if powermetrics cannot measure
@@ -1274,8 +1278,8 @@ struct ConjetBenchCLI {
               --required-baselines LIST Hard-fail gate baselines for existing-report scoring
 
             Notes:
-              run always executes sudo -v before starting benchmark suites.
-              When enabled, energy-gate runs first so powermetrics uses a fresh sudo timestamp.
+              Only energy-gate executes sudo -v because powermetrics requires privilege.
+              Wall-time suites, including network-gate, do not require a sudo timestamp.
               Kubernetes is intentionally out of scope for this benchmark generation.
             """
         )

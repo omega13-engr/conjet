@@ -108,6 +108,18 @@ session for the published-port listener. TCP mux is not implemented yet; TCP
 still uses the existing pooled/per-connection bridge path. The Python bridge
 remains installed as a fallback for older images and for rollback.
 
+The current fast path avoids three classes of avoidable network latency:
+
+- The host Docker socket bridge accepts a deep connection backlog so Docker API
+  bursts do not stall at the Unix socket listener.
+- Host TCP bridge reads and writes wait with `poll(2)` under backpressure
+  instead of micro-sleeping. This reduces tail latency and wasted CPU when many
+  clients share the VSOCK bridge.
+- The compiled guest helper keeps target registration protected by a global
+  registry lock, but UDP send/receive work is serialized only per target. A
+  slow or timing-out UDP service no longer blocks unrelated UDP published
+  ports.
+
 The v2.4 binary frame protocol is intentionally bounded and capability-gated.
 It validates magic, version, frame type, payload length, and truncated frames.
 Do not assume binary UDP/TCP is active unless `conjet network status --json` or
@@ -120,6 +132,16 @@ Conjet starts with an initial reconcile of running containers, subscribes to
 Docker container events, and keeps a slower periodic reconcile as a safety
 repair path. Container lifecycle events use a targeted inspect path so new
 listeners can be started without a broad `docker ps` sweep on the hot path.
+
+The network benchmark separates port publication into two metrics:
+
+- `listener_visible_ms`: elapsed time until the host TCP listener accepts a
+  loopback connection.
+- `first_connect_success_ms`: elapsed time until the first HTTP request through
+  the published port succeeds.
+
+This split keeps listener registration latency visible even when guest service
+readiness or target forwarding dominates the first successful request.
 
 Use `conjet network repair` when port state looks stale after VM image changes,
 daemon restarts, or Docker metadata repair.

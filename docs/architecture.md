@@ -15,8 +15,8 @@ The first implemented surface is intentionally small:
 - `ConjetFS` project attach syncs host-authoritative files into a Docker
   volume mounted at `/workspace`, giving containers a native-Linux workspace
   for dependency and build churn.
-- `EnergyGovernor` encodes low-power runtime states that VM and container
-  scheduling can use as the runtime matures.
+- `EnergyGovernor` encodes `performance`, `balanced`, and `eco` policies for
+  VM CPU caps, event batching, network reconciliation, and persistence cadence.
 
 ## VM Boot Substrate
 
@@ -98,6 +98,31 @@ OrbStack.
 
 The verified Ubuntu lane now supports `conjet run hello-world` through this
 socket path.
+
+## Runtime Fast Path Discipline
+
+The daemon is optimized around bounded host work on hot control paths:
+
+- `ping` and `status` use a short-lived in-process status snapshot so bursty
+  CLI probes do not repeatedly walk VM, manifest, and network-forward state.
+- Lifecycle and repair commands invalidate that snapshot before and after
+  state-changing work, so `start`, `stop`, `vm-status`, and `network repair`
+  preserve exact state reporting.
+- The daemon log keeps one append handle and one ISO-8601 formatter for the
+  process lifetime. Request logging is buffered on a utility queue and flushed
+  according to the active energy mode, so request handling is not blocked by
+  non-critical persistence.
+- `balanced` is the default energy mode. `performance` keeps the tightest
+  latency-oriented background cadence; `eco` lengthens status/metrics
+  persistence and network reconciliation and can reduce VM CPU allocation.
+- Network byte pumps wait on socket readiness with `poll(2)` when backpressure
+  appears. They do not spin-sleep in a tight loop, which protects latency and
+  idle power under Docker API bursts.
+
+These rules are part of the architecture, not incidental implementation
+details. New daemon commands should prefer cached snapshots for read-only
+human-facing status and must invalidate cached state around any operation that
+changes VM, Docker socket, or network-forward topology.
 
 ## ConjetFS MVP
 

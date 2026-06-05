@@ -39,10 +39,23 @@ default it removes generated `work/` dump trees after report files are written;
 pass `--keep-work` when you need the generated workload directories for
 debugging.
 
-The combined runner uses shorter energy and polyglot defaults than the dedicated
-commands so local report generation does not spend most of its time outside the
-failed wall-time gates. Override with `--energy-samples`, `--energy-seconds`,
-or `--polyglot-samples` for publication runs.
+The combined runner defaults energy and polyglot suites to 10 samples when
+`--samples 10` is used. For quick local smoke runs, lower those explicitly with
+`--energy-samples 2` or `--polyglot-samples 2`. For publication confidence,
+raise core polyglot ecosystems with `--polyglot-samples 30`.
+
+Rust/Cargo benchmark workloads use a local `conjet-bench-rust-llvm:1` image
+derived from `rust:1-alpine` with `clang` and `lld` installed. The runner builds
+that image once per Docker context when needed, then exports `RUSTFLAGS` so
+Cargo links with LLVM lld instead of the slower default system linker. Go
+polyglot workloads keep builds local and deterministic with `GOTOOLCHAIN=local`,
+`CGO_ENABLED=0`, `GOFLAGS="-buildvcs=false -trimpath"`, and parallel `go build`
+or `go test` jobs based on available CPUs.
+
+C/C++ rows keep CMake-generated build files under `/workspace/.native` for
+smart-bind runs. Configure rows also set `CC`, `CXX`, `CMAKE_GENERATOR`, and
+`CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY` so compiler detection does less
+repeated bind-mounted metadata work.
 
 To rerun only selected suites, pass `--suites`:
 
@@ -70,6 +83,10 @@ swift run --package-path benchmarks conjet-bench energy-gate \
 When `powermetrics` cannot measure and `--require-power` is absent, the suite
 records an honest skip. When `--require-power` is present, missing privileges or
 missing power samples fail the command.
+
+Energy publication runs should use at least 10 samples per workload. Active
+energy claims require Conjet, OrbStack, and Colima to be measured in the same
+report under the same power source and thermal conditions.
 
 ## Gate Existing Reports
 

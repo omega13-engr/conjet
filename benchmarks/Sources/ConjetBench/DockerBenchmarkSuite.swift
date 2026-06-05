@@ -55,7 +55,9 @@ private struct BindNativeOverlayPlan {
 public struct DockerBenchmarkSuite {
     private static let hotReloadWaitSubscribeDelaySeconds: TimeInterval = 0.02
     private static let pnpmBenchmarkImage = "conjet-bench-node-pnpm:9.15.9"
+    private static let rustLLVMBenchmarkImage = "conjet-bench-rust-llvm:1"
     private static let pnpmBenchmarkImageLock = NSLock()
+    private static let rustLLVMBenchmarkImageLock = NSLock()
 
     public static let defaultWorkloads = [
         "docker-version",
@@ -298,6 +300,9 @@ public struct DockerBenchmarkSuite {
             if requiresPNPMBenchmarkImage(enabledWorkloads) {
                 try ensurePNPMBenchmarkImage(context: context, workDirectory: workDirectory)
             }
+            if requiresRustLLVMBenchmarkImage(enabledWorkloads) {
+                try ensureRustLLVMBenchmarkImage(context: context, workDirectory: workDirectory)
+            }
             if warmup && requiresBuildKitWarmup(enabledWorkloads) {
                 try warmupBuildKit(
                     context: context,
@@ -430,7 +435,7 @@ public struct DockerBenchmarkSuite {
                             imageTag,
                             cargoBuildDirectory.path
                         ]),
-                        metrics: dockerBuildMetrics(["dependency_count": 2])
+                        metrics: cargoToolchainMetrics(dockerBuildMetrics(["dependency_count": 2]))
                     ))
                 }
 
@@ -647,18 +652,18 @@ public struct DockerBenchmarkSuite {
                             "type=bind,source=\(bindCargoDirectory.path),target=/app",
                             "-w",
                             "/app",
-                            "rust:1-alpine",
+                            Self.rustLLVMBenchmarkImage,
                             "sh",
                             "-c",
-                            "cargo build --release && test -x target/release/conjet-cargo-build-benchmark"
+                            cargoLLVMBuildCommand(targetBinary: "target/release/conjet-cargo-build-benchmark")
                         ],
-                        metrics: topologyMetrics(
+                        metrics: cargoToolchainMetrics(topologyMetrics(
                             topology: "strict-bind",
                             strictBind: true,
                             smartMount: false,
                             hostBindPaths: ["/app"],
                             extra: ["dependency_count": 2]
-                        )
+                        ))
                     ))
                 }
 
@@ -674,7 +679,7 @@ public struct DockerBenchmarkSuite {
                     )
                     removeDockerVolumes(context: context, names: overlay.volumeNames)
                     defer { removeDockerVolumes(context: context, names: overlay.volumeNames) }
-                    let cargoCommand = "export CARGO_HOME=/app/target/.cargo-home CARGO_TARGET_DIR=/app/target && mkdir -p /app/target/.cargo-home && cargo build --release && test -x /app/target/release/conjet-cargo-build-benchmark"
+                    let cargoCommand = "export CARGO_HOME=/app/target/.cargo-home CARGO_TARGET_DIR=/app/target && mkdir -p /app/target/.cargo-home && \(cargoLLVMBuildCommand(targetBinary: "/app/target/release/conjet-cargo-build-benchmark"))"
                     results.append(try benchmark(
                         workload: "smart-bind-cargo-build",
                         context: context,
@@ -687,12 +692,12 @@ public struct DockerBenchmarkSuite {
                         ] + overlay.mountArguments + [
                             "-w",
                             "/app",
-                            "rust:1-alpine",
+                            Self.rustLLVMBenchmarkImage,
                             "sh",
                             "-c",
                             cargoCommand
                         ],
-                        metrics: topologyMetrics(
+                        metrics: cargoToolchainMetrics(topologyMetrics(
                             topology: "smart-bind",
                             strictBind: false,
                             smartMount: true,
@@ -700,7 +705,7 @@ public struct DockerBenchmarkSuite {
                             linuxNativeWritePaths: overlay.writePaths,
                             hostBindPaths: ["/app"],
                             extra: ["dependency_count": 2]
-                        )
+                        ))
                     ))
                 }
 
@@ -719,19 +724,19 @@ public struct DockerBenchmarkSuite {
                             "type=volume,source=\(volumeName),target=/app",
                             "-w",
                             "/app",
-                            "rust:1-alpine",
+                            Self.rustLLVMBenchmarkImage,
                             "sh",
                             "-c",
                             cargoVolumeBuildScript()
                         ],
-                        metrics: topologyMetrics(
+                        metrics: cargoToolchainMetrics(topologyMetrics(
                             topology: "volume",
                             strictBind: false,
                             smartMount: false,
                             nativeOverlayMounts: 1,
                             linuxNativeWritePaths: ["/app"],
                             extra: ["dependency_count": 2]
-                        )
+                        ))
                     ))
                 }
 
@@ -794,11 +799,11 @@ public struct DockerBenchmarkSuite {
                         iteration: iteration,
                         projectDirectory: conjetFSCargoDirectory,
                         homeDirectory: conjetFSHome,
-                        image: "rust:1-alpine",
-                        shellCommand: "cargo build --release && test -x target/release/conjet-cargo-build-benchmark",
+                        image: Self.rustLLVMBenchmarkImage,
+                        shellCommand: cargoLLVMBuildCommand(targetBinary: "target/release/conjet-cargo-build-benchmark"),
                         usePackageCaches: false,
                         resetProjectVolume: !warmup,
-                        metrics: topologyMetrics(
+                        metrics: cargoToolchainMetrics(topologyMetrics(
                             topology: "conjetfs",
                             strictBind: false,
                             smartMount: false,
@@ -806,10 +811,10 @@ public struct DockerBenchmarkSuite {
                             linuxNativeWritePaths: ["/workspace"],
                             conjetfsFastPath: true,
                             extra: [
-                            "dependency_count": 2,
-                            "vm_native_target_reused": warmup ? 1 : 0
+                                "dependency_count": 2,
+                                "vm_native_target_reused": warmup ? 1 : 0
                             ]
-                        )
+                        ))
                     ))
                 }
 
@@ -978,6 +983,16 @@ public struct DockerBenchmarkSuite {
         ])
     }
 
+    private func requiresRustLLVMBenchmarkImage(_ workloads: Set<String>) -> Bool {
+        !workloads.isDisjoint(with: [
+            "cargo-build",
+            "strict-bind-cargo-build",
+            "smart-bind-cargo-build",
+            "volume-cargo-build",
+            "conjetfs-cargo-build"
+        ])
+    }
+
     private func requiresBuildKitWarmup(_ workloads: Set<String>) -> Bool {
         !workloads.isDisjoint(with: [
             "image-build",
@@ -1000,7 +1015,7 @@ public struct DockerBenchmarkSuite {
             images.append(Self.pnpmBenchmarkImage)
         }
         if !workloads.isDisjoint(with: ["cargo-build"]) {
-            images.append("rust:1-alpine")
+            images.append(Self.rustLLVMBenchmarkImage)
         }
         return Array(Set(images)).sorted()
     }
@@ -1129,6 +1144,44 @@ public struct DockerBenchmarkSuite {
         }
     }
 
+    private func ensureRustLLVMBenchmarkImage(context: String, workDirectory: URL) throws {
+        Self.rustLLVMBenchmarkImageLock.lock()
+        defer { Self.rustLLVMBenchmarkImageLock.unlock() }
+
+        if (try? runDocker(context: context, arguments: ["image", "inspect", Self.rustLLVMBenchmarkImage]))?.succeeded == true {
+            return
+        }
+
+        let imageDirectory = workDirectory
+            .appendingPathComponent("rust-llvm-benchmark-image", isDirectory: true)
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        let dockerfile = #"""
+        FROM rust:1-alpine
+        RUN apk add --no-cache clang lld >/dev/null \
+            && clang --version >/dev/null \
+            && ld.lld --version >/dev/null \
+            && rustc -Vv >/dev/null
+        """#
+        try dockerfile.write(
+            to: imageDirectory.appendingPathComponent("Dockerfile"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let result = try runDocker(context: context, arguments: [
+            "build",
+            "-t",
+            Self.rustLLVMBenchmarkImage,
+            imageDirectory.path
+        ])
+        if !result.succeeded {
+            throw ConjetError.processFailed(
+                executable: dockerExecutable,
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
+    }
+
     private func commonMetrics(_ metrics: [String: Double], iteration: Int) -> BenchmarkMetrics {
         commonMetrics(BenchmarkMetrics(metrics), iteration: iteration)
     }
@@ -1196,6 +1249,24 @@ public struct DockerBenchmarkSuite {
         metrics.setNull(for: "buildkit_cache_hit_count")
         metrics.setNull(for: "buildkit_cache_miss_count")
         return metrics
+    }
+
+    private func cargoToolchainMetrics(_ metrics: [String: Double] = [:]) -> BenchmarkMetrics {
+        cargoToolchainMetrics(BenchmarkMetrics(metrics))
+    }
+
+    private func cargoToolchainMetrics(_ metrics: BenchmarkMetrics) -> BenchmarkMetrics {
+        var result = metrics
+        result["cargo_llvm_lld"] = 1
+        result.setString("llvm-lld", for: "rust_toolchain")
+        result.setString("clang", for: "rust_linker")
+        result.setString("lld", for: "rust_linker_flavor")
+        result.setString(Self.rustLLVMBenchmarkImage, for: "rust_benchmark_image")
+        return result
+    }
+
+    private func cargoLLVMBuildCommand(targetBinary: String) -> String {
+        "export PATH=\"/usr/local/cargo/bin:$PATH\"; export CC=clang; export CXX=clang++; export RUSTFLAGS=\"${RUSTFLAGS:-} -C linker=clang -C link-arg=-fuse-ld=lld\"; cargo build --release && test -x \(targetBinary)"
     }
 
     private func warmupConjetPackageCaches(
@@ -1299,15 +1370,15 @@ public struct DockerBenchmarkSuite {
                 iteration: 0,
                 projectDirectory: conjetFSCargoDirectory,
                 homeDirectory: homeDirectory,
-                image: "rust:1-alpine",
-                shellCommand: "cargo build --release && test -x target/release/conjet-cargo-build-benchmark",
+                image: Self.rustLLVMBenchmarkImage,
+                shellCommand: cargoLLVMBuildCommand(targetBinary: "target/release/conjet-cargo-build-benchmark"),
                 usePackageCaches: false,
                 resetProjectVolume: true,
-                metrics: [
+                metrics: cargoToolchainMetrics([
                     "dependency_count": 2,
                     "benchmark_warmup_sample": 1,
                     "vm_native_target_warmup": 1
-                ]
+                ])
             )
         }
     }
@@ -2292,9 +2363,9 @@ public struct DockerBenchmarkSuite {
 
     private func prepareCargoBuildContext(at directory: URL) throws {
         try prepareCargoProject(at: directory)
-        let dockerfile = #"""
+        let dockerfile = """
         # syntax=docker/dockerfile:1.7
-        FROM rust:1-alpine
+        FROM \(Self.rustLLVMBenchmarkImage)
         WORKDIR /app
         COPY Cargo.toml ./
         COPY deps ./deps
@@ -2302,8 +2373,8 @@ public struct DockerBenchmarkSuite {
         ARG CONJET_BENCH_ITERATION=0
         RUN --mount=type=cache,target=/usr/local/cargo/registry \
             echo "$CONJET_BENCH_ITERATION" >/tmp/conjet-bench-iteration \
-            && cargo build --release
-        """#
+            && \(cargoLLVMBuildCommand(targetBinary: "target/release/conjet-cargo-build-benchmark"))
+        """
         try dockerfile.write(
             to: directory.appendingPathComponent("Dockerfile"),
             atomically: true,
@@ -2790,7 +2861,7 @@ public struct DockerBenchmarkSuite {
             println!("{} {}", conjet_intfmt::render(42), conjet_floatfmt::render(3.14159));
         }
         RS
-        cargo build --release && test -x target/release/conjet-cargo-build-benchmark
+        \(cargoLLVMBuildCommand(targetBinary: "target/release/conjet-cargo-build-benchmark"))
         """
     }
 

@@ -55,6 +55,8 @@ public struct BenchmarkEnergyGateRunResult: Codable, Equatable, Sendable {
 }
 
 public struct BenchmarkEnergyGateRunner {
+    private static let rustLLVMBenchmarkImage = "conjet-bench-rust-llvm:1"
+
     public var options: BenchmarkEnergyGateOptions
     private let runner: @Sendable (String, [String]) throws -> ProcessResult
     private let sudoAuthenticator: @Sendable () throws -> ProcessResult
@@ -318,7 +320,7 @@ public struct BenchmarkEnergyGateRunner {
         case "cargo-build":
             script = repeatedActiveScript(
                 minimumActiveSeconds: minimumActiveSeconds,
-                command: "docker --context \"$1\" run --rm rust:1-bookworm sh -c 'export PATH=\"/usr/local/cargo/bin:$PATH\"; cargo --version >/dev/null && cargo new --bin /tmp/conjet-energy >/dev/null && cd /tmp/conjet-energy && cargo build >/dev/null'"
+                command: "docker --context \"$1\" run --rm \(Self.rustLLVMBenchmarkImage) sh -c 'export PATH=\"/usr/local/cargo/bin:$PATH\"; export CC=clang; export CXX=clang++; export RUSTFLAGS=\"${RUSTFLAGS:-} -C linker=clang -C link-arg=-fuse-ld=lld\"; cargo --version >/dev/null && cargo new --bin /tmp/conjet-energy >/dev/null && cd /tmp/conjet-energy && cargo build >/dev/null'"
             )
         default:
             script = repeatedActiveScript(
@@ -353,6 +355,18 @@ public struct BenchmarkEnergyGateRunner {
 
         var failures: [BenchmarkResult] = []
         for runtime in options.contexts {
+            if options.workloads.contains("cargo-build") {
+                do {
+                    let setup = try ensureRustLLVMBenchmarkImage(runtime: runtime)
+                    guard setup.succeeded else {
+                        failures.append(setupFailureResult(runtime: runtime, image: Self.rustLLVMBenchmarkImage, result: setup))
+                        continue
+                    }
+                } catch {
+                    failures.append(failedResult(runtime: runtime, workload: "energy-setup-prepull", sample: 0, error: error))
+                    continue
+                }
+            }
             for image in images.sorted() {
                 FileHandle.standardError.write(Data("energy gate: pre-pull runtime=\(runtime) image=\(image)\n".utf8))
                 do {
@@ -380,12 +394,45 @@ public struct BenchmarkEnergyGateRunner {
             case "npm-install", "pnpm-install":
                 images.insert("node:22-alpine")
             case "cargo-build":
-                images.insert("rust:1-bookworm")
+                continue
             default:
                 images.insert("alpine:3.20")
             }
         }
         return images
+    }
+
+    private func ensureRustLLVMBenchmarkImage(runtime: String) throws -> ProcessResult {
+        let inspect = try runner("/usr/bin/env", ["docker", "--context", runtime, "image", "inspect", Self.rustLLVMBenchmarkImage])
+        if inspect.succeeded {
+            return inspect
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("conjet-energy-rust-llvm-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dockerfile = #"""
+        FROM rust:1-alpine
+        RUN apk add --no-cache clang lld >/dev/null \
+            && clang --version >/dev/null \
+            && ld.lld --version >/dev/null \
+            && rustc -Vv >/dev/null
+        """#
+        try dockerfile.write(
+            to: directory.appendingPathComponent("Dockerfile"),
+            atomically: true,
+            encoding: .utf8
+        )
+        return try runner("/usr/bin/env", [
+            "docker",
+            "--context",
+            runtime,
+            "build",
+            "-t",
+            Self.rustLLVMBenchmarkImage,
+            directory.path
+        ])
     }
 
     private func setupFailureResult(runtime: String, image: String, result: ProcessResult) -> BenchmarkResult {

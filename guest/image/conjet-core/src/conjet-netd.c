@@ -79,6 +79,7 @@ struct target {
     int proto;
     char host[64];
     uint16_t port;
+    pthread_mutex_t io_lock;
     int udp_fd;
     struct sockaddr_in udp_addr;
     int udp_addr_ready;
@@ -106,6 +107,9 @@ static struct metrics g_metrics = {
 };
 static pthread_mutex_t g_targets_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct target *g_targets = NULL;
+
+static int connect_unix_socket(const char *path);
+static int connect_tcp_target(const char *host, uint16_t port);
 
 static void metric_inc(uint64_t *field) {
     pthread_mutex_lock(&g_metrics.lock);
@@ -248,7 +252,7 @@ static void write_capabilities(int fd) {
     const char *body =
         "{\"version\":5,"
         "\"capabilities\":{\"tcp_proxy\":true,\"udp_proxy\":true,\"docker_events\":true,"
-        "\"container_ip_lookup\":true,\"port_probe\":true,\"proxy_metrics\":true,"
+        "\"container_ip_lookup\":true,\"container_target_events\":true,\"port_probe\":true,\"proxy_metrics\":true,"
         "\"guest_echo\":true,\"guest_metrics\":true,\"binary_frames\":true,"
         "\"udp_binary_frames\":true,\"persistent_vsock\":true,"
         "\"tcp_binary_frames\":true,\"persistent_tcp_vsock\":true,\"tcp_vsock_pool\":true,"
@@ -283,10 +287,268 @@ static void write_metrics(int fd) {
     write_http_response(fd, "200 OK", "application/json", body);
 }
 
+static int decode_http_chunked_body_in_place(char *body, size_t *body_len) {
+    char *readp = body;
+    char *writep = body;
+    char *end = body + *body_len;
+
+    while (readp < end) {
+        char *line_end = NULL;
+        for (char *p = readp; p + 1 < end; p++) {
+            if (p[0] == '\r' && p[1] == '\n') {
+                line_end = p;
+                break;
+            }
+        }
+        if (line_end == NULL) {
+            return -1;
+        }
+
+        char saved = *line_end;
+        *line_end = '\0';
+        char *parse_end = NULL;
+        errno = 0;
+        unsigned long chunk_len = strtoul(readp, &parse_end, 16);
+        *line_end = saved;
+        if (errno != 0 || parse_end == readp) {
+            return -1;
+        }
+
+        readp = line_end + 2;
+        if (chunk_len == 0) {
+            *body_len = (size_t)(writep - body);
+            return 0;
+        }
+        if ((size_t)(end - readp) < chunk_len + 2) {
+            return -1;
+        }
+        memmove(writep, readp, chunk_len);
+        writep += chunk_len;
+        readp += chunk_len;
+        if (readp + 1 > end || readp[0] != '\r' || readp[1] != '\n') {
+            return -1;
+        }
+        readp += 2;
+    }
+    return -1;
+}
+
+static void write_container_targets(int client) {
+    int upstream = connect_unix_socket(DOCKER_UNIX_SOCKET);
+    if (upstream < 0) {
+        write_http_response(client, "503 Service Unavailable", "text/plain", "Conjet guest bridge could not connect to Docker\n");
+        close_fd(client);
+        return;
+    }
+
+    const char *request =
+        "GET /containers/json?all=false&size=false HTTP/1.1\r\n"
+        "Host: docker\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    if (write_full(upstream, request, strlen(request)) != 0) {
+        close_fd(upstream);
+        close_fd(client);
+        return;
+    }
+    shutdown(upstream, SHUT_WR);
+
+    uint8_t buf[65536];
+    while (1) {
+        ssize_t n = read(upstream, buf, sizeof(buf));
+        if (n > 0) {
+            if (write_full(client, buf, (size_t)n) != 0) {
+                break;
+            }
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    close_fd(upstream);
+    close_fd(client);
+}
+
+static ssize_t fetch_container_targets_body(char *out, size_t out_len) {
+    int upstream = connect_unix_socket(DOCKER_UNIX_SOCKET);
+    if (upstream < 0) {
+        return -1;
+    }
+    const char *request =
+        "GET /containers/json?all=false&size=false HTTP/1.1\r\n"
+        "Host: docker\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    if (write_full(upstream, request, strlen(request)) != 0) {
+        close_fd(upstream);
+        return -1;
+    }
+    shutdown(upstream, SHUT_WR);
+
+    char response[65536];
+    size_t used = 0;
+    while (used < sizeof(response) - 1) {
+        ssize_t n = read(upstream, response + used, sizeof(response) - 1 - used);
+        if (n > 0) {
+            used += (size_t)n;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    close_fd(upstream);
+    response[used] = '\0';
+
+    char *body = strstr(response, "\r\n\r\n");
+    if (body == NULL) {
+        return -1;
+    }
+    char *headers = response;
+    body += 4;
+    size_t body_len = used - (size_t)(body - response);
+    if (strcasestr(headers, "Transfer-Encoding: chunked") != NULL) {
+        if (decode_http_chunked_body_in_place(body, &body_len) != 0) {
+            return -1;
+        }
+    }
+    if (body_len + 2 > out_len) {
+        body_len = out_len > 2 ? out_len - 2 : 0;
+    }
+    if (body_len == 0) {
+        return -1;
+    }
+    memcpy(out, body, body_len);
+    while (body_len > 0 && (out[body_len - 1] == '\n' || out[body_len - 1] == '\r' || out[body_len - 1] == ' ' || out[body_len - 1] == '\t')) {
+        body_len--;
+    }
+    out[body_len++] = '\n';
+    out[body_len] = '\0';
+    return (ssize_t)body_len;
+}
+
+static int emit_container_targets_snapshot(int client) {
+    char body[65536];
+    ssize_t n = fetch_container_targets_body(body, sizeof(body));
+    if (n <= 0) {
+        return -1;
+    }
+    return write_full(client, body, (size_t)n);
+}
+
+static void write_container_target_events(int client) {
+    const char *header =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/x-ndjson\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    if (write_full(client, header, strlen(header)) != 0) {
+        close_fd(client);
+        return;
+    }
+    (void)emit_container_targets_snapshot(client);
+
+    int upstream = connect_unix_socket(DOCKER_UNIX_SOCKET);
+    if (upstream < 0) {
+        close_fd(client);
+        return;
+    }
+    const char *request =
+        "GET /events HTTP/1.1\r\n"
+        "Host: docker\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n";
+    if (write_full(upstream, request, strlen(request)) != 0) {
+        close_fd(upstream);
+        close_fd(client);
+        return;
+    }
+
+    char buf[8192];
+    size_t used = 0;
+    int header_done = 0;
+    while (1) {
+        ssize_t n = read(upstream, buf + used, sizeof(buf) - used);
+        if (n > 0) {
+            used += (size_t)n;
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+
+        size_t offset = 0;
+        if (!header_done) {
+            char *header_end = NULL;
+            for (size_t i = 3; i < used; i++) {
+                if (buf[i - 3] == '\r' && buf[i - 2] == '\n' && buf[i - 1] == '\r' && buf[i] == '\n') {
+                    header_end = &buf[i + 1];
+                    break;
+                }
+            }
+            if (header_end == NULL) {
+                if (used == sizeof(buf)) {
+                    break;
+                }
+                continue;
+            }
+            offset = (size_t)(header_end - buf);
+            header_done = 1;
+        }
+
+        for (size_t i = offset; i < used; i++) {
+            if (buf[i] == '\n') {
+                if (emit_container_targets_snapshot(client) != 0) {
+                    close_fd(upstream);
+                    close_fd(client);
+                    return;
+                }
+            }
+        }
+        used = 0;
+    }
+    close_fd(upstream);
+    close_fd(client);
+}
+
+static void write_port_probe(int client, const uint8_t *first, ssize_t first_len) {
+    char request_line[512];
+    size_t line_len = 0;
+    while (line_len < (size_t)first_len && line_len + 1 < sizeof(request_line)) {
+        if (first[line_len] == '\r' || first[line_len] == '\n') {
+            break;
+        }
+        request_line[line_len] = (char)first[line_len];
+        line_len++;
+    }
+    request_line[line_len] = '\0';
+
+    char host[64];
+    unsigned port = 0;
+    if (sscanf(request_line, "GET /conjet-port-probe?host=%63[^&]&port=%u ", host, &port) != 2 ||
+        port == 0 || port > 65535) {
+        write_http_response(client, "400 Bad Request", "text/plain", "invalid port probe\n");
+        close_fd(client);
+        return;
+    }
+
+    int fd = connect_tcp_target(host, (uint16_t)port);
+    if (fd >= 0) {
+        close_fd(fd);
+        write_http_response(client, "200 OK", "application/json", "{\"ready\":true}\n");
+    } else {
+        write_http_response(client, "503 Service Unavailable", "application/json", "{\"ready\":false}\n");
+    }
+    close_fd(client);
+}
+
 static void register_target(uint32_t id, int proto, const char *host, uint16_t port) {
     pthread_mutex_lock(&g_targets_lock);
     for (struct target *existing = g_targets; existing != NULL; existing = existing->next) {
         if (existing->id == id) {
+            pthread_mutex_lock(&existing->io_lock);
             existing->proto = proto;
             existing->port = port;
             snprintf(existing->host, sizeof(existing->host), "%s", host);
@@ -295,6 +557,7 @@ static void register_target(uint32_t id, int proto, const char *host, uint16_t p
                 existing->udp_fd = -1;
             }
             existing->udp_addr_ready = 0;
+            pthread_mutex_unlock(&existing->io_lock);
             pthread_mutex_unlock(&g_targets_lock);
             metric_inc(&g_metrics.target_registrations);
             return;
@@ -308,6 +571,7 @@ static void register_target(uint32_t id, int proto, const char *host, uint16_t p
     t->id = id;
     t->proto = proto;
     t->port = port;
+    pthread_mutex_init(&t->io_lock, NULL);
     t->udp_fd = -1;
     t->udp_addr_ready = 0;
     snprintf(t->host, sizeof(t->host), "%s", host);
@@ -339,10 +603,12 @@ static ssize_t udp_exchange_target(uint32_t id, const uint8_t *payload, uint32_t
         pthread_mutex_unlock(&g_targets_lock);
         return (ssize_t)n;
     }
+    pthread_mutex_lock(&t->io_lock);
+    pthread_mutex_unlock(&g_targets_lock);
     if (t->udp_fd < 0) {
         t->udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (t->udp_fd < 0) {
-            pthread_mutex_unlock(&g_targets_lock);
+            pthread_mutex_unlock(&t->io_lock);
             return -1;
         }
         struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
@@ -353,7 +619,7 @@ static ssize_t udp_exchange_target(uint32_t id, const uint8_t *payload, uint32_t
         t->udp_addr.sin_family = AF_INET;
         t->udp_addr.sin_port = htons(t->port);
         if (inet_pton(AF_INET, t->host, &t->udp_addr.sin_addr) != 1) {
-            pthread_mutex_unlock(&g_targets_lock);
+            pthread_mutex_unlock(&t->io_lock);
             return -1;
         }
         t->udp_addr_ready = 1;
@@ -361,7 +627,7 @@ static ssize_t udp_exchange_target(uint32_t id, const uint8_t *payload, uint32_t
     if (sendto(t->udp_fd, payload, payload_len, 0, (struct sockaddr *)&t->udp_addr, sizeof(t->udp_addr)) >= 0) {
         result = recv(t->udp_fd, out, out_len, 0);
     }
-    pthread_mutex_unlock(&g_targets_lock);
+    pthread_mutex_unlock(&t->io_lock);
     return result;
 }
 
@@ -891,6 +1157,15 @@ static void *handle_client(void *raw) {
     } else if (n >= 27 && memcmp(first, "GET /conjet-bridge-metrics ", 27) == 0) {
         write_metrics(client);
         close_fd(client);
+    } else if (n >= (ssize_t)(sizeof("GET /conjet-container-targets ") - 1) &&
+               memcmp(first, "GET /conjet-container-targets ", sizeof("GET /conjet-container-targets ") - 1) == 0) {
+        write_container_targets(client);
+    } else if (n >= (ssize_t)(sizeof("GET /conjet-container-target-events ") - 1) &&
+               memcmp(first, "GET /conjet-container-target-events ", sizeof("GET /conjet-container-target-events ") - 1) == 0) {
+        write_container_target_events(client);
+    } else if (n >= (ssize_t)(sizeof("GET /conjet-port-probe?") - 1) &&
+               memcmp(first, "GET /conjet-port-probe?", sizeof("GET /conjet-port-probe?") - 1) == 0) {
+        write_port_probe(client, first, n);
     } else {
         handle_docker_proxy(client, first, (size_t)n);
     }
@@ -904,7 +1179,7 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (strcmp(argv[1], "--capabilities") == 0) {
-            puts("{\"version\":5,\"tcp_proxy\":true,\"udp_proxy\":true,\"guest_echo\":true,\"guest_metrics\":true,\"binary_frames\":true,\"udp_binary_frames\":true,\"persistent_vsock\":true,\"tcp_binary_frames\":true,\"persistent_tcp_vsock\":true,\"tcp_vsock_pool\":true,\"bridge_engine\":\"conjet-netd-c\"}");
+            puts("{\"version\":5,\"tcp_proxy\":true,\"udp_proxy\":true,\"docker_events\":true,\"container_ip_lookup\":true,\"container_target_events\":true,\"port_probe\":true,\"guest_echo\":true,\"guest_metrics\":true,\"binary_frames\":true,\"udp_binary_frames\":true,\"persistent_vsock\":true,\"tcp_binary_frames\":true,\"persistent_tcp_vsock\":true,\"tcp_vsock_pool\":true,\"bridge_engine\":\"conjet-netd-c\"}");
             return 0;
         }
     }

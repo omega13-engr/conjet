@@ -18,6 +18,7 @@ public struct GuestBridgeCapabilities: Equatable, Sendable {
     public var udpProxy: Bool
     public var dockerEvents: Bool
     public var containerIPLookup: Bool
+    public var containerTargetEvents: Bool
     public var portProbe: Bool
     public var proxyMetrics: Bool
     public var guestEcho: Bool
@@ -38,6 +39,7 @@ public struct GuestBridgeCapabilities: Equatable, Sendable {
         udpProxy: Bool = false,
         dockerEvents: Bool = false,
         containerIPLookup: Bool = false,
+        containerTargetEvents: Bool = false,
         portProbe: Bool = false,
         proxyMetrics: Bool = false,
         guestEcho: Bool = false,
@@ -57,6 +59,7 @@ public struct GuestBridgeCapabilities: Equatable, Sendable {
         self.udpProxy = udpProxy
         self.dockerEvents = dockerEvents
         self.containerIPLookup = containerIPLookup
+        self.containerTargetEvents = containerTargetEvents
         self.portProbe = portProbe
         self.proxyMetrics = proxyMetrics
         self.guestEcho = guestEcho
@@ -77,6 +80,7 @@ public struct GuestBridgeCapabilities: Equatable, Sendable {
             udpProxy: udpProxy,
             dockerEvents: dockerEvents,
             containerIPLookup: containerIPLookup,
+            containerTargetEvents: containerTargetEvents,
             portProbe: portProbe,
             proxyMetrics: proxyMetrics,
             guestEcho: guestEcho,
@@ -309,6 +313,7 @@ enum GuestBridgeCapabilityProbe {
             udpProxy: text.contains(#""udp_proxy":true"#),
             dockerEvents: text.contains(#""docker_events":true"#),
             containerIPLookup: text.contains(#""container_ip_lookup":true"#),
+            containerTargetEvents: text.contains(#""container_target_events":true"#),
             portProbe: text.contains(#""port_probe":true"#),
             proxyMetrics: text.contains(#""proxy_metrics":true"#),
             guestEcho: text.contains(#""guest_echo":true"#),
@@ -347,10 +352,19 @@ private func bridgeEngine(in text: String) -> String? {
 }
 
 public final class DockerSocketBridge: @unchecked Sendable {
+    public typealias CreatePublicationIntentHandler = @Sendable (DockerCreatePublicationIntent) -> Void
+    public typealias CreatePublicationResolutionHandler = @Sendable (DockerCreatePublicationResolution) -> Void
+    public typealias ContainerStartIntentHandler = @Sendable (DockerContainerStartRequest) -> Void
+    public typealias ContainerStartHandler = @Sendable (DockerContainerStartRequest) -> Void
+
     public let socketPath: String
     public let guestPort: UInt32
 
     private let connector: any GuestConnectionConnector
+    private let createPublicationIntentHandler: CreatePublicationIntentHandler?
+    private let createPublicationResolutionHandler: CreatePublicationResolutionHandler?
+    private let containerStartIntentHandler: ContainerStartIntentHandler?
+    private let containerStartHandler: ContainerStartHandler?
     private let lock = NSLock()
     private var listenerFD: Int32 = -1
     private var running = false
@@ -359,11 +373,19 @@ public final class DockerSocketBridge: @unchecked Sendable {
     public init(
         socketPath: String,
         guestPort: UInt32 = ConjetRuntimePorts.dockerVsockPort,
-        connector: any GuestConnectionConnector
+        connector: any GuestConnectionConnector,
+        createPublicationIntentHandler: CreatePublicationIntentHandler? = nil,
+        createPublicationResolutionHandler: CreatePublicationResolutionHandler? = nil,
+        containerStartIntentHandler: ContainerStartIntentHandler? = nil,
+        containerStartHandler: ContainerStartHandler? = nil
     ) {
         self.socketPath = socketPath
         self.guestPort = guestPort
         self.connector = connector
+        self.createPublicationIntentHandler = createPublicationIntentHandler
+        self.createPublicationResolutionHandler = createPublicationResolutionHandler
+        self.containerStartIntentHandler = containerStartIntentHandler
+        self.containerStartHandler = containerStartHandler
     }
 
     deinit {
@@ -398,7 +420,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
                     throw ConjetError.socket("bind(\(socketPath)) failed: \(lastErrno())")
                 }
             }
-            guard Darwin.listen(fd, 64) == 0 else {
+            guard Darwin.listen(fd, 1024) == 0 else {
                 throw ConjetError.socket("listen() failed: \(lastErrno())")
             }
 
@@ -459,8 +481,26 @@ public final class DockerSocketBridge: @unchecked Sendable {
 
     private func handleClient(_ clientFD: Int32) {
         do {
+            guard let initialClientData = readInitialDockerClientData(from: clientFD) else {
+                Darwin.close(clientFD)
+                return
+            }
+            let createIntent = DockerCreateRequestParser.intent(from: initialClientData)
+            if let intent = createIntent {
+                createPublicationIntentHandler?(intent)
+            }
+            let startRequest = DockerStartRequestParser.startRequest(from: initialClientData)
+            if let startRequest {
+                containerStartIntentHandler?(startRequest)
+            }
             let guest = try connector.connect()
-            pipe(clientFD: clientFD, guest: guest)
+            pipe(
+                clientFD: clientFD,
+                guest: guest,
+                initialClientData: initialClientData,
+                createIntent: createIntent,
+                startRequest: startRequest
+            )
         } catch {
             let message = "Conjet guest Docker bridge on VSOCK port \(guestPort) is not ready: \(error)\n"
             writeHTTPUnavailable(message, to: clientFD)
@@ -468,7 +508,54 @@ public final class DockerSocketBridge: @unchecked Sendable {
         }
     }
 
-    private func pipe(clientFD: Int32, guest: GuestConnection) {
+    private func pipe(
+        clientFD: Int32,
+        guest: GuestConnection,
+        initialClientData: Data,
+        createIntent: DockerCreatePublicationIntent?,
+        startRequest: DockerContainerStartRequest?
+    ) {
+        guard writeAll(initialClientData, to: guest.fileDescriptor) else {
+            guest.close()
+            Darwin.close(clientFD)
+            return
+        }
+
+        if let createIntent {
+            guard let initialGuestData = readInitialDockerCreateResponseData(from: guest.fileDescriptor) else {
+                guest.close()
+                Darwin.close(clientFD)
+                return
+            }
+            if let containerID = DockerCreateResponseParser.containerID(from: initialGuestData) {
+                createPublicationResolutionHandler?(DockerCreatePublicationResolution(
+                    intent: createIntent,
+                    containerID: containerID
+                ))
+            }
+            guard writeAll(initialGuestData, to: clientFD) else {
+                guest.close()
+                Darwin.close(clientFD)
+                return
+            }
+        }
+
+        if let startRequest {
+            guard let initialGuestData = readInitialDockerStartResponseData(from: guest.fileDescriptor) else {
+                guest.close()
+                Darwin.close(clientFD)
+                return
+            }
+            guard writeAll(initialGuestData, to: clientFD) else {
+                guest.close()
+                Darwin.close(clientFD)
+                return
+            }
+            if DockerStartResponseParser.succeeded(from: initialGuestData) {
+                containerStartHandler?(startRequest)
+            }
+        }
+
         let group = DispatchGroup()
         group.enter()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -487,7 +574,97 @@ public final class DockerSocketBridge: @unchecked Sendable {
         Darwin.close(clientFD)
     }
 
-private func writeHTTPUnavailable(_ message: String, to fd: Int32) {
+    private func readInitialDockerStartResponseData(from fd: Int32) -> Data? {
+        let maxBufferedBytes = 1024 * 1024
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+
+        guard appendRead(from: fd, into: &data, buffer: &buffer) else {
+            return data.isEmpty ? nil : data
+        }
+
+        while DockerStartResponseParser.headerBytesMissing(in: data), data.count < maxBufferedBytes {
+            guard appendRead(from: fd, into: &data, buffer: &buffer) else {
+                return data
+            }
+        }
+
+        return data
+    }
+
+    private func readInitialDockerClientData(from fd: Int32) -> Data? {
+        let maxBufferedBytes = 1024 * 1024
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+
+        guard appendRead(from: fd, into: &data, buffer: &buffer) else {
+            return data.isEmpty ? nil : data
+        }
+
+        while DockerCreateRequestParser.headerBytesMissing(in: data), data.count < maxBufferedBytes {
+            guard appendRead(from: fd, into: &data, buffer: &buffer) else {
+                return data
+            }
+        }
+
+        while let missing = DockerCreateRequestParser.additionalBodyBytesNeeded(in: data),
+              missing > 0,
+              data.count < maxBufferedBytes {
+            guard appendRead(from: fd, into: &data, buffer: &buffer, maxBytes: min(missing, buffer.count)) else {
+                return data
+            }
+        }
+
+        return data
+    }
+
+    private func readInitialDockerCreateResponseData(from fd: Int32) -> Data? {
+        let maxBufferedBytes = 1024 * 1024
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+
+        guard appendRead(from: fd, into: &data, buffer: &buffer) else {
+            return data.isEmpty ? nil : data
+        }
+
+        while DockerCreateResponseParser.headerBytesMissing(in: data), data.count < maxBufferedBytes {
+            guard appendRead(from: fd, into: &data, buffer: &buffer) else {
+                return data
+            }
+        }
+
+        while let missing = DockerCreateResponseParser.additionalBodyBytesNeeded(in: data),
+              missing > 0,
+              data.count < maxBufferedBytes {
+            guard appendRead(from: fd, into: &data, buffer: &buffer, maxBytes: min(missing, buffer.count)) else {
+                return data
+            }
+        }
+
+        return data
+    }
+
+    private func appendRead(
+        from fd: Int32,
+        into data: inout Data,
+        buffer: inout [UInt8],
+        maxBytes: Int? = nil
+    ) -> Bool {
+        let readLimit = max(1, min(maxBytes ?? buffer.count, buffer.count))
+        while true {
+            let count = Darwin.read(fd, &buffer, readLimit)
+            if count > 0 {
+                data.append(buffer, count: count)
+                return true
+            }
+            if count < 0, errno == EINTR {
+                continue
+            }
+            return false
+        }
+    }
+
+    private func writeHTTPUnavailable(_ message: String, to fd: Int32) {
         let response = """
         HTTP/1.1 503 Service Unavailable\r
         Content-Type: text/plain; charset=utf-8\r
@@ -629,6 +806,10 @@ private func copyBytes(from sourceFD: Int32, to destinationFD: Int32) {
                     written += writeCount
                 } else if writeCount < 0, errno == EINTR {
                     continue
+                } else if writeCount < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+                    if !waitForWritableFD(destinationFD, timeoutMilliseconds: 5_000) {
+                        return
+                    }
                 } else {
                     return
                 }
@@ -638,6 +819,20 @@ private func copyBytes(from sourceFD: Int32, to destinationFD: Int32) {
         } else {
             return
         }
+    }
+}
+
+private func waitForWritableFD(_ fd: Int32, timeoutMilliseconds: Int32) -> Bool {
+    var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+    while true {
+        let result = Darwin.poll(&descriptor, 1, timeoutMilliseconds)
+        if result > 0 {
+            return (descriptor.revents & Int16(POLLOUT | POLLHUP | POLLERR)) != 0
+        }
+        if result < 0, errno == EINTR {
+            continue
+        }
+        return false
     }
 }
 

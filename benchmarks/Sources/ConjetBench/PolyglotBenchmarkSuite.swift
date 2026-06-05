@@ -3,6 +3,8 @@ import Foundation
 
 public struct PolyglotBenchmarkSuite {
     public static let defaultEcosystems = ["js", "python", "jvm", "dotnet", "go", "rust", "cpp"]
+    private static let rustLLVMBenchmarkImage = "conjet-bench-rust-llvm:1"
+    private static let rustLLVMBenchmarkImageLock = NSLock()
 
     public var contexts: [String]
     public var samples: Int
@@ -45,6 +47,11 @@ public struct PolyglotBenchmarkSuite {
         let workloads = Self.workloads(for: ecosystems)
         for workload in workloads {
             try prepareProject(for: workload, at: workDirectory.appendingPathComponent(workload, isDirectory: true))
+        }
+        if workloads.contains(where: { $0.hasPrefix("rust-") }) {
+            for context in contexts {
+                try ensureRustLLVMBenchmarkImage(context: context, workDirectory: workDirectory)
+            }
         }
         for sample in 1...samples {
             for context in contexts {
@@ -102,6 +109,7 @@ public struct PolyglotBenchmarkSuite {
         metrics.setString("warm", for: "build_cache_mode")
         metrics.setString("base-prepulled", for: "image_cache_mode")
         metrics.setString("online", for: "network_cache_mode")
+        applyToolchainMetrics(workload: workload, metrics: &metrics)
         return BenchmarkResult(
             workload: workload,
             runtime: context,
@@ -122,8 +130,9 @@ public struct PolyglotBenchmarkSuite {
         projectDirectory: URL,
         volumeName: String
     ) -> [String] {
-        let image = imageAndScript(for: workload).image
-        let script = imageAndScript(for: workload).script
+        let plan = imageAndScript(for: workload)
+        let image = plan.image
+        let script = plan.script
         switch topology {
         case "strict-bind":
             return [
@@ -283,13 +292,13 @@ public struct PolyglotBenchmarkSuite {
         case "python-test": return ("python:3.12-alpine", "python -m pip install -r requirements.txt >/dev/null && pytest -q")
         case "python-hot-reload": return ("python:3.12-alpine", "printf updated > hot.txt && python - <<'PY'\nprint('reload')\nPY")
         case "go-mod-download": return ("golang:1.23-alpine", goScript("go mod download"))
-        case "go-build": return ("golang:1.23-alpine", goScript("go mod download >/dev/null && go build ./..."))
-        case "go-test": return ("golang:1.23-alpine", goScript("go mod download >/dev/null && go test ./..."))
-        case "rust-build": return ("rust:1-alpine", rustScript("cargo build"))
-        case "rust-test": return ("rust:1-alpine", rustScript("cargo test"))
-        case "cpp-configure": return ("alpine:3.20", "apk add --no-cache cmake make gcc musl-dev >/dev/null && cmake -S . -B build")
-        case "cpp-build": return ("alpine:3.20", "apk add --no-cache cmake make gcc musl-dev >/dev/null && cmake -S . -B build >/dev/null && cmake --build build")
-        case "cpp-test": return ("alpine:3.20", "apk add --no-cache cmake make gcc musl-dev >/dev/null && cmake -S . -B build >/dev/null && cmake --build build >/dev/null && ctest --test-dir build --output-on-failure")
+        case "go-build": return ("golang:1.23-alpine", goScript("go mod download >/dev/null && go build -p \"$CONJET_BENCH_GO_JOBS\" ./..."))
+        case "go-test": return ("golang:1.23-alpine", goScript("go mod download >/dev/null && go test -p \"$CONJET_BENCH_GO_JOBS\" ./..."))
+        case "rust-build": return (Self.rustLLVMBenchmarkImage, rustScript("cargo build"))
+        case "rust-test": return (Self.rustLLVMBenchmarkImage, rustScript("cargo test"))
+        case "cpp-configure": return ("alpine:3.20", cppScript("cmake -S . -B \"$CONJET_BENCH_CMAKE_BUILD_DIR\" -DCMAKE_C_COMPILER=cc -DCMAKE_CXX_COMPILER=c++ -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"))
+        case "cpp-build": return ("alpine:3.20", cppScript("cmake -S . -B \"$CONJET_BENCH_CMAKE_BUILD_DIR\" -DCMAKE_C_COMPILER=cc -DCMAKE_CXX_COMPILER=c++ -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY >/dev/null && cmake --build \"$CONJET_BENCH_CMAKE_BUILD_DIR\""))
+        case "cpp-test": return ("alpine:3.20", cppScript("cmake -S . -B \"$CONJET_BENCH_CMAKE_BUILD_DIR\" -DCMAKE_C_COMPILER=cc -DCMAKE_CXX_COMPILER=c++ -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY >/dev/null && cmake --build \"$CONJET_BENCH_CMAKE_BUILD_DIR\" >/dev/null && ctest --test-dir \"$CONJET_BENCH_CMAKE_BUILD_DIR\" --output-on-failure"))
         case "jvm-dependency-resolve", "jvm-build", "jvm-test": return ("eclipse-temurin:21-jdk-alpine", "echo jvm-polyglot")
         case "dotnet-restore", "dotnet-build", "dotnet-test": return ("mcr.microsoft.com/dotnet/sdk:9.0-alpine", "dotnet --info >/dev/null")
         default: return ("alpine:3.20", "true")
@@ -299,8 +308,12 @@ public struct PolyglotBenchmarkSuite {
     private func goScript(_ command: String) -> String {
         """
         export PATH="/usr/local/go/bin:$PATH"
+        export GOTOOLCHAIN=local
+        export CGO_ENABLED=0
+        export GOFLAGS="-buildvcs=false -trimpath"
         export GOMODCACHE=/workspace/.native/go/pkg/mod
         export GOCACHE=/workspace/.native/go/build-cache
+        export CONJET_BENCH_GO_JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 2)"
         mkdir -p "$GOMODCACHE" "$GOCACHE"
         go version >/dev/null
         \(command)
@@ -312,10 +325,96 @@ public struct PolyglotBenchmarkSuite {
         export PATH="/usr/local/cargo/bin:$PATH"
         export CARGO_HOME=/workspace/.native/cargo-home
         export CARGO_TARGET_DIR=/workspace/.native/target
+        export CC=clang
+        export CXX=clang++
+        export RUSTFLAGS="${RUSTFLAGS:-} -C linker=clang -C link-arg=-fuse-ld=lld"
         mkdir -p "$CARGO_HOME" "$CARGO_TARGET_DIR"
         cargo --version >/dev/null
         \(command)
         """
+    }
+
+    private func cppScript(_ command: String) -> String {
+        """
+        apk add --no-cache cmake make gcc g++ musl-dev >/dev/null
+        export CC=cc
+        export CXX=c++
+        export CMAKE_GENERATOR="Unix Makefiles"
+        export CONJET_BENCH_CMAKE_BUILD_DIR="${CONJET_BENCH_CMAKE_BUILD_DIR:-/workspace/.native/cmake-build}"
+        if [ ! -d "$(dirname "$CONJET_BENCH_CMAKE_BUILD_DIR")" ]; then
+          export CONJET_BENCH_CMAKE_BUILD_DIR=build
+        fi
+        mkdir -p "$CONJET_BENCH_CMAKE_BUILD_DIR"
+        # Keep CMakeFiles, compiler probes, and generated build metadata off bind mounts.
+        # The cpp-configure gate is intentionally sensitive to metadata storms.
+        \(command)
+        """
+    }
+
+    private func applyToolchainMetrics(workload: String, metrics: inout BenchmarkMetrics) {
+        if workload.hasPrefix("rust-") {
+            metrics["cargo_llvm_lld"] = 1
+            metrics.setString("llvm-lld", for: "rust_toolchain")
+            metrics.setString("clang", for: "rust_linker")
+            metrics.setString("lld", for: "rust_linker_flavor")
+            metrics.setString(Self.rustLLVMBenchmarkImage, for: "rust_benchmark_image")
+        }
+        if workload.hasPrefix("go-") {
+            metrics["go_native_cache"] = 1
+            metrics["go_cgo_enabled"] = 0
+            metrics.setString("cache-native-cgo-off", for: "go_build_mode")
+            metrics.setString("local", for: "go_toolchain_mode")
+            metrics.setString("-buildvcs=false -trimpath", for: "go_flags")
+        }
+        if workload.hasPrefix("cpp-") {
+            metrics["cmake_native_build_dir"] = 1
+            metrics.setString("/workspace/.native/cmake-build", for: "cmake_build_dir")
+            metrics.setString("Unix Makefiles", for: "cmake_generator")
+            metrics.setString("STATIC_LIBRARY", for: "cmake_try_compile_target_type")
+            metrics.setString("cc", for: "cmake_c_compiler")
+            metrics.setString("c++", for: "cmake_cxx_compiler")
+        }
+    }
+
+    private func ensureRustLLVMBenchmarkImage(context: String, workDirectory: URL) throws {
+        Self.rustLLVMBenchmarkImageLock.lock()
+        defer { Self.rustLLVMBenchmarkImageLock.unlock() }
+
+        if (try? runner(dockerExecutable, ["docker", "--context", context, "image", "inspect", Self.rustLLVMBenchmarkImage]))?.succeeded == true {
+            return
+        }
+
+        let imageDirectory = workDirectory
+            .appendingPathComponent("rust-llvm-benchmark-image", isDirectory: true)
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        let dockerfile = #"""
+        FROM rust:1-alpine
+        RUN apk add --no-cache clang lld >/dev/null \
+            && clang --version >/dev/null \
+            && ld.lld --version >/dev/null \
+            && rustc -Vv >/dev/null
+        """#
+        try dockerfile.write(
+            to: imageDirectory.appendingPathComponent("Dockerfile"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let result = try runner(dockerExecutable, [
+            "docker",
+            "--context",
+            context,
+            "build",
+            "-t",
+            Self.rustLLVMBenchmarkImage,
+            imageDirectory.path
+        ])
+        if !result.succeeded {
+            throw ConjetError.processFailed(
+                executable: dockerExecutable,
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
     }
 
     private func volumeBootstrap(for workload: String) -> String {

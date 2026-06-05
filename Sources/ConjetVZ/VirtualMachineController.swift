@@ -201,15 +201,9 @@ public final class VirtualMachineController {
         } else {
             connector = retryingConnector
         }
-        let bridge = DockerSocketBridge(
-            socketPath: manifest.dockerSocketPath,
-            connector: connector
-        )
-        try bridge.start()
-        dockerBridge = bridge
-
+        let forwarder: DockerPublishedPortForwarder?
         if capabilities.tcpProxy {
-            let forwarder = DockerPublishedPortForwarder(
+            forwarder = DockerPublishedPortForwarder(
                 socketPath: manifest.dockerSocketPath,
                 connector: connector,
                 policy: ConjetPortPolicy(
@@ -223,11 +217,69 @@ public final class VirtualMachineController {
                 bridgeFallbackReason: bridgeFallbackReason,
                 energyMode: config.energyMode
             )
+        } else {
+            forwarder = nil
+        }
+        let createPublicationIntentHandler: DockerSocketBridge.CreatePublicationIntentHandler?
+        if let forwarder {
+            createPublicationIntentHandler = { [weak forwarder] (intent: DockerCreatePublicationIntent) in
+                guard let forwarder else { return }
+                forwarder.observeCreatePublicationIntent(intent)
+            }
+        } else {
+            createPublicationIntentHandler = nil
+        }
+        let createPublicationResolutionHandler: DockerSocketBridge.CreatePublicationResolutionHandler?
+        if let forwarder {
+            createPublicationResolutionHandler = { [weak forwarder] (resolution: DockerCreatePublicationResolution) in
+                guard let forwarder else { return }
+                forwarder.resolveCreatePublication(resolution)
+            }
+        } else {
+            createPublicationResolutionHandler = nil
+        }
+        let containerStartIntentHandler: DockerSocketBridge.ContainerStartIntentHandler?
+        if let forwarder {
+            containerStartIntentHandler = { [weak forwarder] (request: DockerContainerStartRequest) in
+                guard let forwarder else { return }
+                forwarder.observeContainerStartIntent(request)
+            }
+        } else {
+            containerStartIntentHandler = nil
+        }
+        let containerStartHandler: DockerSocketBridge.ContainerStartHandler?
+        if let forwarder {
+            containerStartHandler = { [weak forwarder] (request: DockerContainerStartRequest) in
+                guard let forwarder else { return }
+                forwarder.observeContainerStart(request)
+            }
+        } else {
+            containerStartHandler = nil
+        }
+
+        if let forwarder {
             forwarder.start()
             publishedPortForwarder = forwarder
         } else {
             publishedPortForwarder = nil
         }
+
+        let bridge = DockerSocketBridge(
+            socketPath: manifest.dockerSocketPath,
+            connector: connector,
+            createPublicationIntentHandler: createPublicationIntentHandler,
+            createPublicationResolutionHandler: createPublicationResolutionHandler,
+            containerStartIntentHandler: containerStartIntentHandler,
+            containerStartHandler: containerStartHandler
+        )
+        do {
+            try bridge.start()
+        } catch {
+            forwarder?.stop()
+            publishedPortForwarder = nil
+            throw error
+        }
+        dockerBridge = bridge
     }
     #endif
 }
