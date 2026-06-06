@@ -1,553 +1,909 @@
-# Conjet Implementation Plan
-
-Status: planning artifact created from the shared ChatGPT context and current workspace inspection.
-
-Workspace state on 2026-05-29: `/Users/sly/Workspace/Personal/conjet` is not a Git repository and had no project files before this plan, only ChumMem metadata. Treat this document as the initial technical plan, not as evidence that implementation has started.
-
-Implementation status on 2026-05-30: the SwiftPM skeleton, CLI/daemon IPC,
-Virtualization.framework VM path, Conjet-core release fetch, Docker socket
-bridge, Docker context setup, profiles, `CONJET_HOME`, ConjetFS one-way
-sync-to-volume MVP, host-side FSEvents watch, Docker/idle/power benchmark
-collectors, `bench gate`, and `bench release-gate` are implemented. The
-current verdict is still "not yet proven faster than OrbStack": Conjet has
-promising local results against Colima on filesystem-heavy paths, but the
-release claim requires a passing `conjet bench release-gate` run with OrbStack
-and tuned Colima evidence.
-
-## 1. Intent
-
-Conjet is a macOS container runtime focused on light resource usage, low power usage, and high-performance developer workflows. The credible research claim is not "10x faster for every workload." The credible target is:
-
-> Conjet aims for up to 10x faster filesystem-heavy development workflows and up to 2x lower idle power or energy-to-solution on selected workloads by moving hot work into native Linux storage and synchronizing only the files that matter.
-
-This follows the shared chat context:
-
-- macOS Linux containers still need Linux execution semantics, usually inside a Linux VM.
-- OrbStack is already highly optimized, so universal 10x wins are not realistic.
-- The largest exploitable bottleneck is host-to-guest filesystem crossing, especially many-small-file workloads.
-- The best research direction is an adaptive filesystem/sync layer, predictive cache, file-watch bridge, and energy-aware VM scheduling.
-
-## 2. Evidence Baseline
-
-Primary facts that shape the plan:
-
-- Apple Virtualization.framework is the correct low-level VM base for Linux VMs on macOS, with VIRTIO device support and Rosetta support for x86_64 Linux binaries on Apple Silicon. Apple also exposes host directories to Linux guests through VirtioFS-backed shared directories, requiring guest kernel support for `CONFIG_VIRTIO_FS`.[^apple-vz][^apple-shared][^apple-rosetta]
-- Colima can use QEMU, VZ, or krunkit. Its docs list QEMU as the config default, and VZ as the better-performance Apple Virtualization.framework option with Rosetta and VirtioFS support. Its mount docs list `sshfs` as default, `9p` as better, and `virtiofs` as best when VZ/macOS requirements are met.[^colima-config]
-- Lima v1.0+ uses VZ by default on macOS 13.5+ when compatible, but non-native architecture can still push the path toward QEMU.[^lima-vmtype] Lima's VirtioFS mount support uses Apple Virtualization.framework shared directories on macOS and requires macOS 13+ with `vmType: vz`.[^lima-mount]
-- OrbStack documents a lightweight shared-kernel Linux VM architecture, custom purpose-built services, low-level VM tuning, VirtioFS plus custom file-sharing cache, forwarded Docker socket, and a custom virtual network stack.[^orbstack-architecture][^orbstack-files][^orbstack-network]
-- Docker Desktop docs explicitly warn that sharing too many files can cause high CPU load and slow filesystem performance, and recommend storing non-code data such as caches and databases inside the Linux VM using volumes.[^docker-settings] Docker's Synchronized File Shares use a synchronized cache on ext4 inside the Docker Desktop VM, which validates the same general direction Conjet should take, but Conjet should make this a first-class adaptive default rather than an optional subscription feature.[^docker-sync]
-- Apple has an open-source `containerization` Swift package for running Linux containers on macOS using Virtualization.framework, including OCI image management, ext4 filesystem creation, optimized kernels, lightweight VMs, and Rosetta support. It currently requires Apple Silicon, macOS 26, and Xcode 26 for building from source.[^apple-containerization]
-- BuildKit already provides important build optimizations: parallel build graph solving, incremental transfer of changed build-context files, skipping unused stages/files, and cache management.[^buildkit] Conjet should integrate with BuildKit rather than reimplementing it.
-- containerd supports remote snapshotters, which can support lazy image strategies through snapshotter-specific metadata and pull behavior.[^containerd-remote]
-
-## 3. Non-Negotiable Design Goals
-
-1. Light by default
-   - No Electron dependency.
-   - No always-heavy Kubernetes path.
-   - VM boots only when required.
-   - Idle daemon must be event-driven, not polling-driven.
-
-2. Low power
-   - Idle CPU target: at or below OrbStack-class idle behavior, measured on Apple Silicon.
-   - Reduce wakeups, not just average CPU.
-   - Track energy-to-solution, not only watts.
-
-3. High performance
-   - Optimize filesystem-heavy dev loops first.
-   - Keep dependency folders, caches, databases, and build outputs inside Linux-native storage by default.
-   - Use host synchronization only where human editing or source-of-truth semantics require it.
-
-4. Faster than OrbStack and Colima where defensible
-   - Baseline against OrbStack, Docker Desktop, Colima default, Colima tuned VZ + VirtioFS, and native Linux.
-   - A claim is allowed only if the benchmark suite proves it.
-   - CPU-bound workloads are expected to be near native and not a realistic 10x target.
-
-5. Docker-compatible developer experience
-   - `docker` and `docker compose` should work via a Conjet Docker socket bridge.
-   - `conjet start`, `conjet stop`, `conjet status`, `conjet shell`, `conjet run`, and `conjet compose up` are the initial CLI surface.
-
-## 4. Architecture
-
-Initial architecture:
-
-```text
-conjet CLI
-    |
-    v
-conjetd macOS daemon
-    |  launchd + Unix socket/XPC control API
-    v
-Apple Virtualization.framework VM
-    |  vsock control plane + virtio-net + virtio-blk + minimal VirtioFS bootstrap share
-    v
-minimal Linux guest
-    |
-    +-- containerd
-    +-- BuildKit
-    +-- runc
-    +-- conjet-agent
-    +-- conjetfs-agent
-    |
-    v
-native Linux workspace volumes: ext4 first, btrfs/zfs experiments later
-```
-
-The initial runtime should be a shared dev VM, not one VM per container. A shared VM is the best first target for Docker Compose compatibility, low idle overhead, shared image cache, and simple Docker socket compatibility. A later "microVM lane" can use Apple's Containerization package for short-lived isolated commands if benchmarks justify it.
-
-### Component Choices
-
-- macOS daemon: Swift, because Virtualization.framework, launchd, powermetrics integration, app signing, and native low-power macOS behavior are first-class there.
-- CLI: Swift first for one binary and shared types with `conjetd`. Add shell completions and JSON output early.
-- Sync engine: Rust library/process if Swift filesystem/event performance becomes limiting. Start with Swift prototype, but design protocol boundaries so the sync engine can be swapped.
-- Guest agent: Rust or Go static binary. It manages workspace placement, inotify/fanotify replay, containerd/BuildKit health, and guest-side metrics.
-- Guest OS: minimal Linux image with custom kernel config. Start with Alpine or Buildroot for speed; keep a path to a custom optimized kernel.
-- Runtime: containerd + BuildKit + runc. Avoid replacing these until Conjet has measured evidence of a runtime bottleneck.
-- Networking: start with VZ NAT/bridged capabilities and event-based port forwarding; custom network stack only after filesystem and power wins are proven.
-
-## 5. Core Research Algorithms
-
-### 5.1 Adaptive Hot-Path Sync
-
-Problem: live bind mounts force many container file operations to cross the macOS <-> Linux boundary.
-
-Goal: classify each path and decide whether it belongs in host-synced storage, VM-native storage, lazy sync, ignored storage, or export-on-demand storage.
-
-Initial placement policy:
-
-```text
-host-synced:
-  src/, app/, lib/, config files, lockfiles, Dockerfile, compose files
-
-VM-native:
-  node_modules/, vendor/, target/, dist/, .next/, .turbo/, .cache/,
-  database data, package manager caches, build outputs
-
-lazy-synced:
-  generated assets that developers inspect occasionally
-
-ignored:
-  temp files, editor swap files, logs, OS metadata, generated cache churn
-
-export-on-demand:
-  artifacts requested by user commands: conjet export, conjet open, conjet cp
-```
-
-Placement function:
-
-```text
-score(path) =
-    w1 * source_relevance
-  + w2 * host_edit_probability
-  - w3 * write_churn
-  - w4 * small_file_density
-  - w5 * container_only_probability
-  - w6 * rebuildable_artifact_probability
-
-if score >= host_sync_threshold:
-    host-synced
-else if container_only_probability high:
-    VM-native
-else if human_inspection_probability moderate:
-    lazy-synced
-else:
-    ignored or export-on-demand
-```
-
-Implementation details:
-
-- Maintain a content-addressed index using path, inode, mtime, size, file mode, hash, and generation id.
-- Use fast hashing such as BLAKE3 for changed files and directory Merkle roots.
-- Use a write-ahead log for sync operations so VM/host interruptions can resume safely.
-- Use `.conjetignore`, `.dockerignore`, `.gitignore`, language defaults, and learned access patterns.
-- Record per-path telemetry locally: reads, writes, creates, deletes, rename churn, file size, and fanout count.
-- Keep conflict handling conservative: source files are host-authoritative by default; VM-generated artifacts are VM-authoritative by default.
-
-MVP constraint: Phase 1 only needs one-way host-to-VM sync plus VM-native dependency/build folders. Two-way sync comes later.
-
-### 5.2 Smart File Watch Bridge
-
-Problem: host editors use FSEvents; containers expect inotify/fanotify. Raw event propagation creates wakeups and duplicate work.
-
-Algorithm:
-
-```text
-FSEvents batch window: 25-100 ms adaptive
-
-for each event batch:
-    normalize paths
-    drop ignored/generated paths
-    collapse duplicate writes and rename temp-file patterns
-    prioritize hot-reload relevant source paths
-    emit minimal inotify-compatible events to guest
-```
-
-Target outcome:
-
-- A formatter that rewrites a file multiple times creates one meaningful guest event.
-- Dependency install churn inside VM does not wake host watchers.
-- Hot reload receives source changes quickly without syncing entire trees.
-
-### 5.3 Conjet Energy Governor
-
-Problem: container runtimes can burn battery through idle daemons, timers, watchers, memory pressure, and unnecessary CPU scheduling.
-
-Governor states:
-
-```text
-cold:
-  no VM, daemon waiting on user event
-
-warm-idle:
-  VM running, no active containers or builds
-
-dev-idle:
-  containers running, low request/file activity
-
-interactive:
-  hot reload, shell, HTTP requests, file edits
-
-build:
-  BuildKit/containerd/package manager heavy work
-
-cooldown:
-  recent work ended, delayed demotion to avoid thrash
-```
-
-Policy actions:
-
-- Adjust VM vCPU limits and guest cgroups by state.
-- Use memory ballooning or guest reclaim when supported.
-- Reduce sync scanner cadence in idle states.
-- Suspend noncritical prefetch and cache indexing when battery/thermal pressure is high.
-- Batch filesystem events more aggressively in idle and on battery.
-- Keep build mode performance-first but evaluate energy-to-solution.
-- Stop inactive services after configurable quiet periods.
-
-Metrics:
-
-- `powermetrics` CPU power, wakeups, idle exits, thermal pressure where available.
-- `ps`, `vm_stat`, `memory_pressure`, and Activity Monitor process data.
-- guest `/proc/stat`, cgroup stats, containerd/buildkit metrics, sync queue length.
-
-### 5.4 Predictive Build and Dependency Cache
-
-Problem: generic Docker environments waste time rebuilding or redownloading predictable dependencies.
-
-Project detectors:
-
-- Node: `package.json`, `pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`
-- PHP: `composer.json`, `composer.lock`
-- Rust: `Cargo.toml`, `Cargo.lock`
-- Go: `go.mod`, `go.sum`
-- Python: `pyproject.toml`, `uv.lock`, `poetry.lock`, `requirements.txt`
-- Java: `pom.xml`, `build.gradle`, `gradle.lockfile`
-
-Actions:
-
-- Keep package caches in VM-native volumes.
-- Generate BuildKit cache mount suggestions or inject opt-in templates.
-- Prewarm registry mirrors and package metadata only when the project is active.
-- Use lockfile hashes as cache keys.
-- Prune by LRU, project importance, disk pressure, and energy state.
-
-### 5.5 Image Startup and Lazy Layer Experiments
-
-Start with normal containerd pull/unpack for correctness. Add experiments after the runtime is stable:
-
-- containerd remote snapshotter path.
-- eStargz or Nydus experiments for time-to-first-process.
-- local registry mirror.
-- zstd-compressed layer cache where compatible.
-- prefetch only files touched by prior runs.
-
-Do not make lazy pull a core MVP dependency; it is a phase-two optimization.
-
-## 6. Phased Roadmap
-
-### Phase 0: Benchmark Harness Before Runtime
-
-Deliverables:
-
-- `bench/` scripts for repeatable workloads.
-- Machine profile capture: macOS version, chip, RAM, power state, thermal state.
-- Baselines for OrbStack, Colima default, Colima tuned VZ + VirtioFS, Docker Desktop, and native Linux if available.
-- Result schema: JSON plus Markdown report.
-
-Workloads:
-
-- Empty container start.
-- Docker Compose start.
-- `npm install`, `pnpm install`, `composer install`.
-- `cargo build`, `go test ./...`.
-- Next.js and Laravel/Symfony hot reload.
-- many-small-file `fio`/`fs_mark`.
-- image build with cache and without cache.
-- database volume write workload.
-- idle 10-minute power sample.
-
-Exit gate:
-
-- Harness can run the same workload against at least Colima tuned and one incumbent runtime.
-- It records duration, CPU, memory, disk, wakeups, and available power samples.
-
-### Phase 1: Skeleton Runtime
-
-Deliverables:
-
-- SwiftPM workspace.
-- `conjet` CLI with `start`, `stop`, `status`, `doctor`.
-- `conjetd` launchd-compatible daemon.
-- Config at `~/.conjet/config.toml`.
-- Local control socket at `~/.conjet/run/conjetd.sock`.
-- Structured logs and JSON status output.
-
-Exit gate:
-
-- Daemon starts and stops cleanly.
-- CLI can report host capabilities: Apple Silicon, macOS version, Virtualization.framework availability, Rosetta availability, required entitlements.
-
-### Phase 2: Minimal VZ Linux VM
-
-Deliverables:
-
-- Boot minimal Linux VM with VZ.
-- vsock control channel.
-- serial console logs.
-- virtio-blk root disk and data disk.
-- minimal bootstrap VirtioFS share for guest agent install/update only.
-- `conjet shell`.
-
-Exit gate:
-
-- Cold boot P50 and P95 measured.
-- VM idle CPU and memory measured.
-- VM survives stop/start cycle without disk corruption.
-
-### Phase 3: Guest Container Runtime
-
-Deliverables:
-
-- containerd, runc, BuildKit inside guest.
-- Docker-compatible socket bridge from macOS to guest.
-- `conjet run IMAGE CMD`.
-- `conjet compose up` as a wrapper over Docker Compose using Conjet socket.
-- Image cache stored on guest-native disk.
-
-Exit gate:
-
-- `docker --host unix://~/.conjet/run/docker.sock run hello-world` works.
-- `docker compose up` works for a small multi-service project.
-- Conjet can be benchmarked against Colima on container startup and Compose startup.
-
-### Phase 4: ConjetFS MVP
-
-Deliverables:
-
-- `conjet project init` and `conjet project attach`.
-- One-way host-to-VM sync.
-- `.conjetignore`.
-- VM-native dependency/build/cache paths.
-- Native Linux workspace mount path inside containers.
-- Initial path classifier for Node, PHP, Rust, Go, Python.
-- Host-side FSEvents source-edit trigger with polling fallback.
-
-Exit gate:
-
-- `npm install` and `pnpm install` run with `node_modules` inside VM-native storage by default.
-- Source edits on macOS appear in the VM workspace.
-- Dependency churn does not sync back to host.
-- Benchmark shows a clear win over bind-mount-heavy workflows before expanding scope.
-
-### Phase 5: Watch Bridge and Two-Way Semantics
-
-Deliverables:
-
-- Guest-side inotify/fanotify replay from compressed FSEvents batches.
-- Event compression and prioritization.
-- Safe two-way sync for selected generated outputs.
-- Conflict detection and conservative resolution.
-- `conjet sync status`, `conjet sync repair`, `conjet sync export`.
-
-Exit gate:
-
-- Hot reload works for representative Next.js and PHP projects.
-- Duplicate event rate and wakeup rate are measured.
-- Conflict scenarios are covered by tests.
-
-### Phase 6: Cache and Image Acceleration
-
-Deliverables:
-
-- Project cache policy engine.
-- Package-manager cache volumes.
-- BuildKit cache configuration profiles.
-- Registry mirror option.
-- Optional remote/lazy snapshotter experiment.
-
-Exit gate:
-
-- Repeat builds show cache hit improvements.
-- Cache pruning is deterministic and respects disk pressure.
-- Lazy snapshotter remains optional until reliability is proven.
-
-### Phase 7: Energy Governor
-
-Deliverables:
-
-- State machine: cold, warm-idle, dev-idle, interactive, build, cooldown.
-- Resource policy engine.
-- VM/container activity detector.
-- Low-power mode awareness.
-- `conjet power report`.
-
-Exit gate:
-
-- Idle power/wakeups are below Colima and competitive with OrbStack on the same machine.
-- At least one filesystem-heavy workload shows lower energy-to-solution than OrbStack or tuned Colima.
-- Governor changes do not degrade interactive latency beyond a defined threshold.
-
-### Phase 8: Hardening, UX, and Distribution
-
-Deliverables:
-
-- Signed and notarized macOS app/CLI package.
-- Entitlements audit.
-- VM image signing and update channel.
-- Migration from Docker Desktop/Colima contexts.
-- Security model documentation.
-- Crash reporting optional and telemetry-free by default.
-
-Exit gate:
-
-- Clean install and uninstall.
-- No privileged helper unless strictly required.
-- End-to-end benchmark report included in release artifacts.
-
-## 7. Benchmark Acceptance Criteria
-
-Conjet cannot claim "faster than OrbStack and Colima" until this matrix is green:
-
-| Area | Minimum credible target | Stretch target |
-| --- | --- | --- |
-| Cold VM start | Faster than Colima tuned | OrbStack-class seconds |
-| Empty container start | Faster than Colima tuned | Competitive with OrbStack |
-| npm/pnpm install | 2x faster than tuned bind mount path | Up to 10x on bad bind-mount baselines |
-| Composer install | 2x faster than tuned bind mount path | Up to 10x on bad bind-mount baselines |
-| Hot reload latency | Equal or faster than OrbStack on `hot_reload_seconds` | Lower CPU wakeups than OrbStack |
-| Idle CPU | Lower than Colima default/tuned | OrbStack-class idle |
-| Idle power | Lower than Colima default/tuned | 2x lower than OrbStack only if measured |
-| Energy-to-solution | Lower than Colima tuned | 2x lower than OrbStack on selected workloads |
-| Network throughput | Good enough for dev | Competitive with OrbStack after custom net work |
-
-Rules:
-
-- Report P50, P95, and variance.
-- Record thermal state and whether the Mac is plugged in.
-- Separate cold-cache and warm-cache results.
-- Do not compare against misconfigured Colima only; include tuned VZ + VirtioFS.
-- Run `conjet bench release-gate --contexts conjet,orbstack,colima` and publish
-  `all-results.json`, `gate.json`, and `gate.md` with the release artifacts.
-- Publish failed benchmarks too, because they decide next work.
-
-## 8. Test Strategy
-
-Unit tests:
-
-- path classifier
-- ignore parser
-- Merkle tree/index
-- sync journal replay
-- conflict resolver
-- governor state transitions
-- cache-key derivation
-
-Integration tests:
-
-- VM boot and shutdown
-- guest agent handshake
-- Docker socket forwarding
-- one-way sync correctness
-- dependency folder isolation
-- Compose lifecycle
-- file-watch event replay
-
-Stress tests:
-
-- 1 million tiny files
-- rename storms
-- editor temp-file churn
-- interrupted sync
-- disk-full behavior
-- VM power loss
-- network loss during image pull
-
-Performance tests:
-
-- hyperfine command suites
-- fio/fs_mark filesystem suites
-- BuildKit cache tests
-- powermetrics idle and active samples
-
-## 9. Repository Layout to Create During Implementation
-
-```text
-conjet/
-  Package.swift
-  Sources/
-    ConjetCLI/
-    ConjetDaemon/
-    ConjetCore/
-    ConjetVZ/
-    ConjetPower/
-  guest/
-    agent/
-    image/
-    kernel/
-  conjetfs/
-    README.md
-    src/
-  bench/
-    workloads/
-    runners/
-    reports/
-  docs/
-    architecture.md
-    benchmark-methodology.md
-    power-methodology.md
-    security-model.md
-```
-
-## 10. Key Risks
-
-- OrbStack is already optimized. Beating it broadly may be impossible; target narrow workloads and prove them.
-- Docker Desktop's Synchronized File Shares validate the sync-cache approach but also raise the competitive bar.
-- Two-way sync can corrupt user data if rushed. Start with host-authoritative source sync and explicit artifact export.
-- File watching semantics are hard across FSEvents and inotify. Prefer conservative correctness over clever event replay.
-- Rosetta support is useful but should not become the default fast path. Prefer native arm64 containers.
-- A custom network stack is expensive. Defer until filesystem and power improvements are proven.
-- Benchmark noise on laptops is high. Require controlled thermal/power conditions and repeated samples.
-
-## 11. Immediate Next Implementation Steps
-
-1. Create the SwiftPM skeleton and CLI/daemon IPC.
-2. Build the benchmark harness before optimizing anything.
-3. Boot a minimal Linux VM through Virtualization.framework.
-4. Install containerd/BuildKit in the guest and forward the Docker socket.
-5. Implement ConjetFS one-way sync with dependency/build folders kept VM-native.
-6. Run the first real comparison: ConjetFS MVP vs Colima tuned VZ + VirtioFS vs OrbStack on `pnpm install`, `npm install`, `composer install`, and cold Compose startup.
-
-[^apple-vz]: https://developer.apple.com/documentation/virtualization
-[^apple-shared]: https://developer.apple.com/documentation/virtualization/shared-directories
-[^apple-rosetta]: https://developer.apple.com/documentation/virtualization/running-intel-binaries-in-linux-vms-with-rosetta
-[^colima-config]: https://colima.run/docs/configuration/
-[^lima-vmtype]: https://lima-vm.io/docs/config/vmtype/
-[^lima-mount]: https://lima-vm.io/docs/config/mount/
-[^orbstack-architecture]: https://docs.orbstack.dev/architecture
-[^orbstack-files]: https://docs.orbstack.dev/docker/file-sharing
-[^orbstack-network]: https://docs.orbstack.dev/docker/network
-[^docker-settings]: https://docs.docker.com/desktop/settings-and-maintenance/settings/
-[^docker-sync]: https://docs.docker.com/desktop/features/synchronized-file-sharing/
-[^apple-containerization]: https://github.com/apple/containerization
-[^buildkit]: https://docs.docker.com/build/buildkit/
-[^containerd-remote]: https://containerd.io/docs/2.1/remote-snapshotter/
+# CONJET_IMPLEMENTATION_PLAN.md
+
+This plan is a current-state implementation plan and next-generation feature
+roadmap for Conjet. It is intentionally benchmark-driven: a feature or
+performance claim is not considered supported until the matching harness has
+measured it without regressing Conjet's existing speed, efficiency,
+reliability, or security gates.
+
+Claim levels used in this document:
+
+- `PROVEN`: implemented and validated by a repeatable gate with sufficient
+  samples and visible caveats.
+- `PARTIAL`: implemented for a constrained path, but not complete across every
+  mode or workload.
+- `PLANNED`: feasible and designed, but not implemented or not yet gated.
+- `EXPERIMENTAL`: possible, but high-risk or dependent on kernel/runtime
+  capability work.
+- `NOT SUPPORTED YET`: not currently implemented and must not be claimed.
+
+## 1. Current Status Summary
+
+Conjet has moved beyond the initial wishlist stage. The current runtime has a
+Swift CLI and daemon, a profile-scoped state root, Apple
+Virtualization.framework VM lifecycle, Conjet Core image import, Docker socket
+forwarding over VSOCK, ConjetFS project sync, SmartBind/native-volume topology
+optimization, energy modes, benchmark tooling, and secure-local ConjetNet
+TCP/UDP port publishing.
+
+Current proven or partially proven evidence:
+
+- Warm local development gates have strong evidence for the measured workload
+  matrix where ConjetFS, SmartBind, and native Linux storage are used correctly.
+- Cold base-prepulled and no-cache gates have strong current evidence from the
+  latest benchmark iterations, but reports must continue to name the exact
+  phase and compared contexts.
+- Topology gates strongly support the design choice of keeping dependency,
+  cache, and build churn on Linux-native storage.
+- Polyglot gates show the topology strategy generalizes beyond a single
+  ecosystem, but each language claim must name the measured row and sample
+  count.
+- ConjetNet has working secure-local TCP/UDP forwarding, visible port state,
+  capability reporting, repair commands, native `conjet-netd-c` guest helper
+  support, persistent binary UDP mode, and persistent binary TCP pool evidence.
+- Networking is competitive in several measured rows. This is not a blanket
+  networking superiority claim; port publication and some tail-latency rows
+  remain improvement areas.
+- Energy measurement exists, including active sampling paths, but energy
+  superiority is not proven until privileged `powermetrics` runs pass the
+  energy gate with enough samples.
+
+Current limitations:
+
+- Kubernetes is not supported in this generation.
+- Rootless mode, eBPF support, VPN-aware networking, SSH agent forwarding, and
+  explicit isolated-machine mode are not yet supported features.
+- Low-memory profile policy, memory policy reporting, lazy helper policy fields,
+  and first-container memory gate measurement are implemented and proven for the
+  current balanced profile by `memory-gate --first-container`. This is not a
+  broad claim that every workload uses less memory by default.
+- IPv6 loopback TCP and UDP publication are implemented and proven by
+  `ipv6-gate`; broader guest, LAN, wildcard, and global IPv6 exposure behavior
+  remains planned.
+- Clock drift can be probed and explicitly repaired through
+  `conjet doctor clock --repair`, daemon `clock-repair`, and
+  `conjet-bench clock-gate --repair`. Daemon wake-gap repair is implemented;
+  physical macOS sleep/wake coverage still needs a dedicated wake/resume gate.
+- SSH key lifecycle, guest `sshd` hardening, disabled mode, and `conjet ssh`
+  over a local ProxyCommand transport are implemented and proven by
+  `ssh-gate --require-endpoint --check-disabled-mode`; a dedicated localhost
+  TCP SSH listener is not claimed yet.
+- Conjet should not claim broad industry-grade behavior for every networking
+  mode until VPN, IPv6, LAN, docker-strict, and split-tunnel cases have their
+  own gates.
+
+## 2. Completed Foundations
+
+### ConjetFS / SmartBind
+
+- ConjetFS syncs host-authoritative project files into a VM-native Docker
+  volume mounted at `/workspace`.
+- Dependency and build churn, such as `node_modules`, Cargo `target`, package
+  caches, and generated state, stays on Linux-native storage by default.
+- `conjet sync push`, `conjet sync watch`, `conjet sync repair`, and
+  `conjet sync export` provide the current project workflow.
+- SmartBind and topology-aware benchmark rows separate strict host bind mounts
+  from native-overlay or ConjetFS paths so reports do not mislabel results.
+
+### Warm/Cold/No-Cache Gates
+
+- `conjet-bench gate` validates raw benchmark JSON instead of Markdown
+  summaries.
+- `warm`, `cold-base-prepulled`, and `no-cache` phases are distinct and must
+  remain distinct in release reports.
+- Existing gates prevent under-evidenced global speed claims.
+
+### Topology Gate
+
+- The topology gate validates the core Conjet thesis: host-visible source files
+  should be read-mostly while write-heavy dependency/build paths should stay in
+  native Linux storage.
+- This is a major Conjet advantage and must remain the baseline for future
+  feature work.
+
+### Polyglot Gate
+
+- The polyglot gate covers multiple ecosystems and records topology metadata.
+- Strong publication coverage should include JS, Python, JVM, .NET, Go, Rust,
+  and C/C++ where local toolchain images are available.
+
+### ConjetNet TCP/UDP
+
+- ConjetNet publishes Docker ports to macOS localhost by default under
+  `secure-local`.
+- TCP and UDP support are capability-reported by the guest bridge.
+- `docker-strict` and `lan-allowlist` are policy modes, but LAN exposure must
+  remain explicit.
+
+### conjet-netd-c Native Networking
+
+- Newer Conjet Core images include the compiled `conjet-netd` helper.
+- Benchmark-visible fields identify proxy engine, bridge engine, TCP mode, UDP
+  mode, binary frame use, and Python fallback state.
+- Persistent binary UDP and persistent binary TCP pool paths exist; TCP stream
+  multiplexing is not yet implemented.
+
+### Benchmark Harness
+
+- `benchmarks/` is a standalone Swift package.
+- Existing commands include `run`, `gate`, `energy-gate`, `network-gate`, and
+  `network-segments`.
+- Benchmark reports capture machine profile, topology, phase, sample count,
+  failures, raw JSON, and Markdown summaries.
+
+### Power/Energy Harness Status
+
+- Power and active energy sampling paths exist.
+- Missing or unprivileged `powermetrics` data is not proof.
+- Energy superiority remains unproven until `energy-gate --require-power`
+  passes with sufficient samples across Conjet and required baselines.
+
+## 3. Claim Matrix
+
+| Claim | Status | Evidence | Caveat |
+| --- | --- | --- | --- |
+| Docker-compatible local runtime path | PARTIAL | `conjet run`, `conjet compose up`, Docker socket bridge, profile contexts | Compatibility is practical for local workflows, not a full Docker Desktop replacement claim. |
+| ConjetFS/SmartBind topology advantage | PROVEN | Warm/cold/no-cache/topology gates and ConjetFS benchmark rows | Claim only for measured topology rows and contexts. |
+| Strong warm benchmark performance | PROVEN | Warm gate evidence with raw JSON reports | Do not generalize to unmeasured workloads. |
+| Strong cold base-prepulled/no-cache performance | PROVEN | Cold and no-cache gates in current benchmark iterations | Must keep phase labels visible. |
+| Polyglot topology generalization | PARTIAL | Polyglot gate coverage | Each ecosystem needs its own row-level claim. |
+| Secure-local TCP publishing | PROVEN | Network gate and ConjetNet status/capability reporting | Default localhost behavior only. |
+| Secure-local UDP publishing | PARTIAL | UDP echo rows with `conjet-netd-c` and capability gates | Requires active guest image support. |
+| Networking superiority over incumbents | PARTIAL | Competitive measured rows | Not a global claim; port publication and tail latency remain targets. |
+| Low idle energy or active energy superiority | PLANNED | Energy harness exists | Not proven until privileged power gate passes. |
+| Low initial memory mode | PROVEN | Memory profile config/policy, lazy helper policy fields, status reporting, and `memory-gate --first-container` E2E report | Proven for scoped policy/gate behavior; no broad low-memory superiority claim. |
+| Isolated machines | PLANNED | Profiles provide separate state roots | VM-per-project isolation is not implemented or tested. |
+| VPN-friendly networking | PLANNED | ConjetNet policy engine exists | No route/DNS watcher or VPN gate yet. |
+| IPv6 loopback TCP/UDP publication | PROVEN | `ipv6-gate` E2E passed for `http://[::1]:PORT/` and UDP echo on `[::1]:PORT` | Only scoped loopback is proven; LAN/global/wildcard IPv6 remains unclaimed. |
+| Accurate clock probe/repair | PROVEN | `conjet doctor clock --repair`, daemon `clock-repair`, wake-gap repair path, and `clock-gate --repair` with `<100 ms` gate | Physical macOS sleep/wake E2E remains a future gate row. |
+| Guest Linux eBPF | EXPERIMENTAL | Feasible with kernel config and privileged guest policy | Must not imply macOS kernel eBPF. |
+| SSH into Conjet machines | PROVEN | `conjet ssh`, `conjet ssh-key rotate`, guest hardening, disabled mode, and `ssh-gate --require-endpoint --check-disabled-mode` over local ProxyCommand | Dedicated localhost TCP listener is not claimed. |
+| SSH agent forwarding | PLANNED | Secure-local channels can support opt-in forwarding | High secret-exposure risk; disabled by default. |
+| Rootless mode | EXPERIMENTAL | User/profile separation exists | Rootless meanings must be scoped and tested separately. |
+
+## 4. Next Feature Initiatives
+
+### 4.1 Low Initial Memory Usage
+
+Status: `PROVEN`
+
+Goal:
+
+Reduce cold-start and idle memory footprint without regressing time to first
+container, warm/cold benchmark gates, network reliability, or ConjetFS sync
+latency.
+
+Architecture:
+
+- Add explicit profile modes: `performance`, `balanced`, and `eco`.
+- Keep the current performance-oriented path as the control group.
+- Introduce a low-memory boot profile with a smaller default guest memory
+  target, delayed helper startup, and measured idle reclaim.
+- Start guest services lazily where possible:
+  - delay BuildKit until the first build;
+  - delay containerd-adjacent maintenance tasks until Docker API demand;
+  - avoid eager host watchers until a project is attached or watched;
+  - avoid network helper startup until Docker published ports exist;
+  - reclaim idle network helper processes after a quiet interval.
+- Keep ConjetFS manifests and daemon status snapshots lightweight and
+  event-driven; avoid periodic scans on the hot path.
+
+Performance Risk:
+
+- Too little guest memory can increase page cache misses, image unpack time,
+  BuildKit latency, and first-container latency.
+- Lazy service start can shift cost into the first user command.
+- Aggressive helper reclaim can regress port publication latency and Docker API
+  burst handling.
+- Mitigation: gate each memory profile against existing warm, cold-base-prepulled,
+  no-cache, topology, and network gates before changing defaults.
+
+Security Risk:
+
+- Low-memory mode should not weaken isolation, skip capability checks, or
+  bypass secure-local policy.
+- Reclaimed helpers must close sockets and remove stale listeners deterministically.
+
+Implementation Tasks:
+
+- Implemented: memory profile configuration in profile state and `conjet start`
+  via `--memory-profile` and `CONJET_MEMORY_PROFILE`.
+- Implemented: `ConjetMemoryPolicy` separates memory/lazy-helper policy from
+  CPU/event cadence.
+- Implemented: profile-aware default memory selection, including scoped eco
+  default reduction when memory is not explicitly configured.
+- Implemented: daemon status reports the active memory policy.
+- Implemented: host and guest process RSS accounting in `memory-gate`.
+- Implemented: `time_to_first_container` measurement via
+  `memory-gate --first-container`.
+- Implemented: lazy network-helper policy and idle helper reclaim policy are
+  surfaced as measurable policy fields.
+- Later: add deeper guest service lazy-start hooks for BuildKit and containerd
+  maintenance where compatible with Docker behavior.
+- Later: add helper idle reaper structured logs and per-helper state.
+
+Validation Harness:
+
+- Existing command: `conjet-bench memory-gate --first-container`.
+- Metrics:
+  - `initial_rss_mb`
+  - `vm_memory_mb`
+  - `conjetd_rss_mb`
+  - `guest_agent_rss_mb`
+  - `containerd_rss_mb`
+  - `buildkitd_rss_mb`
+  - `network_helper_rss_mb`
+  - `time_to_first_container`
+  - `idle_wakeups_per_sec`
+- Run memory-gate in `performance`, `balanced`, and `eco`.
+- Re-run existing warm, cold-base-prepulled, no-cache, topology, and network
+  gates after any default memory change.
+
+Release Gate:
+
+- `memory-gate --first-container` passes and records RSS/process metrics.
+- Active daemon status reports the selected memory policy.
+- Existing warm/cold/network gates continue to pass before changing defaults.
+- Startup time and time to first container remain competitive against the
+  release baseline.
+- Do not claim broad memory superiority until per-profile budgets are approved.
+
+### 4.2 Isolated Machines / High-Security Sandbox Mode
+
+Status: `PLANNED`
+
+Goal:
+
+Provide stronger project or container-group isolation for untrusted images and
+sensitive work while preserving the shared fast VM path for normal development.
+
+Architecture:
+
+- Keep `dev-cell` mode as the default:
+  - one shared VM optimized for fast Docker/Compose development;
+  - shared image cache;
+  - shared ConjetFS/SmartBind workflow;
+  - secure-local port publishing.
+- Add `isolated-machine` mode:
+  - one VM or isolated VM profile per project/container group;
+  - separate Docker socket and Docker context;
+  - separate network namespace/policy state;
+  - separate volume store and image/cache store where required;
+  - no shared ConjetFS state unless explicitly mounted;
+  - destroy operation removes VM disk, Docker state, volumes, sockets, and
+    network policy state.
+- Treat VM-per-container as a future optional mode, not the default roadmap
+  target.
+
+Performance Risk:
+
+- VM-per-project increases cold start, memory footprint, image pull/cache
+  duplication, and disk use.
+- Compose workflows may be slower when image cache is not shared.
+- Mitigation: keep dev-cell as default and make isolated-machine explicitly
+  opt-in with measured overhead.
+
+Security Risk:
+
+- Main threats are cross-project Docker socket access, volume leakage, port
+  policy confusion, shared ConjetFS state, and stale state after destroy.
+- Controls: per-profile sockets with strict permissions, per-machine state
+  roots, scoped port policy, explicit host mounts, and destroy verification.
+
+Implementation Tasks:
+
+- Add machine identity and isolation mode to profile/project config.
+- Create per-machine Docker socket paths and contexts.
+- Create per-machine VM disks, volume roots, bootstrap shares, and logs.
+- Scope ConjetNet port registry and policies by machine.
+- Add `conjet machine create`, `conjet machine list`,
+  `conjet machine destroy`, and project attachment to isolated machines.
+- Document isolation semantics and what is still shared by macOS user account.
+
+Validation Harness:
+
+- Add `conjet-bench isolation-gate`.
+- Tests:
+  - Project A cannot access Project B volumes.
+  - Project A cannot access Project B Docker socket.
+  - Network isolation works.
+  - Port policies remain scoped.
+  - Destroying isolated machine removes state.
+  - Explicit shared mounts are the only allowed cross-machine file path.
+
+Release Gate:
+
+- Isolation semantics are documented.
+- Escape paths are tested.
+- Performance overhead is measured and published.
+- No feature copy claims "fully secure"; call it isolated-machine mode with
+  documented boundaries.
+
+### 4.3 VPN-Friendly Networking
+
+Status: `PLANNED`
+
+Goal:
+
+Make Conjet networking behave predictably when macOS DNS resolvers and routes
+change under split-tunnel or full-tunnel VPNs, while preserving secure-local
+published ports and avoiding accidental traffic leaks.
+
+Architecture:
+
+- Add a ConjetNet VPN watcher:
+  - observe macOS route and DNS resolver changes;
+  - detect VPN interface changes;
+  - update guest DNS configuration;
+  - update forwarding policy;
+  - preserve secure-local published ports;
+  - expose current DNS/route source in `conjet network status --json`.
+- Default behavior remains secure-local: Docker-published ports stay on
+  localhost and are not exposed to LAN/VPN interfaces unless policy explicitly
+  allows it.
+- Add policy modes for VPN-required traffic where Conjet refuses guest egress
+  or DNS fallback if VPN resolvers/routes are missing.
+
+Performance Risk:
+
+- Route watchers and DNS updates can add wakeups if implemented by polling.
+- Resolver churn can briefly interrupt guest DNS.
+- Mitigation: use event-driven macOS notifications where possible, debounce
+  updates, and avoid restarting network helpers unless policy truly changes.
+
+Security Risk:
+
+- Full-tunnel VPN policy must not leak traffic through pre-VPN default routes.
+- Split-tunnel DNS must not fall back to public resolvers for VPN-only domains
+  when policy forbids leakage.
+- LAN exposure must remain opt-in.
+
+Implementation Tasks:
+
+- Add macOS resolver/route observer.
+- Add guest DNS update path with rollback.
+- Add VPN policy configuration and status reporting.
+- Add network repair path for stale DNS/route state.
+- Document split-tunnel, full-tunnel, and unsupported VPN cases.
+
+Validation Harness:
+
+- Add `conjet-bench vpn-gate`.
+- Tests:
+  - DNS resolver changes propagate to guest.
+  - Container can resolve VPN-only domains when VPN is active.
+  - Published localhost ports still work.
+  - No accidental LAN exposure under secure-local.
+  - VPN-required policy fails closed when VPN disappears.
+- If a real VPN cannot be automated in CI, add a manual protocol with:
+  - VPN product/name;
+  - split/full tunnel mode;
+  - before/after `scutil --dns`;
+  - route table sample;
+  - guest resolver sample;
+  - leak-test result.
+
+Release Gate:
+
+- VPN behavior is documented.
+- DNS/route update path works under the gate or manual protocol.
+- Secure-local mode has no LAN or non-VPN leak in tested policies.
+
+### 4.4 IPv6 Support
+
+Status: `PROVEN`
+
+Goal:
+
+Support IPv6 loopback for published ports and guest/container networking where
+capabilities exist, without regressing IPv4 behavior or accidentally widening
+LAN/global exposure.
+
+Architecture:
+
+- Keep IPv4 stable and treat it as the compatibility baseline.
+- Add explicit IPv6 listener support for `::1` in secure-local mode.
+- Add IPv6 capability reporting to ConjetNet status.
+- Add docker-strict IPv6 semantics only when enabled and clearly reported.
+- Keep LAN/global IPv6 exposure off by default; require explicit policy.
+- Extend DNS handling to preserve A and AAAA behavior without forcing IPv6 on
+  projects that do not need it.
+
+Performance Risk:
+
+- Dual-stack listeners can add code paths and tail-latency variance.
+- Misconfigured IPv6 fallback can slow connection setup.
+- Mitigation: benchmark IPv4 and IPv6 rows separately and require IPv4
+  non-regression.
+
+Security Risk:
+
+- IPv6 wildcard binds such as `[::]` can expose services even when IPv4 policy
+  appears local.
+- Controls: secure-local maps published ports to `127.0.0.1` and `::1` only;
+  docker-strict and global exposure require explicit policy and diagnostics.
+
+Implementation Tasks:
+
+- Implemented: IPv6 bind/listener support in host port forwarders, including
+  `IPV6_V6ONLY`.
+- Implemented: scoped TCP loopback gate for `[::1]`.
+- Implemented: Python and native guest bridge parsing for IPv6 loopback UDP
+  proxy targets.
+- Implemented: host UDP listener coalescing so concurrent Docker target events
+  cannot double-bind the same IPv6 UDP port.
+- Implemented: TCP and UDP `::1` rows in `ipv6-gate`.
+- Later: add IPv6 policy fields and diagnostics for LAN/global/wildcard IPv6.
+- Later: update docs to distinguish loopback IPv6 from LAN/global IPv6.
+
+Validation Harness:
+
+- Existing command: `conjet-bench ipv6-gate`.
+- Tests:
+  - `::1` published TCP port works.
+  - `::1` published UDP port works if UDP/IPv6 is supported.
+  - IPv6 policy respects secure-local.
+  - Docker-strict `[::]` behavior is explicit.
+  - IPv4 behavior does not regress.
+
+Release Gate:
+
+- IPv6 loopback TCP and UDP support are proven by `ipv6-gate`.
+- Optional LAN/global IPv6 exposure has explicit policy, tests, and docs.
+- No IPv4 gate regression.
+
+### 4.5 Accurate Clock
+
+Status: `PROVEN`
+
+Goal:
+
+Keep guest time close enough to host time for TLS certificates, databases,
+tests, build systems, package managers, and reproducible benchmark timing,
+especially after VM start, host sleep, and resume.
+
+Architecture:
+
+- Add a Conjet Clock Agent:
+  - check host/guest delta;
+  - resync after VM start;
+  - resync after macOS wake;
+  - expose status in `conjet doctor`;
+  - fail clearly when guest time cannot be repaired.
+- Prefer host-driven correction through guest agent or existing guest time sync
+  service. Evaluate NTP, chrony, and systemd-timesyncd only as guest-image
+  options, not as hidden dependencies on public network access.
+- Keep `conjet doctor clock` as the user-facing diagnostic command.
+
+Performance Risk:
+
+- Clock checks should not add frequent wakeups.
+- Time repair should not block common CLI status calls.
+- Mitigation: check on lifecycle events and explicit doctor command, with a
+  low-frequency background check only when VM is running.
+
+Security Risk:
+
+- Incorrect time can break certificate validation and package integrity.
+- Time sync must not require exposing guest management ports.
+- Host-to-guest clock correction should be authenticated through Conjet's
+  existing control plane.
+
+Implementation Tasks:
+
+- Implemented: guest time query and explicit repair command.
+- Implemented: daemon lifecycle repair after VM start.
+- Implemented: daemon wake-gap repair loop for host sleep/resume-like gaps.
+- Implemented: `conjet doctor clock` and repair-capable JSON status fields.
+- Implemented: daemon `clock-repair` protocol command.
+- Later: add explicit macOS sleep/wake notification hook and physical
+  sleep/resume gate row.
+- Later: add configurable drift thresholds.
+
+Validation Harness:
+
+- Existing command: `conjet-bench clock-gate --repair`.
+- Metrics:
+  - `host_guest_clock_delta_ms`
+  - `delta_after_sleep_ms`
+  - `delta_after_resume_ms`
+  - `resync_latency_ms`
+- Include start, restart, and simulated drift cases.
+- Later: add physical macOS sleep/wake E2E row.
+
+Release Gate:
+
+- Clock drift remains below threshold, for example `<100 ms` after start and
+  after explicit repair.
+- `conjet doctor clock` reports drift and repair state clearly.
+- Clock repair does not regress startup or benchmark gates.
+- Do not claim physical sleep/wake coverage until the wake/resume row passes.
+
+### 4.6 eBPF Support
+
+Status: `EXPERIMENTAL`
+
+Goal:
+
+Provide scoped guest-Linux eBPF capability for developer debugging,
+observability, network tracing, low-overhead packet metrics, and future
+ConjetNet acceleration experiments. This is guest Linux eBPF only; it is not
+macOS kernel eBPF.
+
+Architecture:
+
+- Add guest kernel capability reporting for:
+  - `BPF`
+  - `BPF_SYSCALL`
+  - `BPF_JIT`
+  - `BPF_EVENTS`
+  - `CGROUP_BPF`
+  - `XDP` only if explicitly targeted.
+- Include `bpftool` in eBPF-capable guest images or install it through an
+  optional package layer.
+- Keep eBPF disabled for untrusted normal containers by default.
+- Require privileged container mode or a narrowly scoped Conjet debug profile
+  for loading programs.
+- Report rootless limitations explicitly.
+
+Performance Risk:
+
+- BPF JIT and tracing can add overhead or perturb benchmark results.
+- XDP/packet hooks can change network behavior.
+- Mitigation: eBPF debug mode is opt-in and excluded from normal performance
+  claims unless measured separately.
+
+Security Risk:
+
+- eBPF can expand kernel attack surface, observe sensitive data, or enable
+  privileged container behavior.
+- Controls: disabled by default for untrusted containers, capability-reported,
+  privileged/debug profile required, and no silent capability escalation.
+
+Implementation Tasks:
+
+- Add kernel config audit to guest image build.
+- Add `bpftool` probe command through `conjet doctor` or `conjet ebpf status`.
+- Add debug profile policy for eBPF-enabled containers.
+- Add docs distinguishing guest eBPF from macOS eBPF.
+- Add tests for denied default container behavior.
+
+Validation Harness:
+
+- Add `conjet-bench ebpf-gate`.
+- Tests:
+  - `bpftool feature probe`.
+  - Load a harmless BPF program.
+  - Attach a basic tracepoint or cgroup program if safe.
+  - Verify eBPF is disabled by default for untrusted containers.
+  - Verify rootless limitations are reported.
+
+Release Gate:
+
+- eBPF support is capability-reported.
+- Security mode is documented.
+- Normal containers do not receive default escalation.
+- Any performance claim is scoped to measured eBPF rows only.
+
+### 4.7 SSH Support
+
+Status: `PROVEN`
+
+Goal:
+
+Provide a reliable, secure-local SSH entry point for users who need direct
+shell access to Conjet machines or project profiles.
+
+Architecture:
+
+- Implemented: Conjet-managed SSH over local OpenSSH `ProxyCommand` that runs
+  guest `sshd -i` through the existing local Docker/nsenter control path.
+- Implemented: no LAN listener by default.
+- Implemented: profile-scoped Ed25519 keys with strict permissions.
+- Implemented: key rotation.
+- Implemented: disabled mode with config persistence and negative command test.
+- Planned: dedicated localhost TCP listener and `conjet doctor` integration.
+- Commands:
+  - `conjet ssh`
+  - `conjet ssh --profile work`
+  - `conjet ssh project-name`
+  - `conjet ssh-key rotate`
+  - `conjet ssh status`
+
+Performance Risk:
+
+- Starting `sshd` eagerly adds guest memory and idle wakeups.
+- Host forwarding adds one more listener to reconcile.
+- Mitigation: lazy-start SSH or keep it disabled until first use; measure with
+  memory-gate and network-gate.
+
+Security Risk:
+
+- SSH can expose a direct guest management path.
+- Controls: localhost-only by default, profile-scoped keys, no password login,
+  correct file permissions, explicit disabled mode, and no LAN binding unless a
+  future policy explicitly allows it.
+
+Implementation Tasks:
+
+- Implemented: guest SSH package/config in cloud-init and lazy installer for
+  existing VMs.
+- Implemented: host key and user key lifecycle.
+- Implemented: `conjet ssh`, `conjet ssh-key rotate`, and `conjet ssh status`.
+- Implemented: SSH self-repair starts guest `sshd`, creates `/run/sshd`,
+  validates config, and installs the profile-scoped authorized key.
+- Planned: localhost-only TCP forward registration.
+- Add doctor checks for key permissions and endpoint status.
+
+Validation Harness:
+
+- Existing command: `conjet-bench ssh-gate --require-endpoint --check-disabled-mode`.
+- Tests:
+  - SSH connects to guest.
+  - SSH is localhost-only by default.
+  - SSH key is profile-scoped.
+  - SSH disabled mode works.
+  - SSH survives VM restart.
+  - Key permissions are correct.
+
+Release Gate:
+
+- SSH command works through the local ProxyCommand transport.
+- No LAN exposure by default.
+- Key lifecycle and permissions pass tests.
+- Memory and network gates do not regress.
+
+### 4.8 SSH Agent Forwarding
+
+Status: `PLANNED`
+
+Goal:
+
+Allow opt-in use of the user's SSH agent for workflows such as cloning private
+repositories or fetching from private Git remotes inside the guest or selected
+containers.
+
+Architecture:
+
+- Disabled by default.
+- Profile/project scoped.
+- Forward agent over a secure local channel.
+- Never expose the agent to all containers by default.
+- Prefer per-command forwarding:
+  - `conjet run --ssh-agent ...`
+  - `conjet compose up --ssh-agent`
+- Add status command:
+  - `conjet ssh-agent status`
+- Remove forwarded sockets when the command or project session ends.
+
+Performance Risk:
+
+- Minimal steady-state cost if disabled by default.
+- Per-command forwarding adds setup/teardown latency.
+- Mitigation: keep default disabled and measure command startup delta in
+  ssh-gate.
+
+Security Risk:
+
+- Main risks are agent socket exposure, containers stealing signing ability,
+  cross-project access, and long-lived forwarded sockets.
+- Controls: explicit opt-in, per-command scope, project scoping,
+  short-lived sockets, strict permissions, and isolation tests.
+
+Implementation Tasks:
+
+- Add host SSH_AUTH_SOCK discovery and validation.
+- Add scoped agent forwarding channel.
+- Mount/inject agent socket only into requested guest/project/container scope.
+- Add teardown and stale socket cleanup.
+- Add docs for risk model and safe usage.
+
+Validation Harness:
+
+- Extend `ssh-gate` or add `ssh-agent-gate`.
+- Tests:
+  - Agent forwarding disabled by default.
+  - Agent enabled only for requested container/project.
+  - Socket removed after command.
+  - Unrelated containers cannot access agent.
+  - Private Git smoke test works when an agent with access is present.
+
+Release Gate:
+
+- Explicit opt-in only.
+- Isolation tests pass.
+- Risk model is documented.
+- No cross-project agent access.
+
+### 4.9 Rootless Mode
+
+Status: `EXPERIMENTAL`
+
+Goal:
+
+Reduce privilege and blast radius where feasible, while avoiding a vague
+"rootless" claim. Rootless has multiple meanings and each must be implemented,
+tested, and documented separately.
+
+Architecture:
+
+- Define four separate modes:
+  - Host-rootless: Conjet daemon does not require root on macOS.
+  - Guest-rootless: containers run rootless inside the Linux guest.
+  - Docker-rootless: dockerd/containerd runs rootless.
+  - Userns-remap: root inside a container maps to a non-root guest UID.
+- Current Conjet is closest to host-rootless because the daemon uses a
+  user-owned socket and no privileged helper by default, but this still needs a
+  formal gate.
+- Start with userns-remap or selected guest-rootless container workflows before
+  attempting Docker-rootless as a default.
+- Treat eBPF, low port binding, overlayfs, fuse-overlayfs, networking, and
+  volume ownership as explicit compatibility dimensions.
+
+Performance Risk:
+
+- fuse-overlayfs can be slower than overlayfs.
+- Rootless networking can add proxy overhead and limit low-port behavior.
+- UID/GID remapping can complicate ConjetFS ownership and bind semantics.
+- Mitigation: rootless-gate must compare startup, build, filesystem,
+  networking, and Compose rows before any default change.
+
+Security Risk:
+
+- Rootless can improve containment but can also create false confidence if
+  Docker socket, host mounts, or agent sockets remain reachable.
+- Controls: precise mode naming, no blanket claim, documented limitations, and
+  tests for write restrictions and namespace mapping.
+
+Implementation Tasks:
+
+- Add rootless mode config with explicit mode names.
+- Add guest user namespace and subordinate ID setup.
+- Evaluate userns-remap with current Docker path.
+- Evaluate guest-rootless container run support.
+- Evaluate Docker-rootless separately with Compose compatibility tests.
+- Add diagnostics for unsupported eBPF, low ports, overlayfs, and networking.
+
+Validation Harness:
+
+- Add `conjet-bench rootless-gate`.
+- Tests:
+  - Rootless container cannot write host-owned restricted paths.
+  - User namespace mapping works.
+  - Common Docker/Compose workflows still work.
+  - Performance impact is measured.
+  - Networking limitations are documented.
+  - eBPF limitations are reported.
+
+Release Gate:
+
+- Rootless mode is explicitly scoped.
+- No silent compatibility regressions.
+- Performance and feature limitations are documented.
+- Existing speed gates remain protected for the default non-rootless path.
+
+## 5. Harness Engineering Roadmap
+
+### memory-gate
+
+- Existing command: `conjet-bench memory-gate --first-container`.
+- Implemented: process and guest RSS sampling for current helper/runtime
+  processes.
+- Implemented: first-container latency measurement.
+- Implemented: policy fields for idle wakeup budget and helper reclaim.
+- Later: add actual idle wakeup sampling.
+- Compare profile modes and assert no existing speed gate regression.
+
+### isolation-gate
+
+- Create two isolated projects or machines.
+- Verify socket, volume, network, port-policy, and destroy isolation.
+- Record overhead versus default dev-cell mode.
+
+### vpn-gate
+
+- Add route/DNS fixture support where possible.
+- Add manual protocol for real VPN products when automation is unavailable.
+- Verify no secure-local LAN exposure.
+
+### ipv6-gate
+
+- Implemented: TCP and UDP `::1` publication rows.
+- Add IPv4 non-regression rows.
+- Add docker-strict IPv6 policy rows.
+
+### clock-gate
+
+- Existing command: `conjet-bench clock-gate --repair`.
+- Expand host/guest time delta sampler coverage.
+- Implemented: explicit drift repair gate.
+- Add wake/resume row for physical macOS sleep coverage.
+- Add deeper `conjet doctor clock` assertions.
+
+### ebpf-gate
+
+- Add kernel config probe.
+- Add `bpftool feature probe`.
+- Add harmless program load/attach tests.
+- Add denied-by-default tests for normal containers.
+
+### ssh-gate
+
+- Existing command:
+  `conjet-bench ssh-gate --require-endpoint --check-disabled-mode`.
+- Implemented: key existence, guest authorized key, guest `sshd`, localhost-only
+  endpoint, endpoint reachability, and disabled-mode tests.
+- Later: add dedicated localhost TCP listener tests.
+- Later: add restart persistence tests as a separate row.
+
+### rootless-gate
+
+- Add mode-specific rootless tests rather than a single blanket verdict.
+- Measure filesystem, networking, Compose, and build impacts.
+- Record unsupported features explicitly.
+
+### energy-gate Improvement
+
+- Make privileged `powermetrics` setup clearer.
+- Keep missing power data as skipped or failed according to `--require-power`.
+- Add memory and helper wakeup attribution where possible.
+- Do not allow energy superiority claims from wall-time-only evidence.
+
+## 6. Release Gates
+
+Required before a feature is called supported:
+
+- The feature has a documented status level and scope.
+- The implementation has unit tests for policy/config behavior.
+- The implementation has integration tests for the user-facing command path.
+- The matching `conjet-bench <feature>-gate` exists or a documented manual
+  protocol exists when automation is not feasible.
+- Existing warm, cold-base-prepulled, no-cache, topology, and network gates are
+  rerun when the feature can affect speed or networking.
+- Security-sensitive features have negative tests proving default-deny behavior.
+- Release notes state caveats and unsupported modes.
+
+Required before a performance claim is allowed:
+
+- Raw JSON report exists under `benchmarks/reports/`.
+- Markdown summary names contexts, sample count, topology, phase, failures, and
+  caveats.
+- The claim uses the narrow measured workload name.
+- Required baselines are present.
+- P50 and P95 meet the gate.
+- Failed or skipped rows are published, not hidden.
+- Energy claims require privileged power data with `--require-power`.
+
+## 7. Non-Goals
+
+- No Kubernetes in this generation unless explicitly planned in a separate
+  roadmap.
+- No energy superiority claim until privileged energy gates prove it.
+- No rootless blanket claim until host-rootless, guest-rootless,
+  Docker-rootless, and userns-remap are scoped separately.
+- No LAN exposure by default.
+- No claim that Conjet is fully industry-grade for every networking mode.
+- No broad claim that eBPF, IPv6, SSH, SSH agent forwarding, rootless mode,
+  VPN-aware networking, or isolated-machine mode is supported beyond the
+  specific implementation scope proven by gates.
+- No VM-per-container default until VM-per-project isolation is implemented and
+  measured.
+
+## 8. Engineering Priority Order
+
+1. Memory gate / low initial memory
+2. Clock + doctor reliability
+3. SSH
+4. IPv6 loopback
+5. VPN-friendly DNS/route sync
+6. Isolated machines
+7. SSH agent forwarding
+8. eBPF support
+9. Rootless
+
+The ordering protects Conjet's speed foundation. Memory and clock work improve
+baseline runtime reliability without changing developer workflow semantics.
+SSH and IPv6 are bounded user-facing features. VPN and isolated machines expand
+networking and security scope and therefore need stronger gates. SSH agent
+forwarding, eBPF, and rootless mode carry higher security or compatibility risk
+and should remain opt-in until their harnesses are mature.

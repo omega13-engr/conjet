@@ -185,7 +185,7 @@ def parse_tcp_proxy_request(first_chunk):
         return None, None, remainder
     target = line[len(TCP_PROXY_PREFIX):].decode("ascii", errors="ignore").strip()
     host, separator, port_text = target.rpartition(":")
-    if not separator or host not in ("127.0.0.1", "localhost"):
+    if not separator or host not in ("127.0.0.1", "localhost", "::1"):
         return None, None, remainder
     try:
         port = int(port_text)
@@ -202,7 +202,7 @@ def parse_udp_proxy_request(first_chunk):
         return None, None, payload
     target = line[len(UDP_PROXY_PREFIX):].decode("ascii", errors="ignore").strip()
     host, separator, port_text = target.rpartition(":")
-    if not separator or host not in ("127.0.0.1", "localhost"):
+    if not separator or host not in ("127.0.0.1", "localhost", "::1"):
         return None, None, payload
     try:
         port = int(port_text)
@@ -255,7 +255,7 @@ def handle_udp_proxy(client, first_chunk):
         close_socket(client)
         return
 
-    upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    upstream = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_DGRAM)
     upstream.settimeout(2.0)
     try:
         upstream.sendto(payload, (host, port))

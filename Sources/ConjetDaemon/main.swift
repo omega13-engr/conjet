@@ -43,7 +43,8 @@ struct ConjetDaemon {
             "architecture": config.architecture,
             "diskGiB": String(config.diskGiB),
             "runtime": config.runtime,
-            "energyMode": config.energyMode.rawValue
+            "energyMode": config.energyMode.rawValue,
+            "memoryProfile": config.memoryProfile.rawValue
         ])
 
         let server = UnixSocketServer(socketPath: socketPath)
@@ -63,7 +64,7 @@ struct ConjetDaemon {
     }
 }
 
-private final class DaemonRuntime {
+private final class DaemonRuntime: @unchecked Sendable {
     private struct CachedStatus {
         var status: DaemonStatus
         var createdAt: Date
@@ -96,6 +97,7 @@ private final class DaemonRuntime {
         self.statusCacheTTL = TimeInterval(governor.policy(for: .warmIdle).statusPersistenceMinIntervalMilliseconds) / 1_000
         self.host = HostCapabilities.detect()
         _ = VirtualizationProbe.inspect(config: config, host: host)
+        startClockWakeMonitor()
     }
 
     func handle(request: DaemonRequest, stopping: inout Bool) -> DaemonResponse {
@@ -112,6 +114,7 @@ private final class DaemonRuntime {
                 invalidateStatusCache()
                 let manifest = try vmStore.loadManifest()
                 let vm = try vmController.start(manifest: manifest, config: config, store: vmStore)
+                repairClockAsync(reason: "vm-start")
                 invalidateStatusCache()
                 return DaemonResponse(ok: true, message: vm.message, status: status(state: runtimeState(for: vm), vm: vm), vm: vm)
             } catch {
@@ -151,6 +154,15 @@ private final class DaemonRuntime {
                 ok: true,
                 message: "network repair completed",
                 status: status(state: .warmIdle, network: network)
+            )
+        case .clockRepair:
+            invalidateStatusCache()
+            let repaired = repairClock(reason: request.parameters["reason"] ?? "command")
+            invalidateStatusCache()
+            return DaemonResponse(
+                ok: repaired,
+                message: repaired ? "clock repair completed" : "clock repair skipped or failed",
+                status: status(state: .warmIdle)
             )
         case .pruneCache:
             invalidateStatusCache()
@@ -239,6 +251,73 @@ private final class DaemonRuntime {
         statusCacheLock.lock()
         cachedStatus = nil
         statusCacheLock.unlock()
+    }
+
+    private func startClockWakeMonitor() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var lastWallClock = Date()
+            while true {
+                Thread.sleep(forTimeInterval: 30)
+                let now = Date()
+                let gap = now.timeIntervalSince(lastWallClock)
+                lastWallClock = now
+                if gap > 45 {
+                    self?.repairClockAsync(reason: "wake-gap-\(Int(gap))s")
+                }
+            }
+        }
+    }
+
+    private func repairClockAsync(reason: String) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            _ = self?.repairClock(reason: reason)
+        }
+    }
+
+    @discardableResult
+    private func repairClock(reason: String) -> Bool {
+        guard FileManager.default.fileExists(atPath: paths.dockerSocket.path) else {
+            return false
+        }
+        let epochMs = Int(Date().timeIntervalSince1970 * 1000)
+        let seconds = epochMs / 1000
+        let milliseconds = epochMs % 1000
+        let timestamp = "\(seconds).\(String(format: "%03d", milliseconds))"
+        let script = """
+        if command -v timedatectl >/dev/null 2>&1; then timedatectl set-ntp false >/dev/null 2>&1 || true; fi
+        date -u -s @\(timestamp) >/dev/null 2>&1 || date -u -s @\(seconds) >/dev/null
+        hwclock -w >/dev/null 2>&1 || true
+        """
+        do {
+            let result = try ProcessRunner.run("/usr/bin/env", [
+                "docker",
+                "--host",
+                "unix://\(paths.dockerSocket.path)",
+                "run",
+                "--rm",
+                "--privileged",
+                "--pid=host",
+                "--net=host",
+                "--ipc=host",
+                "--uts=host",
+                "ubuntu:24.04",
+                "nsenter",
+                "-t",
+                "1",
+                "-m",
+                "-u",
+                "-i",
+                "-n",
+                "-p",
+                "--",
+                "sh",
+                "-lc",
+                script
+            ], timeoutSeconds: 30)
+            return result.succeeded
+        } catch {
+            return false
+        }
     }
 
     private func runtimeState(for vm: VMRuntimeStatus) -> RuntimeState {

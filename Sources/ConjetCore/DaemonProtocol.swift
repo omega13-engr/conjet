@@ -19,6 +19,7 @@ public enum DaemonCommand: String, Codable, Equatable, Sendable {
     case vmStatus = "vm-status"
     case dockerRun = "docker-run"
     case networkRepair = "network-repair"
+    case clockRepair = "clock-repair"
     case pruneCache = "prune-cache"
 }
 
@@ -131,6 +132,7 @@ public struct DaemonStatus: Codable, Equatable, Sendable {
     public var socketPath: String
     public var host: HostCapabilities
     public var config: ConjetConfig
+    public var memoryPolicy: ConjetMemoryPolicy
     public var vm: VMRuntimeStatus?
     public var network: ConjetNetworkStatus?
 
@@ -141,6 +143,7 @@ public struct DaemonStatus: Codable, Equatable, Sendable {
         socketPath: String,
         host: HostCapabilities,
         config: ConjetConfig,
+        memoryPolicy: ConjetMemoryPolicy? = nil,
         vm: VMRuntimeStatus? = nil,
         network: ConjetNetworkStatus? = nil
     ) {
@@ -150,6 +153,7 @@ public struct DaemonStatus: Codable, Equatable, Sendable {
         self.socketPath = socketPath
         self.host = host
         self.config = config
+        self.memoryPolicy = memoryPolicy ?? config.memoryPolicy
         self.vm = vm
         self.network = network
     }

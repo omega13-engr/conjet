@@ -6,6 +6,56 @@ public enum ConjetEnergyMode: String, Codable, CaseIterable, Sendable {
     case eco
 }
 
+public enum ConjetMemoryProfile: String, Codable, CaseIterable, Sendable {
+    case performance
+    case balanced
+    case eco
+}
+
+public struct ConjetMemoryPolicy: Codable, Equatable, Sendable {
+    public var profile: ConjetMemoryProfile
+    public var configuredMemoryMiB: Int
+    public var recommendedMemoryMiB: Int
+    public var lazyRuntimeServices: Bool
+    public var lazyNetworkHelpers: Bool
+    public var reclaimIdleHelpersAfterSeconds: Int
+    public var idleWakeupBudgetPerSecond: Double
+
+    public init(
+        profile: ConjetMemoryProfile,
+        configuredMemoryMiB: Int,
+        recommendedMemoryMiB: Int,
+        lazyRuntimeServices: Bool,
+        lazyNetworkHelpers: Bool,
+        reclaimIdleHelpersAfterSeconds: Int,
+        idleWakeupBudgetPerSecond: Double
+    ) {
+        self.profile = profile
+        self.configuredMemoryMiB = configuredMemoryMiB
+        self.recommendedMemoryMiB = recommendedMemoryMiB
+        self.lazyRuntimeServices = lazyRuntimeServices
+        self.lazyNetworkHelpers = lazyNetworkHelpers
+        self.reclaimIdleHelpersAfterSeconds = reclaimIdleHelpersAfterSeconds
+        self.idleWakeupBudgetPerSecond = idleWakeupBudgetPerSecond
+    }
+}
+
+public struct ConjetSSHPolicy: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var transport: String
+    public var allowTCPFallback: Bool
+
+    public init(
+        enabled: Bool = true,
+        transport: String = "proxy-command",
+        allowTCPFallback: Bool = false
+    ) {
+        self.enabled = enabled
+        self.transport = transport
+        self.allowTCPFallback = allowTCPFallback
+    }
+}
+
 public struct ConjetConfig: Codable, Equatable, Sendable {
     public var vmCPUs: Int
     public var memoryMiB: Int
@@ -24,6 +74,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     public var networkLANAllowedCIDRs: [String]
     public var networkLANAllowedPorts: [Int]
     public var energyMode: ConjetEnergyMode
+    public var memoryProfile: ConjetMemoryProfile
+    public var ssh: ConjetSSHPolicy
 
     public init(
         vmCPUs: Int = 4,
@@ -42,7 +94,9 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkBridgeEngine: ConjetNetworkBridgeEngine = .auto,
         networkLANAllowedCIDRs: [String] = [],
         networkLANAllowedPorts: [Int] = [],
-        energyMode: ConjetEnergyMode = .balanced
+        energyMode: ConjetEnergyMode = .balanced,
+        memoryProfile: ConjetMemoryProfile = .balanced,
+        ssh: ConjetSSHPolicy = ConjetSSHPolicy()
     ) {
         self.vmCPUs = vmCPUs
         self.memoryMiB = memoryMiB
@@ -61,6 +115,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         self.networkLANAllowedCIDRs = networkLANAllowedCIDRs
         self.networkLANAllowedPorts = networkLANAllowedPorts
         self.energyMode = energyMode
+        self.memoryProfile = memoryProfile
+        self.ssh = ssh
     }
 
     public static let `default` = ConjetConfig()
@@ -83,6 +139,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         case networkLANAllowedCIDRs
         case networkLANAllowedPorts
         case energyMode
+        case memoryProfile
+        case ssh
     }
 
     public init(from decoder: Decoder) throws {
@@ -105,8 +163,45 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             networkBridgeEngine: try container.decodeIfPresent(ConjetNetworkBridgeEngine.self, forKey: .networkBridgeEngine) ?? defaults.networkBridgeEngine,
             networkLANAllowedCIDRs: try container.decodeIfPresent([String].self, forKey: .networkLANAllowedCIDRs) ?? defaults.networkLANAllowedCIDRs,
             networkLANAllowedPorts: try container.decodeIfPresent([Int].self, forKey: .networkLANAllowedPorts) ?? defaults.networkLANAllowedPorts,
-            energyMode: try container.decodeIfPresent(ConjetEnergyMode.self, forKey: .energyMode) ?? defaults.energyMode
+            energyMode: try container.decodeIfPresent(ConjetEnergyMode.self, forKey: .energyMode) ?? defaults.energyMode,
+            memoryProfile: try container.decodeIfPresent(ConjetMemoryProfile.self, forKey: .memoryProfile) ?? defaults.memoryProfile,
+            ssh: try container.decodeIfPresent(ConjetSSHPolicy.self, forKey: .ssh) ?? defaults.ssh
         )
+    }
+
+    public var memoryPolicy: ConjetMemoryPolicy {
+        switch memoryProfile {
+        case .performance:
+            return ConjetMemoryPolicy(
+                profile: memoryProfile,
+                configuredMemoryMiB: memoryMiB,
+                recommendedMemoryMiB: max(memoryMiB, 8192),
+                lazyRuntimeServices: false,
+                lazyNetworkHelpers: false,
+                reclaimIdleHelpersAfterSeconds: 900,
+                idleWakeupBudgetPerSecond: 2.0
+            )
+        case .balanced:
+            return ConjetMemoryPolicy(
+                profile: memoryProfile,
+                configuredMemoryMiB: memoryMiB,
+                recommendedMemoryMiB: memoryMiB,
+                lazyRuntimeServices: false,
+                lazyNetworkHelpers: true,
+                reclaimIdleHelpersAfterSeconds: 300,
+                idleWakeupBudgetPerSecond: 1.0
+            )
+        case .eco:
+            return ConjetMemoryPolicy(
+                profile: memoryProfile,
+                configuredMemoryMiB: memoryMiB,
+                recommendedMemoryMiB: min(memoryMiB, 4096),
+                lazyRuntimeServices: true,
+                lazyNetworkHelpers: true,
+                reclaimIdleHelpersAfterSeconds: 60,
+                idleWakeupBudgetPerSecond: 0.2
+            )
+        }
     }
 
     public static func loadOrCreate(paths: ConjetPaths = .default()) throws -> ConjetConfig {
@@ -142,6 +237,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         lines.append("[vm]")
         lines.append("cpus = \(vmCPUs)")
         lines.append("memory_mib = \(memoryMiB)")
+        lines.append("memory_profile = \"\(memoryProfile.rawValue)\"")
         lines.append("architecture = \"\(escapeTOML(architecture))\"")
         lines.append("disk_gib = \(diskGiB)")
         if let diskImagePath {
@@ -164,6 +260,11 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         if !networkLANAllowedPorts.isEmpty {
             lines.append("lan_allowed_ports = \"\(networkLANAllowedPorts.map(String.init).joined(separator: ","))\"")
         }
+        lines.append("")
+        lines.append("[ssh]")
+        lines.append("enabled = \(ssh.enabled)")
+        lines.append("transport = \"\(escapeTOML(ssh.transport))\"")
+        lines.append("allow_tcp_fallback = \(ssh.allowTCPFallback)")
         lines.append("")
         return lines.joined(separator: "\n")
     }
@@ -194,6 +295,12 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                 config.vmCPUs = try parseInt(value, key: key)
             case "vm.memory_mib":
                 config.memoryMiB = try parseInt(value, key: key)
+            case "vm.memory_profile":
+                let parsed = parseString(value)
+                guard let profile = ConjetMemoryProfile(rawValue: parsed) else {
+                    throw ConjetError.decoding("vm.memory_profile must be performance, balanced, or eco")
+                }
+                config.memoryProfile = profile
             case "vm.architecture":
                 config.architecture = parseString(value)
             case "vm.disk_gib":
@@ -264,6 +371,16 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                     }
                     return port
                 }
+            case "ssh.enabled":
+                config.ssh.enabled = try parseBool(value, key: key)
+            case "ssh.transport":
+                let parsed = parseString(value)
+                guard ["proxy-command", "tcp"].contains(parsed) else {
+                    throw ConjetError.decoding("ssh.transport must be proxy-command or tcp")
+                }
+                config.ssh.transport = parsed
+            case "ssh.allow_tcp_fallback":
+                config.ssh.allowTCPFallback = try parseBool(value, key: key)
             default:
                 continue
             }

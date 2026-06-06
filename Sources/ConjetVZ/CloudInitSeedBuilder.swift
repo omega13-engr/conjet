@@ -94,11 +94,11 @@ public enum CloudInitSeedBuilder {
               if command -v apt-get >/dev/null 2>&1; then
                 export DEBIAN_FRONTEND=noninteractive
                 apt-get update
-                apt-get install -y ca-certificates curl docker.io e2fsprogs python3 util-linux
+                apt-get install -y ca-certificates curl docker.io e2fsprogs openssh-server python3 util-linux
               elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y ca-certificates curl e2fsprogs moby-engine python3 util-linux || dnf install -y ca-certificates curl docker e2fsprogs python3 util-linux
+                dnf install -y ca-certificates curl e2fsprogs moby-engine openssh-server python3 util-linux || dnf install -y ca-certificates curl docker e2fsprogs openssh-server python3 util-linux
               elif command -v apk >/dev/null 2>&1; then
-                apk add --no-cache ca-certificates curl docker e2fsprogs python3 util-linux
+                apk add --no-cache ca-certificates curl docker e2fsprogs openssh-server python3 util-linux
               else
                 echo "unsupported package manager for Conjet Docker bootstrap" >&2
                 exit 1
@@ -193,10 +193,29 @@ public enum CloudInitSeedBuilder {
                 systemctl daemon-reload
                 systemctl enable --now conjet-data-disk.service
                 systemctl enable --now docker || systemctl enable --now docker.service
+                mkdir -p /run/sshd /etc/ssh/sshd_config.d
+                useradd -m -s /bin/sh conjet 2>/dev/null || true
+                passwd -l conjet >/dev/null 2>&1 || true
+                cat >/etc/ssh/sshd_config.d/99-conjet-managed.conf <<'SSH'
+              PasswordAuthentication no
+              KbdInteractiveAuthentication no
+              PermitRootLogin no
+              PubkeyAuthentication yes
+              X11Forwarding no
+              AllowTcpForwarding no
+              GatewayPorts no
+              AllowUsers conjet
+              SSH
+                ssh-keygen -A
+                systemctl enable --now ssh || systemctl enable --now sshd || true
               else
                 /usr/local/sbin/conjet-data-disk.sh || true
                 rc-update add docker default || true
                 service docker start || true
+                adduser -D -s /bin/sh conjet 2>/dev/null || true
+                passwd -l conjet >/dev/null 2>&1 || true
+                rc-update add sshd default || true
+                service sshd start || true
               fi
               if [ -x /usr/bin/unpigz ]; then
                 mv /usr/bin/unpigz /usr/bin/unpigz.conjet-original || true
@@ -333,7 +352,7 @@ public enum CloudInitSeedBuilder {
                       return None, None, remainder
                   target = line[len(TCP_PROXY_PREFIX):].decode("ascii", errors="ignore").strip()
                   host, separator, port_text = target.rpartition(":")
-                  if not separator or host not in ("127.0.0.1", "localhost"):
+                  if not separator or host not in ("127.0.0.1", "localhost", "::1"):
                       return None, None, remainder
                   try:
                       port = int(port_text)
@@ -349,7 +368,7 @@ public enum CloudInitSeedBuilder {
                       return None, None, payload
                   target = line[len(UDP_PROXY_PREFIX):].decode("ascii", errors="ignore").strip()
                   host, separator, port_text = target.rpartition(":")
-                  if not separator or host not in ("127.0.0.1", "localhost"):
+                  if not separator or host not in ("127.0.0.1", "localhost", "::1"):
                       return None, None, payload
                   try:
                       port = int(port_text)
@@ -400,7 +419,7 @@ public enum CloudInitSeedBuilder {
                       close_socket(client)
                       return
 
-                  upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                  upstream = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_DGRAM)
                   upstream.settimeout(2.0)
                   try:
                       upstream.sendto(payload, (host, port))
@@ -533,6 +552,32 @@ public enum CloudInitSeedBuilder {
                   threading.Thread(target=handle, args=(client,), daemon=True).start()
               PY
               chmod 0755 /usr/local/sbin/conjet-docker-vsock-bridge.py
+              cat >/usr/local/sbin/conjet-docker-vsock-entrypoint.sh <<'SH'
+              #!/bin/sh
+              set -eu
+              mkdir -p /run/conjet /mnt/conjetboot /etc/conjet
+              if ! mountpoint -q /mnt/conjetboot; then
+                mount -t virtiofs conjetboot /mnt/conjetboot 2>/dev/null || true
+              fi
+              engine="${CONJET_NET_BRIDGE_ENGINE:-$(cat /mnt/conjetboot/network-bridge-engine 2>/dev/null || cat /etc/conjet/network-bridge-engine 2>/dev/null || echo python-legacy)}"
+              case "$engine" in
+                auto|python|python-legacy|"")
+                  exec /usr/local/sbin/conjet-docker-vsock-bridge.py
+                  ;;
+                conjet-netd|conjet-netd-c)
+                  if [ -x /usr/local/sbin/conjet-netd ]; then
+                    exec /usr/local/sbin/conjet-netd
+                  fi
+                  echo "conjet-netd-c requested but /usr/local/sbin/conjet-netd is missing" >&2
+                  exit 42
+                  ;;
+                *)
+                  echo "unsupported CONJET_NET_BRIDGE_ENGINE=$engine" >&2
+                  exit 43
+                  ;;
+              esac
+              SH
+              chmod 0755 /usr/local/sbin/conjet-docker-vsock-entrypoint.sh
               if command -v systemctl >/dev/null 2>&1; then
                 cat >/etc/systemd/system/conjet-docker-vsock.service <<'UNIT'
               [Unit]
@@ -545,11 +590,11 @@ public enum CloudInitSeedBuilder {
               Environment=PYTHONUNBUFFERED=1
               ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
               ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; mountpoint -q /mnt/conjetboot || mount -t virtiofs conjetboot /mnt/conjetboot 2>/dev/null || true; rm -f /run/conjet/docker-vsock-ready'
-              ExecStart=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; engine="${CONJET_NET_BRIDGE_ENGINE:-$(cat /mnt/conjetboot/network-bridge-engine 2>/dev/null || cat /etc/conjet/network-bridge-engine 2>/dev/null || echo python-legacy)}"; case "$engine" in auto|python|python-legacy|"") exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1 ;; conjet-netd|conjet-netd-c) if [ -x /usr/local/sbin/conjet-netd ]; then exec /usr/local/sbin/conjet-netd 2>&1; else echo "conjet-netd-c requested but /usr/local/sbin/conjet-netd is missing" >&2; exit 42; fi ;; *) echo "unsupported CONJET_NET_BRIDGE_ENGINE=$engine" >&2; exit 43 ;; esac | /usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0'
+              ExecStart=/usr/local/sbin/conjet-docker-vsock-entrypoint.sh
               Restart=always
               RestartSec=2
-              StandardOutput=journal
-              StandardError=journal
+              StandardOutput=append:/run/conjet/docker-vsock.log
+              StandardError=append:/run/conjet/docker-vsock.log
 
               [Install]
               WantedBy=multi-user.target

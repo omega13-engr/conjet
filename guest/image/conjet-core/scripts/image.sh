@@ -202,6 +202,39 @@ chroot "${MOUNT_DIR}" /usr/bin/env \
     /usr/local/src/conjet-netd.c
 chroot "${MOUNT_DIR}" /usr/local/sbin/conjet-netd --capabilities >/dev/null
 
+cat >"${MOUNT_DIR}/usr/local/sbin/conjet-docker-vsock-entrypoint.sh" <<'SH'
+#!/bin/sh
+set -eu
+mkdir -p /run/conjet /mnt/conjetboot /etc/conjet
+if ! mountpoint -q /mnt/conjetboot; then
+    mount -t virtiofs conjetboot /mnt/conjetboot 2>/dev/null || true
+fi
+engine="${CONJET_NET_BRIDGE_ENGINE:-$(cat /mnt/conjetboot/network-bridge-engine 2>/dev/null || cat /etc/conjet/network-bridge-engine 2>/dev/null || echo auto)}"
+case "${engine}" in
+    auto|"")
+        if [ -x /usr/local/sbin/conjet-netd ]; then
+            exec /usr/local/sbin/conjet-netd
+        fi
+        exec /usr/local/sbin/conjet-docker-vsock-bridge.py
+        ;;
+    conjet-netd|conjet-netd-c)
+        if [ -x /usr/local/sbin/conjet-netd ]; then
+            exec /usr/local/sbin/conjet-netd
+        fi
+        echo "conjet-netd-c requested but /usr/local/sbin/conjet-netd is missing" >&2
+        exit 42
+        ;;
+    python|python-legacy)
+        exec /usr/local/sbin/conjet-docker-vsock-bridge.py
+        ;;
+    *)
+        echo "unsupported CONJET_NET_BRIDGE_ENGINE=${engine}" >&2
+        exit 43
+        ;;
+esac
+SH
+chmod 0755 "${MOUNT_DIR}/usr/local/sbin/conjet-docker-vsock-entrypoint.sh"
+
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-data-disk.service" <<'UNIT'
 [Unit]
 Description=Conjet Docker data disk
@@ -249,11 +282,11 @@ Type=simple
 ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
 ExecStartPre=/usr/local/sbin/conjet-docker-service-guard.sh repair-if-required
 ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; mountpoint -q /mnt/conjetboot || mount -t virtiofs conjetboot /mnt/conjetboot 2>/dev/null || true; rm -f /run/conjet/docker-vsock-ready'
-ExecStart=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; engine="${CONJET_NET_BRIDGE_ENGINE:-$(cat /mnt/conjetboot/network-bridge-engine 2>/dev/null || cat /etc/conjet/network-bridge-engine 2>/dev/null || echo auto)}"; case "$engine" in auto|"") if [ -x /usr/local/sbin/conjet-netd ]; then exec /usr/local/sbin/conjet-netd 2>&1; else exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1; fi ;; conjet-netd|conjet-netd-c) if [ -x /usr/local/sbin/conjet-netd ]; then exec /usr/local/sbin/conjet-netd 2>&1; else echo "conjet-netd-c requested but /usr/local/sbin/conjet-netd is missing" >&2; exit 42; fi ;; python|python-legacy) exec /usr/local/sbin/conjet-docker-vsock-bridge.py 2>&1 ;; *) echo "unsupported CONJET_NET_BRIDGE_ENGINE=$engine" >&2; exit 43 ;; esac | /usr/bin/tee -a /run/conjet/docker-vsock.log /dev/hvc0'
+ExecStart=/usr/local/sbin/conjet-docker-vsock-entrypoint.sh
 Restart=always
 RestartSec=2
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:/run/conjet/docker-vsock.log
+StandardError=append:/run/conjet/docker-vsock.log
 
 [Install]
 WantedBy=multi-user.target

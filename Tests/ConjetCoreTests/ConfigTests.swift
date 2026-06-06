@@ -15,7 +15,9 @@ final class ConfigTests: XCTestCase {
             enableHostMounts: false,
             socketPath: "/tmp/conjet.sock",
             conjetCoreRepository: "omega13-engr/conjet",
-            energyMode: .eco
+            energyMode: .eco,
+            memoryProfile: .eco,
+            ssh: ConjetSSHPolicy(enabled: false, transport: "proxy-command", allowTCPFallback: false)
         )
         let parsed = try ConjetConfig.parseTOML(config.renderTOML())
         XCTAssertEqual(parsed, config)
@@ -38,6 +40,9 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.diskGiB, 100)
         XCTAssertEqual(config.runtime, "docker")
         XCTAssertEqual(config.energyMode, .balanced)
+        XCTAssertEqual(config.memoryProfile, .balanced)
+        XCTAssertTrue(config.ssh.enabled)
+        XCTAssertEqual(config.ssh.transport, "proxy-command")
         XCTAssertTrue(config.enableHostMounts)
     }
 
@@ -45,6 +50,23 @@ final class ConfigTests: XCTestCase {
         let parsed = try ConjetConfig.parseTOML("[daemon]\nenergy_mode = \"performance\"\n")
         XCTAssertEqual(parsed.energyMode, .performance)
         XCTAssertThrowsError(try ConjetConfig.parseTOML("[daemon]\nenergy_mode = \"turbo\"\n"))
+    }
+
+    func testMemoryProfileIsValidatedAndProducesPolicy() throws {
+        let parsed = try ConjetConfig.parseTOML("[vm]\nmemory_profile = \"eco\"\nmemory_mib = 8192\n")
+        XCTAssertEqual(parsed.memoryProfile, .eco)
+        XCTAssertEqual(parsed.memoryPolicy.recommendedMemoryMiB, 4096)
+        XCTAssertTrue(parsed.memoryPolicy.lazyRuntimeServices)
+        XCTAssertTrue(parsed.memoryPolicy.lazyNetworkHelpers)
+        XCTAssertThrowsError(try ConjetConfig.parseTOML("[vm]\nmemory_profile = \"tiny\"\n"))
+    }
+
+    func testSSHPolicyIsValidated() throws {
+        let parsed = try ConjetConfig.parseTOML("[ssh]\nenabled = false\ntransport = \"tcp\"\nallow_tcp_fallback = true\n")
+        XCTAssertFalse(parsed.ssh.enabled)
+        XCTAssertEqual(parsed.ssh.transport, "tcp")
+        XCTAssertTrue(parsed.ssh.allowTCPFallback)
+        XCTAssertThrowsError(try ConjetConfig.parseTOML("[ssh]\ntransport = \"lan\"\n"))
     }
 
     func testNamedProfilePathsAreIsolatedUnderProfilesDirectory() {

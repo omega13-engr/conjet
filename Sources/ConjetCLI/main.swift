@@ -44,6 +44,10 @@ struct ConjetCLI {
         switch command {
         case "doctor":
             try doctor(args: args, json: json)
+        case "ssh":
+            try ssh(args: args, json: json)
+        case "ssh-key":
+            try ssh(args: ["key"] + args, json: json)
         case "status":
             try status(json: json)
         case "start":
@@ -84,6 +88,27 @@ struct ConjetCLI {
     }
 
     private static func doctor(args: [String] = [], json: Bool) throws {
+        if args.first == "clock" || args.contains("--clock") {
+            let repair = args.contains("--repair")
+            let output = try doctorClock(repair: repair)
+            if json {
+                print(try ConjetJSON.string(output))
+            } else {
+                print("Conjet clock doctor")
+                print("  profile: \(ConjetPaths.default().profileName)")
+                print("  host/guest delta: \(output.hostGuestClockDeltaMs) ms")
+                print("  threshold: \(output.thresholdMs) ms")
+                print("  status: \(output.supported ? "within threshold" : "out of threshold")")
+                if output.repairAttempted {
+                    print("  repair: \(output.repairSucceeded ? "succeeded" : "failed")")
+                    if let latency = output.resyncLatencyMs {
+                        print("  repair latency: \(latency) ms")
+                    }
+                }
+                print("  note: \(output.message)")
+            }
+            return
+        }
         if args.contains("--repair-network") {
             let response = try UnixSocketClient(socketPath: try socketPath(paths: ConjetPaths.default()))
                 .send(DaemonRequest(command: .networkRepair), timeoutSeconds: 15)
@@ -123,6 +148,387 @@ struct ConjetCLI {
                 }
             }
         }
+    }
+
+    private static func doctorClock(repair: Bool) throws -> ClockDoctorOutput {
+        let thresholdMs = 100
+        var probe = try probeGuestClock()
+        var repairSucceeded = false
+        var repairLatencyMs: Int?
+        if abs(probe.deltaMs) > thresholdMs, repair {
+            let startedAt = Date()
+            repairSucceeded = try repairGuestClock()
+            repairLatencyMs = Int(Date().timeIntervalSince(startedAt) * 1000)
+            probe = try probeGuestClock()
+        }
+        let supported = abs(probe.deltaMs) <= thresholdMs
+        let message: String
+        if supported {
+            message = "guest clock is within the supported drift threshold"
+        } else if repair {
+            message = "guest clock remains outside the supported drift threshold after repair"
+        } else {
+            message = "run 'conjet doctor clock --repair' to resync the guest clock"
+        }
+        return ClockDoctorOutput(
+            hostEpochMs: probe.hostEpochMs,
+            guestEpochMs: probe.guestEpochMs,
+            hostGuestClockDeltaMs: probe.deltaMs,
+            thresholdMs: thresholdMs,
+            supported: supported,
+            repairAttempted: repair,
+            repairSucceeded: repairSucceeded,
+            resyncLatencyMs: repairLatencyMs,
+            message: message
+        )
+    }
+
+    private static func probeGuestClock() throws -> ClockProbe {
+        let hostEpochMs = Int(Date().timeIntervalSince1970 * 1000)
+        let result = try runGuestRootShell("date +%s%3N")
+        guard result.succeeded else {
+            throw ConjetError.processFailed(executable: "guest date", exitCode: result.exitCode, stderr: result.stderr)
+        }
+        let text = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let guestEpochMs = Int(text) else {
+            throw ConjetError.decoding("guest date returned unexpected value '\(text)'")
+        }
+        return ClockProbe(hostEpochMs: hostEpochMs, guestEpochMs: guestEpochMs, deltaMs: guestEpochMs - hostEpochMs)
+    }
+
+    private static func repairGuestClock() throws -> Bool {
+        if let response = try? UnixSocketClient(socketPath: try socketPath(paths: ConjetPaths.default())).send(
+            DaemonRequest(command: .clockRepair, parameters: ["reason": "doctor"]),
+            timeoutSeconds: 45
+        ), response.ok {
+            return true
+        }
+        let epochMs = Int(Date().timeIntervalSince1970 * 1000)
+        let seconds = epochMs / 1000
+        let milliseconds = epochMs % 1000
+        let timestamp = "\(seconds).\(String(format: "%03d", milliseconds))"
+        let script = """
+        if command -v timedatectl >/dev/null 2>&1; then timedatectl set-ntp false >/dev/null 2>&1 || true; fi
+        date -u -s @\(timestamp) >/dev/null 2>&1 || date -u -s @\(seconds) >/dev/null
+        hwclock -w >/dev/null 2>&1 || true
+        """
+        let result = try runGuestRootShell(script)
+        return result.succeeded
+    }
+
+    private static func ssh(args: [String] = [], json: Bool) throws {
+        var remaining = args
+        let subcommand = remaining.first ?? "connect"
+        if !remaining.isEmpty {
+            remaining.removeFirst()
+        }
+        switch subcommand {
+        case "status":
+            let output = try sshStatus(checkGuest: true)
+            if json {
+                print(try ConjetJSON.string(output))
+            } else {
+                printSSHStatus(output)
+            }
+        case "key", "ssh-key":
+            let keySubcommand = remaining.first ?? "status"
+            switch keySubcommand {
+            case "rotate":
+                try rotateSSHKey()
+                let output = try sshStatus(checkGuest: true)
+                if json {
+                    print(try ConjetJSON.string(output))
+                } else {
+                    print("Conjet SSH key rotated")
+                    printSSHStatus(output)
+                }
+            case "status":
+                let output = try sshStatus(checkGuest: false)
+                if json {
+                    print(try ConjetJSON.string(output))
+                } else {
+                    printSSHStatus(output)
+                }
+            default:
+                throw ConjetError.invalidArgument("unknown ssh key command '\(keySubcommand)'")
+            }
+        case "enable":
+            try updateSSHEnabled(true)
+            let output = try sshStatus(checkGuest: false)
+            if json {
+                print(try ConjetJSON.string(output))
+            } else {
+                print("Conjet SSH enabled")
+                printSSHStatus(output)
+            }
+        case "disable":
+            try updateSSHEnabled(false)
+            let output = try sshStatus(checkGuest: false)
+            if json {
+                print(try ConjetJSON.string(output))
+            } else {
+                print("Conjet SSH disabled")
+                printSSHStatus(output)
+            }
+        case "connect":
+            guard try ConjetConfig.loadOrCreate().ssh.enabled else {
+                throw ConjetError.unavailable("Conjet SSH is disabled for this profile")
+            }
+            try ensureSSHKeyInstalled()
+            let endpoint = sshEndpoint(config: try ConjetConfig.loadOrCreate())
+            if endpoint.transport == .tcp,
+               !localTCPConnectable(host: endpoint.host, port: endpoint.port, timeoutSeconds: 1.0) {
+                throw ConjetError.unavailable("Conjet SSH key and guest sshd are configured, but localhost SSH endpoint \(endpoint.host):\(endpoint.port) is not reachable")
+            }
+            try runInheritedProcess("/usr/bin/ssh", sshArguments(endpoint: endpoint) + remaining)
+        default:
+            guard try ConjetConfig.loadOrCreate().ssh.enabled else {
+                throw ConjetError.unavailable("Conjet SSH is disabled for this profile")
+            }
+            try ensureSSHKeyInstalled()
+            let endpoint = sshEndpoint(config: try ConjetConfig.loadOrCreate())
+            if endpoint.transport == .tcp,
+               !localTCPConnectable(host: endpoint.host, port: endpoint.port, timeoutSeconds: 1.0) {
+                throw ConjetError.unavailable("Conjet SSH key and guest sshd are configured, but localhost SSH endpoint \(endpoint.host):\(endpoint.port) is not reachable")
+            }
+            try runInheritedProcess("/usr/bin/ssh", sshArguments(endpoint: endpoint) + [subcommand] + remaining)
+        }
+    }
+
+    private static func printSSHStatus(_ output: SSHStatusOutput) {
+        print("Conjet SSH")
+        print("  profile: \(output.profile)")
+        print("  enabled: \(output.enabled ? "yes" : "no")")
+        print("  key: \(output.keyExists ? output.keyPath : "missing")")
+        print("  guest configured: \(output.guestConfigured ? "yes" : "no")")
+        print("  sshd running: \(output.sshdRunning ? "yes" : "no")")
+        print("  localhost-only: \(output.localhostOnly ? "yes" : "no")")
+        print("  endpoint: \(output.endpoint ?? "not reachable")")
+        print("  note: \(output.message)")
+    }
+
+    private static func sshStatus(checkGuest: Bool) throws -> SSHStatusOutput {
+        let paths = ConjetPaths.default()
+        let config = try ConjetConfig.loadOrCreate(paths: paths)
+        let keyPath = sshPrivateKeyURL(paths: paths)
+        let publicKeyPath = sshPublicKeyURL(paths: paths)
+        let keyExists = FileManager.default.fileExists(atPath: keyPath.path)
+            && FileManager.default.fileExists(atPath: publicKeyPath.path)
+        var guestConfigured = false
+        var sshdRunning = false
+        if config.ssh.enabled, checkGuest, FileManager.default.fileExists(atPath: paths.dockerSocket.path) {
+            if keyExists {
+                try? installSSHAuthorizedKey(publicKeyPath: publicKeyPath)
+            }
+            let result = try? runGuestRootShell("""
+            test -f /home/conjet/.ssh/authorized_keys && echo key=yes || echo key=no
+            (systemctl is-active --quiet ssh || systemctl is-active --quiet sshd || pgrep -x sshd >/dev/null 2>&1 || service sshd status >/dev/null 2>&1) && echo sshd=yes || echo sshd=no
+            """)
+            if let result, result.succeeded {
+                guestConfigured = result.stdout.contains("key=yes")
+                sshdRunning = result.stdout.contains("sshd=yes")
+            }
+        }
+        let endpoint = sshEndpoint(config: config)
+        let reachable = endpoint.transport == .proxyCommand
+            ? config.ssh.enabled && keyExists && guestConfigured && sshdRunning
+            : localTCPConnectable(host: endpoint.host, port: endpoint.port, timeoutSeconds: 0.3)
+        let message: String
+        if !config.ssh.enabled {
+            message = "profile SSH is disabled"
+        } else if reachable {
+            message = endpoint.transport == .proxyCommand
+                ? "local ProxyCommand SSH transport is available"
+                : "localhost SSH endpoint is reachable"
+        } else if keyExists && guestConfigured && sshdRunning {
+            message = "guest SSH is ready; localhost endpoint bridge is not reachable"
+        } else if keyExists {
+            message = "host key exists; run 'conjet ssh key rotate' or 'conjet ssh' to install it in the guest"
+        } else {
+            message = "profile-scoped SSH key has not been created"
+        }
+        return SSHStatusOutput(
+            profile: paths.profileName,
+            enabled: config.ssh.enabled,
+            keyPath: keyPath.path,
+            publicKeyPath: publicKeyPath.path,
+            keyExists: keyExists,
+            guestConfigured: guestConfigured,
+            sshdRunning: sshdRunning,
+            localhostOnly: true,
+            endpoint: reachable ? endpoint.description : nil,
+            message: message
+        )
+    }
+
+    private static func updateSSHEnabled(_ enabled: Bool) throws {
+        let paths = ConjetPaths.default()
+        var config = try ConjetConfig.loadOrCreate(paths: paths)
+        config.ssh.enabled = enabled
+        try config.save(paths: paths)
+    }
+
+    private static func rotateSSHKey() throws {
+        let paths = ConjetPaths.default()
+        let keyPath = sshPrivateKeyURL(paths: paths)
+        let publicKeyPath = sshPublicKeyURL(paths: paths)
+        try FileManager.default.createDirectory(at: keyPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: keyPath.path) {
+            try FileManager.default.removeItem(at: keyPath)
+        }
+        if FileManager.default.fileExists(atPath: publicKeyPath.path) {
+            try FileManager.default.removeItem(at: publicKeyPath)
+        }
+        let result = try ProcessRunner.run("/usr/bin/ssh-keygen", [
+            "-q",
+            "-t", "ed25519",
+            "-N", "",
+            "-C", "conjet-\(paths.profileName)",
+            "-f", keyPath.path
+        ], timeoutSeconds: 15)
+        guard result.succeeded else {
+            throw ConjetError.processFailed(executable: "ssh-keygen", exitCode: result.exitCode, stderr: result.stderr)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyPath.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: publicKeyPath.path)
+        try installSSHAuthorizedKey(publicKeyPath: publicKeyPath)
+    }
+
+    private static func ensureSSHKeyInstalled() throws {
+        let paths = ConjetPaths.default()
+        let keyPath = sshPrivateKeyURL(paths: paths)
+        let publicKeyPath = sshPublicKeyURL(paths: paths)
+        if !FileManager.default.fileExists(atPath: keyPath.path)
+            || !FileManager.default.fileExists(atPath: publicKeyPath.path) {
+            try rotateSSHKey()
+            return
+        }
+        try installSSHAuthorizedKey(publicKeyPath: publicKeyPath)
+    }
+
+    private static func installSSHAuthorizedKey(publicKeyPath: URL) throws {
+        let publicKey = try String(contentsOf: publicKeyPath, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard publicKey.hasPrefix("ssh-ed25519 ") else {
+            throw ConjetError.decoding("Conjet SSH public key is not an ed25519 key")
+        }
+        let script = """
+        set -eu
+        if ! command -v sshd >/dev/null 2>&1; then
+          if command -v apt-get >/dev/null 2>&1; then
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y openssh-server
+          elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y openssh-server
+          elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache openssh-server
+          else
+            echo "unsupported package manager for openssh-server" >&2
+            exit 1
+          fi
+        fi
+        if ! id conjet >/dev/null 2>&1; then useradd -m -s /bin/sh conjet 2>/dev/null || adduser -D -s /bin/sh conjet; fi
+        passwd -l conjet >/dev/null 2>&1 || true
+        mkdir -p /home/conjet/.ssh /run/sshd /etc/ssh/sshd_config.d
+        printf '%s\\n' \(shellSingleQuote(publicKey)) >/home/conjet/.ssh/authorized_keys
+        chown -R conjet:conjet /home/conjet/.ssh 2>/dev/null || chown -R conjet /home/conjet/.ssh
+        chmod 700 /home/conjet/.ssh
+        chmod 600 /home/conjet/.ssh/authorized_keys
+        cat >/etc/ssh/sshd_config.d/99-conjet-managed.conf <<'SSH'
+        PasswordAuthentication no
+        KbdInteractiveAuthentication no
+        PermitRootLogin no
+        PubkeyAuthentication yes
+        X11Forwarding no
+        AllowTcpForwarding no
+        GatewayPorts no
+        AllowUsers conjet
+        SSH
+        ssh-keygen -A
+        /usr/sbin/sshd -t -e
+        if command -v systemctl >/dev/null 2>&1; then
+          systemctl daemon-reload >/dev/null 2>&1 || true
+          systemctl enable --now ssh.socket >/dev/null 2>&1 || true
+          systemctl restart ssh >/dev/null 2>&1 || systemctl restart ssh.service >/dev/null 2>&1 || systemctl start ssh >/dev/null 2>&1 || systemctl start ssh.service >/dev/null 2>&1 || true
+        fi
+        if ! (systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null || pgrep -x sshd >/dev/null 2>&1 || service sshd status >/dev/null 2>&1); then
+          service sshd restart >/dev/null 2>&1 || service ssh restart >/dev/null 2>&1 || /usr/sbin/sshd
+        fi
+        systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd 2>/dev/null || pgrep -x sshd >/dev/null 2>&1 || service sshd status >/dev/null 2>&1 || service ssh status >/dev/null 2>&1
+        """
+        let result = try runGuestRootShell(script)
+        guard result.succeeded else {
+            throw ConjetError.processFailed(executable: "guest ssh setup", exitCode: result.exitCode, stderr: result.stderr)
+        }
+    }
+
+    private static func sshPrivateKeyURL(paths: ConjetPaths) -> URL {
+        paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("id_ed25519")
+    }
+
+    private static func sshPublicKeyURL(paths: ConjetPaths) -> URL {
+        URL(fileURLWithPath: sshPrivateKeyURL(paths: paths).path + ".pub")
+    }
+
+    private static func sshEndpoint(config: ConjetConfig) -> SSHEndpoint {
+        if (ProcessInfo.processInfo.environment["CONJET_SSH_TRANSPORT"] ?? config.ssh.transport) == "tcp" {
+            let host = ProcessInfo.processInfo.environment["CONJET_SSH_HOST"] ?? "127.0.0.1"
+            let port = ProcessInfo.processInfo.environment["CONJET_SSH_PORT"].flatMap(Int.init) ?? 2222
+            return SSHEndpoint(transport: .tcp, host: host, port: port)
+        }
+        return SSHEndpoint(transport: .proxyCommand, host: "conjet", port: 0)
+    }
+
+    private static func sshProxyCommand(paths: ConjetPaths) -> String {
+        [
+            "/usr/bin/env",
+            "docker",
+            "--host", shellSingleQuote("unix://\(paths.dockerSocket.path)"),
+            "run",
+            "--rm",
+            "-i",
+            "--privileged",
+            "--pid=host",
+            "--net=host",
+            "--ipc=host",
+            "--uts=host",
+            "ubuntu:24.04",
+            "nsenter",
+            "-t", "1",
+            "-m",
+            "-u",
+            "-i",
+            "-n",
+            "-p",
+            "--",
+            "/usr/sbin/sshd",
+            "-i",
+            "-e"
+        ].joined(separator: " ")
+    }
+
+    private static func sshArguments(endpoint: SSHEndpoint) -> [String] {
+        let paths = ConjetPaths.default()
+        var arguments = [
+            "-i", sshPrivateKeyURL(paths: paths).path,
+            "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=\(paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("known_hosts").path)"
+        ]
+        switch endpoint.transport {
+        case .proxyCommand:
+            arguments += [
+                "-o", "ProxyCommand=\(sshProxyCommand(paths: paths))",
+                "conjet@conjet"
+            ]
+        case .tcp:
+            arguments += [
+                "-p", String(endpoint.port),
+                "conjet@\(endpoint.host)"
+            ]
+        }
+        return arguments
     }
 
     private static func status(json: Bool) throws {
@@ -482,6 +888,10 @@ struct ConjetCLI {
            !envEnergyMode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             config.energyMode = try parseEnergyMode(envEnergyMode)
         }
+        if let envMemoryProfile = ProcessInfo.processInfo.environment["CONJET_MEMORY_PROFILE"],
+           !envMemoryProfile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            config.memoryProfile = try parseMemoryProfile(envMemoryProfile)
+        }
         let original = config
         var remaining = args
 
@@ -516,6 +926,13 @@ struct ConjetCLI {
                 config.networkBridgeEngine = try parseNetworkBridgeEngine(consumeValue(flag, from: &remaining))
             case "--energy-mode":
                 config.energyMode = try parseEnergyMode(consumeValue(flag, from: &remaining))
+            case "--memory-profile":
+                config.memoryProfile = try parseMemoryProfile(consumeValue(flag, from: &remaining))
+                if config.memoryProfile == .eco,
+                   !args.contains("--memory"),
+                   config.memoryMiB == ConjetConfig.default.memoryMiB {
+                    config.memoryMiB = config.memoryPolicy.recommendedMemoryMiB
+                }
             case "--allow-cidr":
                 config.networkLANAllowedCIDRs.append(try consumeValue(flag, from: &remaining))
             case "--allow-port":
@@ -1470,6 +1887,7 @@ struct ConjetCLI {
         }
         print("  runtime: \(config.runtime)")
         print("  energy mode: \(config.energyMode.rawValue)")
+        print("  memory profile: \(config.memoryProfile.rawValue)")
         print("  network bind policy: \(config.networkBindPolicy.rawValue)")
         print("  network proxy engine: \(config.networkProxyEngine.rawValue)")
         print("  network bridge engine: \(config.networkBridgeEngine.rawValue)")
@@ -1859,6 +2277,13 @@ struct ConjetCLI {
         return mode
     }
 
+    private static func parseMemoryProfile(_ value: String) throws -> ConjetMemoryProfile {
+        guard let profile = ConjetMemoryProfile(rawValue: value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
+            throw ConjetError.invalidArgument("memory profile must be performance, balanced, or eco")
+        }
+        return profile
+    }
+
     private static func parseMemoryMiB(_ value: String, flag: String) throws -> Int {
         let lowercased = value.lowercased()
         if lowercased.hasSuffix("mib") || lowercased.hasSuffix("mb") {
@@ -2231,6 +2656,26 @@ struct ConjetCLI {
         } catch {
             Darwin.close(fd)
             throw error
+        }
+    }
+
+    private static func localTCPConnectable(host: String, port: Int, timeoutSeconds: Double) -> Bool {
+        guard port > 0, port <= 65_535 else { return false }
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        setSocketTimeoutForBridgeTest(fd, timeoutSeconds: timeoutSeconds)
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+            return false
+        }
+        return withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.connect(fd, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
         }
     }
 
@@ -2975,7 +3420,7 @@ struct ConjetCLI {
 
                 Usage:
                   conjet start [--cpus N] [--memory SIZE] [--disk SIZE_OR_PATH] [--runtime NAME] [--arch ARCH]
-                               [--energy-mode MODE] [--network-bind-policy POLICY] [--proxy-engine ENGINE]
+                               [--energy-mode MODE] [--memory-profile MODE] [--network-bind-policy POLICY] [--proxy-engine ENGINE]
 
                 Options:
                   --cpus, --cpu N       Set VM CPU count
@@ -2984,6 +3429,7 @@ struct ConjetCLI {
                   --runtime NAME        Set container runtime preference
                   --arch ARCH           Set guest architecture
                   --energy-mode performance|balanced|eco
+                  --memory-profile performance|balanced|eco
                   --network-bind-policy secure-local|docker-strict|lan-allowlist
                   --proxy-engine auto|nio|event-loop|gcd-evented|gcd-fallback|turbo
                   --allow-cidr CIDR     Add a LAN allowlist CIDR for lan-allowlist mode
@@ -3025,6 +3471,7 @@ struct ConjetCLI {
                   --runtime NAME        Set container runtime preference
                   --arch ARCH           Set guest architecture
                   --energy-mode performance|balanced|eco
+                  --memory-profile performance|balanced|eco
                   --network-bind-policy secure-local|docker-strict|lan-allowlist
                   --proxy-engine auto|nio|event-loop|gcd-evented|gcd-fallback|turbo
                   --profile NAME        Use an isolated Conjet profile
@@ -3075,12 +3522,36 @@ struct ConjetCLI {
                 Check host capabilities and Conjet configuration.
 
                 Usage:
-                  conjet doctor [--repair-network] [--json]
+                  conjet doctor [clock [--repair]|--repair-network] [--json]
 
                 Options:
+                  clock                 Report host/guest clock drift
+                  --repair              Repair clock drift when used with doctor clock
                   --repair-network      Reconcile ConjetNet state and restart network tracking
                   --profile NAME        Use an isolated Conjet profile
                   --json                Emit machine-readable JSON
+                  -h, --help            Show this help text
+                """
+            )
+        case "ssh", "ssh-key":
+            print(
+                """
+                Manage the Conjet profile SSH key and localhost-only SSH access.
+
+                Usage:
+                  conjet ssh [command]
+                  conjet ssh-key rotate
+
+                Commands:
+                  status                Show SSH key, guest sshd, and localhost endpoint status
+                  enable                Enable SSH for this profile
+                  disable               Disable SSH for this profile
+                  key status            Show profile-scoped key status
+                  key rotate            Rotate the profile-scoped Ed25519 key and install it in the guest
+
+                Options:
+                  --profile NAME        Use an isolated Conjet profile
+                  --json                Emit machine-readable JSON where supported
                   -h, --help            Show this help text
                 """
             )
@@ -3482,6 +3953,8 @@ struct ConjetCLI {
               update      Update the Conjet Core VM image
               status      Show daemon, VM, and Docker socket status
               doctor      Check host capabilities and Conjet configuration
+              ssh         Manage localhost-only SSH access
+              ssh-key     Rotate or inspect the profile SSH key
               shell       Open a privileged Linux shell through the Conjet Docker socket
               run         Run a Docker image through Conjet
               compose     Pass through to docker compose using Conjet
@@ -4047,6 +4520,57 @@ private struct DoctorOutput: Codable, Equatable {
     var host: HostCapabilities
     var virtualization: VirtualizationCapabilities
     var config: ConjetConfig
+}
+
+private struct ClockDoctorOutput: Codable, Equatable {
+    var hostEpochMs: Int
+    var guestEpochMs: Int
+    var hostGuestClockDeltaMs: Int
+    var thresholdMs: Int
+    var supported: Bool
+    var repairAttempted: Bool
+    var repairSucceeded: Bool
+    var resyncLatencyMs: Int?
+    var message: String
+}
+
+private struct ClockProbe: Codable, Equatable {
+    var hostEpochMs: Int
+    var guestEpochMs: Int
+    var deltaMs: Int
+}
+
+private struct SSHStatusOutput: Codable, Equatable {
+    var profile: String
+    var enabled: Bool
+    var keyPath: String
+    var publicKeyPath: String
+    var keyExists: Bool
+    var guestConfigured: Bool
+    var sshdRunning: Bool
+    var localhostOnly: Bool
+    var endpoint: String?
+    var message: String
+}
+
+private enum SSHTransport: String, Codable, Equatable {
+    case proxyCommand = "proxy-command"
+    case tcp
+}
+
+private struct SSHEndpoint: Codable, Equatable {
+    var transport: SSHTransport
+    var host: String
+    var port: Int
+
+    var description: String {
+        switch transport {
+        case .proxyCommand:
+            return "proxy-command:docker-local"
+        case .tcp:
+            return "\(host):\(port)"
+        }
+    }
 }
 
 private struct ProfileStatus: Codable, Equatable {

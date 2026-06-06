@@ -81,7 +81,8 @@ struct target {
     uint16_t port;
     pthread_mutex_t io_lock;
     int udp_fd;
-    struct sockaddr_in udp_addr;
+    struct sockaddr_storage udp_addr;
+    socklen_t udp_addr_len;
     int udp_addr_ready;
     struct target *next;
 };
@@ -605,8 +606,9 @@ static ssize_t udp_exchange_target(uint32_t id, const uint8_t *payload, uint32_t
     }
     pthread_mutex_lock(&t->io_lock);
     pthread_mutex_unlock(&g_targets_lock);
+    int family = strchr(t->host, ':') != NULL ? AF_INET6 : AF_INET;
     if (t->udp_fd < 0) {
-        t->udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        t->udp_fd = socket(family, SOCK_DGRAM, 0);
         if (t->udp_fd < 0) {
             pthread_mutex_unlock(&t->io_lock);
             return -1;
@@ -616,15 +618,28 @@ static ssize_t udp_exchange_target(uint32_t id, const uint8_t *payload, uint32_t
     }
     if (!t->udp_addr_ready) {
         memset(&t->udp_addr, 0, sizeof(t->udp_addr));
-        t->udp_addr.sin_family = AF_INET;
-        t->udp_addr.sin_port = htons(t->port);
-        if (inet_pton(AF_INET, t->host, &t->udp_addr.sin_addr) != 1) {
-            pthread_mutex_unlock(&t->io_lock);
-            return -1;
+        if (family == AF_INET6) {
+            struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&t->udp_addr;
+            addr6->sin6_family = AF_INET6;
+            addr6->sin6_port = htons(t->port);
+            if (inet_pton(AF_INET6, t->host, &addr6->sin6_addr) != 1) {
+                pthread_mutex_unlock(&t->io_lock);
+                return -1;
+            }
+            t->udp_addr_len = sizeof(*addr6);
+        } else {
+            struct sockaddr_in *addr4 = (struct sockaddr_in *)&t->udp_addr;
+            addr4->sin_family = AF_INET;
+            addr4->sin_port = htons(t->port);
+            if (inet_pton(AF_INET, t->host, &addr4->sin_addr) != 1) {
+                pthread_mutex_unlock(&t->io_lock);
+                return -1;
+            }
+            t->udp_addr_len = sizeof(*addr4);
         }
         t->udp_addr_ready = 1;
     }
-    if (sendto(t->udp_fd, payload, payload_len, 0, (struct sockaddr *)&t->udp_addr, sizeof(t->udp_addr)) >= 0) {
+    if (sendto(t->udp_fd, payload, payload_len, 0, (struct sockaddr *)&t->udp_addr, t->udp_addr_len) >= 0) {
         result = recv(t->udp_fd, out, out_len, 0);
     }
     pthread_mutex_unlock(&t->io_lock);
@@ -787,20 +802,42 @@ static void handle_legacy_udp(int client, const char *line, const uint8_t *paylo
     memcpy(host, target, host_len);
     host[host_len] = '\0';
     int port = atoi(colon + 1);
-    int upstream = socket(AF_INET, SOCK_DGRAM, 0);
+    int family = strchr(host, ':') != NULL ? AF_INET6 : AF_INET;
+    int upstream = socket(family, SOCK_DGRAM, 0);
     if (upstream < 0) {
         close_fd(client);
         return;
     }
     struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
     setsockopt(upstream, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    struct sockaddr_in addr;
+    struct sockaddr_storage addr;
+    socklen_t addr_len = 0;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-    inet_pton(AF_INET, host, &addr.sin_addr);
+    if (family == AF_INET6) {
+        struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)&addr;
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = htons((uint16_t)port);
+        if (inet_pton(AF_INET6, host, &addr6->sin6_addr) != 1) {
+            metric_inc(&g_metrics.udp_drops);
+            close_fd(upstream);
+            close_fd(client);
+            return;
+        }
+        addr_len = sizeof(*addr6);
+    } else {
+        struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = htons((uint16_t)port);
+        if (inet_pton(AF_INET, host, &addr4->sin_addr) != 1) {
+            metric_inc(&g_metrics.udp_drops);
+            close_fd(upstream);
+            close_fd(client);
+            return;
+        }
+        addr_len = sizeof(*addr4);
+    }
     metric_inc(&g_metrics.udp_packets_in);
-    if (sendto(upstream, payload, payload_len, 0, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (sendto(upstream, payload, payload_len, 0, (struct sockaddr *)&addr, addr_len) < 0) {
         metric_inc(&g_metrics.udp_drops);
         close_fd(upstream);
         close_fd(client);

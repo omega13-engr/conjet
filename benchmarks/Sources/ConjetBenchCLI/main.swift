@@ -31,6 +31,14 @@ struct ConjetBenchCLI {
             try gate(args: args)
         case "energy-gate":
             try energyGate(args: args)
+        case "memory-gate":
+            try memoryGate(args: args)
+        case "clock-gate":
+            try clockGate(args: args)
+        case "ssh-gate":
+            try sshGate(args: args)
+        case "ipv6-gate":
+            try ipv6Gate(args: args)
         case "network-gate":
             try networkGate(args: args)
         case "network-segments":
@@ -510,6 +518,198 @@ struct ConjetBenchCLI {
         print("  report: \(result.markdownReport)")
     }
 
+    private static func memoryGate(args: [String]) throws {
+        let startedAt = Date()
+        if args.contains("--start") {
+            _ = try runProcess(["/usr/bin/env", "swift", "run", "conjet", "start"], timeoutSeconds: 300)
+        }
+        let config = try ConjetConfig.loadOrCreate()
+        let policy = config.memoryPolicy
+        var metrics = BenchmarkMetrics()
+        metrics["configured_memory_mib"] = Double(config.memoryMiB)
+        metrics["recommended_memory_mib"] = Double(policy.recommendedMemoryMiB)
+        metrics.setString(policy.profile.rawValue, for: "memory_profile")
+        metrics.setBool(policy.lazyRuntimeServices, for: "lazy_runtime_services")
+        metrics.setBool(policy.lazyNetworkHelpers, for: "lazy_network_helpers")
+        metrics["helper_reclaim_seconds"] = Double(policy.reclaimIdleHelpersAfterSeconds)
+        metrics["idle_wakeup_budget_per_sec"] = policy.idleWakeupBudgetPerSecond
+        metrics["conjetd_rss_mb"] = hostRSSMiB(processName: "conjetd") ?? 0
+        metrics["conjet_cli_rss_mb"] = hostRSSMiB(processName: "conjet") ?? 0
+        metrics["network_helper_rss_mb"] = hostRSSMiB(processName: "conjet-netd") ?? 0
+        if FileManager.default.fileExists(atPath: ConjetPaths.default().dockerSocket.path) {
+            metrics.merge(try guestRSSMetrics())
+            if args.contains("--first-container") {
+                metrics["time_to_first_container"] = try measureFirstContainerSeconds()
+            }
+        }
+        let passed = config.memoryMiB >= 512
+        let result = BenchmarkResult(
+            workload: "memory-gate",
+            runtime: "conjet",
+            command: CommandLine.arguments,
+            startedAt: startedAt,
+            durationSeconds: Date().timeIntervalSince(startedAt),
+            exitCode: passed ? 0 : 1,
+            metrics: metrics,
+            machine: MachineProfiler.capture(),
+            stdoutTail: "memory profile \(policy.profile.rawValue)",
+            stderrTail: passed ? "" : "configured memory below supported minimum"
+        )
+        try emitSingleGateResult(result, args: args)
+        guard passed else { throw ConjetError.unavailable("memory gate failed") }
+    }
+
+    private static func clockGate(args: [String]) throws {
+        let startedAt = Date()
+        if args.contains("--start") {
+            _ = try runProcess(["/usr/bin/env", "swift", "run", "conjet", "start"], timeoutSeconds: 300)
+        }
+        let repair = args.contains("--repair")
+        let before = try clockProbe()
+        var after = before
+        var repairLatencyMs: Double?
+        if abs(before.deltaMs) > 100, repair {
+            let repairStartedAt = Date()
+            _ = try repairGuestClockForGate()
+            repairLatencyMs = Date().timeIntervalSince(repairStartedAt) * 1000
+            after = try clockProbe()
+        }
+        var metrics = BenchmarkMetrics()
+        metrics["host_guest_clock_delta_ms"] = Double(before.deltaMs)
+        metrics["delta_after_repair_ms"] = Double(after.deltaMs)
+        if let repairLatencyMs {
+            metrics["resync_latency_ms"] = repairLatencyMs
+        }
+        metrics.setBool(repair, for: "repair_requested")
+        let passed = abs(after.deltaMs) <= 100
+        let result = BenchmarkResult(
+            workload: "clock-gate",
+            runtime: "conjet",
+            command: CommandLine.arguments,
+            startedAt: startedAt,
+            durationSeconds: Date().timeIntervalSince(startedAt),
+            exitCode: passed ? 0 : 1,
+            metrics: metrics,
+            machine: MachineProfiler.capture(),
+            stdoutTail: "clock delta \(after.deltaMs) ms",
+            stderrTail: passed ? "" : "clock drift exceeds 100 ms"
+        )
+        try emitSingleGateResult(result, args: args)
+        guard passed else { throw ConjetError.unavailable("clock gate failed") }
+    }
+
+    private static func sshGate(args: [String]) throws {
+        let startedAt = Date()
+        if args.contains("--start") {
+            _ = try runProcess(["/usr/bin/env", "swift", "run", "conjet", "start"], timeoutSeconds: 300)
+        }
+        let status = try runProcess(["/usr/bin/env", "swift", "run", "conjet", "ssh", "status", "--json"], timeoutSeconds: 240)
+        var metrics = BenchmarkMetrics()
+        metrics.setBool(status.succeeded, for: "ssh_status_command_ok")
+        let keyExists = jsonBoolField("keyExists", in: status.stdout) == true
+        let guestConfigured = jsonBoolField("guestConfigured", in: status.stdout) == true
+        let sshdRunning = jsonBoolField("sshdRunning", in: status.stdout) == true
+        let localhostOnly = jsonBoolField("localhostOnly", in: status.stdout) == true
+        let endpointReachable = jsonStringField("endpoint", in: status.stdout) != nil
+        let disabledModeOK = args.contains("--check-disabled-mode") ? try sshDisabledModeCheck(originalStatusJSON: status.stdout) : true
+        metrics.setBool(keyExists, for: "ssh_key_exists")
+        metrics.setBool(guestConfigured, for: "guest_authorized_key_configured")
+        metrics.setBool(sshdRunning, for: "guest_sshd_running")
+        metrics.setBool(localhostOnly, for: "localhost_only")
+        metrics.setBool(endpointReachable, for: "localhost_endpoint_reachable")
+        metrics.setBool(disabledModeOK, for: "ssh_disabled_mode_ok")
+        let requireEndpoint = args.contains("--require-endpoint")
+        let passed = status.succeeded
+            && keyExists
+            && guestConfigured
+            && sshdRunning
+            && localhostOnly
+            && disabledModeOK
+            && (!requireEndpoint || endpointReachable)
+        let result = BenchmarkResult(
+            workload: "ssh-gate",
+            runtime: "conjet",
+            command: CommandLine.arguments,
+            startedAt: startedAt,
+            durationSeconds: Date().timeIntervalSince(startedAt),
+            exitCode: passed ? 0 : 1,
+            metrics: metrics,
+            machine: MachineProfiler.capture(),
+            stdoutTail: status.stdout,
+            stderrTail: passed ? "" : status.stderr
+        )
+        try emitSingleGateResult(result, args: args)
+        guard passed else { throw ConjetError.unavailable("ssh gate failed") }
+    }
+
+    private static func ipv6Gate(args: [String]) throws {
+        let startedAt = Date()
+        if args.contains("--start") {
+            _ = try runProcess(["/usr/bin/env", "swift", "run", "conjet", "start"], timeoutSeconds: 300)
+        }
+        let socket = ConjetPaths.default().dockerSocket.path
+        guard FileManager.default.fileExists(atPath: socket) else {
+            throw ConjetError.unavailable("Conjet Docker socket is not available; rerun with --start")
+        }
+        let port = Int.random(in: 20_000...40_000)
+        let udpPort = Int.random(in: 40_001...55_000)
+        let containerName = "conjet-ipv6-gate-\(UUID().uuidString.prefix(8))"
+        let udpContainerName = "\(containerName)-udp"
+        _ = try? runProcess(["/usr/bin/env", "docker", "--host", "unix://\(socket)", "rm", "-f", containerName], timeoutSeconds: 10)
+        _ = try? runProcess(["/usr/bin/env", "docker", "--host", "unix://\(socket)", "rm", "-f", udpContainerName], timeoutSeconds: 10)
+        defer {
+            _ = try? runProcess(["/usr/bin/env", "docker", "--host", "unix://\(socket)", "rm", "-f", containerName], timeoutSeconds: 10)
+            _ = try? runProcess(["/usr/bin/env", "docker", "--host", "unix://\(socket)", "rm", "-f", udpContainerName], timeoutSeconds: 10)
+        }
+        let run = try runProcess([
+            "/usr/bin/env", "docker", "--host", "unix://\(socket)",
+            "run", "-d", "--name", containerName,
+            "-p", "[::1]:\(port):80",
+            "nginx:alpine"
+        ], timeoutSeconds: 120)
+        var metrics = BenchmarkMetrics()
+        metrics.setBool(run.succeeded, for: "container_started")
+        Thread.sleep(forTimeInterval: 2)
+        let curl6 = try runProcess(["/usr/bin/curl", "-g", "-6", "--max-time", "5", "http://[::1]:\(port)/"], timeoutSeconds: 10)
+        metrics.setBool(curl6.succeeded, for: "ipv6_loopback_tcp_ok")
+        metrics["published_tcp_port"] = Double(port)
+        let udpRun = try runProcess([
+            "/usr/bin/env", "docker", "--host", "unix://\(socket)",
+            "run", "-d", "--name", udpContainerName,
+            "-p", "[::1]:\(udpPort):5353/udp",
+            "python:3-alpine",
+            "python3", "-u", "-c",
+            """
+            import socket
+            s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+            s.bind(('0.0.0.0',5353))
+            while True:
+             data,addr=s.recvfrom(2048)
+             s.sendto(data,addr)
+            """
+        ], timeoutSeconds: 120)
+        Thread.sleep(forTimeInterval: 2)
+        let udpOK = udpRun.succeeded && ipv6UDPEcho(port: udpPort, payload: "conjet-ipv6-udp")
+        metrics.setBool(udpRun.succeeded, for: "udp_container_started")
+        metrics.setBool(udpOK, for: "ipv6_loopback_udp_ok")
+        metrics["published_udp_port"] = Double(udpPort)
+        let passed = run.succeeded && curl6.succeeded && udpOK
+        let result = BenchmarkResult(
+            workload: "ipv6-gate",
+            runtime: "conjet",
+            command: CommandLine.arguments,
+            startedAt: startedAt,
+            durationSeconds: Date().timeIntervalSince(startedAt),
+            exitCode: passed ? 0 : 1,
+            metrics: metrics,
+            machine: MachineProfiler.capture(),
+            stdoutTail: curl6.stdout,
+            stderrTail: [run.stderr, curl6.stderr, udpRun.stderr].filter { !$0.isEmpty }.joined(separator: "\n")
+        )
+        try emitSingleGateResult(result, args: args)
+        guard passed else { throw ConjetError.unavailable("ipv6 gate failed") }
+    }
+
     private static func networkGate(args: [String]) throws {
         let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack", "colima"]
         let samples = benchmarkSamples()
@@ -885,11 +1085,206 @@ struct ConjetBenchCLI {
         return String(body[..<end])
     }
 
+    private static func jsonBoolField(_ field: String, in text: String) -> Bool? {
+        guard let fieldRange = text.range(of: "\"\(field)\"") else { return nil }
+        let suffix = text[fieldRange.upperBound...]
+        guard let colon = suffix.firstIndex(of: ":") else { return nil }
+        let afterColon = suffix[suffix.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        if afterColon.hasPrefix("true") { return true }
+        if afterColon.hasPrefix("false") { return false }
+        return nil
+    }
+
+    private static func ipv6UDPEcho(port: Int, payload: String) -> Bool {
+        let fd = Darwin.socket(AF_INET6, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        var address = sockaddr_in6()
+        address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+        address.sin6_family = sa_family_t(AF_INET6)
+        address.sin6_port = in_port_t(port).bigEndian
+        guard inet_pton(AF_INET6, "::1", &address.sin6_addr) == 1 else {
+            return false
+        }
+        let bytes = [UInt8](payload.utf8)
+        let sent = bytes.withUnsafeBytes { rawBuffer -> Int in
+            guard let base = rawBuffer.baseAddress else { return -1 }
+            return withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    Darwin.sendto(fd, base, bytes.count, 0, socketAddress, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                }
+            }
+        }
+        guard sent == bytes.count else { return false }
+        var buffer = [UInt8](repeating: 0, count: 2048)
+        let received = Darwin.recv(fd, &buffer, buffer.count, 0)
+        guard received == bytes.count else { return false }
+        return String(decoding: buffer.prefix(received), as: UTF8.self) == payload
+    }
+
+    private static func sshDisabledModeCheck(originalStatusJSON: String) throws -> Bool {
+        let originallyEnabled = jsonBoolField("enabled", in: originalStatusJSON) != false
+        defer {
+            if originallyEnabled {
+                _ = try? runProcess(["/usr/bin/env", "swift", "run", "conjet", "ssh", "enable", "--json"], timeoutSeconds: 120)
+            } else {
+                _ = try? runProcess(["/usr/bin/env", "swift", "run", "conjet", "ssh", "disable", "--json"], timeoutSeconds: 120)
+            }
+        }
+        let disabled = try runProcess(["/usr/bin/env", "swift", "run", "conjet", "ssh", "disable", "--json"], timeoutSeconds: 120)
+        guard disabled.succeeded,
+              jsonStringField("message", in: disabled.stdout) == "profile SSH is disabled" else {
+            return false
+        }
+        let attempt = try runProcess(["/usr/bin/env", "swift", "run", "conjet", "ssh", "true"], timeoutSeconds: 120)
+        return !attempt.succeeded && attempt.stderr.contains("Conjet SSH is disabled")
+    }
+
     private static func runProcess(_ command: [String], timeoutSeconds: Double?) throws -> ProcessResult {
         guard let executable = command.first else {
             throw ConjetError.invalidArgument("empty command")
         }
         return try ProcessRunner.run(executable, Array(command.dropFirst()), timeoutSeconds: timeoutSeconds)
+    }
+
+    private static func emitSingleGateResult(_ result: BenchmarkResult, args: [String]) throws {
+        print(try ConjetJSON.string(result))
+        if let output = value(after: "--output-dir", in: args) {
+            let directory = URL(fileURLWithPath: expandedPath(output), isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent("\(result.workload).json")
+            try ConjetJSON.string(result).write(to: url, atomically: true, encoding: .utf8)
+            print("  result: \(url.path)")
+        }
+    }
+
+    private static func hostRSSMiB(processName: String) -> Double? {
+        guard let pgrep = try? runProcess(["/usr/bin/pgrep", "-x", processName], timeoutSeconds: 5),
+              pgrep.succeeded else {
+            return nil
+        }
+        let pids = pgrep.stdout.split(whereSeparator: \.isNewline).map(String.init)
+        guard !pids.isEmpty else { return nil }
+        var totalKiB = 0.0
+        for pid in pids {
+            guard let ps = try? runProcess(["/bin/ps", "-o", "rss=", "-p", pid], timeoutSeconds: 5),
+                  ps.succeeded,
+                  let rss = Double(ps.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                continue
+            }
+            totalKiB += rss
+        }
+        return totalKiB / 1024.0
+    }
+
+    private static func guestRSSMetrics() throws -> BenchmarkMetrics {
+        let output = try guestRootShell("""
+        ps -eo comm=,rss= | awk '
+        { rss[$1]+=$2 }
+        END {
+          for (name in rss) {
+            print name " " rss[name]
+          }
+        }'
+        """)
+        guard output.succeeded else {
+            throw ConjetError.processFailed(executable: "guest ps", exitCode: output.exitCode, stderr: output.stderr)
+        }
+        var metrics = BenchmarkMetrics()
+        for line in output.stdout.split(whereSeparator: \.isNewline).map(String.init) {
+            let parts = line.split(separator: " ")
+            guard parts.count == 2, let rssKiB = Double(parts[1]) else { continue }
+            let rssMiB = rssKiB / 1024.0
+            switch parts[0] {
+            case "containerd":
+                metrics["containerd_rss_mb"] = rssMiB
+            case "dockerd":
+                metrics["dockerd_rss_mb"] = rssMiB
+            case "buildkitd":
+                metrics["buildkitd_rss_mb"] = rssMiB
+            case "sshd":
+                metrics["sshd_rss_mb"] = rssMiB
+            case "systemd":
+                metrics["guest_agent_rss_mb"] = rssMiB
+            default:
+                continue
+            }
+        }
+        return metrics
+    }
+
+    private static func measureFirstContainerSeconds() throws -> Double {
+        let socket = ConjetPaths.default().dockerSocket.path
+        let startedAt = Date()
+        let result = try runProcess([
+            "/usr/bin/env", "docker", "--host", "unix://\(socket)",
+            "run", "--rm", "alpine:3.20", "true"
+        ], timeoutSeconds: 120)
+        guard result.succeeded else {
+            throw ConjetError.processFailed(executable: "docker first container", exitCode: result.exitCode, stderr: result.stderr)
+        }
+        return Date().timeIntervalSince(startedAt)
+    }
+
+    private static func clockProbe() throws -> (hostEpochMs: Int, guestEpochMs: Int, deltaMs: Int) {
+        let hostEpochMs = Int(Date().timeIntervalSince1970 * 1000)
+        let result = try guestRootShell("date +%s%3N")
+        guard result.succeeded else {
+            throw ConjetError.processFailed(executable: "guest date", exitCode: result.exitCode, stderr: result.stderr)
+        }
+        let text = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let guestEpochMs = Int(text) else {
+            throw ConjetError.decoding("guest date returned unexpected value '\(text)'")
+        }
+        return (hostEpochMs, guestEpochMs, guestEpochMs - hostEpochMs)
+    }
+
+    private static func repairGuestClockForGate() throws -> Bool {
+        let epochMs = Int(Date().timeIntervalSince1970 * 1000)
+        let seconds = epochMs / 1000
+        let milliseconds = epochMs % 1000
+        let timestamp = "\(seconds).\(String(format: "%03d", milliseconds))"
+        let result = try guestRootShell("""
+        if command -v timedatectl >/dev/null 2>&1; then timedatectl set-ntp false >/dev/null 2>&1 || true; fi
+        date -u -s @\(timestamp) >/dev/null 2>&1 || date -u -s @\(seconds) >/dev/null
+        hwclock -w >/dev/null 2>&1 || true
+        """)
+        return result.succeeded
+    }
+
+    private static func guestRootShell(_ script: String) throws -> ProcessResult {
+        let socket = ConjetPaths.default().dockerSocket.path
+        guard FileManager.default.fileExists(atPath: socket) else {
+            throw ConjetError.unavailable("Conjet Docker socket is not available; rerun with --start")
+        }
+        return try ProcessRunner.run("/usr/bin/env", [
+            "docker",
+            "--host",
+            "unix://\(socket)",
+            "run",
+            "--rm",
+            "--privileged",
+            "--pid=host",
+            "--net=host",
+            "--ipc=host",
+            "--uts=host",
+            "ubuntu:24.04",
+            "nsenter",
+            "-t",
+            "1",
+            "-m",
+            "-u",
+            "-i",
+            "-n",
+            "-p",
+            "--",
+            "sh",
+            "-lc",
+            script
+        ], timeoutSeconds: 120)
     }
 
     private static func samplePhase(_ value: String?) throws -> BenchmarkSamplePhase {
@@ -1238,6 +1633,10 @@ struct ConjetBenchCLI {
             Usage:
               conjet-bench run [options]
               conjet-bench energy-gate [options]
+              conjet-bench memory-gate [--start] [--first-container] [--output-dir DIR]
+              conjet-bench clock-gate [--start] [--repair] [--output-dir DIR]
+              conjet-bench ssh-gate [--start] [--require-endpoint] [--output-dir DIR]
+              conjet-bench ipv6-gate [--start] [--output-dir DIR]
               conjet-bench network-gate [options]
               conjet-bench network-segments [options]
               conjet-bench gate --reports PATH[,PATH...]
@@ -1245,6 +1644,10 @@ struct ConjetBenchCLI {
             Commands:
               run          Run energy in isolation, then wall-time suites in parallel.
               energy-gate  Run only the powermetrics energy gate.
+              memory-gate  Measure Conjet memory profile policy plus host/guest RSS.
+              clock-gate   Measure and optionally repair host/guest clock drift.
+              ssh-gate     Verify profile key, guest sshd hardening, and optional endpoint.
+              ipv6-gate    Verify scoped ::1 TCP publication.
               network-gate Run ConjetNet localhost TCP/UDP network gate.
               network-segments
                           Run ConjetNet path-segmentation microbenchmarks.

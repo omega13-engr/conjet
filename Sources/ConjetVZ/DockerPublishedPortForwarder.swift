@@ -35,6 +35,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
     private var targetEventThread: Thread?
     private var tcpListeners: [ForwardKey: any PortListener] = [:]
     private var udpListeners: [ForwardKey: any PortListener] = [:]
+    private var startingUDPKeys: Set<ForwardKey> = []
     private var statuses: [ForwardKey: ConjetPortForwardStatus] = [:]
     private var publishedPortCache: [String: Set<DockerPublishedPort>] = [:]
     private var containerTargetIPCache: [String: String] = [:]
@@ -101,6 +102,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         tcpListeners.removeAll()
         let udp = udpListeners
         udpListeners.removeAll()
+        startingUDPKeys.removeAll()
         for key in statuses.keys {
             statuses[key]?.state = .stopped
             statuses[key]?.updatedAt = Date()
@@ -1398,17 +1400,27 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             return
         }
         lock.lock()
-        let exists = udpListeners[key] != nil
+        let exists = udpListeners[key] != nil || startingUDPKeys.contains(key)
+        if !exists {
+            startingUDPKeys.insert(key)
+        }
         lock.unlock()
         guard !exists else { return }
+        defer {
+            lock.lock()
+            startingUDPKeys.remove(key)
+            lock.unlock()
+        }
 
         let listener: any PortListener
         let binaryUDP = capabilities.binaryFrames && capabilities.udpBinaryFrames
         let portForwardID = binaryPortForwardID(hostPort: publishedPort.hostPort, targetPort: publishedPort.containerPort)
+        let targetHost = udpTargetHost(for: publishedPort, bindAddress: bindAddress)
         if useNIOProxy {
             listener = NIOUDPPublishedPortListener(
                 bindAddress: bindAddress,
                 hostPort: publishedPort.hostPort,
+                guestHost: targetHost,
                 guestHostPort: publishedPort.hostPort,
                 portForwardID: portForwardID,
                 useBinaryFrames: binaryUDP,
@@ -1422,6 +1434,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             listener = UDPPublishedPortListener(
                 bindAddress: bindAddress,
                 hostPort: publishedPort.hostPort,
+                guestHost: targetHost,
                 guestHostPort: publishedPort.hostPort,
                 portForwardID: portForwardID,
                 useBinaryFrames: binaryUDP,
@@ -1447,6 +1460,13 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             listener.stop()
             setStatus(for: key, status(for: publishedPort, bindAddress: bindAddress, state: .failedConflict, error: conflictMessage(bindAddress: bindAddress, port: publishedPort.hostPort, proto: .udp, error: error), warning: warning))
         }
+    }
+
+    private func udpTargetHost(for publishedPort: DockerPublishedPort, bindAddress: String) -> String {
+        if bindAddress == "::1" || publishedPort.hostIP == "::1" {
+            return "::1"
+        }
+        return "127.0.0.1"
     }
 
     private func status(
@@ -1969,6 +1989,7 @@ private final class NIOTCPProxyHandler: ChannelInboundHandler, @unchecked Sendab
 private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendable {
     private let bindAddress: String
     private let hostPort: Int
+    private let guestHost: String
     private let guestHostPort: Int
     private let portForwardID: UInt32
     private let requestedBinaryFrames: Bool
@@ -1984,6 +2005,7 @@ private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendab
     init(
         bindAddress: String,
         hostPort: Int,
+        guestHost: String,
         guestHostPort: Int,
         portForwardID: UInt32,
         useBinaryFrames: Bool,
@@ -1993,6 +2015,7 @@ private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendab
     ) {
         self.bindAddress = bindAddress
         self.hostPort = hostPort
+        self.guestHost = guestHost
         self.guestHostPort = guestHostPort
         self.portForwardID = portForwardID
         self.requestedBinaryFrames = useBinaryFrames
@@ -2014,6 +2037,7 @@ private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendab
         let binaryEnabled = requestedBinaryFrames && registerBinaryUDPTarget(
             connector: connector,
             portForwardID: portForwardID,
+            guestHost: guestHost,
             guestHostPort: guestHostPort
         )
         let session = binaryEnabled ? BinaryUDPGuestSession(
@@ -2027,8 +2051,9 @@ private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendab
 
         let bootstrap = DatagramBootstrap(group: group)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .channelInitializer { [connector, metrics, statusHandler, guestHostPort, portForwardID, binaryEnabled, session] channel in
+            .channelInitializer { [connector, metrics, statusHandler, guestHost, guestHostPort, portForwardID, binaryEnabled, session] channel in
                 channel.pipeline.addHandler(NIOUDPProxyHandler(
+                    guestHost: guestHost,
                     guestHostPort: guestHostPort,
                     portForwardID: portForwardID,
                     useBinaryFrames: binaryEnabled,
@@ -2060,6 +2085,7 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
     typealias OutboundOut = AddressedEnvelope<ByteBuffer>
 
+    private let guestHost: String
     private let guestHostPort: Int
     private let portForwardID: UInt32
     private let useBinaryFrames: Bool
@@ -2069,6 +2095,7 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
     private let statusHandler: @Sendable (ProxyMetrics) -> Void
 
     init(
+        guestHost: String,
         guestHostPort: Int,
         portForwardID: UInt32,
         useBinaryFrames: Bool,
@@ -2077,6 +2104,7 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
         metrics: ProxyMetrics,
         statusHandler: @escaping @Sendable (ProxyMetrics) -> Void
     ) {
+        self.guestHost = guestHost
         self.guestHostPort = guestHostPort
         self.portForwardID = portForwardID
         self.useBinaryFrames = useBinaryFrames
@@ -2100,7 +2128,7 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
         let remoteAddress = envelope.remoteAddress
         let eventLoop = context.eventLoop
         let allocator = context.channel.allocator
-        DispatchQueue.global(qos: .userInitiated).async { [connector, guestHostPort, useBinaryFrames, binarySession, metrics, statusHandler, weak channel = context.channel] in
+        DispatchQueue.global(qos: .userInitiated).async { [connector, guestHost, guestHostPort, useBinaryFrames, binarySession, metrics, statusHandler, weak channel = context.channel] in
             guard let channel else { return }
             do {
                 let response: Data
@@ -2110,7 +2138,7 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
                     let guest = try connector.connect()
                     disableSigpipeForPortProxy(guest.fileDescriptor)
                     defer { guest.close() }
-                    let preface = "CONJET-UDP 127.0.0.1:\(guestHostPort)\n"
+                    let preface = "CONJET-UDP \(guestHost):\(guestHostPort)\n"
                     guard writeAllBytes(Data(preface.utf8) + Data(bytes), to: guest.fileDescriptor) else {
                         metrics.udpDrop()
                         statusHandler(metrics)
@@ -2433,6 +2461,7 @@ private final class TCPPublishedPortListener: PortListener, @unchecked Sendable 
 private final class UDPPublishedPortListener: PortListener, @unchecked Sendable {
     private let bindAddress: String
     private let hostPort: Int
+    private let guestHost: String
     private let guestHostPort: Int
     private let portForwardID: UInt32
     private let requestedBinaryFrames: Bool
@@ -2449,6 +2478,7 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
     init(
         bindAddress: String,
         hostPort: Int,
+        guestHost: String,
         guestHostPort: Int,
         portForwardID: UInt32,
         useBinaryFrames: Bool,
@@ -2457,6 +2487,7 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
     ) {
         self.bindAddress = bindAddress
         self.hostPort = hostPort
+        self.guestHost = guestHost
         self.guestHostPort = guestHostPort
         self.portForwardID = portForwardID
         self.requestedBinaryFrames = useBinaryFrames
@@ -2491,6 +2522,7 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
             binaryFramesEnabled = registerBinaryUDPTarget(
                 connector: connector,
                 portForwardID: portForwardID,
+                guestHost: guestHost,
                 guestHostPort: guestHostPort
             )
             if binaryFramesEnabled {
@@ -2560,7 +2592,7 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
             } else {
                 let guest = try connector.connect()
                 defer { guest.close() }
-                let preface = "CONJET-UDP 127.0.0.1:\(guestHostPort)\n"
+                let preface = "CONJET-UDP \(guestHost):\(guestHostPort)\n"
                 guard writeAllBytes(Data(preface.utf8) + payload, to: guest.fileDescriptor) else {
                     metrics.udpDrop()
                     statusHandler(metrics)
@@ -3019,13 +3051,14 @@ private func binaryPortForwardID(hostPort: Int, targetPort: Int) -> UInt32 {
 private func registerBinaryUDPTarget(
     connector: any GuestConnectionConnector,
     portForwardID: UInt32,
+    guestHost: String,
     guestHostPort: Int
 ) -> Bool {
     do {
         let guest = try connector.connect()
         defer { guest.close() }
         setSocketReadTimeout(guest.fileDescriptor, timeoutSeconds: 1)
-        let payload = Data("\(portForwardID) udp 127.0.0.1 \(guestHostPort)".utf8)
+        let payload = Data("\(portForwardID) udp \(guestHost) \(guestHostPort)".utf8)
         let frame = ConjetBinaryFrame(
             type: .registerTarget,
             streamID: 0,
