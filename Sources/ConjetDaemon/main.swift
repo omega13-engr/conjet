@@ -18,6 +18,10 @@ struct ConjetDaemon {
     private static func serve() throws {
         let paths = ConjetPaths.default()
         try paths.ensureBaseDirectories()
+        let instanceLock = try DaemonInstanceLock.acquire(
+            path: paths.runDirectory.appendingPathComponent("conjetd.lock").path
+        )
+        defer { instanceLock.release() }
         let config = try ConjetConfig.loadOrCreate(paths: paths)
         let socketPath = config.socketPath ?? paths.socket.path
         let policy = EnergyGovernor(
@@ -61,6 +65,38 @@ struct ConjetDaemon {
         }
 
         try logger.log("daemon_stop", ["socket": socketPath])
+    }
+}
+
+private final class DaemonInstanceLock {
+    private let fd: Int32
+    private let path: String
+
+    private init(fd: Int32, path: String) {
+        self.fd = fd
+        self.path = path
+    }
+
+    static func acquire(path: String) throws -> DaemonInstanceLock {
+        let fd = open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else {
+            throw ConjetError.socket("open(\(path)) failed: \(String(cString: strerror(errno)))")
+        }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            let error = String(cString: strerror(errno))
+            close(fd)
+            throw ConjetError.unavailable("another conjetd is already running for this profile: \(error)")
+        }
+        ftruncate(fd, 0)
+        let pid = "\(getpid())\n"
+        _ = pid.withCString { write(fd, $0, strlen($0)) }
+        return DaemonInstanceLock(fd: fd, path: path)
+    }
+
+    func release() {
+        flock(fd, LOCK_UN)
+        close(fd)
+        unlink(path)
     }
 }
 
@@ -192,15 +228,21 @@ private final class DaemonRuntime: @unchecked Sendable {
             let boundedWait = cleanupTimeout
             let cleanupTimedOut = semaphore.wait(timeout: .now() + boundedWait) == .timedOut
             let message: String
+            let ok: Bool
             if cleanupTimedOut {
+                stopping = false
+                ok = false
                 message = "conjetd stopping; cleanup still in progress after \(String(format: "%.1f", boundedWait))s"
             } else if let error = cleanupError.get() {
+                stopping = false
+                ok = false
                 message = "conjetd stopping; cleanup failed separately: \(error)"
             } else {
+                ok = true
                 message = "conjetd stopping; cleanup completed"
             }
-            let vm = vmStore.status(state: .stopping, message: message)
-            return DaemonResponse(ok: true, message: message, status: status(state: .stopping, vm: vm), vm: vm)
+            let vm = vmStore.status(state: ok ? .stopping : .error, message: message)
+            return DaemonResponse(ok: ok, message: message, status: status(state: ok ? .stopping : .warmIdle, vm: vm), vm: vm)
         }
     }
 

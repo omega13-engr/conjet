@@ -252,6 +252,38 @@ struct ConjetCLI {
             default:
                 throw ConjetError.invalidArgument("unknown ssh key command '\(keySubcommand)'")
             }
+        case "config":
+            let configSubcommand = remaining.first ?? "install"
+            switch configSubcommand {
+            case "install":
+                let output = try installSSHConfigInclude()
+                if json {
+                    print(try ConjetJSON.string(output))
+                } else if output.changed {
+                    print("Conjet SSH config installed")
+                    printSSHConfigStatus(output)
+                } else {
+                    print("Conjet SSH config already installed")
+                    printSSHConfigStatus(output)
+                }
+            case "status":
+                let output = try sshConfigStatus()
+                if json {
+                    print(try ConjetJSON.string(output))
+                } else {
+                    printSSHConfigStatus(output)
+                }
+            case "remove":
+                let output = try removeSSHConfigInclude()
+                if json {
+                    print(try ConjetJSON.string(output))
+                } else {
+                    print("Conjet SSH config include removed")
+                    printSSHConfigStatus(output)
+                }
+            default:
+                throw ConjetError.invalidArgument("unknown ssh config command '\(configSubcommand)'")
+            }
         case "enable":
             try updateSSHEnabled(true)
             let output = try sshStatus(checkGuest: false)
@@ -275,6 +307,7 @@ struct ConjetCLI {
                 throw ConjetError.unavailable("Conjet SSH is disabled for this profile")
             }
             try ensureSSHKeyInstalled()
+            _ = try installSSHConfigInclude()
             let endpoint = sshEndpoint(config: try ConjetConfig.loadOrCreate())
             if endpoint.transport == .tcp,
                !localTCPConnectable(host: endpoint.host, port: endpoint.port, timeoutSeconds: 1.0) {
@@ -287,6 +320,7 @@ struct ConjetCLI {
                 throw ConjetError.unavailable("Conjet SSH is disabled for this profile")
             }
             try ensureSSHKeyInstalled()
+            _ = try installSSHConfigInclude()
             let endpoint = sshEndpoint(config: try ConjetConfig.loadOrCreate())
             if endpoint.transport == .tcp,
                !localTCPConnectable(host: endpoint.host, port: endpoint.port, timeoutSeconds: 1.0) {
@@ -306,6 +340,16 @@ struct ConjetCLI {
         print("  localhost-only: \(output.localhostOnly ? "yes" : "no")")
         print("  endpoint: \(output.endpoint ?? "not reachable")")
         print("  note: \(output.message)")
+    }
+
+    private static func printSSHConfigStatus(_ output: SSHConfigOutput) {
+        print("Conjet SSH config")
+        print("  profile: \(output.profile)")
+        print("  generated config: \(output.generatedConfigPath)")
+        print("  user config: \(output.userConfigPath)")
+        print("  include installed: \(output.includeInstalled ? "yes" : "no")")
+        print("  changed: \(output.changed ? "yes" : "no")")
+        print("  host aliases: \(output.hostAliases.joined(separator: ", "))")
     }
 
     private static func sshStatus(checkGuest: Bool) throws -> SSHStatusOutput {
@@ -362,6 +406,55 @@ struct ConjetCLI {
         )
     }
 
+    private static func installSSHConfigInclude() throws -> SSHConfigOutput {
+        let paths = ConjetPaths.default()
+        try ensureSSHKeyExists(paths: paths)
+        var changed = try writeGeneratedSSHConfig(paths: paths, config: try ConjetConfig.loadOrCreate(paths: paths))
+        let userConfigPath = userSSHConfigURL()
+        try FileManager.default.createDirectory(at: userConfigPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let existing = (try? String(contentsOf: userConfigPath, encoding: .utf8)) ?? ""
+        let cleaned = removeConjetSSHIncludeBlock(from: existing, paths: paths)
+        let block = conjetSSHIncludeBlock(paths: paths)
+        if !existing.contains(block) {
+            let separator = cleaned.isEmpty || cleaned.hasPrefix("\n") ? "" : "\n"
+            try "\(block)\(separator)\(cleaned)".write(to: userConfigPath, atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: userConfigPath.path)
+            changed = true
+        }
+        return try sshConfigStatus(changed: changed)
+    }
+
+    private static func removeSSHConfigInclude() throws -> SSHConfigOutput {
+        let paths = ConjetPaths.default()
+        let userConfigPath = userSSHConfigURL()
+        var changed = false
+        if FileManager.default.fileExists(atPath: userConfigPath.path) {
+            let existing = try String(contentsOf: userConfigPath, encoding: .utf8)
+            let cleaned = removeConjetSSHIncludeBlock(from: existing, paths: paths)
+            if cleaned != existing {
+                try cleaned.write(to: userConfigPath, atomically: true, encoding: .utf8)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: userConfigPath.path)
+                changed = true
+            }
+        }
+        return try sshConfigStatus(changed: changed)
+    }
+
+    private static func sshConfigStatus(changed: Bool = false) throws -> SSHConfigOutput {
+        let paths = ConjetPaths.default()
+        let userConfigPath = userSSHConfigURL()
+        let generatedConfigPath = generatedSSHConfigURL(paths: paths)
+        let userConfig = (try? String(contentsOf: userConfigPath, encoding: .utf8)) ?? ""
+        return SSHConfigOutput(
+            profile: paths.profileName,
+            userConfigPath: userConfigPath.path,
+            generatedConfigPath: generatedConfigPath.path,
+            includeInstalled: userConfig.contains(conjetSSHIncludeBlock(paths: paths)),
+            changed: changed,
+            hostAliases: sshHostAliases(paths: paths)
+        )
+    }
+
     private static func updateSSHEnabled(_ enabled: Bool) throws {
         let paths = ConjetPaths.default()
         var config = try ConjetConfig.loadOrCreate(paths: paths)
@@ -371,14 +464,32 @@ struct ConjetCLI {
 
     private static func rotateSSHKey() throws {
         let paths = ConjetPaths.default()
+        try generateSSHKey(paths: paths, replaceExisting: true)
+        try installSSHAuthorizedKey(publicKeyPath: sshPublicKeyURL(paths: paths))
+    }
+
+    private static func ensureSSHKeyExists(paths: ConjetPaths) throws {
+        let keyPath = sshPrivateKeyURL(paths: paths)
+        let publicKeyPath = sshPublicKeyURL(paths: paths)
+        if !FileManager.default.fileExists(atPath: keyPath.path)
+            || !FileManager.default.fileExists(atPath: publicKeyPath.path) {
+            try generateSSHKey(paths: paths, replaceExisting: false)
+        }
+    }
+
+    private static func generateSSHKey(paths: ConjetPaths, replaceExisting: Bool) throws {
         let keyPath = sshPrivateKeyURL(paths: paths)
         let publicKeyPath = sshPublicKeyURL(paths: paths)
         try FileManager.default.createDirectory(at: keyPath.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: keyPath.path) {
+        if replaceExisting, FileManager.default.fileExists(atPath: keyPath.path) {
             try FileManager.default.removeItem(at: keyPath)
         }
-        if FileManager.default.fileExists(atPath: publicKeyPath.path) {
+        if replaceExisting, FileManager.default.fileExists(atPath: publicKeyPath.path) {
             try FileManager.default.removeItem(at: publicKeyPath)
+        }
+        if FileManager.default.fileExists(atPath: keyPath.path)
+            || FileManager.default.fileExists(atPath: publicKeyPath.path) {
+            return
         }
         let result = try ProcessRunner.run("/usr/bin/ssh-keygen", [
             "-q",
@@ -392,19 +503,12 @@ struct ConjetCLI {
         }
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyPath.path)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: publicKeyPath.path)
-        try installSSHAuthorizedKey(publicKeyPath: publicKeyPath)
     }
 
     private static func ensureSSHKeyInstalled() throws {
         let paths = ConjetPaths.default()
-        let keyPath = sshPrivateKeyURL(paths: paths)
-        let publicKeyPath = sshPublicKeyURL(paths: paths)
-        if !FileManager.default.fileExists(atPath: keyPath.path)
-            || !FileManager.default.fileExists(atPath: publicKeyPath.path) {
-            try rotateSSHKey()
-            return
-        }
-        try installSSHAuthorizedKey(publicKeyPath: publicKeyPath)
+        try ensureSSHKeyExists(paths: paths)
+        try installSSHAuthorizedKey(publicKeyPath: sshPublicKeyURL(paths: paths))
     }
 
     private static func installSSHAuthorizedKey(publicKeyPath: URL) throws {
@@ -472,6 +576,107 @@ struct ConjetCLI {
         URL(fileURLWithPath: sshPrivateKeyURL(paths: paths).path + ".pub")
     }
 
+    private static func generatedSSHConfigURL(paths: ConjetPaths) -> URL {
+        paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("config")
+    }
+
+    private static func userSSHConfigURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".ssh", isDirectory: true)
+            .appendingPathComponent("config")
+    }
+
+    @discardableResult
+    private static func writeGeneratedSSHConfig(paths: ConjetPaths, config: ConjetConfig) throws -> Bool {
+        let url = generatedSSHConfigURL(paths: paths)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let content = generatedSSHConfigContent(paths: paths, config: config)
+        if let existing = try? String(contentsOf: url, encoding: .utf8), existing == content {
+            return false
+        }
+        try content.write(to: url, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return true
+    }
+
+    private static func generatedSSHConfigContent(paths: ConjetPaths, config: ConjetConfig) -> String {
+        let endpoint = sshEndpoint(config: config)
+        var lines = [
+            "# Generated by Conjet. Run 'conjet ssh config install' to refresh.",
+            "Host \(sshHostAliases(paths: paths).joined(separator: " "))",
+            "  User conjet",
+            "  IdentityFile \(sshConfigQuote(sshPrivateKeyURL(paths: paths).path))",
+            "  IdentitiesOnly yes",
+            "  StrictHostKeyChecking accept-new",
+            "  UserKnownHostsFile \(sshConfigQuote(paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("known_hosts").path))",
+            "  LogLevel ERROR"
+        ]
+        switch endpoint.transport {
+        case .proxyCommand:
+            lines.append("  HostName conjet")
+            lines.append("  ProxyCommand \(sshProxyCommand(paths: paths))")
+        case .tcp:
+            lines.append("  HostName \(endpoint.host)")
+            lines.append("  Port \(endpoint.port)")
+        }
+        lines.append("")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func sshHostAliases(paths: ConjetPaths) -> [String] {
+        if paths.profileName == "default" {
+            return ["conjet", "conjet-default"]
+        }
+        return ["conjet-\(paths.profileName)"]
+    }
+
+    private static func conjetSSHIncludeBlock(paths: ConjetPaths) -> String {
+        let marker = conjetSSHIncludeMarker(paths: paths)
+        return """
+        # >>> \(marker) >>>
+        # Added by Conjet: SSH hosts for Conjet profile '\(paths.profileName)'.
+        # Keep this Include before Host blocks so 'ssh conjet' resolves correctly.
+        Include \(sshConfigQuote(generatedSSHConfigURL(paths: paths).path))
+        # <<< \(marker) <<<
+        """
+    }
+
+    private static func conjetSSHIncludeMarker(paths: ConjetPaths) -> String {
+        "conjet ssh config \(paths.profileName)"
+    }
+
+    private static func removeConjetSSHIncludeBlock(from content: String, paths: ConjetPaths) -> String {
+        let marker = conjetSSHIncludeMarker(paths: paths)
+        var lines = content.components(separatedBy: .newlines)
+        var output: [String] = []
+        var skipping = false
+        for line in lines {
+            if line == "# >>> \(marker) >>>" {
+                skipping = true
+                continue
+            }
+            if skipping {
+                if line == "# <<< \(marker) <<<" {
+                    skipping = false
+                }
+                continue
+            }
+            output.append(line)
+        }
+        while output.first == "" {
+            output.removeFirst()
+        }
+        lines = output
+        while lines.last == "" && lines.dropLast().last == "" {
+            lines.removeLast()
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func sshConfigQuote(_ value: String) -> String {
+        "\"\(value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
+    }
+
     private static func sshEndpoint(config: ConjetConfig) -> SSHEndpoint {
         if (ProcessInfo.processInfo.environment["CONJET_SSH_TRANSPORT"] ?? config.ssh.transport) == "tcp" {
             let host = ProcessInfo.processInfo.environment["CONJET_SSH_HOST"] ?? "127.0.0.1"
@@ -503,9 +708,9 @@ struct ConjetCLI {
             "-n",
             "-p",
             "--",
-            "/usr/sbin/sshd",
-            "-i",
-            "-q"
+            "/bin/sh",
+            "-lc",
+            shellSingleQuote("mkdir -p /run/sshd && exec /usr/sbin/sshd -i -q")
         ].joined(separator: " ")
     }
 
@@ -873,9 +1078,17 @@ struct ConjetCLI {
     private static func startRuntime(args: [String] = [], json: Bool = false) throws -> DaemonResponse {
         let paths = ConjetPaths.default()
         let config = try updateProfileConfigFromStartArgs(args, paths: paths, json: json)
+        try autoInstallSSHConfig(json: json)
         try ensureVMConfiguredForStart(json: json, config: config)
         let socketPath = try startDaemonOnly(printStatus: !json)
         return try startVMIfConfigured(socketPath: socketPath, config: config, json: json)
+    }
+
+    private static func autoInstallSSHConfig(json: Bool) throws {
+        let output = try installSSHConfigInclude()
+        if !json, output.changed {
+            ConjetFetchUI(enabled: true).step("[ssh config] registered \(output.hostAliases.joined(separator: ", "))")
+        }
     }
 
     private static func updateProfileConfigFromStartArgs(_ args: [String], paths: ConjetPaths, json: Bool) throws -> ConjetConfig {
@@ -1019,6 +1232,9 @@ struct ConjetCLI {
             DaemonRequest(command: .stop, parameters: ["timeout_seconds": String(timeout)]),
             timeoutSeconds: max(timeout, 1) + 1
         )
+        guard response.ok, !response.message.contains("cleanup still in progress") else {
+            throw ConjetError.unavailable(response.message)
+        }
         waitForDaemonStop(socketPath: currentSocketPath, timeoutSeconds: max(timeout, 5))
         return response
     }
@@ -1086,6 +1302,7 @@ struct ConjetCLI {
 
         let paths = ConjetPaths.default()
         let config = try ConjetConfig.loadOrCreate(paths: paths)
+        try autoInstallSSHConfig(json: json)
         let currentSocketPath = try socketPath(paths: paths)
         let wasRunning = daemonIsRunning(socketPath: currentSocketPath)
         let stopped = try stopRuntime(timeout: timeout, requireRunning: false)
@@ -3570,6 +3787,9 @@ struct ConjetCLI {
                   status                Show SSH key, guest sshd, and localhost endpoint status
                   enable                Enable SSH for this profile
                   disable               Disable SSH for this profile
+                  config install        Add Conjet's generated SSH config to ~/.ssh/config
+                  config status         Show SSH config include status
+                  config remove         Remove Conjet's ~/.ssh/config include for this profile
                   key status            Show profile-scoped key status
                   key rotate            Rotate the profile-scoped Ed25519 key and install it in the guest
 
@@ -4575,6 +4795,15 @@ private struct SSHStatusOutput: Codable, Equatable {
     var localhostOnly: Bool
     var endpoint: String?
     var message: String
+}
+
+private struct SSHConfigOutput: Codable, Equatable {
+    var profile: String
+    var userConfigPath: String
+    var generatedConfigPath: String
+    var includeInstalled: Bool
+    var changed: Bool
+    var hostAliases: [String]
 }
 
 private enum SSHTransport: String, Codable, Equatable {
