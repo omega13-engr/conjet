@@ -280,7 +280,8 @@ struct ConjetCLI {
                !localTCPConnectable(host: endpoint.host, port: endpoint.port, timeoutSeconds: 1.0) {
                 throw ConjetError.unavailable("Conjet SSH key and guest sshd are configured, but localhost SSH endpoint \(endpoint.host):\(endpoint.port) is not reachable")
             }
-            try runInheritedProcess("/usr/bin/ssh", sshArguments(endpoint: endpoint) + remaining)
+            let remoteCommand = remaining.isEmpty ? ["/bin/sh", "-l"] : remaining
+            try execInheritedProcess("/usr/bin/ssh", sshArguments(endpoint: endpoint, forceTTY: remaining.isEmpty) + remoteCommand)
         default:
             guard try ConjetConfig.loadOrCreate().ssh.enabled else {
                 throw ConjetError.unavailable("Conjet SSH is disabled for this profile")
@@ -291,7 +292,7 @@ struct ConjetCLI {
                !localTCPConnectable(host: endpoint.host, port: endpoint.port, timeoutSeconds: 1.0) {
                 throw ConjetError.unavailable("Conjet SSH key and guest sshd are configured, but localhost SSH endpoint \(endpoint.host):\(endpoint.port) is not reachable")
             }
-            try runInheritedProcess("/usr/bin/ssh", sshArguments(endpoint: endpoint) + [subcommand] + remaining)
+            try execInheritedProcess("/usr/bin/ssh", sshArguments(endpoint: endpoint) + [subcommand] + remaining)
         }
     }
 
@@ -504,11 +505,11 @@ struct ConjetCLI {
             "--",
             "/usr/sbin/sshd",
             "-i",
-            "-e"
+            "-q"
         ].joined(separator: " ")
     }
 
-    private static func sshArguments(endpoint: SSHEndpoint) -> [String] {
+    private static func sshArguments(endpoint: SSHEndpoint, forceTTY: Bool = false) -> [String] {
         let paths = ConjetPaths.default()
         var arguments = [
             "-i", sshPrivateKeyURL(paths: paths).path,
@@ -516,6 +517,9 @@ struct ConjetCLI {
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "UserKnownHostsFile=\(paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("known_hosts").path)"
         ]
+        if forceTTY {
+            arguments.append("-tt")
+        }
         switch endpoint.transport {
         case .proxyCommand:
             arguments += [
@@ -2846,6 +2850,26 @@ struct ConjetCLI {
                 executable: executable,
                 exitCode: process.terminationStatus,
                 stderr: "command exited with status \(process.terminationStatus)"
+            )
+        }
+    }
+
+    private static func execInheritedProcess(_ executable: String, _ arguments: [String]) throws {
+        var argv: [UnsafeMutablePointer<CChar>?] = ([executable] + arguments).map { strdup($0) }
+        argv.append(nil)
+        defer {
+            for pointer in argv where pointer != nil {
+                free(pointer)
+            }
+        }
+        let result = executable.withCString { path in
+            execv(path, &argv)
+        }
+        if result == -1 {
+            throw ConjetError.processFailed(
+                executable: executable,
+                exitCode: Int32(errno),
+                stderr: String(cString: strerror(errno))
             )
         }
     }

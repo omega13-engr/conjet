@@ -10,6 +10,7 @@ The output is intentionally Conjet-specific:
 - Ubuntu minimal cloud image base.
 - EFI/GPT raw disk suitable for `VZEFIBootLoader`.
 - Docker Engine from Ubuntu packages.
+- `neofetch` for quick guest identity and environment inspection.
 - Conjet guest VSOCK bridge listening on port `2375`, forwarding Docker API
   traffic to `/var/run/docker.sock`, and proxying published TCP/UDP ports back
   to macOS localhost.

@@ -170,6 +170,7 @@ apt-get install -y --no-install-recommends \
     iptables \
     libc6-dev \
     netcat-openbsd \
+    neofetch \
     netplan.io \
     openssh-server \
     python3 \
