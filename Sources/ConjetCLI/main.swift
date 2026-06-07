@@ -46,6 +46,8 @@ struct ConjetCLI {
             try doctor(args: args, json: json)
         case "ssh":
             try ssh(args: args, json: json)
+        case "key":
+            try ssh(args: ["key"] + args, json: json)
         case "ssh-key":
             try ssh(args: ["key"] + args, json: json)
         case "status":
@@ -307,6 +309,7 @@ struct ConjetCLI {
                 throw ConjetError.unavailable("Conjet SSH is disabled for this profile")
             }
             try ensureSSHKeyInstalled()
+            _ = try reconcileSSHKnownHosts()
             _ = try installSSHConfigInclude()
             let endpoint = sshEndpoint(config: try ConjetConfig.loadOrCreate())
             if endpoint.transport == .tcp,
@@ -320,6 +323,7 @@ struct ConjetCLI {
                 throw ConjetError.unavailable("Conjet SSH is disabled for this profile")
             }
             try ensureSSHKeyInstalled()
+            _ = try reconcileSSHKnownHosts()
             _ = try installSSHConfigInclude()
             let endpoint = sshEndpoint(config: try ConjetConfig.loadOrCreate())
             if endpoint.transport == .tcp,
@@ -568,6 +572,66 @@ struct ConjetCLI {
         }
     }
 
+    @discardableResult
+    private static func reconcileSSHKnownHosts() throws -> Bool {
+        let paths = ConjetPaths.default()
+        let knownHostsPath = sshKnownHostsURL(paths: paths)
+        guard FileManager.default.fileExists(atPath: knownHostsPath.path) else {
+            return false
+        }
+        let aliases = sshHostAliases(paths: paths)
+        let hasConjetEntry = aliases.contains { alias in
+            ((try? ProcessRunner.run("/usr/bin/ssh-keygen", [
+                "-F", alias,
+                "-f", knownHostsPath.path
+            ], timeoutSeconds: 5).succeeded) ?? false)
+        }
+        guard hasConjetEntry else {
+            return false
+        }
+
+        let guestFingerprint = try currentGuestSSHHostFingerprint()
+        var changed = false
+        for alias in aliases {
+            let result = try ProcessRunner.run("/usr/bin/ssh-keygen", [
+                "-F", alias,
+                "-f", knownHostsPath.path,
+                "-l"
+            ], timeoutSeconds: 5)
+            guard result.succeeded else {
+                continue
+            }
+            if !result.stdout.contains(guestFingerprint) {
+                let remove = try ProcessRunner.run("/usr/bin/ssh-keygen", [
+                    "-R", alias,
+                    "-f", knownHostsPath.path
+                ], timeoutSeconds: 5)
+                guard remove.succeeded else {
+                    throw ConjetError.processFailed(executable: "ssh-keygen", exitCode: remove.exitCode, stderr: remove.stderr)
+                }
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    private static func currentGuestSSHHostFingerprint() throws -> String {
+        let result = try runGuestRootShell("""
+        set -eu
+        mkdir -p /run/sshd
+        ssh-keygen -A >/dev/null 2>&1
+        ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub | awk '{print $2}'
+        """)
+        guard result.succeeded else {
+            throw ConjetError.processFailed(executable: "guest ssh host key probe", exitCode: result.exitCode, stderr: result.stderr)
+        }
+        let fingerprint = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard fingerprint.hasPrefix("SHA256:"), !fingerprint.contains("\n") else {
+            throw ConjetError.decoding("failed to read guest SSH ED25519 host key fingerprint")
+        }
+        return fingerprint
+    }
+
     private static func sshPrivateKeyURL(paths: ConjetPaths) -> URL {
         paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("id_ed25519")
     }
@@ -578,6 +642,10 @@ struct ConjetCLI {
 
     private static func generatedSSHConfigURL(paths: ConjetPaths) -> URL {
         paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("config")
+    }
+
+    private static func sshKnownHostsURL(paths: ConjetPaths) -> URL {
+        paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("known_hosts")
     }
 
     private static func userSSHConfigURL() -> URL {
@@ -608,7 +676,7 @@ struct ConjetCLI {
             "  IdentityFile \(sshConfigQuote(sshPrivateKeyURL(paths: paths).path))",
             "  IdentitiesOnly yes",
             "  StrictHostKeyChecking accept-new",
-            "  UserKnownHostsFile \(sshConfigQuote(paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("known_hosts").path))",
+            "  UserKnownHostsFile \(sshConfigQuote(sshKnownHostsURL(paths: paths).path))",
             "  LogLevel ERROR"
         ]
         switch endpoint.transport {
@@ -720,7 +788,7 @@ struct ConjetCLI {
             "-i", sshPrivateKeyURL(paths: paths).path,
             "-o", "IdentitiesOnly=yes",
             "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "UserKnownHostsFile=\(paths.home.appendingPathComponent("ssh", isDirectory: true).appendingPathComponent("known_hosts").path)"
+            "-o", "UserKnownHostsFile=\(sshKnownHostsURL(paths: paths).path)"
         ]
         if forceTTY {
             arguments.append("-tt")
@@ -1081,7 +1149,11 @@ struct ConjetCLI {
         try autoInstallSSHConfig(json: json)
         try ensureVMConfiguredForStart(json: json, config: config)
         let socketPath = try startDaemonOnly(printStatus: !json)
-        return try startVMIfConfigured(socketPath: socketPath, config: config, json: json)
+        let response = try startVMIfConfigured(socketPath: socketPath, config: config, json: json)
+        if response.ok, config.ssh.enabled, FileManager.default.fileExists(atPath: paths.dockerSocket.path) {
+            _ = try? reconcileSSHKnownHosts()
+        }
+        return response
     }
 
     private static func autoInstallSSHConfig(json: Bool) throws {
@@ -4198,6 +4270,7 @@ struct ConjetCLI {
               status      Show daemon, VM, and Docker socket status
               doctor      Check host capabilities and Conjet configuration
               ssh         Manage localhost-only SSH access
+              key         Alias for 'conjet ssh key'
               ssh-key     Rotate or inspect the profile SSH key
               shell       Open a privileged Linux shell through the Conjet Docker socket
               run         Run a Docker image through Conjet
