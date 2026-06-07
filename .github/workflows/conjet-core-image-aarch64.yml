@@ -1,0 +1,63 @@
+name: Conjet Core Image Build aarch64
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Conjet Core semantic version.
+        required: true
+        type: string
+      root_disk_gb:
+        description: Root disk size for the raw image.
+        required: true
+        type: string
+      runtime:
+        description: Guest runtime to bake into the image.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build aarch64
+    runs-on: ubuntu-24.04-arm
+    env:
+      CONJET_CORE_VERSION: ${{ inputs.version }}
+      ROOT_DISK_GB: ${{ inputs.root_disk_gb }}
+      RUNTIME: ${{ inputs.runtime }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify Conjet Core VERSION
+        run: |
+          set -euo pipefail
+          actual="$(tr -d '[:space:]' < guest/image/conjet-core/VERSION)"
+          if [ "${actual}" != "${CONJET_CORE_VERSION}" ]; then
+            echo "guest/image/conjet-core/VERSION=${actual}, expected ${CONJET_CORE_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Show Docker environment
+        run: docker info
+
+      - name: Build Conjet Core image
+        run: |
+          set -euo pipefail
+          make -C guest/image/conjet-core image \
+            OS_ARCH="aarch64" \
+            CONJET_CORE_VERSION="${CONJET_CORE_VERSION}" \
+            ROOT_DISK_GB="${ROOT_DISK_GB}" \
+            RUNTIME="${RUNTIME}"
+
+      - name: Upload image artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: conjet-core-${{ inputs.version }}-aarch64
+          if-no-files-found: error
+          path: |
+            guest/image/conjet-core/dist/out/*.raw.gz
+            guest/image/conjet-core/dist/out/*.raw.gz.sha512sum
+            guest/image/conjet-core/dist/out/*.raw.gz.json

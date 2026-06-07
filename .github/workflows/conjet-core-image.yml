@@ -86,67 +86,33 @@ jobs:
             echo "runtime=${runtime}"
           } >> "${GITHUB_OUTPUT}"
 
-  build:
-    name: Build ${{ matrix.os_arch }}
-    runs-on: ubuntu-24.04
+  build-aarch64:
+    name: Build aarch64
     needs:
       - meta
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os_arch: aarch64
-          - os_arch: x86_64
-    env:
-      CONJET_CORE_VERSION: ${{ needs.meta.outputs.version }}
-      ROOT_DISK_GB: ${{ needs.meta.outputs.root_disk_gb }}
-      RUNTIME: ${{ needs.meta.outputs.runtime }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+    uses: ./.github/workflows/conjet-core-image-aarch64.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      root_disk_gb: ${{ needs.meta.outputs.root_disk_gb }}
+      runtime: ${{ needs.meta.outputs.runtime }}
 
-      - name: Verify Conjet Core VERSION
-        run: |
-          set -euo pipefail
-          actual="$(tr -d '[:space:]' < guest/image/conjet-core/VERSION)"
-          if [ "${actual}" != "${CONJET_CORE_VERSION}" ]; then
-            echo "guest/image/conjet-core/VERSION=${actual}, expected ${CONJET_CORE_VERSION}" >&2
-            exit 1
-          fi
-
-      - name: Enable cross-architecture container execution
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64,amd64
-
-      - name: Show Docker environment
-        run: docker info
-
-      - name: Build Conjet Core image
-        run: |
-          set -euo pipefail
-          make -C guest/image/conjet-core image \
-            OS_ARCH="${{ matrix.os_arch }}" \
-            CONJET_CORE_VERSION="${CONJET_CORE_VERSION}" \
-            ROOT_DISK_GB="${ROOT_DISK_GB}" \
-            RUNTIME="${RUNTIME}"
-
-      - name: Upload image artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: conjet-core-${{ needs.meta.outputs.version }}-${{ matrix.os_arch }}
-          if-no-files-found: error
-          path: |
-            guest/image/conjet-core/dist/out/*.raw.gz
-            guest/image/conjet-core/dist/out/*.raw.gz.sha512sum
-            guest/image/conjet-core/dist/out/*.raw.gz.json
+  build-x86_64:
+    name: Build x86_64
+    needs:
+      - meta
+    uses: ./.github/workflows/conjet-core-image-x86_64.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      root_disk_gb: ${{ needs.meta.outputs.root_disk_gb }}
+      runtime: ${{ needs.meta.outputs.runtime }}
 
   release:
     name: Publish Conjet Core image release
     runs-on: ubuntu-24.04
     needs:
       - meta
-      - build
+      - build-aarch64
+      - build-x86_64
     steps:
       - name: Download image artifacts
         uses: actions/download-artifact@v4
