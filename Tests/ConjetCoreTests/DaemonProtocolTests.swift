@@ -41,6 +41,45 @@ final class DaemonProtocolTests: XCTestCase {
         XCTAssertEqual(status.memoryPolicy.recommendedMemoryMiB, 4096)
     }
 
+    func testVMRuntimeStatusCarriesStartupEvents() throws {
+        let event = VMRuntimeEvent(
+            timestamp: Date(timeIntervalSince1970: 1),
+            phase: "guest-bridge",
+            message: "waiting for guest bridge"
+        )
+        let status = VMRuntimeStatus(
+            state: .starting,
+            configured: true,
+            manifestPath: "/tmp/manifest.json",
+            message: "starting",
+            phase: "guest-bridge",
+            events: [event]
+        )
+
+        let data = try ConjetJSON.encoder(pretty: false).encode(status)
+        let decoded = try ConjetJSON.decoder().decode(VMRuntimeStatus.self, from: data)
+
+        XCTAssertEqual(decoded.phase, "guest-bridge")
+        XCTAssertEqual(decoded.events, [event])
+    }
+
+    func testVMRuntimeStatusDecodesOldPayloadWithoutStartupEvents() throws {
+        let payload = Data("""
+        {
+          "state": "running",
+          "configured": true,
+          "manifestPath": "/tmp/manifest.json",
+          "message": "VM started"
+        }
+        """.utf8)
+
+        let decoded = try ConjetJSON.decoder().decode(VMRuntimeStatus.self, from: payload)
+
+        XCTAssertEqual(decoded.state, .running)
+        XCTAssertNil(decoded.phase)
+        XCTAssertEqual(decoded.events, [])
+    }
+
     func testUnsupportedCommandCompatibilityDetectsOldDaemonDecodeFailure() {
         let response = DaemonResponse(
             ok: false,

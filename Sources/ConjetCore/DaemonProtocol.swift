@@ -48,6 +48,18 @@ public enum VMRunState: String, Codable, Equatable, Sendable {
     case error
 }
 
+public struct VMRuntimeEvent: Codable, Equatable, Sendable {
+    public var timestamp: Date
+    public var phase: String
+    public var message: String
+
+    public init(timestamp: Date = Date(), phase: String, message: String) {
+        self.timestamp = timestamp
+        self.phase = phase
+        self.message = message
+    }
+}
+
 public struct VMRuntimeStatus: Codable, Equatable, Sendable {
     public var state: VMRunState
     public var configured: Bool
@@ -64,6 +76,28 @@ public struct VMRuntimeStatus: Codable, Equatable, Sendable {
     public var serialLogPath: String?
     public var dockerSocketPath: String?
     public var message: String
+    public var phase: String?
+    public var events: [VMRuntimeEvent]
+
+    private enum CodingKeys: String, CodingKey {
+        case state
+        case configured
+        case manifestPath
+        case bootLoaderKind
+        case bootDiskPath
+        case efiVariableStorePath
+        case cloudInitSeedPath
+        case kernelPath
+        case initialRamdiskPath
+        case rootDiskPath
+        case dataDiskPath
+        case bootstrapSharePath
+        case serialLogPath
+        case dockerSocketPath
+        case message
+        case phase
+        case events
+    }
 
     public init(
         state: VMRunState,
@@ -80,7 +114,9 @@ public struct VMRuntimeStatus: Codable, Equatable, Sendable {
         bootstrapSharePath: String? = nil,
         serialLogPath: String? = nil,
         dockerSocketPath: String? = nil,
-        message: String
+        message: String,
+        phase: String? = nil,
+        events: [VMRuntimeEvent] = []
     ) {
         self.state = state
         self.configured = configured
@@ -97,6 +133,29 @@ public struct VMRuntimeStatus: Codable, Equatable, Sendable {
         self.serialLogPath = serialLogPath
         self.dockerSocketPath = dockerSocketPath
         self.message = message
+        self.phase = phase
+        self.events = events
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.state = try container.decode(VMRunState.self, forKey: .state)
+        self.configured = try container.decode(Bool.self, forKey: .configured)
+        self.manifestPath = try container.decode(String.self, forKey: .manifestPath)
+        self.bootLoaderKind = try container.decodeIfPresent(String.self, forKey: .bootLoaderKind)
+        self.bootDiskPath = try container.decodeIfPresent(String.self, forKey: .bootDiskPath)
+        self.efiVariableStorePath = try container.decodeIfPresent(String.self, forKey: .efiVariableStorePath)
+        self.cloudInitSeedPath = try container.decodeIfPresent(String.self, forKey: .cloudInitSeedPath)
+        self.kernelPath = try container.decodeIfPresent(String.self, forKey: .kernelPath)
+        self.initialRamdiskPath = try container.decodeIfPresent(String.self, forKey: .initialRamdiskPath)
+        self.rootDiskPath = try container.decodeIfPresent(String.self, forKey: .rootDiskPath)
+        self.dataDiskPath = try container.decodeIfPresent(String.self, forKey: .dataDiskPath)
+        self.bootstrapSharePath = try container.decodeIfPresent(String.self, forKey: .bootstrapSharePath)
+        self.serialLogPath = try container.decodeIfPresent(String.self, forKey: .serialLogPath)
+        self.dockerSocketPath = try container.decodeIfPresent(String.self, forKey: .dockerSocketPath)
+        self.message = try container.decode(String.self, forKey: .message)
+        self.phase = try container.decodeIfPresent(String.self, forKey: .phase)
+        self.events = try container.decodeIfPresent([VMRuntimeEvent].self, forKey: .events) ?? []
     }
 }
 

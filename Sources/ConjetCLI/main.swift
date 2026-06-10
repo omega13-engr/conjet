@@ -836,7 +836,13 @@ struct ConjetCLI {
                 print(response.message)
             }
         } catch {
-            let offline = DaemonResponse(ok: false, message: "conjetd is not running at \(socketPath)")
+            let message: String
+            if let pid = runningDaemonPID(socketPath: socketPath) {
+                message = "conjetd pid \(pid) is running but not answering at \(socketPath)"
+            } else {
+                message = "conjetd is not running at \(socketPath)"
+            }
+            let offline = DaemonResponse(ok: false, message: message)
             if json {
                 print(try ConjetJSON.string(offline))
             } else {
@@ -1250,6 +1256,19 @@ struct ConjetCLI {
             ui.cached("[conjetd 1/2] running")
             return socketPath
         }
+        if let pid = runningDaemonPID(socketPath: socketPath) {
+            for _ in 0..<20 {
+                if let response = try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .ping), timeoutSeconds: 0.25),
+                   response.ok {
+                    ui.cached("[conjetd 1/2] running")
+                    return socketPath
+                }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            throw ConjetError.unavailable(
+                "conjetd pid \(pid) is running but did not answer at \(socketPath); try 'conjet status' or inspect \(paths.daemonLog.path)"
+            )
+        }
 
         let daemonURL = try daemonExecutableURL()
         _ = try repairDebugVirtualizationSigningIfPossible(daemonURL: daemonURL)
@@ -1300,10 +1319,20 @@ struct ConjetCLI {
             return nil
         }
 
-        let response = try UnixSocketClient(socketPath: currentSocketPath).send(
-            DaemonRequest(command: .stop, parameters: ["timeout_seconds": String(timeout)]),
-            timeoutSeconds: max(timeout, 1) + 1
-        )
+        let response: DaemonResponse
+        do {
+            response = try UnixSocketClient(socketPath: currentSocketPath).send(
+                DaemonRequest(command: .stop, parameters: ["timeout_seconds": String(timeout)]),
+                timeoutSeconds: max(timeout, 1) + 1
+            )
+        } catch {
+            if let pid = runningDaemonPID(socketPath: currentSocketPath) {
+                throw ConjetError.unavailable(
+                    "conjetd pid \(pid) is running but did not answer stop at \(currentSocketPath): \(error)"
+                )
+            }
+            throw error
+        }
         guard response.ok, !response.message.contains("cleanup still in progress") else {
             throw ConjetError.unavailable(response.message)
         }
@@ -1328,7 +1357,26 @@ struct ConjetCLI {
     }
 
     private static func daemonIsRunning(socketPath: String) -> Bool {
-        (try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .ping), timeoutSeconds: 1).ok) == true
+        if (try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .ping), timeoutSeconds: 1).ok) == true {
+            return true
+        }
+        return runningDaemonPID(socketPath: socketPath) != nil
+    }
+
+    private static func runningDaemonPID(socketPath: String) -> Int32? {
+        let lockPath = URL(fileURLWithPath: socketPath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("conjetd.lock")
+            .path
+        guard let raw = try? String(contentsOfFile: lockPath, encoding: .utf8),
+              let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 0 else {
+            return nil
+        }
+        if Darwin.kill(pid, 0) == 0 || errno == EPERM {
+            return pid
+        }
+        return nil
     }
 
     private static func stopTimeout(from value: String?) throws -> Double {
@@ -1445,7 +1493,7 @@ struct ConjetCLI {
             return DaemonResponse(ok: false, message: "VM is not configured", vm: store.status())
         }
         try writeBridgeSelectorToBootstrap(paths: ConjetPaths.default(), engine: config.networkBridgeEngine)
-        let renderer = json ? nil : VMStartLiveRenderer(serialLogPath: store.status().serialLogPath)
+        let renderer = json ? nil : VMStartLiveRenderer(socketPath: socketPath, serialLogPath: store.status().serialLogPath)
         renderer?.start()
         let response: DaemonResponse
         do {
@@ -1628,7 +1676,7 @@ struct ConjetCLI {
             try ensureVMConfiguredForStart(json: json, config: config)
             try ensureDaemon()
             let socketPath = try socketPath(paths: ConjetPaths.default())
-            let renderer = json ? nil : VMStartLiveRenderer(serialLogPath: VMImageStore().status().serialLogPath)
+            let renderer = json ? nil : VMStartLiveRenderer(socketPath: socketPath, serialLogPath: VMImageStore().status().serialLogPath)
             renderer?.start()
             let response: DaemonResponse
             do {
@@ -4381,6 +4429,25 @@ private enum JetTerminal {
         write(text)
     }
 
+    static func replaceBlock(previousLineCount: Int, lines: [String]) {
+        var text = ""
+        if previousLineCount > 0 {
+            text += "\u{001B}[\(previousLineCount)A"
+        }
+        let renderedCount = max(previousLineCount, lines.count)
+        for index in 0..<renderedCount {
+            text += clearLine
+            if index < lines.count {
+                text += lines[index]
+            }
+            text += "\n"
+        }
+        if renderedCount > lines.count {
+            text += "\u{001B}[\(renderedCount - lines.count)A"
+        }
+        write(text)
+    }
+
     static func dim(_ text: String) -> String {
         "\(dimGray)\(colorizeBrand(text, restoreStyle: dimGray))\(reset)"
     }
@@ -4398,6 +4465,7 @@ private enum JetTerminal {
 }
 
 private final class VMStartLiveRenderer: @unchecked Sendable {
+    private let socketPath: String?
     private let serialLogPath: String?
     private let serialStartOffset: UInt64?
     private let lock = NSLock()
@@ -4405,9 +4473,13 @@ private final class VMStartLiveRenderer: @unchecked Sendable {
     private var renderedLineCount = 0
     private var spinnerIndex = 0
     private var state = "[vm 2/2] starting"
+    private var daemonPhase: String?
+    private var daemonEvents: [VMRuntimeEvent] = []
+    private var lastStatusPoll = Date.distantPast
     private var thread: Thread?
 
-    init(serialLogPath: String?) {
+    init(socketPath: String?, serialLogPath: String?) {
+        self.socketPath = socketPath
         self.serialLogPath = serialLogPath
         self.serialStartOffset = serialLogPath.flatMap(Self.fileSize)
     }
@@ -4426,6 +4498,7 @@ private final class VMStartLiveRenderer: @unchecked Sendable {
             while true {
                 Thread.sleep(forTimeInterval: 0.16)
                 guard self?.isRunning() == true else { break }
+                self?.pollDaemonStatusIfNeeded()
                 self?.redraw()
             }
         }
@@ -4440,12 +4513,25 @@ private final class VMStartLiveRenderer: @unchecked Sendable {
         redraw()
     }
 
+    func setVMStatus(_ vm: VMRuntimeStatus) {
+        lock.lock()
+        daemonPhase = vm.phase
+        daemonEvents = vm.events
+        let phaseSuffix = vm.phase.map { " [\($0)]" } ?? ""
+        state = "[vm 2/2] \(vm.state.rawValue)\(phaseSuffix)"
+        lock.unlock()
+        redraw()
+    }
+
     func stop(finalLine: String) {
         lock.lock()
         running = false
         state = finalLine
+        let previous = renderedLineCount
+        renderedLineCount = 1
         lock.unlock()
-        redraw()
+        let prefix = finalLine.hasPrefix(JetTerminal.symbolError) ? "" : "\(JetTerminal.symbolDone) "
+        JetTerminal.replaceBlock(previousLineCount: previous, lines: ["\(prefix)\(finalLine)"])
     }
 
     private func isRunning() -> Bool {
@@ -4457,17 +4543,28 @@ private final class VMStartLiveRenderer: @unchecked Sendable {
     private func redraw() {
         let frame = spinner()
         let currentState: String
+        let currentPhase: String?
+        let currentEvents: [VMRuntimeEvent]
         lock.lock()
         currentState = state
+        currentPhase = daemonPhase
+        currentEvents = daemonEvents
         lock.unlock()
 
         var lines = ["\(frame) \(currentState)"]
+        if let currentPhase {
+            lines.append(JetTerminal.dim("  \(JetTerminal.symbolState) phase: \(currentPhase)"))
+        }
+        if !currentEvents.isEmpty {
+            lines += currentEvents.suffix(4).map { event in
+                JetTerminal.dim("  \(JetTerminal.symbolDetail) \(event.phase): \(event.message)")
+            }
+        }
         if let serialLogPath {
             lines.append(JetTerminal.dim("  \(JetTerminal.symbolLog) serial: \(serialLogPath)"))
             let serialLines = Self.tailLines(
                 path: serialLogPath,
                 limit: 5,
-                containing: "conjet-boot-diagnostics",
                 fromOffset: serialStartOffset
             )
             if serialLines.isEmpty {
@@ -4484,6 +4581,21 @@ private final class VMStartLiveRenderer: @unchecked Sendable {
         renderedLineCount = lines.count
         lock.unlock()
         JetTerminal.redrawBlock(previousLineCount: previous, lines: lines)
+    }
+
+    private func pollDaemonStatusIfNeeded() {
+        guard let socketPath else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastStatusPoll) >= 0.5 else { return }
+        lastStatusPoll = now
+
+        guard let response = try? UnixSocketClient(socketPath: socketPath).send(
+            DaemonRequest(command: .vmStatus),
+            timeoutSeconds: 0.25
+        ), let vm = response.vm ?? response.status?.vm else {
+            return
+        }
+        setVMStatus(vm)
     }
 
     private func spinner() -> String {

@@ -1,4 +1,5 @@
 import Darwin
+import Dispatch
 import Foundation
 
 public final class UnixSocketClient {
@@ -38,7 +39,7 @@ public final class UnixSocketClient {
     }
 }
 
-public final class UnixSocketServer {
+public final class UnixSocketServer: @unchecked Sendable {
     public let socketPath: String
 
     public init(socketPath: String) {
@@ -46,7 +47,7 @@ public final class UnixSocketServer {
     }
 
     public func listen(
-        handler: (DaemonRequest) -> DaemonResponse,
+        handler: @escaping @Sendable (DaemonRequest) -> DaemonResponse,
         shouldStop: () -> Bool
     ) throws {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
@@ -54,6 +55,7 @@ public final class UnixSocketServer {
             throw ConjetError.socket("socket() failed: \(lastErrno())")
         }
         disableSigpipe(fd)
+        setSocketTimeout(fd, timeoutSeconds: 0.25)
         defer {
             Darwin.close(fd)
             unlink(socketPath)
@@ -77,26 +79,36 @@ public final class UnixSocketServer {
             let clientFD = Darwin.accept(fd, nil, nil)
             if clientFD < 0 {
                 if errno == EINTR { continue }
+                if errno == EAGAIN || errno == EWOULDBLOCK { continue }
                 throw ConjetError.socket("accept() failed: \(lastErrno())")
             }
             disableSigpipe(clientFD)
-            do {
-                let response: DaemonResponse
-                let requestData = try readLine(from: clientFD)
-                let request = try ConjetJSON.decoder().decode(DaemonRequest.self, from: requestData)
-                response = handler(request)
-                var responseData = try ConjetJSON.encoder(pretty: false).encode(response)
-                responseData.append(0x0a)
-                try writeAll(responseData, to: clientFD)
-                Darwin.close(clientFD)
-            } catch {
-                let response = DaemonResponse(ok: false, message: String(describing: error))
-                if let responseData = try? ConjetJSON.encoder(pretty: false).encode(response) {
-                    var line = responseData
-                    line.append(0x0a)
-                    try? writeAll(line, to: clientFD)
-                }
-                Darwin.close(clientFD)
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.handleClient(clientFD, handler: handler)
+            }
+        }
+    }
+
+    private func handleClient(
+        _ clientFD: Int32,
+        handler: @escaping @Sendable (DaemonRequest) -> DaemonResponse
+    ) {
+        defer { Darwin.close(clientFD) }
+
+        do {
+            let response: DaemonResponse
+            let requestData = try readLine(from: clientFD)
+            let request = try ConjetJSON.decoder().decode(DaemonRequest.self, from: requestData)
+            response = handler(request)
+            var responseData = try ConjetJSON.encoder(pretty: false).encode(response)
+            responseData.append(0x0a)
+            try writeAll(responseData, to: clientFD)
+        } catch {
+            let response = DaemonResponse(ok: false, message: String(describing: error))
+            if let responseData = try? ConjetJSON.encoder(pretty: false).encode(response) {
+                var line = responseData
+                line.append(0x0a)
+                try? writeAll(line, to: clientFD)
             }
         }
     }

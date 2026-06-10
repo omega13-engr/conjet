@@ -7,7 +7,12 @@ import Foundation
 
 public final class VirtualMachineController {
     private let queue = DispatchQueue(label: "dev.conjet.vm")
+    private let operationLock = NSLock()
+    private let progressLock = NSLock()
     private var state: VMRunState = .stopped
+    private var phase: String?
+    private var events: [VMRuntimeEvent] = []
+    private let maxEventCount = 16
 
     #if canImport(Virtualization)
     private var machine: VZVirtualMachine?
@@ -21,10 +26,16 @@ public final class VirtualMachineController {
     public func status(store: VMImageStore) -> VMRuntimeStatus {
         #if canImport(Virtualization)
         if let machine {
-            return store.status(state: mapState(machine.state), message: "VZ virtual machine is \(mapState(machine.state).rawValue)")
+            let mappedState = mapState(machine.state)
+            return statusWithProgress(
+                store.status(state: mappedState, message: "VZ virtual machine is \(mappedState.rawValue)")
+            )
         }
         #endif
-        return store.status(state: state, message: "VZ virtual machine is \(state.rawValue)")
+        let snapshot = progressSnapshot()
+        return statusWithProgress(
+            store.status(state: snapshot.state, message: snapshot.message ?? "VZ virtual machine is \(snapshot.state.rawValue)")
+        )
     }
 
     public func networkStatus(config: ConjetConfig) -> ConjetNetworkStatus {
@@ -65,22 +76,44 @@ public final class VirtualMachineController {
     }
 
     public func start(manifest: VMAssetManifest, config: ConjetConfig, store: VMImageStore) throws -> VMRuntimeStatus {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+
         #if canImport(Virtualization)
         if let machine, mapState(machine.state) == .running || mapState(machine.state) == .starting {
-            return manifest.runtimeStatus(state: mapState(machine.state), message: "VM is already \(mapState(machine.state).rawValue)", manifestPath: store.paths.vmManifest.path)
+            let mappedState = mapState(machine.state)
+            return statusWithProgress(manifest.runtimeStatus(
+                state: mappedState,
+                message: "VM is already \(mappedState.rawValue)",
+                manifestPath: store.paths.vmManifest.path
+            ))
         }
 
-        let configured = try VZConfigurationBuilder.build(manifest: manifest, config: config)
+        setProgress(
+            state: .starting,
+            phase: "configuration",
+            message: "preparing Virtualization.framework configuration",
+            resetEvents: true
+        )
+        let configured: VZConfiguredMachine
         do {
+            configured = try VZConfigurationBuilder.build(manifest: manifest, config: config)
+        } catch {
+            setProgress(state: .error, phase: "configuration", message: "failed to prepare VM configuration")
+            throw error
+        }
+        do {
+            setProgress(state: .starting, phase: "validation", message: "validating VM configuration")
             try configured.configuration.validate()
         } catch {
+            setProgress(state: .error, phase: "validation", message: "VZ configuration did not validate")
             throw ConjetError.unavailable("VZ configuration did not validate: \(error)")
         }
 
+        setProgress(state: .starting, phase: "vz-start", message: "starting VZ virtual machine")
         let vm = VZVirtualMachine(configuration: configured.configuration, queue: queue)
         machine = vm
         retainedResources = configured.resources
-        state = .starting
 
         let semaphore = DispatchSemaphore(value: 0)
         let startError = AsyncErrorBox()
@@ -94,30 +127,39 @@ public final class VirtualMachineController {
             }
         }
         if semaphore.wait(timeout: .now() + 30) == .timedOut {
-            state = .error
+            setProgress(state: .error, phase: "vz-start", message: "timed out waiting for VZ VM to start")
             throw ConjetError.unavailable("timed out waiting for VZ VM to start")
         }
         if let startError = startError.get() {
-            state = .error
+            setProgress(state: .error, phase: "vz-start", message: "failed to start VZ VM")
             throw ConjetError.unavailable("failed to start VZ VM: \(startError)")
         }
-        try startDockerBridge(for: vm, manifest: manifest, config: config)
-        state = .running
-        return manifest.runtimeStatus(state: .running, message: "VM started", manifestPath: store.paths.vmManifest.path)
+        setProgress(state: .starting, phase: "guest-bridge", message: "VZ VM started; waiting for guest bridge")
+        do {
+            try startDockerBridge(for: vm, manifest: manifest, config: config)
+        } catch {
+            setProgress(state: .error, phase: "guest-bridge", message: "failed to expose Docker bridge")
+            throw error
+        }
+        setProgress(state: .running, phase: "ready", message: "VM started")
+        return statusWithProgress(manifest.runtimeStatus(state: .running, message: "VM started", manifestPath: store.paths.vmManifest.path))
         #else
         throw ConjetError.unavailable("Virtualization.framework is not available in this build")
         #endif
     }
 
     public func stop(store: VMImageStore) throws -> VMRuntimeStatus {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+
         #if canImport(Virtualization)
         guard let machine else {
             publishedPortForwarder?.stop()
             publishedPortForwarder = nil
             dockerBridge?.stop()
             dockerBridge = nil
-            state = .stopped
-            return store.status(state: .stopped, message: "VM is not running")
+            setProgress(state: .stopped, phase: "stopped", message: "VM is not running", resetEvents: true)
+            return statusWithProgress(store.status(state: .stopped, message: "VM is not running"))
         }
 
         if mapState(machine.state) == .stopped {
@@ -127,19 +169,21 @@ public final class VirtualMachineController {
             dockerBridge = nil
             self.machine = nil
             retainedResources = nil
-            state = .stopped
-            return store.status(state: .stopped, message: "VM is already stopped")
+            setProgress(state: .stopped, phase: "stopped", message: "VM is already stopped", resetEvents: true)
+            return statusWithProgress(store.status(state: .stopped, message: "VM is already stopped"))
         }
 
-        state = .stopping
+        setProgress(state: .stopping, phase: "guest-shutdown", message: "quiescing guest Docker services", resetEvents: true)
         if let manifest = try? store.loadManifest() {
             try? DockerServiceQuiescer(socketPath: manifest.dockerSocketPath).quiesceForVMStop()
         }
+        setProgress(state: .stopping, phase: "network-stop", message: "stopping Docker socket bridge")
         publishedPortForwarder?.stop()
         publishedPortForwarder = nil
         dockerBridge?.stop()
         dockerBridge = nil
 
+        setProgress(state: .stopping, phase: "vz-stop", message: "stopping VZ virtual machine")
         let semaphore = DispatchSemaphore(value: 0)
         let stopError = AsyncErrorBox()
         let vmBox = VZMachineBox(machine)
@@ -154,15 +198,17 @@ public final class VirtualMachineController {
             }
         }
         if semaphore.wait(timeout: .now() + 15) == .timedOut {
+            setProgress(state: .error, phase: "vz-stop", message: "timed out waiting for VZ VM to stop")
             throw ConjetError.unavailable("timed out waiting for VZ VM to stop")
         }
         if let stopError = stopError.get() {
+            setProgress(state: .error, phase: "vz-stop", message: "failed to stop VZ VM")
             throw ConjetError.unavailable("failed to stop VZ VM: \(stopError)")
         }
         self.machine = nil
         retainedResources = nil
-        state = .stopped
-        return store.status(state: .stopped, message: "VM stopped")
+        setProgress(state: .stopped, phase: "stopped", message: "VM stopped")
+        return statusWithProgress(store.status(state: .stopped, message: "VM stopped"))
         #else
         return store.status(state: .stopped, message: "Virtualization.framework is not available in this build")
         #endif
@@ -182,7 +228,7 @@ public final class VirtualMachineController {
         case .error:
             return .error
         default:
-            return self.state
+            return progressSnapshot().state
         }
     }
 
@@ -195,6 +241,7 @@ public final class VirtualMachineController {
             throw ConjetError.unavailable("VM started without a virtio socket device; cannot expose Docker socket")
         }
         dockerBridge?.stop()
+        setProgress(state: .starting, phase: "guest-bridge", message: "probing guest bridge capabilities")
         let retryingConnector = RetryingGuestConnectionConnector(
             base: VZGuestConnectionConnector(socketDevice: socketDevice, queue: queue),
             timeoutSeconds: 90,
@@ -269,12 +316,14 @@ public final class VirtualMachineController {
         }
 
         if let forwarder {
+            setProgress(state: .starting, phase: "port-forwarder", message: "starting published port forwarder")
             forwarder.start()
             publishedPortForwarder = forwarder
         } else {
             publishedPortForwarder = nil
         }
 
+        setProgress(state: .starting, phase: "docker-socket", message: "exposing Docker socket")
         let bridge = DockerSocketBridge(
             socketPath: manifest.dockerSocketPath,
             connector: connector,
@@ -293,6 +342,54 @@ public final class VirtualMachineController {
         dockerBridge = bridge
     }
     #endif
+
+    private func progressSnapshot() -> (state: VMRunState, phase: String?, message: String?, events: [VMRuntimeEvent]) {
+        progressLock.lock()
+        defer { progressLock.unlock() }
+        return (state, phase, events.last?.message, events)
+    }
+
+    private func statusWithProgress(_ status: VMRuntimeStatus) -> VMRuntimeStatus {
+        let snapshot = progressSnapshot()
+        var enriched = status
+        enriched.phase = snapshot.phase
+        enriched.events = snapshot.events
+        switch snapshot.state {
+        case .starting, .stopping, .error:
+            enriched.state = snapshot.state
+            if let message = snapshot.message {
+                enriched.message = message
+            }
+        default:
+            if let message = snapshot.message, status.state == snapshot.state {
+                enriched.message = message
+            }
+        }
+        if enriched.state == .unconfigured {
+            enriched.phase = nil
+            enriched.events = []
+        }
+        return enriched
+    }
+
+    private func setProgress(
+        state: VMRunState,
+        phase: String,
+        message: String,
+        resetEvents: Bool = false
+    ) {
+        progressLock.lock()
+        self.state = state
+        self.phase = phase
+        if resetEvents {
+            events.removeAll(keepingCapacity: true)
+        }
+        events.append(VMRuntimeEvent(phase: phase, message: message))
+        if events.count > maxEventCount {
+            events.removeFirst(events.count - maxEventCount)
+        }
+        progressLock.unlock()
+    }
 }
 
 extension VirtualMachineController: @unchecked Sendable {}

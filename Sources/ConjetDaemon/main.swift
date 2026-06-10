@@ -52,19 +52,36 @@ struct ConjetDaemon {
         ])
 
         let server = UnixSocketServer(socketPath: socketPath)
-        var stopping = false
+        let stopFlag = DaemonStopFlag()
         try server.listen { request in
-            let response = runtime.handle(request: request, stopping: &stopping)
+            let response = runtime.handle(request: request, stopFlag: stopFlag)
             try? logger.log("request", [
                 "command": request.command.rawValue,
                 "ok": String(response.ok)
             ])
             return response
         } shouldStop: {
-            stopping
+            stopFlag.isSet()
         }
 
         try logger.log("daemon_stop", ["socket": socketPath])
+    }
+}
+
+private final class DaemonStopFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+
+    func set(_ value: Bool) {
+        lock.lock()
+        stopped = value
+        lock.unlock()
+    }
+
+    func isSet() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
     }
 }
 
@@ -136,7 +153,7 @@ private final class DaemonRuntime: @unchecked Sendable {
         startClockWakeMonitor()
     }
 
-    func handle(request: DaemonRequest, stopping: inout Bool) -> DaemonResponse {
+    func handle(request: DaemonRequest, stopFlag: DaemonStopFlag) -> DaemonResponse {
         switch request.command {
         case .ping:
             return DaemonResponse(ok: true, message: "pong", status: status(state: .warmIdle, allowCache: true))
@@ -211,7 +228,6 @@ private final class DaemonRuntime: @unchecked Sendable {
             )
         case .stop:
             invalidateStatusCache()
-            stopping = true
             let cleanupTimeout = request.parameters["timeout_seconds"].flatMap(Double.init)
                 .map { min(max($0, 0.1), 25) }
                 ?? 25
@@ -230,14 +246,13 @@ private final class DaemonRuntime: @unchecked Sendable {
             let message: String
             let ok: Bool
             if cleanupTimedOut {
-                stopping = false
                 ok = false
                 message = "conjetd stopping; cleanup still in progress after \(String(format: "%.1f", boundedWait))s"
             } else if let error = cleanupError.get() {
-                stopping = false
                 ok = false
                 message = "conjetd stopping; cleanup failed separately: \(error)"
             } else {
+                stopFlag.set(true)
                 ok = true
                 message = "conjetd stopping; cleanup completed"
             }

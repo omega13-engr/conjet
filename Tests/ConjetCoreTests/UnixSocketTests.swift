@@ -1,5 +1,6 @@
 import ConjetCore
 import Darwin
+import Dispatch
 import XCTest
 
 final class UnixSocketTests: XCTestCase {
@@ -112,6 +113,65 @@ final class UnixSocketTests: XCTestCase {
 
         Thread.sleep(forTimeInterval: 1)
         _ = try UnixSocketClient(socketPath: socket.path).send(DaemonRequest(command: .stop), timeoutSeconds: 1)
+    }
+
+    func testServerRespondsToPingWhileAnotherRequestIsSlow() throws {
+        let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("cj-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let socket = root.appendingPathComponent("conjetd.sock")
+        let state = ServerState()
+        let slowRequestStarted = DispatchSemaphore(value: 0)
+        let slowRequestFinished = DispatchSemaphore(value: 0)
+
+        let thread = Thread {
+            do {
+                let server = UnixSocketServer(socketPath: socket.path)
+                try server.listen { request in
+                    if request.command == .status {
+                        slowRequestStarted.signal()
+                        Thread.sleep(forTimeInterval: 0.6)
+                    }
+                    if request.command == .stop {
+                        state.stop()
+                    }
+                    return DaemonResponse(ok: true, message: request.command.rawValue)
+                } shouldStop: {
+                    state.shouldStop()
+                }
+            } catch {
+                state.setError(error)
+            }
+        }
+        thread.start()
+        try waitForSocket(socket.path)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = try? UnixSocketClient(socketPath: socket.path).send(
+                DaemonRequest(command: .status),
+                timeoutSeconds: 2
+            )
+            slowRequestFinished.signal()
+        }
+
+        XCTAssertEqual(slowRequestStarted.wait(timeout: .now() + 1), .success)
+
+        let startedAt = Date()
+        let response = try UnixSocketClient(socketPath: socket.path).send(
+            DaemonRequest(command: .ping),
+            timeoutSeconds: 0.3
+        )
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.message, "ping")
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
+
+        XCTAssertEqual(slowRequestFinished.wait(timeout: .now() + 2), .success)
+        _ = try UnixSocketClient(socketPath: socket.path).send(DaemonRequest(command: .stop), timeoutSeconds: 1)
+        Thread.sleep(forTimeInterval: 0.3)
+
+        XCTAssertNil(state.capturedError())
     }
 
     private func waitForSocket(_ path: String) throws {
