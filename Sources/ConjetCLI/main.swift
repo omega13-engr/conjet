@@ -1154,12 +1154,162 @@ struct ConjetCLI {
         let config = try updateProfileConfigFromStartArgs(args, paths: paths, json: json)
         try autoInstallSSHConfig(json: json)
         try ensureVMConfiguredForStart(json: json, config: config)
+        if !json {
+            launchContainingAppForMenuBarIfAvailable()
+        }
         let socketPath = try startDaemonOnly(printStatus: !json)
         let response = try startVMIfConfigured(socketPath: socketPath, config: config, json: json)
         if response.ok, config.ssh.enabled, FileManager.default.fileExists(atPath: paths.dockerSocket.path) {
             _ = try? reconcileSSHKnownHosts()
         }
         return response
+    }
+
+    private static func launchContainingAppForMenuBarIfAvailable() {
+        let environment = ProcessInfo.processInfo.environment
+        if environment["CONJET_DISABLE_MENU_BAR_APP"] == "1" {
+            return
+        }
+        if !runningConjetAppPIDs().isEmpty {
+            return
+        }
+        guard let appURL = containingAppBundleURL(environment: environment) else {
+            writeDiagnostic("menu bar app not found; run './script/build_and_run.sh --stage' or set CONJET_APP_PATH")
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [
+            "-g",
+            "-j",
+            appURL.path,
+            "--args",
+            "--background-menu-bar"
+        ]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                writeDiagnostic("menu bar app launch failed with exit code \(process.terminationStatus)")
+            }
+        } catch {
+            writeDiagnostic("menu bar app launch failed: \(error)")
+        }
+    }
+
+    private static func containingAppBundleURL(environment: [String: String]) -> URL? {
+        let manager = FileManager.default
+        if let override = environment["CONJET_APP_PATH"], !override.isEmpty {
+            let overrideURL = URL(fileURLWithPath: override, isDirectory: true)
+            if manager.fileExists(atPath: overrideURL.path), isLaunchableConjetAppBundle(overrideURL) {
+                return overrideURL
+            }
+        }
+        if let staged = stageSourceAppBundleIfPossible(environment: environment),
+           manager.fileExists(atPath: staged.path),
+           isLaunchableConjetAppBundle(staged) {
+            return staged
+        }
+        for candidate in containingAppBundleCandidates(environment: environment) where manager.fileExists(atPath: candidate.path) {
+            if isLaunchableConjetAppBundle(candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private static func isLaunchableConjetAppBundle(_ appURL: URL) -> Bool {
+        let executable = appURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
+            .appendingPathComponent("Conjet")
+        return FileManager.default.isExecutableFile(atPath: executable.path)
+    }
+
+    private static func containingAppBundleCandidates(environment: [String: String]) -> [URL] {
+        var seen: Set<String> = []
+        var candidates: [URL] = []
+
+        func append(_ url: URL?) {
+            guard let url else { return }
+            let standardized = url.standardizedFileURL
+            guard standardized.pathExtension == "app" else { return }
+            let path = standardized.path
+            guard !seen.contains(path) else { return }
+            seen.insert(path)
+            candidates.append(standardized)
+        }
+
+        if let override = environment["CONJET_APP_PATH"], !override.isEmpty {
+            append(URL(fileURLWithPath: override, isDirectory: true))
+        }
+
+        let executables = [currentExecutableURL(), Bundle.main.executableURL] + commandLineExecutableCandidates().map(Optional.some)
+        for executable in executables.compactMap({ $0 }) {
+            append(appBundleAncestor(for: executable))
+            if let root = repositoryRoot(containing: executable) {
+                append(root.appendingPathComponent("dist/Conjet.app", isDirectory: true))
+            }
+        }
+
+        append(FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications", isDirectory: true)
+            .appendingPathComponent("Conjet.app", isDirectory: true))
+        append(URL(fileURLWithPath: "/Applications/Conjet.app", isDirectory: true))
+
+        return candidates
+    }
+
+    private static func stageSourceAppBundleIfPossible(environment: [String: String]) -> URL? {
+        guard environment["CONJET_DISABLE_SOURCE_APP_STAGING"] != "1",
+              let root = sourceRepositoryRoot(environment: environment) else {
+            return nil
+        }
+        let script = root
+            .appendingPathComponent("script", isDirectory: true)
+            .appendingPathComponent("build_and_run.sh")
+        guard FileManager.default.isExecutableFile(atPath: script.path) else {
+            return nil
+        }
+        do {
+            let result = try ProcessRunner.run("/bin/bash", [script.path, "--stage"], timeoutSeconds: 240)
+            if result.succeeded {
+                return root.appendingPathComponent("dist/Conjet.app", isDirectory: true)
+            }
+            let error = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            writeDiagnostic("source menu bar app staging failed: \(error.isEmpty ? "exit \(result.exitCode)" : error)")
+        } catch {
+            writeDiagnostic("source menu bar app staging failed: \(error)")
+        }
+        return nil
+    }
+
+    private static func sourceRepositoryRoot(environment: [String: String]) -> URL? {
+        let executables = [currentExecutableURL(), Bundle.main.executableURL] + commandLineExecutableCandidates().map(Optional.some)
+        for executable in executables.compactMap({ $0 }) {
+            if let root = repositoryRoot(containing: executable) {
+                return root
+            }
+        }
+        return nil
+    }
+
+    private static func appBundleAncestor(for url: URL) -> URL? {
+        var current = url.standardizedFileURL
+        if !current.hasDirectoryPath {
+            current = current.deletingLastPathComponent()
+        }
+
+        while current.path != "/" {
+            if current.pathExtension == "app",
+               current.lastPathComponent == "Conjet.app",
+               FileManager.default.fileExists(atPath: current.path) {
+                return current
+            }
+            current = current.deletingLastPathComponent()
+        }
+        return nil
     }
 
     private static func autoInstallSSHConfig(json: Bool) throws {
@@ -1299,9 +1449,9 @@ struct ConjetCLI {
         if let unknown = stopArgs.first {
             throw ConjetError.invalidArgument("unknown stop option '\(unknown)'")
         }
-        guard let response = try stopRuntime(timeout: timeout, requireRunning: true) else {
-            throw ConjetError.unavailable("conjetd is not running")
-        }
+        defer { terminateConjetAppIfRunning() }
+        let response = try stopRuntime(timeout: timeout, requireRunning: false)
+            ?? DaemonResponse(ok: true, message: "conjetd is not running")
         if json {
             print(try ConjetJSON.string(response))
         } else {
@@ -1407,6 +1557,46 @@ struct ConjetCLI {
         if json {
             print(try ConjetJSON.string(ConjetRestartResult(pruned: pruned, stopped: stopped, started: started)))
         }
+    }
+
+    private static func terminateConjetAppIfRunning() {
+        if ProcessInfo.processInfo.environment["CONJET_DISABLE_MENU_BAR_APP"] == "1" {
+            return
+        }
+        let pids = runningConjetAppPIDs()
+        guard !pids.isEmpty else { return }
+        for pid in pids {
+            _ = Darwin.kill(pid, SIGTERM)
+        }
+        waitForPIDsToExit(pids, timeoutSeconds: 4)
+    }
+
+    private static func runningConjetAppPIDs() -> [Int32] {
+        guard let result = try? ProcessRunner.run("/usr/bin/pgrep", ["-x", "Conjet"], timeoutSeconds: 2),
+              result.succeeded else {
+            return []
+        }
+        return result.stdout
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { $0 > 0 && $0 != getpid() }
+    }
+
+    private static func waitForPIDsToExit(_ pids: [Int32], timeoutSeconds: Double) {
+        let attempts = max(1, Int((timeoutSeconds / 0.1).rounded(.up)))
+        for _ in 0..<attempts {
+            if pids.allSatisfy({ !processExists(pid: $0) }) {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+    }
+
+    private static func processExists(pid: Int32) -> Bool {
+        if Darwin.kill(pid, 0) == 0 {
+            return true
+        }
+        return errno == EPERM
     }
 
     private static func update(args: [String] = [], json: Bool = false) throws {

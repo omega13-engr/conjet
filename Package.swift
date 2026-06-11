@@ -10,6 +10,8 @@ let package = Package(
     products: [
         .executable(name: "conjet", targets: ["ConjetCLI"]),
         .executable(name: "conjetd", targets: ["ConjetDaemon"]),
+        .executable(name: "ConjetApp", targets: ["ConjetApp"]),
+        .library(name: "ConjetAppCore", targets: ["ConjetAppCore"]),
         .library(name: "ConjetCore", targets: ["ConjetCore"]),
         .library(name: "ConjetPower", targets: ["ConjetPower"]),
         .library(name: "ConjetVZ", targets: ["ConjetVZ"])
@@ -44,8 +46,20 @@ let package = Package(
             name: "ConjetDaemon",
             dependencies: ["ConjetCore", "ConjetPower", "ConjetVZ"]
         ),
+        .target(
+            name: "ConjetAppCore",
+            dependencies: ["ConjetCore"]
+        ),
+        .executableTarget(
+            name: "ConjetApp",
+            dependencies: ["ConjetAppCore", "ConjetCore"],
+            resources: [
+                .process("Resources")
+            ]
+        ),
         .testTarget(name: "ConjetCoreTests", dependencies: ["ConjetCore"]),
         .testTarget(name: "ConjetPowerTests", dependencies: ["ConjetPower"]),
-        .testTarget(name: "ConjetVZTests", dependencies: ["ConjetVZ"])
+        .testTarget(name: "ConjetVZTests", dependencies: ["ConjetVZ"]),
+        .testTarget(name: "ConjetAppCoreTests", dependencies: ["ConjetAppCore"])
     ]
 )

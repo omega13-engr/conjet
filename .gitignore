@@ -5,8 +5,8 @@ benchmarks/reports/**/*.json
 benchmarks/reports/**/*.md
 benchmarks/reports/**/work/
 DerivedData/
+dist/
 *.xcuserstate
 .DS_Store
 .chum-cache/
 .chum-mem
-
