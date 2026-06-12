@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import Security
 import ServiceManagement
 
 enum ConjetBundleIdentifiers {
@@ -58,7 +60,10 @@ final class ConjetBackgroundService: ObservableObject {
     }
 
     var foregroundAppShouldDeferMenuBarIcon: Bool {
-        !isRunningAsMenuBarLoginItem && wantsBackgroundMenuBar && status == .enabled
+        !isRunningAsMenuBarLoginItem
+            && wantsBackgroundMenuBar
+            && status == .enabled
+            && Self.menuBarLoginItemIsRunning()
     }
 
     func reconcileOnLaunch() {
@@ -66,13 +71,22 @@ final class ConjetBackgroundService: ObservableObject {
         guard ProcessInfo.processInfo.environment[Self.disableRegistrationEnvironmentKey] != "1",
               !isRunningAsMenuBarLoginItem,
               wantsBackgroundMenuBar else { return }
+        guard Self.supportsLoginItemRegistration else {
+            lastError = Self.loginItemUnsupportedMessage
+            return
+        }
         register()
     }
 
     func setBackgroundMenuBarEnabled(_ enabled: Bool) {
         wantsBackgroundMenuBar = enabled
         if enabled {
-            register()
+            if Self.supportsLoginItemRegistration {
+                register()
+            } else {
+                refresh()
+                lastError = Self.loginItemUnsupportedMessage
+            }
         } else {
             unregister()
         }
@@ -120,6 +134,9 @@ final class ConjetBackgroundService: ObservableObject {
     }
 
     private static func currentStatus() -> ConjetBackgroundItemStatus {
+        guard supportsLoginItemRegistration else {
+            return .notRegistered
+        }
         switch SMAppService.loginItem(identifier: ConjetBundleIdentifiers.menuBarLoginItem).status {
         case .notRegistered:
             return .notRegistered
@@ -138,5 +155,44 @@ final class ConjetBackgroundService: ObservableObject {
         let nsError = error as NSError
         let message = nsError.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         return message.isEmpty ? "\(nsError.domain) \(nsError.code)" : message
+    }
+
+    private static var supportsLoginItemRegistration: Bool {
+        codeSigningTeamIdentifier()?.isEmpty == false
+    }
+
+    private static var loginItemUnsupportedMessage: String {
+        "Launch at login requires a Developer ID signed Conjet build. This ad-hoc build keeps the menu bar icon available while Conjet.app is running."
+    }
+
+    private static func menuBarLoginItemIsRunning() -> Bool {
+        !NSRunningApplication
+            .runningApplications(withBundleIdentifier: ConjetBundleIdentifiers.menuBarLoginItem)
+            .isEmpty
+    }
+
+    private static func codeSigningTeamIdentifier() -> String? {
+        var code: SecCode?
+        guard SecCodeCopySelf(SecCSFlags(), &code) == errSecSuccess, let code else {
+            return nil
+        }
+
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, SecCSFlags(), &staticCode) == errSecSuccess,
+              let staticCode else {
+            return nil
+        }
+
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            staticCode,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &information
+        ) == errSecSuccess,
+              let dictionary = information as? [String: Any] else {
+            return nil
+        }
+
+        return dictionary[kSecCodeInfoTeamIdentifier as String] as? String
     }
 }

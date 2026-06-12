@@ -570,7 +570,7 @@ private enum VZConfigurationBuilder {
         devices.append(bootstrapDevice)
 
         if config.enableHostMounts {
-            devices.append(contentsOf: hostDirectoryShares())
+            devices.append(contentsOf: hostDirectoryShares(includeRemovableVolumes: config.enableRemovableHostMounts))
         }
 
         #if arch(arm64)
@@ -586,11 +586,11 @@ private enum VZConfigurationBuilder {
         return devices
     }
 
-    private static func hostDirectoryShares() -> [VZDirectorySharingDeviceConfiguration] {
-        let hostShares = [
-            ("conjethostusers", "/Users"),
-            ("conjethostvolumes", "/Volumes")
-        ]
+    private static func hostDirectoryShares(includeRemovableVolumes: Bool) -> [VZDirectorySharingDeviceConfiguration] {
+        var hostShares = [("conjethostusers", "/Users")]
+        if includeRemovableVolumes {
+            hostShares.append(("conjethostvolumes", "/Volumes"))
+        }
         return hostShares.compactMap { tag, path in
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),

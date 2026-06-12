@@ -91,10 +91,34 @@ final class ConjetAppCoreTests: XCTestCase {
 
     func testResolvedToolBuildsInvocationWithPrefix() {
         let tool = ResolvedTool(executable: "/usr/bin/env", argumentsPrefix: ["docker"], source: "test")
-        let invocation = tool.invocation(arguments: ["ps"], displayName: "Docker PS")
+        let invocation = tool.invocation(
+            arguments: ["ps"],
+            displayName: "Docker PS",
+            environment: ["CONJET_HOME": "/tmp/conjet-home"]
+        )
 
         XCTAssertEqual(invocation.executable, "/usr/bin/env")
         XCTAssertEqual(invocation.arguments, ["docker", "ps"])
         XCTAssertEqual(invocation.displayName, "Docker PS")
+        XCTAssertEqual(invocation.environment["CONJET_HOME"], "/tmp/conjet-home")
+    }
+
+    func testFindExecutableUsesProvidedPath() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-tool-resolver-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let executable = directory.appendingPathComponent("conjet-test-tool")
+        FileManager.default.createFile(atPath: executable.path, contents: Data())
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        XCTAssertEqual(
+            ConjetToolResolver.findExecutable(
+                named: "conjet-test-tool",
+                environment: ["PATH": directory.path]
+            ),
+            executable.path
+        )
     }
 }

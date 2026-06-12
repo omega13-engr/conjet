@@ -20,12 +20,40 @@ final class HostShareMounterTests: XCTestCase {
         let commandText = arguments.joined(separator: " ")
         XCTAssertTrue(commandText.contains("conjethostusers"))
         XCTAssertTrue(commandText.contains("/Users"))
+        XCTAssertFalse(commandText.contains("conjethostvolumes"))
+        XCTAssertFalse(commandText.contains("/Volumes"))
+    }
+
+    func testDockerArgumentsMountRemovableVolumesOnlyWhenEnabled() {
+        let mounter = HostShareMounter(dockerContext: "conjet", includeRemovableVolumes: true)
+        let commandText = mounter.dockerArguments().joined(separator: " ")
+
+        XCTAssertTrue(commandText.contains("conjethostusers"))
+        XCTAssertTrue(commandText.contains("/Users"))
         XCTAssertTrue(commandText.contains("conjethostvolumes"))
         XCTAssertTrue(commandText.contains("/Volumes"))
     }
 
     func testEnsureMountedReturnsMountedPaths() throws {
         let mounter = HostShareMounter(dockerContext: "conjet") { executable, arguments in
+            ProcessResult(
+                executable: executable,
+                arguments: arguments,
+                exitCode: 0,
+                stdout: "/Users mounted\n",
+                stderr: ""
+            )
+        }
+
+        let result = try mounter.ensureMounted()
+
+        XCTAssertEqual(result.dockerContext, "conjet")
+        XCTAssertEqual(result.mountedPaths, ["/Users"])
+        XCTAssertTrue(result.stdoutTail.contains("/Users mounted"))
+    }
+
+    func testEnsureMountedReturnsRemovableVolumePathWhenEnabled() throws {
+        let mounter = HostShareMounter(dockerContext: "conjet", includeRemovableVolumes: true) { executable, arguments in
             ProcessResult(
                 executable: executable,
                 arguments: arguments,
@@ -37,9 +65,7 @@ final class HostShareMounterTests: XCTestCase {
 
         let result = try mounter.ensureMounted()
 
-        XCTAssertEqual(result.dockerContext, "conjet")
         XCTAssertEqual(result.mountedPaths, ["/Users", "/Volumes"])
-        XCTAssertTrue(result.stdoutTail.contains("/Users mounted"))
     }
 
     func testEnsureMountedReportsDockerFailure() {

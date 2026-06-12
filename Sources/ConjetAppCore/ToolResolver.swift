@@ -1,3 +1,4 @@
+import ConjetCore
 import Foundation
 
 public struct ResolvedTool: Equatable, Sendable {
@@ -15,6 +16,7 @@ public struct ResolvedTool: Equatable, Sendable {
         arguments: [String],
         displayName: String? = nil,
         workingDirectory: URL? = nil,
+        environment: [String: String] = [:],
         timeoutSeconds: Double? = nil
     ) -> CommandInvocation {
         CommandInvocation(
@@ -22,6 +24,7 @@ public struct ResolvedTool: Equatable, Sendable {
             arguments: argumentsPrefix + arguments,
             displayName: displayName,
             workingDirectory: workingDirectory,
+            environment: environment,
             timeoutSeconds: timeoutSeconds
         )
     }
@@ -74,7 +77,7 @@ public enum ConjetToolResolver {
         named name: String,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String? {
-        let searchPath = environment["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        let searchPath = ConjetEnvironment.mergedExecutableSearchPath(environment["PATH"])
         for directory in searchPath.split(separator: ":").map(String.init) {
             let candidate = URL(fileURLWithPath: directory).appendingPathComponent(name).path
             if FileManager.default.isExecutableFile(atPath: candidate) {

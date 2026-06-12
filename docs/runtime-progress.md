@@ -80,8 +80,9 @@ Observed progress on 2026-05-30:
 
 - Conjet profiles and `CONJET_HOME` are implemented for isolated state roots,
   sockets, VM assets, logs, and Docker contexts.
-- Conjet now exposes `/Users` and `/Volumes` to the guest with VZ VirtioFS
-  directory shares when `enable_host_mounts = true`.
+- Conjet now exposes `/Users` to the guest with VZ VirtioFS directory sharing
+  when `enable_host_mounts = true`; `/Volumes` requires explicit
+  `enable_removable_host_mounts = true` opt-in.
 - The Conjet-core image scripts and cloud-init seed mount `conjethostusers` and
   `conjethostvolumes` inside the guest. Existing images can be repaired at
   startup by `HostShareMounter`, which enters the guest host namespace through

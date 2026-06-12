@@ -1183,6 +1183,7 @@ struct ConjetCLI {
         process.arguments = [
             "-g",
             "-j",
+        ] + ConjetEnvironment.forwardedEnvironmentArguments(environment) + [
             appURL.path,
             "--args",
             "--background-menu-bar"
@@ -1687,6 +1688,9 @@ struct ConjetCLI {
         if dockerContext != nil {
             renderer?.setState("\(JetTerminal.symbolStep) [docker context internal] configured")
         }
+        if config.enableHostMounts, response.ok, dockerContext != nil {
+            renderer?.setState("\(JetTerminal.symbolStep) [host shares internal] mounting")
+        }
         let hostShares = mountHostSharesIfStarted(response, dockerContext: dockerContext, config: config, json: json)
         if hostShares != nil {
             renderer?.setState("\(JetTerminal.symbolStep) [host shares internal] mounted")
@@ -1869,6 +1873,9 @@ struct ConjetCLI {
             let dockerContext = configureDockerContextIfStarted(response, json: json)
             if dockerContext != nil {
                 renderer?.setState("\(JetTerminal.symbolStep) [docker context internal] configured")
+            }
+            if config.enableHostMounts, response.ok, dockerContext != nil {
+                renderer?.setState("\(JetTerminal.symbolStep) [host shares internal] mounting")
             }
             let hostShares = mountHostSharesIfStarted(response, dockerContext: dockerContext, config: config, json: json)
             if hostShares != nil {
@@ -3724,7 +3731,10 @@ struct ConjetCLI {
         }
 
         do {
-            return try HostShareMounter(dockerContext: dockerContext.contextName).ensureMounted()
+            return try HostShareMounter(
+                dockerContext: dockerContext.contextName,
+                includeRemovableVolumes: config.enableRemovableHostMounts
+            ).ensureMounted()
         } catch {
             if !json {
                 writeDiagnostic("could not mount Conjet host shares in guest: \(error)")

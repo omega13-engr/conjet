@@ -23,8 +23,8 @@ class Conjet < Formula
   desc "Super Sonic Speed containers for macOS developers"
   homepage "https://github.com/${source_repository}"
   url "https://github.com/${source_repository}/releases/download/${tag}/${asset_name}"
-  sha256 "${asset_sha256}"
   version "${version}"
+  sha256 "${asset_sha256}"
   head "https://github.com/${source_repository}.git", branch: "main"
 
   livecheck do
@@ -56,10 +56,21 @@ class Conjet < Formula
   def install_app_bundle(app_bundle)
     appdir = prefix/"Applications"
     appdir.install app_bundle
+    strip_extended_attributes(appdir/"Conjet.app")
 
     tools = appdir/"Conjet.app/Contents/Resources/ConjetTools"
     bin.install_symlink tools/"conjet" => "conjet"
     bin.install_symlink tools/"conjetd" => "conjetd"
+  end
+
+  def post_install
+    strip_extended_attributes(prefix/"Applications/Conjet.app")
+  end
+
+  def strip_extended_attributes(path)
+    return unless path.directory?
+
+    system "/usr/bin/xattr", "-cr", path
   end
 
   def caveats

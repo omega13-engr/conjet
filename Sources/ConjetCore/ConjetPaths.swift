@@ -42,9 +42,11 @@ public struct ConjetPaths: Codable, Equatable, Sendable {
         self.dockerSocket = runDirectory.appendingPathComponent("docker.sock")
     }
 
-    public static func `default`() -> ConjetPaths {
-        let profileName = ProcessInfo.processInfo.environment["CONJET_PROFILE"] ?? "default"
-        if let override = ProcessInfo.processInfo.environment["CONJET_HOME"], !override.isEmpty {
+    public static func `default`(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> ConjetPaths {
+        let profileName = environment["CONJET_PROFILE"] ?? "default"
+        if let override = environment["CONJET_HOME"], !override.isEmpty {
             return ConjetPaths(home: URL(fileURLWithPath: override, isDirectory: true), profileName: profileName)
         }
         let home = FileManager.default.homeDirectoryForCurrentUser

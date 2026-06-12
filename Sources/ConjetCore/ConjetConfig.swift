@@ -66,6 +66,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     public var quietStopMinutes: Int
     public var enableRosetta: Bool
     public var enableHostMounts: Bool
+    public var enableRemovableHostMounts: Bool
     public var socketPath: String?
     public var conjetCoreRepository: String
     public var networkBindPolicy: ConjetNetworkBindPolicy
@@ -87,6 +88,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         quietStopMinutes: Int = 30,
         enableRosetta: Bool = true,
         enableHostMounts: Bool = true,
+        enableRemovableHostMounts: Bool = false,
         socketPath: String? = nil,
         conjetCoreRepository: String = ConjetCoreReleaseSource.defaultRepository,
         networkBindPolicy: ConjetNetworkBindPolicy = .secureLocal,
@@ -107,6 +109,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         self.quietStopMinutes = quietStopMinutes
         self.enableRosetta = enableRosetta
         self.enableHostMounts = enableHostMounts
+        self.enableRemovableHostMounts = enableRemovableHostMounts
         self.socketPath = socketPath
         self.conjetCoreRepository = conjetCoreRepository
         self.networkBindPolicy = networkBindPolicy
@@ -131,6 +134,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         case quietStopMinutes
         case enableRosetta
         case enableHostMounts
+        case enableRemovableHostMounts
         case socketPath
         case conjetCoreRepository
         case networkBindPolicy
@@ -156,6 +160,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             quietStopMinutes: try container.decodeIfPresent(Int.self, forKey: .quietStopMinutes) ?? defaults.quietStopMinutes,
             enableRosetta: try container.decodeIfPresent(Bool.self, forKey: .enableRosetta) ?? defaults.enableRosetta,
             enableHostMounts: try container.decodeIfPresent(Bool.self, forKey: .enableHostMounts) ?? defaults.enableHostMounts,
+            enableRemovableHostMounts: try container.decodeIfPresent(Bool.self, forKey: .enableRemovableHostMounts) ?? defaults.enableRemovableHostMounts,
             socketPath: try container.decodeIfPresent(String.self, forKey: .socketPath) ?? defaults.socketPath,
             conjetCoreRepository: try container.decodeIfPresent(String.self, forKey: .conjetCoreRepository) ?? defaults.conjetCoreRepository,
             networkBindPolicy: try container.decodeIfPresent(ConjetNetworkBindPolicy.self, forKey: .networkBindPolicy) ?? defaults.networkBindPolicy,
@@ -246,6 +251,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         lines.append("runtime = \"\(escapeTOML(runtime))\"")
         lines.append("enable_rosetta = \(enableRosetta)")
         lines.append("enable_host_mounts = \(enableHostMounts)")
+        lines.append("enable_removable_host_mounts = \(enableRemovableHostMounts)")
         lines.append("")
         lines.append("[images]")
         lines.append("conjet_core_repository = \"\(escapeTOML(conjetCoreRepository))\"")
@@ -314,6 +320,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                 config.enableRosetta = try parseBool(value, key: key)
             case "vm.enable_host_mounts":
                 config.enableHostMounts = try parseBool(value, key: key)
+            case "vm.enable_removable_host_mounts":
+                config.enableRemovableHostMounts = try parseBool(value, key: key)
             case "daemon.quiet_stop_minutes":
                 config.quietStopMinutes = try parseInt(value, key: key)
             case "daemon.energy_mode":

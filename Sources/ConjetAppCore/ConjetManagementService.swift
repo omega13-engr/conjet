@@ -2,20 +2,25 @@ import ConjetCore
 import Foundation
 
 public struct ConjetManagementService: Sendable {
+    private let environment: [String: String]
     private let conjetTool: ResolvedTool
     private let conjetdTool: ResolvedTool
     private let dockerTool: ResolvedTool
+    private let paths: ConjetPaths
     private let execute: @Sendable (CommandInvocation) async -> ProcessResult
 
     public init(
-        conjetTool: ResolvedTool = ConjetToolResolver.conjet(),
-        conjetdTool: ResolvedTool = ConjetToolResolver.conjetd(),
-        dockerTool: ResolvedTool = ConjetToolResolver.docker(),
+        environment: [String: String] = ConjetEnvironment.app(),
+        conjetTool: ResolvedTool? = nil,
+        conjetdTool: ResolvedTool? = nil,
+        dockerTool: ResolvedTool? = nil,
         executor: any CommandExecuting = LocalCommandExecutor()
     ) {
-        self.conjetTool = conjetTool
-        self.conjetdTool = conjetdTool
-        self.dockerTool = dockerTool
+        self.environment = environment
+        self.conjetTool = conjetTool ?? ConjetToolResolver.conjet(environment: environment)
+        self.conjetdTool = conjetdTool ?? ConjetToolResolver.conjetd(environment: environment)
+        self.dockerTool = dockerTool ?? ConjetToolResolver.docker(environment: environment)
+        self.paths = ConjetPaths.default(environment: environment)
         self.execute = { invocation in await executor.run(invocation) }
     }
 
@@ -78,7 +83,12 @@ public struct ConjetManagementService: Sendable {
         label: String,
         timeoutSeconds: Double? = 120
     ) async -> CommandLogEntry {
-        await run(conjetTool.invocation(arguments: arguments, displayName: label, timeoutSeconds: timeoutSeconds), label: label)
+        await run(conjetTool.invocation(
+            arguments: arguments,
+            displayName: label,
+            environment: environment,
+            timeoutSeconds: timeoutSeconds
+        ), label: label)
     }
 
     public func runDocker(
@@ -91,6 +101,7 @@ public struct ConjetManagementService: Sendable {
             arguments: dockerHostArguments() + arguments,
             displayName: label,
             workingDirectory: workingDirectory,
+            environment: environment,
             timeoutSeconds: timeoutSeconds
         )
         return await run(invocation, label: label)
@@ -124,7 +135,12 @@ public struct ConjetManagementService: Sendable {
     }
 
     private func daemonStatus() async -> (value: DaemonResponse?, warnings: [String]) {
-        let result = await execute(conjetTool.invocation(arguments: ["status", "--json"], displayName: "Status", timeoutSeconds: 15))
+        let result = await execute(conjetTool.invocation(
+            arguments: ["status", "--json"],
+            displayName: "Status",
+            environment: environment,
+            timeoutSeconds: 15
+        ))
         guard !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (nil, result.stderr.isEmpty ? [] : ["conjet status: \(trim(result.stderr))"])
         }
@@ -148,7 +164,12 @@ public struct ConjetManagementService: Sendable {
     }
 
     private func profileList() async -> (value: [String], warnings: [String]) {
-        let result = await execute(conjetTool.invocation(arguments: ["profile", "list", "--json"], displayName: "Profiles", timeoutSeconds: 10))
+        let result = await execute(conjetTool.invocation(
+            arguments: ["profile", "list", "--json"],
+            displayName: "Profiles",
+            environment: environment,
+            timeoutSeconds: 10
+        ))
         guard result.exitCode == 0 else {
             return ([], ["profile list: \(trim(result.stderr))"])
         }
@@ -219,6 +240,7 @@ public struct ConjetManagementService: Sendable {
         await execute(dockerTool.invocation(
             arguments: dockerHostArguments() + arguments,
             displayName: "Docker",
+            environment: environment,
             timeoutSeconds: timeoutSeconds
         ))
     }
@@ -228,7 +250,6 @@ public struct ConjetManagementService: Sendable {
     }
 
     private func dockerSocketPath() -> String {
-        let paths = ConjetPaths.default()
         if let config = try? ConjetConfig.loadOrCreate(paths: paths), let socketPath = config.socketPath {
             return socketPath
         }
@@ -236,7 +257,6 @@ public struct ConjetManagementService: Sendable {
     }
 
     private func daemonSocketPath() -> String {
-        let paths = ConjetPaths.default()
         if let config = try? ConjetConfig.loadOrCreate(paths: paths), let socketPath = config.socketPath {
             return socketPath
         }

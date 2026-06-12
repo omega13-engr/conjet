@@ -101,6 +101,8 @@ Drag Conjet.app to Applications, or install with Homebrew:
 The bin directory contains signed conjet and conjetd command-line tools.
 INSTALL
 
+/usr/bin/xattr -cr "$STAGING_ROOT"
+
 /usr/bin/codesign --verify --deep --strict "$STAGING_ROOT/Conjet.app"
 /usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/conjet"
 /usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/conjetd"

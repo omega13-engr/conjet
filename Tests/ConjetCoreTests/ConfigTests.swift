@@ -13,6 +13,7 @@ final class ConfigTests: XCTestCase {
             quietStopMinutes: 12,
             enableRosetta: false,
             enableHostMounts: false,
+            enableRemovableHostMounts: true,
             socketPath: "/tmp/conjet.sock",
             conjetCoreRepository: "omega13-engr/conjet",
             energyMode: .eco,
@@ -44,6 +45,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(config.ssh.enabled)
         XCTAssertEqual(config.ssh.transport, "proxy-command")
         XCTAssertTrue(config.enableHostMounts)
+        XCTAssertFalse(config.enableRemovableHostMounts)
     }
 
     func testEnergyModeIsValidated() throws {
@@ -69,6 +71,14 @@ final class ConfigTests: XCTestCase {
         XCTAssertThrowsError(try ConjetConfig.parseTOML("[ssh]\ntransport = \"lan\"\n"))
     }
 
+    func testRemovableHostMountsAreExplicitOptIn() throws {
+        XCTAssertFalse(ConjetConfig.default.enableRemovableHostMounts)
+
+        let parsed = try ConjetConfig.parseTOML("[vm]\nenable_removable_host_mounts = true\n")
+        XCTAssertTrue(parsed.enableRemovableHostMounts)
+        XCTAssertTrue(parsed.renderTOML().contains("enable_removable_host_mounts = true"))
+    }
+
     func testNamedProfilePathsAreIsolatedUnderProfilesDirectory() {
         let root = URL(fileURLWithPath: "/tmp/conjet-home", isDirectory: true)
         let paths = ConjetPaths(home: root, profileName: "work")
@@ -88,5 +98,42 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(paths.home, root)
         XCTAssertEqual(paths.socket.path, "/tmp/conjet-home/run/conjetd.sock")
         XCTAssertEqual(paths.vmManifest.path, "/tmp/conjet-home/state/vm/manifest.json")
+    }
+
+    func testDefaultPathsRespectExplicitEnvironment() {
+        let paths = ConjetPaths.default(environment: [
+            "CONJET_HOME": "/tmp/conjet-env-home",
+            "CONJET_PROFILE": "work"
+        ])
+
+        XCTAssertEqual(paths.profileName, "work")
+        XCTAssertEqual(paths.rootHome.path, "/tmp/conjet-env-home")
+        XCTAssertEqual(paths.home.path, "/tmp/conjet-env-home/profiles/work")
+        XCTAssertEqual(paths.socket.path, "/tmp/conjet-env-home/profiles/work/run/conjetd.sock")
+    }
+
+    func testAppEnvironmentMergesExecutableFallbackPath() {
+        let environment = ConjetEnvironment.app(
+            processEnvironment: ["PATH": "/custom/bin:/usr/bin"],
+            includeLaunchdEnvironment: false
+        )
+
+        XCTAssertEqual(
+            environment["PATH"],
+            "/custom/bin:/usr/bin:/opt/homebrew/bin:/usr/local/bin:/bin:/usr/sbin:/sbin"
+        )
+    }
+
+    func testForwardedAppEnvironmentArgumentsOnlyIncludeSupportedKeys() {
+        let arguments = ConjetEnvironment.forwardedEnvironmentArguments([
+            "CONJET_HOME": "/tmp/conjet-home",
+            "CONJET_PROFILE": "work",
+            "UNRELATED": "ignored"
+        ])
+
+        XCTAssertEqual(arguments, [
+            "--env", "CONJET_HOME=/tmp/conjet-home",
+            "--env", "CONJET_PROFILE=work"
+        ])
     }
 }

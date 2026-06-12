@@ -36,6 +36,11 @@ cask "conjet" do
 
   app "Conjet.app"
 
+  postflight do
+    app_path = "#{appdir}/Conjet.app"
+    system_command "/usr/bin/xattr", args: ["-cr", app_path] if File.directory?(app_path)
+  end
+
   uninstall quit: [
     "dev.conjet.app",
     "dev.conjet.app.menubar",

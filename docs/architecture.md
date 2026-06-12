@@ -35,9 +35,9 @@ The VZ layer now manages:
 - compressed raw EFI disk import for Conjet-core `.raw.gz` guest artifacts
 - Docker API forwarding from `~/.conjet/run/docker.sock` to guest VSOCK port
   2375 after VM start
-- optional VirtioFS host shares for `/Users` and `/Volumes`, exposed as
-  `conjethostusers` and `conjethostvolumes`, so the guest Docker daemon can
-  resolve normal macOS bind-mount source paths
+- optional VirtioFS host shares for `/Users`, plus explicit opt-in `/Volumes`
+  sharing, exposed as `conjethostusers` and `conjethostvolumes`, so the guest
+  Docker daemon can resolve normal macOS bind-mount source paths
 
 `conjet vm fetch-fedora` and `conjet vm fetch-alpine` are boot-asset fetchers,
 not complete container-runtime images. The smoke-test blocker is now concrete:
@@ -65,8 +65,8 @@ ready for `conjet vm start`.
 `guest/image/conjet-core` is the Conjet-owned version of that lane. It starts
 from Ubuntu minimal cloud image, installs Docker and the guest VSOCK bridge
 inside the disk image, configures DHCP and vsock module loading, disables
-cloud-init first-boot waits, mounts the Conjet host `/Users` and `/Volumes`
-VirtioFS shares, and emits a `.raw.gz` artifact. The
+cloud-init first-boot waits, mounts configured Conjet host VirtioFS shares, and
+emits a `.raw.gz` artifact. The
 `conjet vm fetch-conjet-core --image PATH.raw.gz` command imports that artifact
 directly and does not attach the generic cloud-init Docker seed.
 

@@ -242,6 +242,7 @@ codesign_tool "$APP_TOOLS/conjetd"
 codesign_plain "$APP_BINARY"
 codesign_plain "$APP_BUNDLE"
 
+/usr/bin/xattr -cr "$APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST" >/dev/null
 /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HELPER_INFO_PLIST" >/dev/null
