@@ -1170,7 +1170,7 @@ struct ConjetCLI {
         if environment["CONJET_DISABLE_MENU_BAR_APP"] == "1" {
             return
         }
-        if !runningConjetAppPIDs().isEmpty {
+        if !runningConjetInterfacePIDs().isEmpty {
             return
         }
         guard let appURL = containingAppBundleURL(environment: environment) else {
@@ -1449,7 +1449,6 @@ struct ConjetCLI {
         if let unknown = stopArgs.first {
             throw ConjetError.invalidArgument("unknown stop option '\(unknown)'")
         }
-        defer { terminateConjetAppIfRunning() }
         let response = try stopRuntime(timeout: timeout, requireRunning: false)
             ?? DaemonResponse(ok: true, message: "conjetd is not running")
         if json {
@@ -1559,44 +1558,20 @@ struct ConjetCLI {
         }
     }
 
-    private static func terminateConjetAppIfRunning() {
-        if ProcessInfo.processInfo.environment["CONJET_DISABLE_MENU_BAR_APP"] == "1" {
-            return
-        }
-        let pids = runningConjetAppPIDs()
-        guard !pids.isEmpty else { return }
-        for pid in pids {
-            _ = Darwin.kill(pid, SIGTERM)
-        }
-        waitForPIDsToExit(pids, timeoutSeconds: 4)
-    }
-
-    private static func runningConjetAppPIDs() -> [Int32] {
-        guard let result = try? ProcessRunner.run("/usr/bin/pgrep", ["-x", "Conjet"], timeoutSeconds: 2),
-              result.succeeded else {
-            return []
-        }
-        return result.stdout
-            .split(whereSeparator: \.isNewline)
-            .compactMap { Int32($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
-            .filter { $0 > 0 && $0 != getpid() }
-    }
-
-    private static func waitForPIDsToExit(_ pids: [Int32], timeoutSeconds: Double) {
-        let attempts = max(1, Int((timeoutSeconds / 0.1).rounded(.up)))
-        for _ in 0..<attempts {
-            if pids.allSatisfy({ !processExists(pid: $0) }) {
-                return
+    private static func runningConjetInterfacePIDs() -> [Int32] {
+        var pids: Set<Int32> = []
+        for processName in ["Conjet", "Conjet Menu Bar"] {
+            guard let result = try? ProcessRunner.run("/usr/bin/pgrep", ["-x", processName], timeoutSeconds: 2),
+                  result.succeeded else {
+                continue
             }
-            Thread.sleep(forTimeInterval: 0.1)
+            for line in result.stdout.split(whereSeparator: \.isNewline) {
+                if let pid = Int32(line.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0, pid != getpid() {
+                    pids.insert(pid)
+                }
+            }
         }
-    }
-
-    private static func processExists(pid: Int32) -> Bool {
-        if Darwin.kill(pid, 0) == 0 {
-            return true
-        }
-        return errno == EPERM
+        return pids.sorted()
     }
 
     private static func update(args: [String] = [], json: Bool = false) throws {

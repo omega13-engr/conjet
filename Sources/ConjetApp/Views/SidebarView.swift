@@ -21,11 +21,6 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SidebarBrand()
-                .padding(.top, 44)
-                .padding(.horizontal, 18)
-                .padding(.bottom, 18)
-
             VStack(alignment: .leading, spacing: 18) {
                 ForEach(groups) { group in
                     VStack(alignment: .leading, spacing: 6) {
@@ -48,6 +43,7 @@ struct SidebarView: View {
                     }
                 }
             }
+            .padding(.top, 44)
             .padding(.bottom, 18)
 
             Spacer(minLength: 18)
@@ -65,30 +61,6 @@ private struct SidebarGroup: Identifiable {
     var sections: [ManagementSection]
 
     var id: String { title }
-}
-
-private struct SidebarBrand: View {
-    var body: some View {
-        HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(.blue.gradient)
-                Image(systemName: "bolt.horizontal.fill")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 28, height: 28)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Conjet")
-                    .font(.headline.weight(.semibold))
-                Text("Container Studio")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-    }
 }
 
 private struct SidebarRow: View {

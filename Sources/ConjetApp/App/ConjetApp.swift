@@ -28,6 +28,7 @@ final class ConjetDesktopApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ConjetBackgroundService.shared.reconcileOnLaunch()
         state.startAutoRefresh()
         statusMenuController.install()
 
@@ -85,8 +86,8 @@ final class ConjetDesktopApp: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Conjet Settings"
         window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 420, height: 140))
-        window.minSize = NSSize(width: 420, height: 140)
+        window.setContentSize(NSSize(width: 440, height: 240))
+        window.minSize = NSSize(width: 440, height: 240)
         window.isReleasedWhenClosed = false
         window.center()
         settingsWindow = window
