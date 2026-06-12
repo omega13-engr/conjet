@@ -15,8 +15,9 @@ The pushed tag is the source of truth for the release version.
 Publishing a tag like `conjet-v0.1.0` runs `.github/workflows/release-conjet.yml`.
 The workflow builds `Conjet.app`, `conjet`, and `conjetd`, runs tests, signs the
 app bundle, creates a read-only DMG, publishes it to GitHub Releases, renders the
-Homebrew formula from the final DMG checksum, updates `Formula/conjet.rb`, and
-uploads the generated formula to the release.
+Homebrew formula and cask from the final DMG checksum, updates
+`Formula/conjet.rb` and `Casks/conjet.rb`, and uploads the generated Homebrew
+package files to the release.
 
 If Developer ID signing secrets are configured, the workflow signs with
 Developer ID. If Apple notarization secrets are also configured, the workflow
@@ -30,6 +31,10 @@ The DMG contains:
 - `bin/conjet`
 - `bin/conjetd`
 - an `/Applications` alias for drag-install users
+
+The formula installs the CLI tools and a keg-local app copy. The cask installs
+`Conjet.app` into `/Applications`, which is the Homebrew-standard route for GUI
+applications.
 
 Production notarized releases require these repository secrets:
 

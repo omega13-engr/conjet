@@ -62,6 +62,16 @@ class Conjet < Formula
     bin.install_symlink tools/"conjetd" => "conjetd"
   end
 
+  def caveats
+    <<~EOS
+      The formula installs Homebrew-managed CLI tools and keeps Conjet.app inside the keg:
+        #{prefix}/Applications/Conjet.app
+
+      To install Conjet.app into /Applications, use the cask:
+        brew install --cask ${source_repository}/conjet
+    EOS
+  end
+
   test do
     assert_path_exists prefix/"Applications/Conjet.app/Contents/MacOS/Conjet"
     assert_match "Conjet manages", shell_output("#{bin}/conjet --help")

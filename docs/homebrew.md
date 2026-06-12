@@ -7,7 +7,22 @@ brew tap omega13-engr/conjet https://github.com/omega13-engr/conjet.git
 brew install conjet
 ```
 
-The explicit URL keeps the tap pointed at the Conjet repository.
+The explicit URL keeps the tap pointed at the Conjet repository. The formula
+installs the `conjet` and `conjetd` command-line tools and keeps a keg-local copy
+of `Conjet.app` under:
+
+```sh
+open "$(brew --prefix conjet)/Applications/Conjet.app"
+```
+
+Install the visible macOS app into `/Applications` with the cask:
+
+```sh
+brew install --cask omega13-engr/conjet/conjet
+```
+
+The formula and cask can be installed together: the formula owns Homebrew's CLI
+symlinks, and the cask owns `/Applications/Conjet.app`.
 
 ## Release Flow
 
@@ -24,17 +39,11 @@ When `.github/workflows/release-conjet.yml` runs, it:
 - creates and notarizes the release DMG,
 - publishes a GitHub release,
 - renders a binary Homebrew formula with the stapled DMG SHA256,
-- uploads that formula as a release asset,
-- updates `Formula/conjet.rb` in the source repository.
+- renders a Homebrew cask for `/Applications/Conjet.app`,
+- uploads the formula and cask as release assets,
+- updates `Formula/conjet.rb` and `Casks/conjet.rb` in the source repository.
 
 The pushed `conjet-vX.Y.Z` tag is the source of truth for the release version.
-
-The formula installs `Conjet.app` under the formula prefix and symlinks the
-bundled command-line tools into Homebrew's `bin` directory. Open the app with:
-
-```sh
-open "$(brew --prefix conjet)/Applications/Conjet.app"
-```
 
 ## Developer Builds
 

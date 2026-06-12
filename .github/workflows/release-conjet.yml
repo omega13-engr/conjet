@@ -193,7 +193,7 @@ jobs:
             dist/*.dmg.sha256
 
   release:
-    name: Publish GitHub release and formula
+    name: Publish GitHub release, formula, and cask
     runs-on: ubuntu-24.04
     needs:
       - build
@@ -242,7 +242,7 @@ jobs:
             --notes-file release-notes.md \
             --latest
 
-      - name: Render Homebrew formula
+      - name: Render Homebrew formula and cask
         run: |
           set -euo pipefail
           artifact_base="${{ needs.build.outputs.artifact_base }}"
@@ -254,35 +254,47 @@ jobs:
           asset_sha="$(awk '{print $1}' "${sha_file}")"
           artifact_arch="${artifact_base##*-macos-}"
           mkdir -p homebrew-formula
+          mkdir -p homebrew-cask
           build-support/render-homebrew-formula.sh \
             "${{ needs.build.outputs.version }}" \
             "${asset_sha}" \
             "${GITHUB_REPOSITORY}" \
             "${artifact_arch}" > homebrew-formula/conjet.rb
+          build-support/render-homebrew-cask.sh \
+            "${{ needs.build.outputs.version }}" \
+            "${asset_sha}" \
+            "${GITHUB_REPOSITORY}" \
+            "${artifact_arch}" > homebrew-cask/conjet.rb
           ruby -c homebrew-formula/conjet.rb
+          ruby -c homebrew-cask/conjet.rb
 
-      - name: Update source formula
+      - name: Update source formula and cask
         run: |
           set -euo pipefail
           version="${{ needs.build.outputs.version }}"
           cp homebrew-formula/conjet.rb Formula/conjet.rb
+          mkdir -p Casks
+          cp homebrew-cask/conjet.rb Casks/conjet.rb
           printf '%s\n' "${version}" > VERSION
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/conjet.rb VERSION
+          git add Casks/conjet.rb Formula/conjet.rb VERSION
           if git diff --cached --quiet; then
-            echo "Source formula already up to date"
+            echo "Source formula and cask already up to date"
             exit 0
           fi
           git commit -m "chore(release): update conjet ${version}"
           git push origin "HEAD:${{ github.event.repository.default_branch }}"
 
-      - name: Upload Homebrew formula to release
+      - name: Upload Homebrew packages to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "${{ needs.build.outputs.tag }}" homebrew-formula/conjet.rb \
+          cp homebrew-cask/conjet.rb homebrew-cask/conjet-cask.rb
+          gh release upload "${{ needs.build.outputs.tag }}" \
+            homebrew-formula/conjet.rb \
+            homebrew-cask/conjet-cask.rb \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
