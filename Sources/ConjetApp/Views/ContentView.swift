@@ -13,6 +13,7 @@ struct ContentView: View {
             DetailView(section: app.selectedSection)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 1080, minHeight: 720)
         .background(.regularMaterial)
         .task {
