@@ -1,9 +1,9 @@
 class Conjet < Formula
   desc "Super Sonic Speed containers for macOS developers"
   homepage "https://github.com/omega13-engr/conjet"
-  url "https://github.com/omega13-engr/conjet/releases/download/conjet-v0.3.4/conjet-0.3.4-macos-arm64.tar.gz"
-  sha256 "1602d989b68efb7765c1a8dfe5ea110f3a6fcda6541d9a9c095991fa3265de87"
-  version "0.3.4"
+  url "https://github.com/omega13-engr/conjet/releases/download/conjet-v0.3.6/conjet-0.3.6-macos-arm64.dmg"
+  sha256 "dee0a0dc7c011bb185f2b9fcd860877023f59623860e55359f198d293337cf70"
+  version "0.3.6"
   head "https://github.com/omega13-engr/conjet.git", branch: "main"
 
   livecheck do
@@ -26,15 +26,9 @@ class Conjet < Formula
       install_app_bundle buildpath/"dist/Conjet.app"
     else
       app_bundle = Dir["**/Conjet.app"].find { |path| File.directory?(path) }
+      odie "Conjet.app is missing from the release DMG" if app_bundle.nil?
 
-      if app_bundle
-        install_app_bundle app_bundle
-      else
-        conjet = Dir["**/conjet"].find { |path| File.file?(path) }
-        conjetd = Dir["**/conjetd"].find { |path| File.file?(path) }
-        bin.install conjet => "conjet"
-        bin.install conjetd => "conjetd"
-      end
+      install_app_bundle app_bundle
     end
   end
 
@@ -48,6 +42,7 @@ class Conjet < Formula
   end
 
   test do
+    assert_path_exists prefix/"Applications/Conjet.app/Contents/MacOS/Conjet"
     assert_match "Conjet manages", shell_output("#{bin}/conjet --help")
   end
 end
