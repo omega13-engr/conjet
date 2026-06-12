@@ -14,10 +14,15 @@ The pushed tag is the source of truth for the release version.
 
 Publishing a tag like `conjet-v0.1.0` runs `.github/workflows/release-conjet.yml`.
 The workflow builds `Conjet.app`, `conjet`, and `conjetd`, runs tests, signs the
-app bundle with Developer ID, creates a read-only DMG, notarizes and staples the
-DMG, publishes it to GitHub Releases, renders the Homebrew formula from the
-final stapled DMG checksum, updates `Formula/conjet.rb`, and uploads the
-generated formula to the release.
+app bundle, creates a read-only DMG, publishes it to GitHub Releases, renders the
+Homebrew formula from the final DMG checksum, updates `Formula/conjet.rb`, and
+uploads the generated formula to the release.
+
+If Developer ID signing secrets are configured, the workflow signs with
+Developer ID. If Apple notarization secrets are also configured, the workflow
+notarizes and staples the DMG before computing the published checksum. If those
+secrets are absent, the workflow intentionally falls back to ad-hoc signing and
+publishes a non-notarized DMG for early distribution.
 
 The DMG contains:
 
@@ -26,7 +31,7 @@ The DMG contains:
 - `bin/conjetd`
 - an `/Applications` alias for drag-install users
 
-The release workflow requires these repository secrets:
+Production notarized releases require these repository secrets:
 
 - `MACOS_CERTIFICATE_P12`: base64-encoded Developer ID Application `.p12`
 - `MACOS_CERTIFICATE_PASSWORD`: password for the `.p12`
@@ -100,9 +105,10 @@ build-support/create-macos-dmg.sh \
   --arch "$(uname -m)"
 ```
 
-Local ad-hoc DMGs are useful for structure and signing-order validation, but
-they are not production distributables. Production releases must use Developer ID
-signing, notarization, and stapling in GitHub Actions.
+Ad-hoc DMGs are useful for early distribution and structure/signing-order
+validation, but they are not Gatekeeper-notarized production distributables.
+Production releases should use Developer ID signing, notarization, and stapling
+in GitHub Actions.
 
 ## Runtime Updates
 

@@ -9,7 +9,7 @@ on:
       version:
         description: Semantic version to release, without the conjet-v prefix
         required: true
-        default: 0.3.5
+        default: 0.3.6
 
 permissions:
   contents: write
@@ -85,6 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${MACOS_CERTIFICATE_P12}" ]; then
+            echo "::warning::MACOS_CERTIFICATE_P12 is not configured; release will use ad-hoc signing and skip notarization."
             echo "identity=-" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
@@ -114,7 +115,7 @@ jobs:
 
           echo "identity=${identity}" >> "${GITHUB_OUTPUT}"
 
-      - name: Require production signing and notarization credentials
+      - name: Report signing mode
         env:
           SIGNING_IDENTITY: ${{ steps.certificate.outputs.identity }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -123,13 +124,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${SIGNING_IDENTITY}" = "-" ] || [ -z "${SIGNING_IDENTITY}" ]; then
-            echo "production releases require MACOS_CERTIFICATE_P12 and MACOS_CERTIFICATE_PASSWORD secrets" >&2
-            exit 1
+            echo "::warning::Publishing an ad-hoc signed, non-notarized DMG because Developer ID signing secrets are not configured."
+            exit 0
           fi
           if [ -z "${APPLE_ID}" ] || [ -z "${APPLE_TEAM_ID}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD}" ]; then
-            echo "production releases require APPLE_ID, APPLE_TEAM_ID, and APPLE_APP_SPECIFIC_PASSWORD secrets for notarization" >&2
-            exit 1
+            echo "::warning::Publishing a Developer ID signed but non-notarized DMG because Apple notarization secrets are not configured."
+            exit 0
           fi
+          echo "Developer ID signing and notarization credentials are configured."
 
       - name: Stage signed Conjet app bundle
         env:
@@ -163,15 +165,22 @@ jobs:
             --arch "${arch}"
           echo "artifact_base=${artifact_base}" >> "${GITHUB_OUTPUT}"
 
-      - name: Notarize and staple DMG
+      - name: Finalize DMG notarization and checksum
         env:
+          SIGNING_IDENTITY: ${{ steps.certificate.outputs.identity }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
           dmg="dist/${{ steps.package.outputs.artifact_base }}.dmg"
-          build-support/notarize-macos-dmg.sh "${dmg}"
+          if [ "${SIGNING_IDENTITY}" = "-" ] || [ -z "${SIGNING_IDENTITY}" ]; then
+            echo "::warning::Skipping notarization for ad-hoc signed DMG."
+          elif [ -z "${APPLE_ID}" ] || [ -z "${APPLE_TEAM_ID}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD}" ]; then
+            echo "::warning::Skipping notarization because Apple notarization secrets are not configured."
+          else
+            build-support/notarize-macos-dmg.sh "${dmg}"
+          fi
           shasum -a 256 "${dmg}" > "${dmg}.sha256"
 
       - name: Upload release artifact
