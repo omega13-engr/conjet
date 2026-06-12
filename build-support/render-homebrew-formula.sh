@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:?usage: render-homebrew-formula.sh VERSION ASSET_SHA256 [SOURCE_REPOSITORY] [ARTIFACT_ARCH]}"
-asset_sha256="${2:?usage: render-homebrew-formula.sh VERSION ASSET_SHA256 [SOURCE_REPOSITORY] [ARTIFACT_ARCH]}"
+version="${1:?usage: render-homebrew-formula.sh VERSION DMG_SHA256 [SOURCE_REPOSITORY] [ARTIFACT_ARCH]}"
+asset_sha256="${2:?usage: render-homebrew-formula.sh VERSION DMG_SHA256 [SOURCE_REPOSITORY] [ARTIFACT_ARCH]}"
 source_repository="${3:-omega13-engr/conjet}"
 artifact_arch="${4:-arm64}"
 tag="conjet-v${version}"
-asset_name="conjet-${version}-macos-${artifact_arch}.tar.gz"
+asset_name="conjet-${version}-macos-${artifact_arch}.dmg"
 
 if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
     echo "invalid semantic version: ${version}" >&2
@@ -37,24 +37,33 @@ class Conjet < Formula
 
   def install
     if build.head?
-      system "swift", "build", "-c", "release", "--disable-sandbox", "--product", "conjet"
-      system "swift", "build", "-c", "release", "--disable-sandbox", "--product", "conjetd"
-
-      bin.install ".build/release/conjet"
-      bin.install ".build/release/conjetd"
-
-      entitlements = buildpath/"build-support/conjet-debug.entitlements"
-      system "codesign", "--force", "--sign", "-", "--entitlements", entitlements, bin/"conjet"
-      system "codesign", "--force", "--sign", "-", "--entitlements", entitlements, bin/"conjetd"
+      system "build-support/stage-macos-app.sh",
+        "--configuration", "release",
+        "--version", version.to_s,
+        "--dist-dir", buildpath/"dist",
+        "--signing-identity", "-",
+        "--entitlements", buildpath/"build-support/conjet-release.entitlements",
+        "--disable-sandbox"
+      install_app_bundle buildpath/"dist/Conjet.app"
     else
-      conjet = Dir["**/conjet"].find { |path| File.file?(path) }
-      conjetd = Dir["**/conjetd"].find { |path| File.file?(path) }
-      bin.install conjet => "conjet"
-      bin.install conjetd => "conjetd"
+      app_bundle = Dir["**/Conjet.app"].find { |path| File.directory?(path) }
+      odie "Conjet.app is missing from the release DMG" if app_bundle.nil?
+
+      install_app_bundle app_bundle
     end
   end
 
+  def install_app_bundle(app_bundle)
+    appdir = prefix/"Applications"
+    appdir.install app_bundle
+
+    tools = appdir/"Conjet.app/Contents/Resources/ConjetTools"
+    bin.install_symlink tools/"conjet" => "conjet"
+    bin.install_symlink tools/"conjetd" => "conjetd"
+  end
+
   test do
+    assert_path_exists prefix/"Applications/Conjet.app/Contents/MacOS/Conjet"
     assert_match "Conjet manages", shell_output("#{bin}/conjet --help")
   end
 end

@@ -21,7 +21,7 @@ env:
 jobs:
   swift:
     name: Swift build and test
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -42,6 +42,57 @@ jobs:
 
       - name: Test Conjet
         run: swift test
+
+      - name: Stage Conjet app bundle
+        run: |
+          set -euo pipefail
+          build-support/stage-macos-app.sh \
+            --configuration release \
+            --version "$(cat VERSION)" \
+            --dist-dir dist \
+            --signing-identity - \
+            --entitlements build-support/conjet-release.entitlements
+
+      - name: Create release DMG
+        run: |
+          set -euo pipefail
+          build-support/create-macos-dmg.sh \
+            --version "$(cat VERSION)" \
+            --dist-dir dist \
+            --arch "$(uname -m)"
+
+      - name: Validate release DMG contents
+        run: |
+          set -euo pipefail
+          dmg="$(find dist -maxdepth 1 -name 'conjet-*-macos-*.dmg' -print -quit)"
+          if [ -z "${dmg}" ]; then
+            echo "missing release dmg" >&2
+            exit 1
+          fi
+          mount_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/conjet-dmg.XXXXXX")"
+          cleanup() {
+            /usr/bin/hdiutil detach "${mount_dir}" >/dev/null 2>&1 || true
+            rmdir "${mount_dir}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          /usr/bin/hdiutil attach -nobrowse -readonly -mountpoint "${mount_dir}" "${dmg}"
+          test -d "${mount_dir}/Conjet.app"
+          test -x "${mount_dir}/Conjet.app/Contents/MacOS/Conjet"
+          test -x "${mount_dir}/bin/conjet"
+          test -x "${mount_dir}/bin/conjetd"
+          /usr/bin/codesign --verify --deep --strict "${mount_dir}/Conjet.app"
+
+      - name: Validate rendered Homebrew formula
+        run: |
+          set -euo pipefail
+          dmg="$(find dist -maxdepth 1 -name 'conjet-*-macos-*.dmg' -print -quit)"
+          sha="$(shasum -a 256 "${dmg}" | awk '{print $1}')"
+          build-support/render-homebrew-formula.sh \
+            "$(cat VERSION)" \
+            "${sha}" \
+            "${GITHUB_REPOSITORY:-omega13-engr/conjet}" \
+            "$(uname -m)" > dist/conjet.rb
+          ruby -c dist/conjet.rb
 
       - name: Build benchmark package
         run: swift build --package-path benchmarks

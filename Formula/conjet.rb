@@ -16,21 +16,35 @@ class Conjet < Formula
 
   def install
     if build.head?
-      system "swift", "build", "-c", "release", "--disable-sandbox", "--product", "conjet"
-      system "swift", "build", "-c", "release", "--disable-sandbox", "--product", "conjetd"
-
-      bin.install ".build/release/conjet"
-      bin.install ".build/release/conjetd"
-
-      entitlements = buildpath/"build-support/conjet-debug.entitlements"
-      system "codesign", "--force", "--sign", "-", "--entitlements", entitlements, bin/"conjet"
-      system "codesign", "--force", "--sign", "-", "--entitlements", entitlements, bin/"conjetd"
+      system "build-support/stage-macos-app.sh",
+        "--configuration", "release",
+        "--version", version.to_s,
+        "--dist-dir", buildpath/"dist",
+        "--signing-identity", "-",
+        "--entitlements", buildpath/"build-support/conjet-release.entitlements",
+        "--disable-sandbox"
+      install_app_bundle buildpath/"dist/Conjet.app"
     else
-      conjet = Dir["**/conjet"].find { |path| File.file?(path) }
-      conjetd = Dir["**/conjetd"].find { |path| File.file?(path) }
-      bin.install conjet => "conjet"
-      bin.install conjetd => "conjetd"
+      app_bundle = Dir["**/Conjet.app"].find { |path| File.directory?(path) }
+
+      if app_bundle
+        install_app_bundle app_bundle
+      else
+        conjet = Dir["**/conjet"].find { |path| File.file?(path) }
+        conjetd = Dir["**/conjetd"].find { |path| File.file?(path) }
+        bin.install conjet => "conjet"
+        bin.install conjetd => "conjetd"
+      end
     end
+  end
+
+  def install_app_bundle(app_bundle)
+    appdir = prefix/"Applications"
+    appdir.install app_bundle
+
+    tools = appdir/"Conjet.app/Contents/Resources/ConjetTools"
+    bin.install_symlink tools/"conjet" => "conjet"
+    bin.install_symlink tools/"conjetd" => "conjetd"
   end
 
   test do

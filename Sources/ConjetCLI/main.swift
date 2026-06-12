@@ -1248,6 +1248,9 @@ struct ConjetCLI {
         let executables = [currentExecutableURL(), Bundle.main.executableURL] + commandLineExecutableCandidates().map(Optional.some)
         for executable in executables.compactMap({ $0 }) {
             append(appBundleAncestor(for: executable))
+            for installedApp in installedAppBundleCandidates(for: executable) {
+                append(installedApp)
+            }
             if let root = repositoryRoot(containing: executable) {
                 append(root.appendingPathComponent("dist/Conjet.app", isDirectory: true))
             }
@@ -1259,6 +1262,18 @@ struct ConjetCLI {
         append(URL(fileURLWithPath: "/Applications/Conjet.app", isDirectory: true))
 
         return candidates
+    }
+
+    private static func installedAppBundleCandidates(for executable: URL) -> [URL] {
+        let executableDirectory = executable.standardizedFileURL.deletingLastPathComponent()
+        let installPrefix = executableDirectory.deletingLastPathComponent()
+        return [
+            installPrefix.appendingPathComponent("Applications", isDirectory: true)
+                .appendingPathComponent("Conjet.app", isDirectory: true),
+            installPrefix.appendingPathComponent("Conjet.app", isDirectory: true),
+            URL(fileURLWithPath: "/opt/homebrew/opt/conjet/Applications/Conjet.app", isDirectory: true),
+            URL(fileURLWithPath: "/usr/local/opt/conjet/Applications/Conjet.app", isDirectory: true)
+        ]
     }
 
     private static func stageSourceAppBundleIfPossible(environment: [String: String]) -> URL? {

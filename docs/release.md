@@ -2,7 +2,7 @@
 
 Conjet has two separate release lanes.
 
-## Conjet CLI and Daemon
+## Conjet App, CLI, and Daemon
 
 Production runtime releases use semantic version tags:
 
@@ -13,9 +13,26 @@ conjet-vX.Y.Z
 The pushed tag is the source of truth for the release version.
 
 Publishing a tag like `conjet-v0.1.0` runs `.github/workflows/release-conjet.yml`.
-The workflow builds `conjet` and `conjetd`, runs tests, publishes release
-archives, renders the Homebrew formula from the release asset checksum, updates
-`Formula/conjet.rb`, and uploads the generated formula to the release.
+The workflow builds `Conjet.app`, `conjet`, and `conjetd`, runs tests, signs the
+app bundle with Developer ID, creates a read-only DMG, notarizes and staples the
+DMG, publishes it to GitHub Releases, renders the Homebrew formula from the
+final stapled DMG checksum, updates `Formula/conjet.rb`, and uploads the
+generated formula to the release.
+
+The DMG contains:
+
+- `Conjet.app`
+- `bin/conjet`
+- `bin/conjetd`
+- an `/Applications` alias for drag-install users
+
+The release workflow requires these repository secrets:
+
+- `MACOS_CERTIFICATE_P12`: base64-encoded Developer ID Application `.p12`
+- `MACOS_CERTIFICATE_PASSWORD`: password for the `.p12`
+- `APPLE_ID`: Apple ID used for notarization
+- `APPLE_TEAM_ID`: Apple Developer Team ID
+- `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for notarization
 
 Manual release:
 
@@ -64,6 +81,28 @@ Use semantic versioning for both lanes:
 Keep the two versions independent. A Conjet CLI release does not require a
 Conjet Core image release, and a Conjet Core image release does not require a
 Conjet CLI release.
+
+## Local Release Simulation
+
+Use ad-hoc signing for local packaging validation:
+
+```sh
+swift test
+build-support/stage-macos-app.sh \
+  --configuration release \
+  --version "$(cat VERSION)" \
+  --dist-dir dist \
+  --signing-identity - \
+  --entitlements build-support/conjet-release.entitlements
+build-support/create-macos-dmg.sh \
+  --version "$(cat VERSION)" \
+  --dist-dir dist \
+  --arch "$(uname -m)"
+```
+
+Local ad-hoc DMGs are useful for structure and signing-order validation, but
+they are not production distributables. Production releases must use Developer ID
+signing, notarization, and stapling in GitHub Actions.
 
 ## Runtime Updates
 
