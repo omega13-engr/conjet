@@ -81,6 +81,7 @@ public struct DockerVolume: Identifiable, Codable, Equatable, Sendable {
     public var scope: String
     public var mountpoint: String
     public var labels: String
+    public var size: String
 
     public var id: String { name }
 
@@ -90,6 +91,68 @@ public struct DockerVolume: Identifiable, Codable, Equatable, Sendable {
         case scope = "Scope"
         case mountpoint = "Mountpoint"
         case labels = "Labels"
+        case size = "Size"
+    }
+
+    public init(
+        name: String,
+        driver: String,
+        scope: String,
+        mountpoint: String,
+        labels: String,
+        size: String = ""
+    ) {
+        self.name = name
+        self.driver = driver
+        self.scope = scope
+        self.mountpoint = mountpoint
+        self.labels = labels
+        self.size = size
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        self.driver = try container.decodeIfPresent(String.self, forKey: .driver) ?? ""
+        self.scope = try container.decodeIfPresent(String.self, forKey: .scope) ?? ""
+        self.mountpoint = try container.decodeIfPresent(String.self, forKey: .mountpoint) ?? ""
+        self.labels = try container.decodeIfPresent(String.self, forKey: .labels) ?? ""
+        self.size = try container.decodeIfPresent(String.self, forKey: .size) ?? ""
+    }
+
+    public var displaySize: String {
+        let trimmed = size.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "N/A" {
+            return "-"
+        }
+        return trimmed
+    }
+}
+
+struct DockerSystemDiskUsage: Decodable, Equatable, Sendable {
+    var volumes: [DockerVolumeUsage]
+
+    private enum CodingKeys: String, CodingKey {
+        case volumes = "Volumes"
+    }
+
+    static func volumeUsageByName(from output: String) -> [String: DockerVolumeUsage] {
+        guard let data = output.data(using: .utf8),
+              let usage = try? JSONDecoder().decode(DockerSystemDiskUsage.self, from: data) else {
+            return [:]
+        }
+
+        return Dictionary(uniqueKeysWithValues: usage.volumes.map { ($0.name, $0) })
+    }
+}
+
+struct DockerVolumeUsage: Decodable, Equatable, Sendable {
+    var name: String
+    var size: String
+
+    private enum CodingKeys: String, CodingKey {
+        case name = "Name"
+        case size = "Size"
     }
 }
 

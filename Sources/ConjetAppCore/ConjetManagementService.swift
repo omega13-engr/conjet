@@ -162,7 +162,16 @@ public struct ConjetManagementService: Sendable {
         guard socketAvailable else { return ([], []) }
         let result = await docker(["volume", "ls", "--format", "{{json .}}"], timeoutSeconds: 20)
         guard result.exitCode == 0 else { return ([], ["docker volume ls: \(trim(result.stderr))"]) }
-        return (DockerJSONLines.decode(DockerVolume.self, from: result.stdout), [])
+        let volumes = DockerJSONLines.decode(DockerVolume.self, from: result.stdout)
+        let usageResult = await docker(["system", "df", "-v", "--format", "json"], timeoutSeconds: 20)
+        guard usageResult.exitCode == 0 else { return (volumes, []) }
+        let usageByName = DockerSystemDiskUsage.volumeUsageByName(from: usageResult.stdout)
+        return (volumes.map { volume in
+            guard let usage = usageByName[volume.name] else { return volume }
+            var copy = volume
+            copy.size = usage.size
+            return copy
+        }, [])
     }
 
     private func dockerStats(socketAvailable: Bool) async -> (value: [DockerStats], warnings: [String]) {

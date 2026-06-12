@@ -1,4 +1,4 @@
-import ConjetAppCore
+@testable import ConjetAppCore
 import XCTest
 
 final class ConjetAppCoreTests: XCTestCase {
@@ -28,6 +28,31 @@ final class ConjetAppCoreTests: XCTestCase {
         XCTAssertEqual(stats[0].name, "api")
         XCTAssertEqual(stats[0].cpuPercent, "1.25%")
         XCTAssertEqual(stats[0].pids, "4")
+    }
+
+    func testDecodesDockerVolumeJSONLinesWithSize() {
+        let output = """
+        {"Name":"db_data","Driver":"local","Scope":"local","Mountpoint":"/var/lib/docker/volumes/db_data/_data","Labels":"project=test","Size":"42.5MB"}
+        """
+
+        let volumes = DockerJSONLines.decode(DockerVolume.self, from: output)
+
+        XCTAssertEqual(volumes.count, 1)
+        XCTAssertEqual(volumes[0].name, "db_data")
+        XCTAssertEqual(volumes[0].driver, "local")
+        XCTAssertEqual(volumes[0].size, "42.5MB")
+        XCTAssertEqual(volumes[0].displaySize, "42.5MB")
+    }
+
+    func testParsesDockerSystemDiskUsageVolumeSizes() {
+        let output = """
+        {"Volumes":[{"Name":"chroma_data","Size":"672.7MB"},{"Name":"postgres_data","Size":"6.957GB"}]}
+        """
+
+        let usage = DockerSystemDiskUsage.volumeUsageByName(from: output)
+
+        XCTAssertEqual(usage["chroma_data"]?.size, "672.7MB")
+        XCTAssertEqual(usage["postgres_data"]?.size, "6.957GB")
     }
 
     func testContainerActivitySnapshotAggregatesContainerRuntimeOnly() {

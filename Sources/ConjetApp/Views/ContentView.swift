@@ -4,11 +4,17 @@ struct ContentView: View {
     @EnvironmentObject private var app: ConjetAppState
 
     var body: some View {
-        NavigationSplitView {
+        HStack(spacing: 0) {
             SidebarView(selection: $app.selectedSection)
-        } detail: {
+                .frame(width: 172)
+
+            Divider()
+
             DetailView(section: app.selectedSection)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(minWidth: 1080, minHeight: 720)
+        .background(.regularMaterial)
         .task {
             ConjetWindowPresenter.configure(app: app)
             app.startAutoRefresh()
