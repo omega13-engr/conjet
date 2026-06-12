@@ -104,6 +104,10 @@ public struct ConjetManagementService: Sendable {
         await runDocker(["compose"] + arguments, label: label, workingDirectory: workingDirectory, timeoutSeconds: nil)
     }
 
+    public func loadVMStatus() async -> DaemonResponse? {
+        freshVMStatus(socketPath: nil)
+    }
+
     private func run(_ invocation: CommandInvocation, label: String) async -> CommandLogEntry {
         let startedAt = Date()
         let result = await execute(invocation)
@@ -125,11 +129,22 @@ public struct ConjetManagementService: Sendable {
             return (nil, result.stderr.isEmpty ? [] : ["conjet status: \(trim(result.stderr))"])
         }
         do {
-            let response = try ConjetJSON.decoder().decode(DaemonResponse.self, from: Data(result.stdout.utf8))
+            var response = try ConjetJSON.decoder().decode(DaemonResponse.self, from: Data(result.stdout.utf8))
+            if let freshResponse = freshVMStatus(socketPath: response.status?.socketPath) {
+                response.status = freshResponse.status ?? response.status
+                response.vm = freshResponse.vm ?? freshResponse.status?.vm ?? response.vm
+            }
             return (response, result.exitCode == 0 ? [] : ["conjet status exited \(result.exitCode)"])
         } catch {
             return (nil, ["conjet status JSON decode failed: \(error)"])
         }
+    }
+
+    private func freshVMStatus(socketPath: String?) -> DaemonResponse? {
+        let path = socketPath ?? daemonSocketPath()
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        return try? UnixSocketClient(socketPath: path)
+            .send(DaemonRequest(command: .vmStatus), timeoutSeconds: 1)
     }
 
     private func profileList() async -> (value: [String], warnings: [String]) {
@@ -218,6 +233,14 @@ public struct ConjetManagementService: Sendable {
             return socketPath
         }
         return paths.dockerSocket.path
+    }
+
+    private func daemonSocketPath() -> String {
+        let paths = ConjetPaths.default()
+        if let config = try? ConjetConfig.loadOrCreate(paths: paths), let socketPath = config.socketPath {
+            return socketPath
+        }
+        return paths.socket.path
     }
 
     private func parseDockerTop(output: String, container: DockerContainer) -> [ContainerProcess] {

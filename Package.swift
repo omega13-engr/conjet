@@ -55,11 +55,15 @@ let package = Package(
             dependencies: ["ConjetAppCore", "ConjetCore"],
             resources: [
                 .process("Resources")
+            ],
+            linkerSettings: [
+                .linkedFramework("ServiceManagement", .when(platforms: [.macOS]))
             ]
         ),
         .testTarget(name: "ConjetCoreTests", dependencies: ["ConjetCore"]),
         .testTarget(name: "ConjetPowerTests", dependencies: ["ConjetPower"]),
         .testTarget(name: "ConjetVZTests", dependencies: ["ConjetVZ"]),
-        .testTarget(name: "ConjetAppCoreTests", dependencies: ["ConjetAppCore"])
+        .testTarget(name: "ConjetAppCoreTests", dependencies: ["ConjetAppCore"]),
+        .testTarget(name: "ConjetAppTests", dependencies: ["ConjetApp"])
     ]
 )

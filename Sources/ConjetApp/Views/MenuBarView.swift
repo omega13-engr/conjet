@@ -2,15 +2,23 @@ import AppKit
 import Combine
 import ConjetCore
 import OSLog
+import QuartzCore
 import SwiftUI
 
 private let windowLogger = Logger(subsystem: "dev.conjet.app", category: "Windowing")
+
+private enum MenuBarIconAnimation {
+    static let interval: TimeInterval = 0.48
+    static let duration: TimeInterval = 0.36
+    static let dimOpacity = 0.48
+}
 
 enum ConjetLaunchOptions {
     static let menuBarOnlyArgument = "--background-menu-bar"
 
     static var startsInMenuBarOnlyMode: Bool {
         CommandLine.arguments.contains(menuBarOnlyArgument)
+            || Bundle.main.bundleIdentifier == ConjetBundleIdentifiers.menuBarLoginItem
     }
 }
 
@@ -42,7 +50,7 @@ struct ConjetMenuBarIconLabel: View {
     @ObservedObject var app: ConjetAppState
 
     private var vmState: VMRunState? {
-        app.snapshot.daemonResponse?.status?.vm?.state ?? app.snapshot.daemonResponse?.vm?.state
+        app.currentVMState
     }
 
     private var isAnimating: Bool {
@@ -50,13 +58,15 @@ struct ConjetMenuBarIconLabel: View {
     }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.32)) { context in
+        TimelineView(.periodic(from: .now, by: MenuBarIconAnimation.interval)) { context in
             let image = MenuBarIconAsset.image()
+            let opacity = opacity(at: context.date)
             Image(nsImage: image)
                 .resizable()
                 .scaledToFit()
                 .frame(width: image.size.width, height: image.size.height)
-                .opacity(opacity(at: context.date))
+                .opacity(opacity)
+                .animation(.easeInOut(duration: MenuBarIconAnimation.duration), value: opacity)
                 .accessibilityLabel("Conjet")
         }
         .onAppear {
@@ -67,8 +77,8 @@ struct ConjetMenuBarIconLabel: View {
 
     private func opacity(at date: Date) -> Double {
         guard isAnimating else { return 1 }
-        let phase = Int(date.timeIntervalSinceReferenceDate / 0.32)
-        return phase.isMultiple(of: 2) ? 1 : 0.52
+        let phase = Int(date.timeIntervalSinceReferenceDate / MenuBarIconAnimation.interval)
+        return phase.isMultiple(of: 2) ? 1 : MenuBarIconAnimation.dimOpacity
     }
 }
 
@@ -162,6 +172,7 @@ final class ConjetStatusMenuController: NSObject {
     private var statusItem: NSStatusItem?
     private var animationTimer: Timer?
     private var snapshotObserver: AnyCancellable?
+    private var commandObserver: AnyCancellable?
     private var defaultsObserver: NSObjectProtocol?
     private var animationPhase = false
     private var isDisabled = false
@@ -192,6 +203,14 @@ final class ConjetStatusMenuController: NSObject {
             }
         }
 
+        if commandObserver == nil {
+            commandObserver = app.$commandVMState.sink { [weak self] _ in
+                Task { @MainActor in
+                    self?.syncVisibility()
+                }
+            }
+        }
+
         guard defaultsObserver == nil else { return }
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification,
@@ -207,6 +226,8 @@ final class ConjetStatusMenuController: NSObject {
     private func removeObservers() {
         snapshotObserver?.cancel()
         snapshotObserver = nil
+        commandObserver?.cancel()
+        commandObserver = nil
         if let defaultsObserver {
             NotificationCenter.default.removeObserver(defaultsObserver)
             self.defaultsObserver = nil
@@ -226,13 +247,18 @@ final class ConjetStatusMenuController: NSObject {
 
     private var shouldShowMenuBarIcon: Bool {
         if UserDefaults.standard.object(forKey: "conjet.showMenuBarIcon") == nil {
-            return true
+            return ConjetLaunchOptions.startsInMenuBarOnlyMode
+                || !ConjetBackgroundService.shared.foregroundAppShouldDeferMenuBarIcon
         }
-        return UserDefaults.standard.bool(forKey: "conjet.showMenuBarIcon")
+        guard UserDefaults.standard.bool(forKey: "conjet.showMenuBarIcon") else {
+            return false
+        }
+        return ConjetLaunchOptions.startsInMenuBarOnlyMode
+            || !ConjetBackgroundService.shared.foregroundAppShouldDeferMenuBarIcon
     }
 
     private var vmState: VMRunState? {
-        app.snapshot.daemonResponse?.status?.vm?.state ?? app.snapshot.daemonResponse?.vm?.state
+        app.currentVMState
     }
 
     private var shouldAnimate: Bool {
@@ -243,7 +269,7 @@ final class ConjetStatusMenuController: NSObject {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.menu = makeMenu()
         statusItem = item
-        updateIcon(opacity: 1)
+        updateIcon(opacity: 1, animated: false)
     }
 
     private func removeStatusItem() {
@@ -273,31 +299,59 @@ final class ConjetStatusMenuController: NSObject {
 
     private func updateAnimation() {
         guard shouldAnimate else {
-            animationTimer?.invalidate()
-            animationTimer = nil
-            updateIcon(opacity: 1)
+            stopBlinkAnimation()
             return
         }
 
         guard animationTimer == nil else { return }
-        animationTimer = Timer.scheduledTimer(withTimeInterval: 0.32, repeats: true) { [weak self] _ in
+        animationPhase = false
+        updateIcon(opacity: 1, animated: false)
+        pulseIcon()
+        let timer = Timer(timeInterval: MenuBarIconAnimation.interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.animationPhase.toggle()
-                self.updateIcon(opacity: self.animationPhase ? 1 : 0.52)
+                self.pulseIcon()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        animationTimer = timer
     }
 
-    private func updateIcon(opacity: Double) {
+    private func stopBlinkAnimation() {
+        animationTimer?.invalidate()
+        animationTimer = nil
+        animationPhase = false
+        updateIcon(opacity: 1, animated: false)
+    }
+
+    private func pulseIcon() {
+        animationPhase.toggle()
+        let opacity = animationPhase ? MenuBarIconAnimation.dimOpacity : 1
+        updateIcon(opacity: opacity, animated: true)
+    }
+
+    private func updateIcon(opacity: Double, animated: Bool) {
         guard let button = statusItem?.button else { return }
-        let image = MenuBarIconAsset.image()
-        image.isTemplate = true
-        button.image = image
-        button.imagePosition = .imageOnly
-        button.toolTip = "Conjet"
-        button.alphaValue = opacity
-        statusItem?.length = MenuBarIconMetrics.statusItemLength(for: image)
+        if button.image == nil {
+            let image = MenuBarIconAsset.image()
+            image.isTemplate = true
+            button.image = image
+            button.imagePosition = .imageOnly
+            button.toolTip = "Conjet"
+            button.wantsLayer = true
+            statusItem?.length = MenuBarIconMetrics.statusItemLength(for: image)
+        }
+
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = MenuBarIconAnimation.duration
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                button.animator().alphaValue = opacity
+            }
+        } else {
+            button.layer?.removeAllAnimations()
+            button.alphaValue = opacity
+        }
     }
 
     @objc private func openConjet() {
