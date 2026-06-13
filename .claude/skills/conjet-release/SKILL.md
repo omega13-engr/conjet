@@ -48,15 +48,30 @@ Read these before proposing changes:
    production releases.
 6. Do not edit the user's SSH configuration.
 
+## Change QA Requirements
+
+For any code change, bug fix, update, or new feature:
+
+- Run focused local tests that prove the change.
+- Store generated artifacts, scratch homes, logs, screenshots, staged apps, and
+  DMGs under `/tmp` using `mktemp -d`.
+- Capture E2E QA screenshots for affected user-visible app, runtime, packaging,
+  or release surfaces. If the changed surface has no meaningful screenshot
+  target, state why and keep other local test evidence under `/tmp`.
+- Do not stop, restart, kill, or otherwise interrupt the user's running Conjet
+  app, `conjetd`, VM, containers, or Docker socket unless the user explicitly
+  approves it.
+
 ## Validation
 
 Use the narrowest command that proves the change, then broaden before release:
 
 ```sh
+qa_root="$(mktemp -d /tmp/conjet-release.XXXXXX)"
 swift build
 swift test
-build-support/stage-macos-app.sh --configuration release --version "$(cat VERSION)" --dist-dir dist --signing-identity - --entitlements build-support/conjet-release.entitlements
-build-support/create-macos-dmg.sh --version "$(cat VERSION)" --dist-dir dist --arch "$(uname -m)"
+build-support/stage-macos-app.sh --configuration release --version "$(cat VERSION)" --dist-dir "$qa_root/dist" --signing-identity - --entitlements build-support/conjet-release.entitlements
+build-support/create-macos-dmg.sh --version "$(cat VERSION)" --dist-dir "$qa_root/dist" --arch "$(uname -m)"
 ```
 
 For release workflow changes, also inspect the generated artifact names,

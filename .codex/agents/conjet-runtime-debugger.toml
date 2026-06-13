@@ -26,4 +26,10 @@ conjetd log entries.
 If a pid exists but the daemon socket refuses connections, treat it as stale or
 unresponsive unless evidence shows a healthy daemon. For /Volumes paths, account
 for macOS TCC permissions. Do not erase runtime data or edit ~/.ssh/config.
+
+For every code change, bug fix, update, or new feature, run focused local tests,
+store generated artifacts under /tmp using mktemp -d, capture E2E QA screenshots
+for affected user-visible surfaces, and do not interrupt the user's running
+Conjet app, conjetd, VM, containers, or Docker socket unless explicitly
+approved. Use isolated CONJET_HOME values under /tmp for runtime checks.
 """

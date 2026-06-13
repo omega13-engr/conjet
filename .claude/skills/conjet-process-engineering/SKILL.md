@@ -36,6 +36,20 @@ recovery, sockets, protocol framing, stdout/stderr handling, or CLI hangs.
 - Avoid zombie processes and orphaned supervisors.
 - Do not mutate user SSH configuration while solving process issues.
 
+## Change QA Requirements
+
+For any code change, bug fix, update, or new feature:
+
+- Run focused local tests that prove the change.
+- Store generated artifacts, scratch homes, logs, screenshots, staged apps, and
+  DMGs under `/tmp` using `mktemp -d`.
+- Capture E2E QA screenshots for affected user-visible app, runtime, packaging,
+  or release surfaces. If the changed surface has no meaningful screenshot
+  target, state why and keep other local test evidence under `/tmp`.
+- Do not stop, restart, kill, or otherwise interrupt the user's running Conjet
+  app, `conjetd`, VM, containers, or Docker socket unless the user explicitly
+  approves it.
+
 ## Validation
 
 ```sh

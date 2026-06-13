@@ -36,6 +36,20 @@ settings, windows, or app-to-CLI integration.
   inherit shell environment variables.
 - Distinguish legitimate macOS privacy prompts from packaging/quarantine bugs.
 
+## Change QA Requirements
+
+For any code change, bug fix, update, or new feature:
+
+- Run focused local tests that prove the change.
+- Store generated artifacts, scratch homes, logs, screenshots, staged apps, and
+  DMGs under `/tmp` using `mktemp -d`.
+- Capture E2E QA screenshots for affected user-visible app, runtime, packaging,
+  or release surfaces. If the changed surface has no meaningful screenshot
+  target, state why and keep other local test evidence under `/tmp`.
+- Do not stop, restart, kill, or otherwise interrupt the user's running Conjet
+  app, `conjetd`, VM, containers, or Docker socket unless the user explicitly
+  approves it.
+
 ## Validation
 
 ```sh
@@ -44,5 +58,5 @@ swift test --filter ConjetAppCoreTests
 swift build
 ```
 
-For UI changes, inspect the SwiftUI view hierarchy and state flow before editing
-shared app state.
+For UI changes, also run screenshot-backed E2E QA with screenshot output under
+`/tmp`.

@@ -23,4 +23,6 @@ Use these project skills when a focused workflow is enough:
 - `/conjet-process-engineering`
 - `/conjet-vm-engineering`
 
+For any code change, bug fix, update, or new feature, run local validation with generated artifacts under `/tmp`, capture E2E QA screenshots for affected user-visible surfaces, and do not interrupt the user's running Conjet app, `conjetd`, VM, containers, or Docker socket unless explicitly approved.
+
 Follow `AGENTS.md` for repository-wide operating rules and validation commands.

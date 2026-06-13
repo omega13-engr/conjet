@@ -45,6 +45,12 @@ swift test --filter ConjetAppCoreTests
 swift build
 ```
 
+Change QA requirements: for every code change, bug fix, update, or new feature,
+run focused local tests, store generated artifacts under `/tmp` using
+`mktemp -d`, capture E2E QA screenshots for affected user-visible surfaces, and
+do not interrupt the user's running Conjet app, `conjetd`, VM, containers, or
+Docker socket unless explicitly approved.
+
 Keep UI work main-thread safe, avoid blocking the app while polling daemon
 state, and preserve a useful menu bar experience even when the daemon is
 unavailable. Distinguish true app bugs from macOS TCC prompts caused by external

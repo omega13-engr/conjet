@@ -51,5 +51,11 @@ swift test --filter DockerServiceQuiescerTests
 swift test --filter ConjetCoreReleaseResolverTests
 ```
 
+Change QA requirements: for every code change, bug fix, update, or new feature,
+run focused local tests, store generated artifacts under `/tmp` using
+`mktemp -d`, capture E2E QA screenshots for affected user-visible surfaces, and
+do not interrupt the user's running Conjet app, `conjetd`, VM, containers, or
+Docker socket unless explicitly approved.
+
 Keep host and guest responsibilities explicit. Do not assume Linux guest paths,
 launch behavior, or system services behave like macOS host services.

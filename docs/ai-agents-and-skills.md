@@ -207,5 +207,6 @@ Spawn conjet_container_engineer to inspect Docker build performance.
 - Keep each agent narrow. Add a new agent only when the task needs a different mental model or validation surface.
 - Keep skill descriptions short and trigger-oriented; both Claude and Codex use descriptions for discovery.
 - Do not add hidden network fetches, install commands, or credential access to skills.
+- Keep the change QA rule in every agent and skill: code changes, updates, fixes, and features require local validation with artifacts under `/tmp`, screenshot-backed E2E QA for affected user-visible surfaces, and no interruption of the user's running Conjet app, `conjetd`, VM, containers, or Docker socket without explicit approval.
 - Keep release and packaging instructions synchronized with `docs/release.md`, `docs/homebrew.md`, and `.github/workflows/release-conjet.yml`.
 - If the cask/formula behavior changes, update both the Homebrew docs and the release skill instructions in the same change.

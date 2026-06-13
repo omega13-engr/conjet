@@ -40,11 +40,18 @@ before the final checksum is computed.
 Verify with:
 
 ```sh
-build-support/stage-macos-app.sh --configuration release --version "$(cat VERSION)" --dist-dir dist --signing-identity - --entitlements build-support/conjet-release.entitlements
-/usr/bin/codesign --verify --deep --strict --verbose=2 dist/Conjet.app
-/usr/bin/xattr -l dist/Conjet.app || true
-build-support/create-macos-dmg.sh --version "$(cat VERSION)" --dist-dir dist --arch "$(uname -m)"
+qa_root="$(mktemp -d /tmp/conjet-package.XXXXXX)"
+build-support/stage-macos-app.sh --configuration release --version "$(cat VERSION)" --dist-dir "$qa_root/dist" --signing-identity - --entitlements build-support/conjet-release.entitlements
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$qa_root/dist/Conjet.app"
+/usr/bin/xattr -l "$qa_root/dist/Conjet.app" || true
+build-support/create-macos-dmg.sh --version "$(cat VERSION)" --dist-dir "$qa_root/dist" --arch "$(uname -m)"
 ```
+
+Change QA requirements: for every code change, bug fix, update, or new feature,
+run focused local tests, store generated artifacts under `/tmp` using
+`mktemp -d`, capture E2E QA screenshots for affected user-visible surfaces, and
+do not interrupt the user's running Conjet app, `conjetd`, VM, containers, or
+Docker socket unless explicitly approved.
 
 When diagnosing Gatekeeper or TCC prompts, distinguish quarantine/xattr issues
 from legitimate macOS privacy prompts caused by `CONJET_HOME` or project paths

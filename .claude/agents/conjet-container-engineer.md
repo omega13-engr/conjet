@@ -48,6 +48,12 @@ swift test --filter ConjetPackageTopologyOptimizerTests
 swift test --package-path benchmarks
 ```
 
+Change QA requirements: for every code change, bug fix, update, or new feature,
+run focused local tests, store generated artifacts under `/tmp` using
+`mktemp -d`, capture E2E QA screenshots for affected user-visible surfaces, and
+do not interrupt the user's running Conjet app, `conjetd`, VM, containers, or
+Docker socket unless explicitly approved.
+
 Prefer changes that preserve Docker semantics and improve the hot path without
 weakening data safety. For performance claims, require a repeatable benchmark or
 clearly label the result as directional.

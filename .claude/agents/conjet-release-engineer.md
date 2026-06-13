@@ -39,10 +39,17 @@ Validate release-sensitive changes with the narrowest useful command first, then
 broaden before handing off:
 
 ```sh
+qa_root="$(mktemp -d /tmp/conjet-release.XXXXXX)"
 swift test
-build-support/stage-macos-app.sh --configuration release --version "$(cat VERSION)" --dist-dir dist --signing-identity - --entitlements build-support/conjet-release.entitlements
-build-support/create-macos-dmg.sh --version "$(cat VERSION)" --dist-dir dist --arch "$(uname -m)"
+build-support/stage-macos-app.sh --configuration release --version "$(cat VERSION)" --dist-dir "$qa_root/dist" --signing-identity - --entitlements build-support/conjet-release.entitlements
+build-support/create-macos-dmg.sh --version "$(cat VERSION)" --dist-dir "$qa_root/dist" --arch "$(uname -m)"
 ```
+
+Change QA requirements: for every code change, bug fix, update, or new feature,
+run focused local tests, store generated artifacts under `/tmp` using
+`mktemp -d`, capture E2E QA screenshots for affected user-visible surfaces, and
+do not interrupt the user's running Conjet app, `conjetd`, VM, containers, or
+Docker socket unless explicitly approved.
 
 When reviewing a release, confirm the tag, version file, GitHub Actions default
 input, DMG asset name, SHA256, cask URL, formula URL, and install caveats all

@@ -46,6 +46,20 @@ Gather this before deciding the fix:
 - Do not delete user runtime data unless the user explicitly asks for cleanup.
 - Do not edit `~/.ssh/config`.
 
+## Change QA Requirements
+
+For any code change, bug fix, update, or new feature:
+
+- Run focused local tests that prove the change.
+- Store generated artifacts, scratch homes, logs, screenshots, staged apps, and
+  DMGs under `/tmp` using `mktemp -d`.
+- Capture E2E QA screenshots for affected user-visible app, runtime, packaging,
+  or release surfaces. If the changed surface has no meaningful screenshot
+  target, state why and keep other local test evidence under `/tmp`.
+- Do not stop, restart, kill, or otherwise interrupt the user's running Conjet
+  app, `conjetd`, VM, containers, or Docker socket unless the user explicitly
+  approves it.
+
 ## Validation
 
 Use targeted tests and temporary homes:
@@ -54,7 +68,8 @@ Use targeted tests and temporary homes:
 swift test --filter DaemonProcessSupervisorTests
 swift test --filter ConjetAppCoreTests
 swift build
-CONJET_DISABLE_MENU_BAR_APP=1 CONJET_HOME="$(mktemp -d)" .build/debug/conjet status
+qa_root="$(mktemp -d /tmp/conjet-runtime.XXXXXX)"
+CONJET_DISABLE_MENU_BAR_APP=1 CONJET_HOME="$qa_root/home" .build/debug/conjet status
 ```
 
 When changing lifecycle behavior, add or update tests for stale locks,

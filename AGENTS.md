@@ -21,6 +21,7 @@ The repository also owns the Homebrew formula and cask used for distribution.
 - Prefer project scripts and existing release docs over ad hoc commands.
 - Keep macOS release work aligned with Homebrew behavior: the cask installs `/Applications/Conjet.app` and links the bundled `conjet` and `conjetd` tools; the formula remains useful for source or keg-managed CLI installs.
 - Treat ad-hoc signing as an early-release fallback only. Production releases should use Developer ID signing, notarization, stapling, and a checksum generated from the final DMG.
+- For any code change, bug fix, update, or new feature, run local validation with generated artifacts under `/tmp`, capture E2E QA screenshots for affected user-visible surfaces, and do not interrupt the user's running Conjet app, `conjetd`, VM, containers, or Docker socket unless the user explicitly approves it.
 
 ## Discovery
 
@@ -97,28 +98,37 @@ swift test --filter DaemonProcessSupervisorTests
 swift test --filter ConjetAppCoreTests
 ```
 
+For every implementation change, create a temporary QA root and store scratch homes, logs, screenshots, staged apps, DMGs, and other generated artifacts there:
+
+```sh
+qa_root="$(mktemp -d /tmp/conjet-qa.XXXXXX)"
+```
+
+Use isolated `CONJET_HOME` values under that QA root for local runtime checks. For UI, app, runtime-status, packaging, or release behavior, run screenshot-backed E2E QA and write screenshots under `$qa_root/screenshots`. If the changed surface has no meaningful screenshot target, state why and keep the local test evidence under `$qa_root`.
+
 For packaging simulation:
 
 ```sh
+qa_root="$(mktemp -d /tmp/conjet-package.XXXXXX)"
 swift test
 build-support/stage-macos-app.sh \
   --configuration release \
   --version "$(cat VERSION)" \
-  --dist-dir dist \
+  --dist-dir "$qa_root/dist" \
   --signing-identity - \
   --entitlements build-support/conjet-release.entitlements
 build-support/create-macos-dmg.sh \
   --version "$(cat VERSION)" \
-  --dist-dir dist \
+  --dist-dir "$qa_root/dist" \
   --arch "$(uname -m)"
 ```
 
 Verify generated app and DMG behavior before changing release assets:
 
 ```sh
-/usr/bin/codesign --verify --deep --strict --verbose=2 dist/Conjet.app
-/usr/bin/xattr -l dist/Conjet.app || true
-hdiutil attach "dist/conjet-$(cat VERSION)-macos-$(uname -m).dmg"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$qa_root/dist/Conjet.app"
+/usr/bin/xattr -l "$qa_root/dist/Conjet.app" || true
+hdiutil attach "$qa_root/dist/conjet-$(cat VERSION)-macos-$(uname -m).dmg"
 ```
 
 ## AI Agent Surfaces

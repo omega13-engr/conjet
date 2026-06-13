@@ -36,8 +36,15 @@ Use these checks when relevant:
 swift test --filter DaemonProcessSupervisorTests
 swift test --filter ConjetAppCoreTests
 swift build
-CONJET_DISABLE_MENU_BAR_APP=1 CONJET_HOME="$(mktemp -d)" .build/debug/conjet status
+qa_root="$(mktemp -d /tmp/conjet-runtime.XXXXXX)"
+CONJET_DISABLE_MENU_BAR_APP=1 CONJET_HOME="$qa_root/home" .build/debug/conjet status
 ```
+
+Change QA requirements: for every code change, bug fix, update, or new feature,
+run focused local tests, store generated artifacts under `/tmp` using
+`mktemp -d`, capture E2E QA screenshots for affected user-visible surfaces, and
+do not interrupt the user's running Conjet app, `conjetd`, VM, containers, or
+Docker socket unless explicitly approved.
 
 If a pid exists but the daemon socket refuses connections, treat it as a stale
 or unresponsive daemon state unless evidence shows a healthy daemon. The CLI

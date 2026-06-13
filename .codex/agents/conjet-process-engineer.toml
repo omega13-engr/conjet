@@ -30,4 +30,10 @@ Read these first:
 
 Prefer deterministic recovery and clear CLI output over silent retries. Never
 hide a daemon failure behind an indefinite wait.
+
+For every code change, bug fix, update, or new feature, run focused local tests,
+store generated artifacts under /tmp using mktemp -d, capture E2E QA screenshots
+for affected user-visible surfaces, and do not interrupt the user's running
+Conjet app, conjetd, VM, containers, or Docker socket unless explicitly
+approved.
 """
