@@ -5,7 +5,29 @@ on:
     branches:
       - main
       - dev
+    paths:
+      - .github/workflows/ci.yml
+      - Package.swift
+      - Package.resolved
+      - VERSION
+      - Sources/**
+      - Tests/**
+      - build-support/**
+      - benchmarks/**
+      - Formula/**
+      - Casks/**
   pull_request:
+    paths:
+      - .github/workflows/ci.yml
+      - Package.swift
+      - Package.resolved
+      - VERSION
+      - Sources/**
+      - Tests/**
+      - build-support/**
+      - benchmarks/**
+      - Formula/**
+      - Casks/**
   workflow_dispatch:
 
 permissions:
