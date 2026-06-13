@@ -1,6 +1,6 @@
 cask "conjet" do
-  version "0.3.10"
-  sha256 "9913e4d3bf203bc6435a7e3c1294addf28f9ba72379e98750803b789de5755bf"
+  version "0.3.11"
+  sha256 "c6706b4db0ea80cb623ded138681ace43c29fa0239f3eac635b52bf50e427457"
 
   url "https://github.com/omega13-engr/conjet/releases/download/conjet-v#{version}/conjet-#{version}-macos-arm64.dmg"
   name "Conjet"
