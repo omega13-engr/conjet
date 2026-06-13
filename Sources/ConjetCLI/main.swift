@@ -1452,9 +1452,12 @@ struct ConjetCLI {
                 }
                 Thread.sleep(forTimeInterval: 0.1)
             }
-            throw ConjetError.unavailable(
-                "conjetd pid \(pid) is running but did not answer at \(socketPath); try 'conjet status' or inspect \(paths.daemonLog.path)"
-            )
+            let supervisor = DaemonProcessSupervisor(socketPath: socketPath)
+            let termination = try supervisor.terminateRunningDaemon(timeoutSeconds: 3)
+            if let termination {
+                let signalName = daemonTerminationSignalDescription(termination.signal)
+                ui.step("[conjetd 1/2] replaced unresponsive pid \(pid) with \(signalName)")
+            }
         }
 
         let daemonURL = try daemonExecutableURL()
@@ -1513,8 +1516,18 @@ struct ConjetCLI {
             )
         } catch {
             if let pid = runningDaemonPID(socketPath: currentSocketPath) {
-                throw ConjetError.unavailable(
-                    "conjetd pid \(pid) is running but did not answer stop at \(currentSocketPath): \(error)"
+                let termination = try DaemonProcessSupervisor(socketPath: currentSocketPath)
+                    .terminateRunningDaemon(timeoutSeconds: max(timeout, 3))
+                let suffix: String
+                if let termination {
+                    let signalName = daemonTerminationSignalDescription(termination.signal)
+                    suffix = " with \(signalName)"
+                } else {
+                    suffix = ""
+                }
+                return DaemonResponse(
+                    ok: true,
+                    message: "conjetd pid \(pid) was not answering stop at \(currentSocketPath); terminated\(suffix)"
                 )
             }
             throw error
@@ -1532,10 +1545,18 @@ struct ConjetCLI {
         guard daemonIsRunning(socketPath: currentSocketPath) else {
             return nil
         }
-        let response = try UnixSocketClient(socketPath: currentSocketPath).send(
-            DaemonRequest(command: .pruneCache),
-            timeoutSeconds: 10
-        )
+        let response: DaemonResponse
+        do {
+            response = try UnixSocketClient(socketPath: currentSocketPath).send(
+                DaemonRequest(command: .pruneCache),
+                timeoutSeconds: 10
+            )
+        } catch {
+            if runningDaemonPID(socketPath: currentSocketPath) != nil {
+                return nil
+            }
+            throw error
+        }
         if DaemonCompatibility.isUnsupportedCommandResponse(response, command: .pruneCache) {
             return nil
         }
@@ -1550,19 +1571,20 @@ struct ConjetCLI {
     }
 
     private static func runningDaemonPID(socketPath: String) -> Int32? {
-        let lockPath = URL(fileURLWithPath: socketPath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("conjetd.lock")
-            .path
-        guard let raw = try? String(contentsOfFile: lockPath, encoding: .utf8),
-              let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
-              pid > 0 else {
-            return nil
+        DaemonProcessSupervisor(socketPath: socketPath).runningPID()
+    }
+
+    private static func daemonTerminationSignalDescription(_ signal: Int32) -> String {
+        switch signal {
+        case SIGTERM:
+            return "SIGTERM"
+        case SIGKILL:
+            return "SIGKILL"
+        case 0:
+            return "stale pid cleanup"
+        default:
+            return "signal \(signal)"
         }
-        if Darwin.kill(pid, 0) == 0 || errno == EPERM {
-            return pid
-        }
-        return nil
     }
 
     private static func stopTimeout(from value: String?) throws -> Double {
