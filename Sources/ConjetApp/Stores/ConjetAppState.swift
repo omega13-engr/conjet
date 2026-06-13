@@ -77,6 +77,7 @@ final class ConjetAppState: ObservableObject {
     @Published var selectedContainerID: String?
     @Published var selectedImageID: String?
     @Published var selectedVolumeID: String?
+    @Published private(set) var activeContainerGroupID: String?
     @Published var runImage = "hello-world"
     @Published var runCommand = ""
     @Published var pullImage = "ubuntu:24.04"
@@ -88,13 +89,16 @@ final class ConjetAppState: ObservableObject {
     private let service: ConjetManagementService
     private var refreshTask: Task<Void, Never>?
     private var transitionRefreshTask: Task<Void, Never>?
+    private var containerGroupRefreshTask: Task<Void, Never>?
     private var fastRefreshUntil = Date.distantPast
 
     private static let transitionRefreshDelayNanoseconds: UInt64 = 250_000_000
+    private static let containerGroupRefreshDelayNanoseconds: UInt64 = 1_000_000_000
     private static let fastRefreshDelayNanoseconds: UInt64 = 350_000_000
     private static let normalRefreshDelayNanoseconds: UInt64 = 2_000_000_000
     private static let launchFastRefreshDuration: TimeInterval = 12
     private static let commandFastRefreshDuration: TimeInterval = 20
+    private static let containerGroupPollingDuration: TimeInterval = 90
 
     init(service: ConjetManagementService = ConjetManagementService()) {
         self.service = service
@@ -104,6 +108,7 @@ final class ConjetAppState: ObservableObject {
     deinit {
         refreshTask?.cancel()
         transitionRefreshTask?.cancel()
+        containerGroupRefreshTask?.cancel()
     }
 
     var selectedContainer: DockerContainer? {
@@ -231,6 +236,42 @@ final class ConjetAppState: ObservableObject {
         }
         await runAndRefresh(label: label) {
             await service.runDocker(args, label: label, timeoutSeconds: 60)
+        }
+    }
+
+    func containerGroupAction(_ action: String, group: ContainerGroup) async {
+        let label = "\(action.capitalized) \(group.title)"
+        switch action {
+        case "up":
+            guard let project = group.composeProject,
+                  let workingDirectory = group.composeWorkingDirectory else {
+                return
+            }
+            let fileArguments = group.composeConfigFiles.flatMap { ["-f", $0] }
+            await runAndRefresh(label: "Compose Up \(project)") {
+                await service.runCompose(
+                    fileArguments + ["-p", project, "up", "--detach"],
+                    workingDirectory: URL(fileURLWithPath: workingDirectory, isDirectory: true),
+                    label: "Compose Up \(project)"
+                )
+            }
+            startContainerGroupPolling(groupID: group.id)
+        case "start":
+            let ids = group.startableContainers.map(\.id)
+            guard !ids.isEmpty else { return }
+            await runAndRefresh(label: label) {
+                await service.runDocker(["start"] + ids, label: label, timeoutSeconds: 60)
+            }
+            startContainerGroupPolling(groupID: group.id)
+        case "restart":
+            let ids = group.containers.map(\.id)
+            guard !ids.isEmpty else { return }
+            await runAndRefresh(label: label) {
+                await service.runDocker(["restart"] + ids, label: label, timeoutSeconds: 120)
+            }
+            startContainerGroupPolling(groupID: group.id)
+        default:
+            return
         }
     }
 
@@ -396,6 +437,32 @@ final class ConjetAppState: ObservableObject {
         } else {
             startTransitionRefresh()
         }
+    }
+
+    private func startContainerGroupPolling(groupID: String) {
+        activeContainerGroupID = groupID
+        containerGroupRefreshTask?.cancel()
+        let deadline = Date().addingTimeInterval(Self.containerGroupPollingDuration)
+        containerGroupRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                try? await Task.sleep(nanoseconds: Self.containerGroupRefreshDelayNanoseconds)
+                await self.refresh()
+                guard Date() < deadline,
+                      self.shouldContinuePollingContainerGroup(groupID) else {
+                    self.activeContainerGroupID = nil
+                    self.containerGroupRefreshTask = nil
+                    return
+                }
+            }
+        }
+    }
+
+    private func shouldContinuePollingContainerGroup(_ groupID: String) -> Bool {
+        guard let group = ContainerGrouping.groups(containers: snapshot.containers).first(where: { $0.id == groupID }) else {
+            return false
+        }
+        return group.readiness.shouldPoll
     }
 
     private func startTransitionRefresh() {

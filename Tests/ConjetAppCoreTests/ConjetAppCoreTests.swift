@@ -5,7 +5,7 @@ import XCTest
 final class ConjetAppCoreTests: XCTestCase {
     func testDecodesDockerContainerJSONLines() {
         let output = """
-        {"ID":"abcdef123456","Names":"api","Image":"ubuntu:24.04","Command":"\\"sleep 60\\"","CreatedAt":"2026-06-11 08:00:00 +0800 PST","RunningFor":"2 minutes","Ports":"127.0.0.1:8080->80/tcp","State":"running","Status":"Up 2 minutes","Size":"0B"}
+        {"ID":"abcdef123456","Names":"api","Image":"ubuntu:24.04","Command":"\\"sleep 60\\"","CreatedAt":"2026-06-11 08:00:00 +0800 PST","RunningFor":"2 minutes","Ports":"127.0.0.1:8080->80/tcp","State":"running","Status":"Up 2 minutes (healthy)","Size":"0B","Labels":"com.docker.compose.project=demo,com.docker.compose.service=api"}
         {"ID":"fedcba654321","Names":"worker","Image":"alpine:3.20","Command":"\\"sh\\"","CreatedAt":"2026-06-11 08:01:00 +0800 PST","RunningFor":"1 minute","Ports":"","State":"exited","Status":"Exited (0)","Size":"0B"}
         """
 
@@ -15,7 +15,77 @@ final class ConjetAppCoreTests: XCTestCase {
         XCTAssertEqual(containers[0].id, "abcdef123456")
         XCTAssertEqual(containers[0].name, "api")
         XCTAssertEqual(containers[0].state, "running")
+        XCTAssertEqual(containers[0].healthState, .healthy)
+        XCTAssertEqual(containers[0].composeProject, "demo")
+        XCTAssertEqual(containers[0].composeService, "api")
         XCTAssertEqual(containers[1].image, "alpine:3.20")
+        XCTAssertEqual(containers[1].labels, "")
+    }
+
+    func testContainerGroupingBuildsComposeGroupsWithHealthReadiness() {
+        let containers = [
+            DockerContainer(
+                id: "api",
+                name: "demo-api-1",
+                image: "demo-api",
+                state: "running",
+                status: "Up 20 seconds (health: starting)",
+                labels: "com.docker.compose.project=demo,com.docker.compose.service=api,com.docker.compose.project.working_dir=/tmp/demo,com.docker.compose.project.config_files=/tmp/demo/compose.yml"
+            ),
+            DockerContainer(
+                id: "db",
+                name: "demo-db-1",
+                image: "postgres:18",
+                state: "running",
+                status: "Up 20 seconds (healthy)",
+                labels: "com.docker.compose.project=demo,com.docker.compose.service=db,com.docker.compose.project.working_dir=/tmp/demo,com.docker.compose.project.config_files=/tmp/demo/compose.yml"
+            ),
+            DockerContainer(
+                id: "standalone",
+                name: "shell",
+                image: "alpine:3.20",
+                state: "exited",
+                status: "Exited (0)"
+            )
+        ]
+
+        let groups = ContainerGrouping.groups(containers: containers)
+
+        XCTAssertEqual(groups.map(\.title), ["demo", "Standalone"])
+        XCTAssertEqual(groups[0].id, "compose:demo")
+        XCTAssertEqual(groups[0].readiness, .starting)
+        XCTAssertEqual(groups[0].healthyCount, 1)
+        XCTAssertEqual(groups[0].startingHealthCount, 1)
+        XCTAssertEqual(groups[0].composeWorkingDirectory, "/tmp/demo")
+        XCTAssertEqual(groups[0].composeConfigFiles, ["/tmp/demo/compose.yml"])
+        XCTAssertTrue(groups[0].canRunComposeUp)
+        XCTAssertEqual(groups[1].readiness, .stopped)
+    }
+
+    func testContainerGroupingMarksUnhealthyComposeGroupDegraded() throws {
+        let containers = [
+            DockerContainer(
+                id: "api",
+                name: "demo-api-1",
+                image: "demo-api",
+                state: "running",
+                status: "Up 5 minutes (unhealthy)",
+                labels: "com.docker.compose.project=demo,com.docker.compose.service=api"
+            ),
+            DockerContainer(
+                id: "worker",
+                name: "demo-worker-1",
+                image: "demo-worker",
+                state: "running",
+                status: "Up 5 minutes",
+                labels: "com.docker.compose.project=demo,com.docker.compose.service=worker"
+            )
+        ]
+
+        let group = try XCTUnwrap(ContainerGrouping.groups(containers: containers).first)
+
+        XCTAssertEqual(group.readiness, .degraded)
+        XCTAssertFalse(group.readiness.shouldPoll)
     }
 
     func testDecodesDockerStatsJSONLines() {

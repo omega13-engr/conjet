@@ -11,6 +11,7 @@ public struct DockerContainer: Identifiable, Codable, Equatable, Sendable {
     public var state: String
     public var status: String
     public var size: String
+    public var labels: String
 
     private enum CodingKeys: String, CodingKey {
         case id = "ID"
@@ -23,6 +24,7 @@ public struct DockerContainer: Identifiable, Codable, Equatable, Sendable {
         case state = "State"
         case status = "Status"
         case size = "Size"
+        case labels = "Labels"
     }
 
     public init(
@@ -35,7 +37,8 @@ public struct DockerContainer: Identifiable, Codable, Equatable, Sendable {
         ports: String = "",
         state: String,
         status: String,
-        size: String = ""
+        size: String = "",
+        labels: String = ""
     ) {
         self.id = id
         self.name = name
@@ -47,6 +50,97 @@ public struct DockerContainer: Identifiable, Codable, Equatable, Sendable {
         self.state = state
         self.status = status
         self.size = size
+        self.labels = labels
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(String.self, forKey: .id) ?? ""
+        self.name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        self.image = try container.decodeIfPresent(String.self, forKey: .image) ?? ""
+        self.command = try container.decodeIfPresent(String.self, forKey: .command) ?? ""
+        self.createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt) ?? ""
+        self.runningFor = try container.decodeIfPresent(String.self, forKey: .runningFor) ?? ""
+        self.ports = try container.decodeIfPresent(String.self, forKey: .ports) ?? ""
+        self.state = try container.decodeIfPresent(String.self, forKey: .state) ?? ""
+        self.status = try container.decodeIfPresent(String.self, forKey: .status) ?? ""
+        self.size = try container.decodeIfPresent(String.self, forKey: .size) ?? ""
+        self.labels = try container.decodeIfPresent(String.self, forKey: .labels) ?? ""
+    }
+
+    public var isRunning: Bool {
+        state.localizedCaseInsensitiveContains("running")
+    }
+
+    public var parsedLabels: [String: String] {
+        DockerLabelParser.parse(labels)
+    }
+
+    public var composeProject: String? {
+        nonEmptyLabel("com.docker.compose.project")
+    }
+
+    public var composeService: String? {
+        nonEmptyLabel("com.docker.compose.service")
+    }
+
+    public var composeWorkingDirectory: String? {
+        nonEmptyLabel("com.docker.compose.project.working_dir")
+    }
+
+    public var composeConfigFiles: [String] {
+        guard let value = nonEmptyLabel("com.docker.compose.project.config_files") else {
+            return []
+        }
+        return value
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    public var healthState: DockerContainerHealthState {
+        DockerContainerHealthState(status: status, isRunning: isRunning)
+    }
+
+    private func nonEmptyLabel(_ key: String) -> String? {
+        let value = parsedLabels[key]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+}
+
+public enum DockerContainerHealthState: String, Equatable, Sendable {
+    case healthy
+    case starting
+    case unhealthy
+    case none
+
+    init(status: String, isRunning: Bool) {
+        let normalized = status.lowercased()
+        if normalized.contains("unhealthy") {
+            self = .unhealthy
+        } else if normalized.contains("health: starting") {
+            self = .starting
+        } else if normalized.contains("healthy") {
+            self = .healthy
+        } else {
+            self = .none
+        }
+    }
+}
+
+enum DockerLabelParser {
+    static func parse(_ labels: String) -> [String: String] {
+        var parsed: [String: String] = [:]
+        for label in labels.split(separator: ",") {
+            let parts = label.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let key = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !key.isEmpty else {
+                continue
+            }
+            let value = parts.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            parsed[key] = value
+        }
+        return parsed
     }
 }
 

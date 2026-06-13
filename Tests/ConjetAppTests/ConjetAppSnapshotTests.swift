@@ -18,8 +18,10 @@ final class ConjetAppSnapshotTests: XCTestCase {
 
         let app = ConjetAppState()
         app.snapshot = Self.qaSnapshot()
+        app.selectedContainerID = app.snapshot.containers.first?.id
 
         try render(section: .overview, app: app, to: outputDirectory.appendingPathComponent("overview.png"))
+        try render(section: .containers, app: app, to: outputDirectory.appendingPathComponent("containers.png"))
         try render(section: .images, app: app, to: outputDirectory.appendingPathComponent("images.png"))
     }
 
@@ -67,8 +69,22 @@ final class ConjetAppSnapshotTests: XCTestCase {
         let tool = ResolvedTool(executable: "/tmp/conjet-ui-qa/tool", source: "test")
         let socketPath = "/tmp/conjet-ui-qa/home/run/docker.sock"
         let containers = [
-            DockerContainer(id: "c1", name: "api", image: "nginx:alpine", state: "running", status: "Up 10 minutes"),
-            DockerContainer(id: "c2", name: "worker", image: "redis:7.2", state: "running", status: "Up 9 minutes")
+            DockerContainer(
+                id: "c1",
+                name: "chum-mem-api-1",
+                image: "chum-mem-api",
+                state: "running",
+                status: "Up 10 minutes (healthy)",
+                labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=api,com.docker.compose.project.working_dir=/Users/sly/Workspace/Org/chum-mem,com.docker.compose.project.config_files=/Users/sly/Workspace/Org/chum-mem/docker-compose.yml"
+            ),
+            DockerContainer(
+                id: "c2",
+                name: "chum-mem-worker-1",
+                image: "chum-mem-worker",
+                state: "running",
+                status: "Up 9 minutes (health: starting)",
+                labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=worker,com.docker.compose.project.working_dir=/Users/sly/Workspace/Org/chum-mem,com.docker.compose.project.config_files=/Users/sly/Workspace/Org/chum-mem/docker-compose.yml"
+            )
         ]
         let images = [
             DockerImage(
@@ -175,6 +191,8 @@ private struct SnapshotHarness: View {
             switch section {
             case .overview:
                 OverviewView()
+            case .containers:
+                ContainersView()
             case .images:
                 ImagesView()
             default:

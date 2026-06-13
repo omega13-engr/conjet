@@ -14,6 +14,9 @@ struct ContainersView: View {
                 || $0.image.localizedCaseInsensitiveContains(query)
                 || $0.state.localizedCaseInsensitiveContains(query)
                 || $0.status.localizedCaseInsensitiveContains(query)
+                || $0.labels.localizedCaseInsensitiveContains(query)
+                || ($0.composeProject?.localizedCaseInsensitiveContains(query) ?? false)
+                || ($0.composeService?.localizedCaseInsensitiveContains(query) ?? false)
         }
     }
 
@@ -67,6 +70,10 @@ private struct ContainerMasterPanel: View {
     @Binding var searchText: String
     @Binding var selection: String?
 
+    private var groups: [ContainerGroup] {
+        ContainerGrouping.groups(containers: containers)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             PanelHeader(title: "Inventory", subtitle: "\(containers.count) shown") {
@@ -90,10 +97,18 @@ private struct ContainerMasterPanel: View {
                 )
             } else {
                 List(selection: $selection) {
-                    ForEach(containers) { container in
-                        ContainerRow(container: container)
-                            .tag(container.id)
-                            .listRowInsets(EdgeInsets(top: 5, leading: 12, bottom: 5, trailing: 12))
+                    ForEach(groups) { group in
+                        Section {
+                            ForEach(group.containers) { container in
+                                ContainerRow(container: container)
+                                    .tag(container.id)
+                                    .listRowInsets(EdgeInsets(top: 5, leading: 18, bottom: 5, trailing: 12))
+                            }
+                        } header: {
+                            ContainerGroupHeader(group: group)
+                                .textCase(nil)
+                                .padding(.top, 4)
+                        }
                     }
                 }
                 .listStyle(.inset)
@@ -103,6 +118,64 @@ private struct ContainerMasterPanel: View {
             Divider()
             RunContainerPanel()
         }
+    }
+}
+
+private struct ContainerGroupHeader: View {
+    @EnvironmentObject private var app: ConjetAppState
+
+    let group: ContainerGroup
+
+    private var isPolling: Bool {
+        app.activeContainerGroupID == group.id
+    }
+
+    private var primaryAction: (title: String, systemImage: String, action: String) {
+        if group.canRunComposeUp {
+            return ("Up", "play.fill", "up")
+        }
+        if group.stoppedCount > 0 {
+            return ("Start", "play.fill", "start")
+        }
+        return ("Restart", "arrow.clockwise", "restart")
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            ResourceIcon(
+                systemImage: group.composeProject == nil ? "shippingbox" : "square.stack.3d.up",
+                tint: group.readiness.tint,
+                size: 24
+            )
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 7) {
+                    Text(group.title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    StatusBadge(text: group.readiness.displayName, state: group.readiness.badgeState)
+                }
+                Text(group.subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 6)
+
+            if isPolling {
+                ProgressView()
+                    .controlSize(.small)
+                    .help("Polling health status")
+            }
+
+            CommandBarButton(title: primaryAction.title, systemImage: primaryAction.systemImage) {
+                Task { await app.containerGroupAction(primaryAction.action, group: group) }
+            }
+            .disabled(group.containers.isEmpty || app.activeCommandLabel != nil)
+        }
+        .padding(.vertical, 3)
     }
 }
 
@@ -136,26 +209,25 @@ private struct RunContainerPanel: View {
 private struct ContainerRow: View {
     let container: DockerContainer
 
-    private var isRunning: Bool {
-        container.state.localizedCaseInsensitiveContains("running")
-    }
-
     var body: some View {
         HStack(spacing: 10) {
             ResourceIcon(
-                systemImage: isRunning ? "play.rectangle.fill" : "shippingbox",
-                tint: isRunning ? .green : .secondary,
+                systemImage: container.isRunning ? "play.rectangle.fill" : "shippingbox",
+                tint: container.isRunning ? .green : .secondary,
                 size: 28
             )
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(container.name)
+                    Text(container.composeService ?? container.name)
                         .font(.callout.weight(.semibold))
                         .lineLimit(1)
-                    StatusBadge(text: container.state, state: isRunning ? .good : .neutral)
+                    StatusBadge(text: container.state, state: container.isRunning ? .good : .neutral)
+                    if container.healthState != .none {
+                        StatusBadge(text: container.healthState.displayName, state: container.healthState.badgeState)
+                    }
                 }
-                Text(container.image)
+                Text(container.name == (container.composeService ?? container.name) ? container.image : "\(container.name) - \(container.image)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -187,7 +259,7 @@ private struct ContainerDetail: View {
     @Binding var selectedPane: ContainerPane
 
     private var isRunning: Bool {
-        container.state.localizedCaseInsensitiveContains("running")
+        container.isRunning
     }
 
     private var matchingStat: DockerStats? {
@@ -226,6 +298,9 @@ private struct ContainerDetail: View {
                     }
                     Spacer()
                     StatusBadge(text: container.state, state: isRunning ? .good : .neutral)
+                    if container.healthState != .none {
+                        StatusBadge(text: container.healthState.displayName, state: container.healthState.badgeState)
+                    }
                 }
 
                 HStack {
@@ -260,6 +335,9 @@ private struct ContainerDetail: View {
                             ("Image", container.image),
                             ("Command", container.command),
                             ("Status", container.status),
+                            ("Health", container.healthState.detailText),
+                            ("Compose Project", container.composeProject ?? ""),
+                            ("Compose Service", container.composeService ?? ""),
                             ("Ports", container.ports),
                             ("Created", container.createdAt),
                             ("Running For", container.runningFor),
@@ -303,6 +381,53 @@ private struct ContainerDetail: View {
             }
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+}
+
+private extension ContainerGroupReadiness {
+    var badgeState: StatusBadge.BadgeState {
+        switch self {
+        case .ready: .good
+        case .starting, .partial: .warning
+        case .degraded: .bad
+        case .stopped, .empty: .neutral
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .ready: .green
+        case .starting, .partial: .orange
+        case .degraded: .red
+        case .stopped, .empty: .secondary
+        }
+    }
+}
+
+private extension DockerContainerHealthState {
+    var displayName: String {
+        switch self {
+        case .healthy: "healthy"
+        case .starting: "starting"
+        case .unhealthy: "unhealthy"
+        case .none: "no healthcheck"
+        }
+    }
+
+    var detailText: String {
+        switch self {
+        case .none: ""
+        default: displayName
+        }
+    }
+
+    var badgeState: StatusBadge.BadgeState {
+        switch self {
+        case .healthy: .good
+        case .starting: .warning
+        case .unhealthy: .bad
+        case .none: .neutral
         }
     }
 }
