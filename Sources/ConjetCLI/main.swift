@@ -1178,9 +1178,7 @@ struct ConjetCLI {
             return
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = [
+        let arguments = [
             "-g",
             "-j",
         ] + ConjetEnvironment.forwardedEnvironmentArguments(environment) + [
@@ -1189,10 +1187,11 @@ struct ConjetCLI {
             "--background-menu-bar"
         ]
         do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus != 0 {
-                writeDiagnostic("menu bar app launch failed with exit code \(process.terminationStatus)")
+            let result = try ProcessRunner.run("/usr/bin/open", arguments, timeoutSeconds: 5)
+            if !result.succeeded {
+                let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                let suffix = detail.isEmpty ? "" : ": \(detail)"
+                writeDiagnostic("menu bar app launch failed with exit code \(result.exitCode)\(suffix)")
             }
         } catch {
             writeDiagnostic("menu bar app launch failed: \(error)")
@@ -1207,16 +1206,28 @@ struct ConjetCLI {
                 return overrideURL
             }
         }
-        if let staged = stageSourceAppBundleIfPossible(environment: environment),
-           manager.fileExists(atPath: staged.path),
-           isLaunchableConjetAppBundle(staged) {
-            return staged
+        let preferSourceApp = shouldPreferSourceAppStaging(environment: environment)
+        if preferSourceApp {
+            if let staged = stageSourceAppBundleIfPossible(environment: environment),
+               manager.fileExists(atPath: staged.path),
+               isLaunchableConjetAppBundle(staged) {
+                return staged
+            }
         }
+
         for candidate in containingAppBundleCandidates(environment: environment) where manager.fileExists(atPath: candidate.path) {
             if isLaunchableConjetAppBundle(candidate) {
                 return candidate
             }
         }
+
+        if !preferSourceApp,
+           let staged = stageSourceAppBundleIfPossible(environment: environment),
+           manager.fileExists(atPath: staged.path),
+           isLaunchableConjetAppBundle(staged) {
+            return staged
+        }
+
         return nil
     }
 
@@ -1299,6 +1310,16 @@ struct ConjetCLI {
             writeDiagnostic("source menu bar app staging failed: \(error)")
         }
         return nil
+    }
+
+    private static func shouldPreferSourceAppStaging(environment: [String: String]) -> Bool {
+        guard environment["CONJET_DISABLE_SOURCE_APP_STAGING"] != "1" else {
+            return false
+        }
+        let executables = [currentExecutableURL(), Bundle.main.executableURL] + commandLineExecutableCandidates().map(Optional.some)
+        return executables.compactMap { $0 }.contains { executable in
+            isSwiftPMBuildExecutable(executable) && repositoryRoot(containing: executable) != nil
+        }
     }
 
     private static func sourceRepositoryRoot(environment: [String: String]) -> URL? {
@@ -3799,20 +3820,32 @@ struct ConjetCLI {
         return path.contains("/.build/") && path.contains("/debug/")
     }
 
+    private static func isSwiftPMBuildExecutable(_ executable: URL) -> Bool {
+        executable.standardizedFileURL.path.contains("/.build/")
+    }
+
     private static func repositoryRoot(containing executable: URL) -> URL? {
         let manager = FileManager.default
-        var directory = executable.deletingLastPathComponent().standardizedFileURL
-        while true {
-            let entitlements = directory.appendingPathComponent("build-support/conjet-debug.entitlements")
-            if manager.fileExists(atPath: entitlements.path) {
-                return directory
+        var directoryPath = (executable.path as NSString).deletingLastPathComponent
+        guard !directoryPath.isEmpty else {
+            return nil
+        }
+        directoryPath = URL(fileURLWithPath: directoryPath, isDirectory: true).standardizedFileURL.path
+
+        var visited = Set<String>()
+        while !directoryPath.isEmpty, visited.insert(directoryPath).inserted {
+            let entitlementsPath = (directoryPath as NSString)
+                .appendingPathComponent("build-support/conjet-debug.entitlements")
+            if manager.fileExists(atPath: entitlementsPath) {
+                return URL(fileURLWithPath: directoryPath, isDirectory: true)
             }
-            let parent = directory.deletingLastPathComponent()
-            if parent.path == directory.path {
+            let parentPath = (directoryPath as NSString).deletingLastPathComponent
+            if parentPath == directoryPath {
                 return nil
             }
-            directory = parent
+            directoryPath = parentPath
         }
+        return nil
     }
 
     private static func waitForDaemonStop(socketPath: String, timeoutSeconds: Double = 5) {

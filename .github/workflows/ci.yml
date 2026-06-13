@@ -99,6 +99,8 @@ jobs:
             "$(uname -m)" > dist/conjet-cask.rb
           ruby -c dist/conjet.rb
           ruby -c dist/conjet-cask.rb
+          grep -q 'binary "bin/conjet"' dist/conjet-cask.rb
+          grep -q 'binary "bin/conjetd"' dist/conjet-cask.rb
 
       - name: Build benchmark package
         run: swift build --package-path benchmarks

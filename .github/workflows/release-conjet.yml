@@ -9,7 +9,7 @@ on:
       version:
         description: Semantic version to release, without the conjet-v prefix
         required: true
-        default: 0.3.7
+        default: 0.3.8
 
 permissions:
   contents: write
@@ -267,6 +267,8 @@ jobs:
             "${artifact_arch}" > homebrew-cask/conjet.rb
           ruby -c homebrew-formula/conjet.rb
           ruby -c homebrew-cask/conjet.rb
+          grep -q 'binary "bin/conjet"' homebrew-cask/conjet.rb
+          grep -q 'binary "bin/conjetd"' homebrew-cask/conjet.rb
 
       - name: Update source formula and cask
         run: |

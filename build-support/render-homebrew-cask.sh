@@ -35,10 +35,17 @@ cask "conjet" do
   depends_on arch: :arm64
 
   app "Conjet.app"
+  binary "bin/conjet"
+  binary "bin/conjetd"
 
   postflight do
-    app_path = "#{appdir}/Conjet.app"
-    system_command "/usr/bin/xattr", args: ["-cr", app_path] if File.directory?(app_path)
+    [
+      "#{appdir}/Conjet.app",
+      "#{staged_path}/bin/conjet",
+      "#{staged_path}/bin/conjetd",
+    ].each do |path|
+      system_command "/usr/bin/xattr", args: ["-cr", path] if File.exist?(path)
+    end
   end
 
   uninstall quit: [
@@ -57,9 +64,11 @@ cask "conjet" do
   ]
 
   caveats <<~EOS
-    This cask installs Conjet.app into /Applications. The formula remains the
-    Homebrew-managed install path for the conjet and conjetd command-line tools:
-      brew install ${source_repository}/conjet
+    This cask installs Conjet.app into /Applications and links the bundled
+    conjet and conjetd command-line tools into Homebrew's bin directory.
+
+    If CONJET_HOME points under /Volumes, grant Removable Volumes or Full Disk
+    Access to your terminal app and Conjet.app in System Settings.
 
     Current early releases are ad-hoc signed and not notarized; use right-click
     Open if Gatekeeper blocks the first launch.

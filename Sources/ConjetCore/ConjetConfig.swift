@@ -210,20 +210,54 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     }
 
     public static func loadOrCreate(paths: ConjetPaths = .default()) throws -> ConjetConfig {
-        try paths.ensureBaseDirectories()
+        do {
+            try paths.ensureBaseDirectories()
+        } catch {
+            throw configurationAccessError(path: paths.home, operation: "prepare Conjet home", underlying: error)
+        }
         let manager = FileManager.default
         if manager.fileExists(atPath: paths.config.path) {
-            let text = try String(contentsOf: paths.config, encoding: .utf8)
+            let text: String
+            do {
+                text = try String(contentsOf: paths.config, encoding: .utf8)
+            } catch {
+                throw configurationAccessError(path: paths.config, operation: "read Conjet config", underlying: error)
+            }
             return try parseTOML(text)
         }
         let config = ConjetConfig.default
-        try config.renderTOML().write(to: paths.config, atomically: true, encoding: .utf8)
+        do {
+            try config.renderTOML().write(to: paths.config, atomically: true, encoding: .utf8)
+        } catch {
+            throw configurationAccessError(path: paths.config, operation: "write Conjet config", underlying: error)
+        }
         return config
     }
 
     public func save(paths: ConjetPaths = .default()) throws {
-        try paths.ensureBaseDirectories()
-        try renderTOML().write(to: paths.config, atomically: true, encoding: .utf8)
+        do {
+            try paths.ensureBaseDirectories()
+            try renderTOML().write(to: paths.config, atomically: true, encoding: .utf8)
+        } catch {
+            throw ConjetConfig.configurationAccessError(path: paths.config, operation: "write Conjet config", underlying: error)
+        }
+    }
+
+    private static func configurationAccessError(path: URL, operation: String, underlying: Error) -> ConjetError {
+        var detail = underlying.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        while detail.last == "." {
+            detail.removeLast()
+        }
+        var message = "could not \(operation) at \(path.path): \(detail)"
+        if pathIsOnMountedVolume(path) {
+            message += ". CONJET_HOME is on a mounted volume; grant Removable Volumes or Full Disk Access to the terminal app and Conjet.app in System Settings > Privacy & Security, or move CONJET_HOME to a local path."
+        }
+        return .filesystem(message)
+    }
+
+    private static func pathIsOnMountedVolume(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        return path == "/Volumes" || path.hasPrefix("/Volumes/")
     }
 
     public func renderTOML() -> String {

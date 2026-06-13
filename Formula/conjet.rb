@@ -57,8 +57,11 @@ class Conjet < Formula
       The formula installs Homebrew-managed CLI tools and keeps Conjet.app inside the keg:
         #{prefix}/Applications/Conjet.app
 
-      To install Conjet.app into /Applications, use the cask:
+      For the standard one-step install of Conjet.app plus conjet/conjetd, use the cask:
         brew install --cask omega13-engr/conjet/conjet
+
+      If CONJET_HOME points under /Volumes, grant Removable Volumes or Full Disk
+      Access to your terminal app and Conjet.app in System Settings.
     EOS
   end
 
