@@ -19,9 +19,22 @@ final class ConjetAppSnapshotTests: XCTestCase {
         let app = ConjetAppState()
         app.snapshot = Self.qaSnapshot()
         app.selectedContainerID = app.snapshot.containers.first?.id
+        let defaults = UserDefaults.standard
+        let collapsedKey = "containers.dockerEditorCollapsed"
+        let previousCollapsedValue = defaults.object(forKey: collapsedKey)
+        defer {
+            if let previousCollapsedValue {
+                defaults.set(previousCollapsedValue, forKey: collapsedKey)
+            } else {
+                defaults.removeObject(forKey: collapsedKey)
+            }
+        }
 
         try render(section: .overview, app: app, to: outputDirectory.appendingPathComponent("overview.png"))
+        defaults.set(false, forKey: collapsedKey)
         try render(section: .containers, app: app, to: outputDirectory.appendingPathComponent("containers.png"))
+        defaults.set(true, forKey: collapsedKey)
+        try render(section: .containers, app: app, to: outputDirectory.appendingPathComponent("containers-collapsed.png"))
         try render(section: .images, app: app, to: outputDirectory.appendingPathComponent("images.png"))
     }
 

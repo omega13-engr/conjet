@@ -92,7 +92,7 @@ private struct ContainerMasterPanel: View {
                     systemImage: totalCount == 0 ? "shippingbox" : "magnifyingglass",
                     title: totalCount == 0 ? "No Containers" : "No Results",
                     message: totalCount == 0
-                        ? "Start a workload from the run panel below."
+                        ? "Build a workload from the Dockerfile editor below."
                         : "Try a different name, image, status, or state."
                 )
             } else {
@@ -116,7 +116,7 @@ private struct ContainerMasterPanel: View {
             }
 
             Divider()
-            RunContainerPanel()
+            ContainerDockerEditorPanel()
         }
     }
 }
@@ -176,33 +176,6 @@ private struct ContainerGroupHeader: View {
             .disabled(group.containers.isEmpty || app.activeCommandLabel != nil)
         }
         .padding(.vertical, 3)
-    }
-}
-
-private struct RunContainerPanel: View {
-    @EnvironmentObject private var app: ConjetAppState
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Run")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            TextField("Image", text: $app.runImage)
-                .textFieldStyle(.roundedBorder)
-            TextField("Command", text: $app.runCommand)
-                .textFieldStyle(.roundedBorder)
-
-            HStack {
-                Spacer()
-                CommandBarButton(title: "Run", systemImage: "play.fill") {
-                    Task { await app.runContainer() }
-                }
-                .disabled(app.runImage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .padding(12)
-        .background(.regularMaterial)
     }
 }
 

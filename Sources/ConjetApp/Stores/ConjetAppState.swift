@@ -78,8 +78,9 @@ final class ConjetAppState: ObservableObject {
     @Published var selectedImageID: String?
     @Published var selectedVolumeID: String?
     @Published private(set) var activeContainerGroupID: String?
-    @Published var runImage = "hello-world"
-    @Published var runCommand = ""
+    @Published var dockerEditorSource: String
+    @Published var dockerEditorImageTag = "conjet-editor:latest"
+    @Published var dockerEditorRunArguments = ""
     @Published var pullImage = "ubuntu:24.04"
     @Published var composeDirectory = FileManager.default.currentDirectoryPath
     @Published var composeArguments = "--detach"
@@ -99,10 +100,15 @@ final class ConjetAppState: ObservableObject {
     private static let launchFastRefreshDuration: TimeInterval = 12
     private static let commandFastRefreshDuration: TimeInterval = 20
     private static let containerGroupPollingDuration: TimeInterval = 90
+    static let defaultDockerfileSource = """
+    FROM alpine:3.20
+    CMD ["sh", "-c", "echo hello from Conjet && sleep 3600"]
+    """
 
     init(service: ConjetManagementService = ConjetManagementService()) {
         self.service = service
         self.snapshot = DashboardSnapshot.empty()
+        self.dockerEditorSource = Self.defaultDockerfileSource
     }
 
     deinit {
@@ -217,12 +223,65 @@ final class ConjetAppState: ObservableObject {
         }
     }
 
-    func runContainer() async {
-        let args = [runImage].filter { !$0.isEmpty } + splitArguments(runCommand)
-        guard !args.isEmpty else { return }
-        await runAndRefresh(label: "Run Container") {
-            await service.runConjet(["run"] + args, label: "Run Container", timeoutSeconds: nil)
+    func runDockerEditor() async {
+        let source = dockerEditorSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty else { return }
+
+        let imageTag = dockerEditorImageReference()
+        let runID = Self.shortRunIdentifier()
+        let containerName = "conjet-editor-\(runID)"
+        let buildDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("conjet-docker-editor-\(UUID().uuidString)", isDirectory: true)
+        let dockerfileURL = buildDirectory.appendingPathComponent("Dockerfile")
+
+        activeCommandLabel = "Build Dockerfile"
+        do {
+            try FileManager.default.createDirectory(at: buildDirectory, withIntermediateDirectories: true)
+            try source.write(to: dockerfileURL, atomically: true, encoding: .utf8)
+        } catch {
+            recordCommand(CommandLogEntry(
+                label: "Build Dockerfile",
+                commandLine: "write \(dockerfileURL.path)",
+                startedAt: Date(),
+                finishedAt: Date(),
+                exitCode: 1,
+                stdout: "",
+                stderr: String(describing: error)
+            ))
+            activeCommandLabel = nil
+            return
         }
+        defer { try? FileManager.default.removeItem(at: buildDirectory) }
+
+        let buildEntry = await service.runDocker(
+            ["build", "--label", "io.conjet.source=docker-editor", "--tag", imageTag, "."],
+            label: "Build Dockerfile",
+            workingDirectory: buildDirectory,
+            timeoutSeconds: nil
+        )
+        recordCommand(buildEntry)
+        guard buildEntry.succeeded else {
+            activeCommandLabel = nil
+            await refresh()
+            return
+        }
+
+        activeCommandLabel = "Run \(containerName)"
+        let runEntry = await service.runDocker(
+            [
+                "run",
+                "--detach",
+                "--rm",
+                "--name", containerName,
+                "--label", "io.conjet.source=docker-editor"
+            ] + splitArguments(dockerEditorRunArguments) + [imageTag],
+            label: "Run \(containerName)",
+            timeoutSeconds: nil
+        )
+        recordCommand(runEntry)
+        activeCommandLabel = nil
+        await refresh()
+        selectedContainerID = snapshot.containers.first { $0.name == containerName }?.id ?? selectedContainerID
     }
 
     func containerAction(_ action: String, container: DockerContainer) async {
@@ -392,8 +451,7 @@ final class ConjetAppState: ObservableObject {
             prioritizeRefresh(for: Self.commandFastRefreshDuration)
         }
         let entry = await operation()
-        commandLog.insert(entry, at: 0)
-        commandLog = Array(commandLog.prefix(80))
+        recordCommand(entry)
         if let response = Self.daemonResponse(from: entry.stdout) {
             applyDaemonResponse(response)
         }
@@ -404,8 +462,22 @@ final class ConjetAppState: ObservableObject {
         await refresh()
     }
 
+    private func recordCommand(_ entry: CommandLogEntry) {
+        commandLog.insert(entry, at: 0)
+        commandLog = Array(commandLog.prefix(80))
+    }
+
     private func splitArguments(_ text: String) -> [String] {
         text.split(whereSeparator: \.isWhitespace).map(String.init)
+    }
+
+    private func dockerEditorImageReference() -> String {
+        let value = dockerEditorImageTag.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "conjet-editor:latest" : value
+    }
+
+    private static func shortRunIdentifier() -> String {
+        String(UUID().uuidString.lowercased().prefix(8))
     }
 
     private var snapshotVMState: VMRunState? {

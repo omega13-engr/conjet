@@ -174,6 +174,59 @@ final class ConjetAppStateTests: XCTestCase {
         XCTAssertEqual(app.activeContainerGroupID, "compose:chum-mem")
     }
 
+    @MainActor
+    func testDockerEditorBuildsTemporaryContextAndRunsDetachedContainer() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetdTool: Self.tool,
+            dockerTool: Self.tool,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        app.dockerEditorSource = """
+        FROM alpine:3.20
+        CMD ["sleep", "60"]
+        """
+        app.dockerEditorImageTag = "conjet-editor:test"
+        app.dockerEditorRunArguments = "-p 8080:80"
+
+        await app.runDockerEditor()
+
+        let invocations = await executor.invocations
+        let buildInvocation = try XCTUnwrap(invocations.first { $0.displayName == "Build Dockerfile" })
+        XCTAssertEqual(Array(buildInvocation.arguments.suffix(6)), [
+            "build",
+            "--label", "io.conjet.source=docker-editor",
+            "--tag", "conjet-editor:test",
+            "."
+        ])
+        let buildDirectory = try XCTUnwrap(buildInvocation.workingDirectory)
+        XCTAssertTrue(buildDirectory.path.contains("conjet-docker-editor-"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: buildDirectory.path))
+
+        let runInvocation = try XCTUnwrap(invocations.first { $0.displayName?.hasPrefix("Run conjet-editor-") == true })
+        XCTAssertTrue(runInvocation.arguments.contains("run"))
+        XCTAssertTrue(runInvocation.arguments.contains("--detach"))
+        XCTAssertTrue(runInvocation.arguments.contains("--rm"))
+        XCTAssertTrue(runInvocation.arguments.contains("--name"))
+        XCTAssertTrue(runInvocation.arguments.contains("--label"))
+        XCTAssertTrue(runInvocation.arguments.contains("io.conjet.source=docker-editor"))
+        XCTAssertTrue(runInvocation.arguments.contains("-p"))
+        XCTAssertTrue(runInvocation.arguments.contains("8080:80"))
+        XCTAssertEqual(runInvocation.arguments.last, "conjet-editor:test")
+        XCTAssertNil(app.activeCommandLabel)
+        XCTAssertEqual(app.commandLog.count, 2)
+        XCTAssertEqual(app.commandLog.first?.label, runInvocation.displayName)
+    }
+
     private static let tool = ResolvedTool(executable: "/tmp/conjet-test-tool", source: "test")
 
     private static func temporaryConjetPaths() -> ConjetPaths {
