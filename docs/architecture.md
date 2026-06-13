@@ -18,6 +18,112 @@ The first implemented surface is intentionally small:
 - `EnergyGovernor` encodes `performance`, `balanced`, and `eco` policies for
   VM CPU caps, event batching, network reconciliation, and persistence cadence.
 
+## Backend Backbone
+
+The current backend is three layers: a small macOS control plane, an Apple
+Virtualization.framework transport/storage plane, and a Linux guest runtime.
+Docker compatibility stays at the host-facing edge, while dependency, build,
+image, and container state churn stay on Linux-native storage.
+
+```mermaid
+flowchart LR
+    docker["Docker + Compose"] --> bridge
+    cli["conjet command"] --> supervisor
+    app["Conjet app"] --> supervisor
+
+    subgraph service["Conjet service"]
+        supervisor["Runtime supervisor"]
+        bridge["Docker API bridge"]
+        network["Network stack"]
+        sync["Workspace sync"]
+        evidence["Status + benchmark evidence"]
+    end
+
+    subgraph vm["Linux VM"]
+        init["Conjet Core init"]
+        machine["Machine manager"]
+        engine["Docker engine"]
+        guest["Guest bridge"]
+    end
+
+    subgraph fast["Fast paths"]
+        storage["Native Linux storage"]
+        cache["Build + package caches"]
+        workspace["Synced source workspace"]
+        ports["Localhost port publishing"]
+    end
+
+    supervisor <--> machine
+    bridge <--> guest
+    guest <--> engine
+    network <--> guest
+    sync --> workspace
+
+    init --> machine
+    machine --> engine
+    engine --> storage
+    engine --> cache
+    workspace --> engine
+    network --> ports
+    supervisor --> evidence
+```
+
+The backbone responsibilities are:
+
+- `conjet` stays thin. It starts or asks `conjetd` for VM lifecycle work,
+  configures Docker context `conjet`, and routes Docker-compatible commands to
+  the Conjet socket instead of embedding a second Docker client.
+- `conjetd` owns the stateful host surfaces: VM lifecycle, Docker socket
+  bridging, published-port forwarding, network repair, cached status, and
+  orderly guest Docker quiesce on stop.
+- The VZ substrate supplies the hard isolation and low-level transport:
+  EFI-booted Conjet Core disk, separate data disk, NAT, VSOCK, serial logs, and
+  VirtioFS bootstrap/host shares.
+- The guest owns container runtime state. Docker, containerd, BuildKit, the
+  compiled `conjet-netd` helper, the Python fallback bridge, service lifecycle
+  markers, and boot diagnostics live inside Conjet Core.
+- ConjetFS owns the fast development workspace path. It synchronizes
+  host-authoritative source into a Docker volume mounted at `/workspace`, while
+  dependency directories, package caches, and build outputs remain VM-native
+  unless explicitly exported.
+
+This architecture is fast for concrete reasons, not because the host socket is
+special by itself:
+
+- Write-heavy container state stays on the guest data disk. `/var/lib/docker`
+  and `/var/lib/containerd` are bound onto the Conjet data disk, so image
+  extraction, layer writes, BuildKit state, and container metadata avoid
+  repeated macOS filesystem crossings.
+- Project hot paths avoid strict bind-mount churn. ConjetFS copies only
+  source-authoritative files and records signatures, so later pushes copy
+  changed paths and delete removed synced files without touching VM-native
+  `node_modules`, package stores, Cargo `target`, Go caches, or generated build
+  trees.
+- Small edit loops have short synchronization paths. `sync watch` uses FSEvents
+  by default, batches with a debounce, and can stream small updates through a
+  helper or tar payload before falling back to bulk staging.
+- Docker API compatibility is preserved through a bounded bridge. The host
+  Docker socket has a deep accept backlog, parses create/start requests only far
+  enough to prepublish ports, forwards bytes over VSOCK, and returns HTTP 503
+  when the guest is not ready instead of silently falling through to another
+  runtime.
+- Published-port setup avoids broad sweeps on hot paths. Create/start intent
+  caches, Docker event watching, container-target snapshots, and targeted
+  inspect calls let Conjet attach listeners close to container start while
+  keeping periodic reconcile as a repair path.
+- Network proxy work is capability-gated. The default `auto` proxy selects the
+  measured DispatchSource path today, keeps SwiftNIO available for comparison,
+  and uses binary/persistent guest paths only when the active guest bridge
+  advertises them.
+- Read-only status is cached and invalidated around state changes. Bursty CLI
+  probes do not repeatedly walk VM state, manifest files, Docker socket state,
+  and forwarding tables.
+
+The benchmark rule is part of the architecture: call a path "fast" only for the
+measured topology, cache mode, sample count, and baseline that produced the raw
+JSON evidence. Warm dev-loop wins do not prove cold/no-cache or energy
+superiority.
+
 ## VM Boot Substrate
 
 The VZ layer now manages:
