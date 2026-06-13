@@ -128,6 +128,21 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertTrue(forwarder.status().messages.contains("network cache pruned"))
     }
 
+    func testStatusMessagesAreCappedToRecentEntries() {
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: UnavailableGuestConnectionConnector()
+        )
+        defer { forwarder.stop() }
+
+        forwarder.appendMessagesForTesting((0..<250).map { "message-\($0)" })
+
+        let messages = forwarder.status().messages
+        XCTAssertEqual(messages.count, 200)
+        XCTAssertEqual(messages.first, "message-50")
+        XCTAssertEqual(messages.last, "message-249")
+    }
+
     func testCreatePublicationIntentPrimesPendingPortMetadataAndPruneClearsIt() {
         let forwarder = DockerPublishedPortForwarder(
             socketPath: "/tmp/missing-\(UUID().uuidString).sock",

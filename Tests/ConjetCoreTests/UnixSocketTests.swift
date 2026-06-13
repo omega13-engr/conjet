@@ -115,6 +115,43 @@ final class UnixSocketTests: XCTestCase {
         _ = try UnixSocketClient(socketPath: socket.path).send(DaemonRequest(command: .stop), timeoutSeconds: 1)
     }
 
+    func testClientReportsOversizedDaemonResponse() throws {
+        let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("cj-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let socket = root.appendingPathComponent("conjetd.sock")
+        let state = ServerState()
+        let thread = Thread {
+            do {
+                let server = UnixSocketServer(socketPath: socket.path)
+                try server.listen { request in
+                    if request.command == .stop {
+                        state.stop()
+                        return DaemonResponse(ok: true, message: "stopping")
+                    }
+                    return DaemonResponse(ok: true, message: String(repeating: "x", count: 1_100_000))
+                } shouldStop: {
+                    state.shouldStop()
+                }
+            } catch {
+                state.setError(error)
+            }
+        }
+        thread.start()
+        try waitForSocket(socket.path)
+
+        XCTAssertThrowsError(try UnixSocketClient(socketPath: socket.path).send(
+            DaemonRequest(command: .status),
+            timeoutSeconds: 2
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("daemon response exceeded"))
+        }
+
+        _ = try UnixSocketClient(socketPath: socket.path).send(DaemonRequest(command: .stop), timeoutSeconds: 1)
+    }
+
     func testServerRespondsToPingWhileAnotherRequestIsSlow() throws {
         let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
             .appendingPathComponent("cj-\(UUID().uuidString.prefix(8))", isDirectory: true)

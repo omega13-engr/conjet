@@ -15,14 +15,20 @@ public struct DaemonProcessTermination: Equatable, Sendable {
 
 public struct DaemonProcessSupervisor: Sendable {
     public var socketPath: String
+    public var lockPath: String
     public var expectedExecutableNames: Set<String>
 
-    public init(socketPath: String, expectedExecutableNames: Set<String> = ["conjetd"]) {
+    public init(
+        socketPath: String,
+        lockPath: String? = nil,
+        expectedExecutableNames: Set<String> = ["conjetd"]
+    ) {
         self.socketPath = socketPath
+        self.lockPath = lockPath ?? Self.defaultLockPath(socketPath: socketPath)
         self.expectedExecutableNames = expectedExecutableNames
     }
 
-    public var lockPath: String {
+    public static func defaultLockPath(socketPath: String) -> String {
         URL(fileURLWithPath: socketPath)
             .deletingLastPathComponent()
             .appendingPathComponent("conjetd.lock")
@@ -50,7 +56,7 @@ public struct DaemonProcessSupervisor: Sendable {
             return DaemonProcessTermination(pid: pid, signal: 0, removedRuntimePaths: removed)
         }
         guard processLooksExpected(pid) else {
-            let executable = Self.executablePath(pid: pid) ?? "unknown"
+            let executable = Self.executablePath(pid: pid) ?? Self.commandPath(pid: pid) ?? "unknown"
             throw ConjetError.unavailable(
                 "refusing to terminate pid \(pid) from \(lockPath); executable '\(executable)' does not look like \(expectedExecutableDescription)"
             )
@@ -116,12 +122,24 @@ public struct DaemonProcessSupervisor: Sendable {
         return String(decoding: bytes, as: UTF8.self)
     }
 
+    public static func commandPath(pid: Int32) -> String? {
+        guard let result = try? ProcessRunner.run(
+            "/bin/ps",
+            ["-ww", "-p", String(pid), "-o", "comm="],
+            timeoutSeconds: 2
+        ), result.succeeded else {
+            return nil
+        }
+        let value = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
     private var expectedExecutableDescription: String {
         expectedExecutableNames.sorted().joined(separator: " or ")
     }
 
     private func processLooksExpected(_ pid: Int32) -> Bool {
-        guard let executablePath = Self.executablePath(pid: pid) else {
+        guard let executablePath = Self.executablePath(pid: pid) ?? Self.commandPath(pid: pid) else {
             return false
         }
         let executableName = URL(fileURLWithPath: executablePath).lastPathComponent

@@ -82,6 +82,31 @@ final class ConjetAppStateTests: XCTestCase {
         XCTAssertEqual(vm?.message, "Docker socket is reachable; daemon VM status is unavailable")
     }
 
+    @MainActor
+    func testRestartRuntimeAppliesStartedDaemonVMStatus() async {
+        let paths = Self.temporaryConjetPaths()
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetdTool: Self.tool,
+            dockerTool: Self.tool,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+
+        await app.restartRuntime()
+
+        let invocations = await executor.invocations
+        XCTAssertTrue(invocations.contains { $0.arguments == ["restart", "--json"] })
+        XCTAssertEqual(app.currentVMState, .running)
+        XCTAssertEqual(app.displayedVMStatus?.dockerSocketPath, paths.dockerSocket.path)
+        XCTAssertEqual(app.runtimeHealth.state, .online)
+        XCTAssertEqual(app.runtimeHealth.detail, "pid 456")
+    }
+
     func testImageSelectionIDKeepsTagsWithSameDigestDistinct() {
         let stable = "sha256:abcdef"
         let alpine = DockerImage(
@@ -107,4 +132,129 @@ final class ConjetAppStateTests: XCTestCase {
     }
 
     private static let tool = ResolvedTool(executable: "/tmp/conjet-test-tool", source: "test")
+
+    private static func temporaryConjetPaths() -> ConjetPaths {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-app-state-tests-\(UUID().uuidString)", isDirectory: true)
+        return ConjetPaths(home: home)
+    }
+
+    private static func processResult(
+        for invocation: CommandInvocation,
+        paths: ConjetPaths
+    ) -> ProcessResult {
+        if invocation.arguments == ["restart", "--json"] {
+            return ProcessResult(
+                executable: invocation.executable,
+                arguments: invocation.arguments,
+                exitCode: 0,
+                stdout: restartJSON(paths: paths),
+                stderr: ""
+            )
+        }
+        if invocation.arguments == ["status", "--json"] {
+            return ProcessResult(
+                executable: invocation.executable,
+                arguments: invocation.arguments,
+                exitCode: 0,
+                stdout: daemonResponseJSON(paths: paths),
+                stderr: ""
+            )
+        }
+        if invocation.arguments == ["profile", "list", "--json"] {
+            return ProcessResult(
+                executable: invocation.executable,
+                arguments: invocation.arguments,
+                exitCode: 0,
+                stdout: #"["default"]"#,
+                stderr: ""
+            )
+        }
+        return ProcessResult(
+            executable: invocation.executable,
+            arguments: invocation.arguments,
+            exitCode: 0,
+            stdout: "",
+            stderr: ""
+        )
+    }
+
+    private static func restartJSON(paths: ConjetPaths) -> String {
+        """
+        {
+          "started": \(daemonResponseJSON(paths: paths))
+        }
+        """
+    }
+
+    private static func daemonResponseJSON(paths: ConjetPaths) -> String {
+        """
+        {
+          "ok": true,
+          "message": "running",
+          "status": {
+            "pid": 456,
+            "startedAt": "2026-06-13T09:00:00Z",
+            "state": "warm-idle",
+            "socketPath": "\(paths.socket.path)",
+            "host": {
+              "macOSVersion": "26.4.1",
+              "buildVersion": "25E253",
+              "architecture": "arm64",
+              "cpuBrand": "Apple",
+              "memoryBytes": 17179869184,
+              "isAppleSilicon": true,
+              "virtualizationFrameworkAvailable": true,
+              "rosettaLinuxSupportLikelyAvailable": true,
+              "lowPowerModeEnabled": false,
+              "thermalState": "nominal",
+              "requiredEntitlements": ["com.apple.security.virtualization"]
+            },
+            "config": {},
+            "memoryPolicy": {
+              "profile": "balanced",
+              "configuredMemoryMiB": 8192,
+              "recommendedMemoryMiB": 8192,
+              "lazyRuntimeServices": false,
+              "lazyNetworkHelpers": true,
+              "reclaimIdleHelpersAfterSeconds": 300,
+              "idleWakeupBudgetPerSecond": 1
+            },
+            "vm": {
+              "state": "running",
+              "configured": true,
+              "manifestPath": "\(paths.vmManifest.path)",
+              "dockerSocketPath": "\(paths.dockerSocket.path)",
+              "message": "running",
+              "events": []
+            },
+            "network": {
+              "activeTCPForwards": 0,
+              "activeUDPForwards": 0,
+              "failedForwards": 0,
+              "conflictCount": 0,
+              "staleForwards": 0,
+              "forwards": [],
+              "messages": []
+            }
+          }
+        }
+        """
+    }
+}
+
+private actor RecordingCommandExecutor: CommandExecuting {
+    private var recordedInvocations: [CommandInvocation] = []
+    private let handler: @Sendable (CommandInvocation) -> ProcessResult
+
+    init(handler: @escaping @Sendable (CommandInvocation) -> ProcessResult) {
+        self.handler = handler
+    }
+
+    var invocations: [CommandInvocation] { recordedInvocations }
+
+    func run(_ invocation: CommandInvocation) async -> ProcessResult {
+        recordedInvocations.append(invocation)
+        return handler(invocation)
+    }
 }

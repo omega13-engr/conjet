@@ -124,6 +124,60 @@ final class ConfigTests: XCTestCase {
         )
     }
 
+    func testAppEnvironmentUsesPersistedRuntimeBindingWhenProcessEnvIsMissing() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-env-tests-\(UUID().uuidString)", isDirectory: true)
+        let binding = directory.appendingPathComponent("runtime-environment.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try ConjetEnvironment.persistRuntimeBinding(
+            environment: [
+                "CONJET_HOME": "/tmp/conjet-bound-home",
+                "CONJET_PROFILE": "work",
+                "PATH": "/should/not/persist"
+            ],
+            to: binding
+        )
+
+        let environment = ConjetEnvironment.app(
+            processEnvironment: ["PATH": "/custom/bin"],
+            includeLaunchdEnvironment: false,
+            persistedRuntimeEnvironmentURL: binding
+        )
+
+        XCTAssertEqual(environment["CONJET_HOME"], "/tmp/conjet-bound-home")
+        XCTAssertEqual(environment["CONJET_PROFILE"], "work")
+        XCTAssertEqual(environment["PATH"], "/custom/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    }
+
+    func testProcessEnvironmentWinsOverPersistedRuntimeBinding() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-env-tests-\(UUID().uuidString)", isDirectory: true)
+        let binding = directory.appendingPathComponent("runtime-environment.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try ConjetEnvironment.persistRuntimeBinding(
+            environment: [
+                "CONJET_HOME": "/tmp/conjet-bound-home",
+                "CONJET_PROFILE": "work"
+            ],
+            to: binding
+        )
+
+        let environment = ConjetEnvironment.app(
+            processEnvironment: [
+                "CONJET_HOME": "/tmp/process-home",
+                "CONJET_PROFILE": "default",
+                "PATH": "/custom/bin"
+            ],
+            includeLaunchdEnvironment: false,
+            persistedRuntimeEnvironmentURL: binding
+        )
+
+        XCTAssertEqual(environment["CONJET_HOME"], "/tmp/process-home")
+        XCTAssertEqual(environment["CONJET_PROFILE"], "default")
+    }
+
     func testForwardedAppEnvironmentArgumentsOnlyIncludeSupportedKeys() {
         let arguments = ConjetEnvironment.forwardedEnvironmentArguments([
             "CONJET_HOME": "/tmp/conjet-home",

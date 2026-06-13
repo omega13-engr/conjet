@@ -8,6 +8,7 @@ public typealias DockerPublishedPort = ConjetPublishedPortRequest
 
 public final class DockerPublishedPortForwarder: @unchecked Sendable {
     public typealias Runner = @Sendable (String, [String], Double?) throws -> ProcessResult
+    private static let maxStatusMessages = 200
 
     private let socketPath: String
     private let connector: any GuestConnectionConnector
@@ -123,7 +124,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
 
     public func repair() {
         lock.lock()
-        messages.append("network repair requested")
+        appendMessage("network repair requested")
         statuses = statuses.filter { _, status in
             status.state != .stale && status.state != .stopped
         }
@@ -144,7 +145,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         statuses = statuses.filter { _, status in
             status.state != .stale && status.state != .stopped
         }
-        messages.append("network cache pruned")
+        appendMessage("network cache pruned")
         lock.unlock()
     }
 
@@ -162,7 +163,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             }
             .map { "\($0.hostPort):\($0.containerPort)/\($0.protocol.rawValue)" }
             .joined(separator: ",")
-        messages.append("observed Docker create port intent \(intent.containerName ?? "<anonymous>") [\(sortedPorts)]")
+        appendMessage("observed Docker create port intent \(intent.containerName ?? "<anonymous>") [\(sortedPorts)]")
         lock.unlock()
 
         prepublishCreateIntent(intent)
@@ -189,7 +190,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         } else if let index = pendingAnonymousCreatePorts.firstIndex(of: resolution.intent.ports) {
             pendingAnonymousCreatePorts.remove(at: index)
         }
-        messages.append("resolved Docker create port intent \(String(resolution.containerID.prefix(12)))")
+        appendMessage("resolved Docker create port intent \(String(resolution.containerID.prefix(12)))")
         lock.unlock()
     }
 
@@ -197,7 +198,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         guard !request.containerID.isEmpty else { return }
         lock.lock()
         let shouldRun = running
-        messages.append("observed Docker container start intent \(String(request.containerID.prefix(12)))")
+        appendMessage("observed Docker container start intent \(String(request.containerID.prefix(12)))")
         lock.unlock()
         guard shouldRun else { return }
 
@@ -207,7 +208,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                 partial.formUnion(item.ports)
             }
             lock.lock()
-            messages.append("start-intent used cached create publication \(String(request.containerID.prefix(12)))")
+            appendMessage("start-intent used cached create publication \(String(request.containerID.prefix(12)))")
             lock.unlock()
             prepublishPendingTCPPorts(ports)
             return
@@ -221,13 +222,13 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             )
         } catch {
             lock.lock()
-            messages.append("start-intent prepublish inspect failed \(String(request.containerID.prefix(12))): \(error)")
+            appendMessage("start-intent prepublish inspect failed \(String(request.containerID.prefix(12))): \(error)")
             lock.unlock()
             return
         }
         guard !ports.isEmpty else {
             lock.lock()
-            messages.append("start-intent prepublish found no published ports \(String(request.containerID.prefix(12)))")
+            appendMessage("start-intent prepublish found no published ports \(String(request.containerID.prefix(12)))")
             lock.unlock()
             return
         }
@@ -235,7 +236,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         lock.lock()
         pendingCreatePortsByID[containerID] = ports
         pendingCreatePortsByID[String(containerID.prefix(12))] = ports
-        messages.append("prepublished Docker start port intent \(String(containerID.prefix(12)))")
+        appendMessage("prepublished Docker start port intent \(String(containerID.prefix(12)))")
         lock.unlock()
         prepublishPendingTCPPorts(ports)
     }
@@ -244,7 +245,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         guard !request.containerID.isEmpty else { return }
         lock.lock()
         let shouldRun = running
-        messages.append("observed Docker container start \(String(request.containerID.prefix(12)))")
+        appendMessage("observed Docker container start \(String(request.containerID.prefix(12)))")
         lock.unlock()
         guard shouldRun else { return }
 
@@ -311,6 +312,14 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         )
         lock.unlock()
         return result
+    }
+
+    func appendMessagesForTesting(_ values: [String]) {
+        lock.lock()
+        for value in values {
+            appendMessage(value)
+        }
+        lock.unlock()
     }
 
     func listenerPortsForTesting() -> Set<Int> {
@@ -471,7 +480,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             if running {
                 targetEventWatcherRunning = false
                 targetEventReconnects += 1
-                messages.append("container target event stream reconnecting")
+                appendMessage("container target event stream reconnecting")
             }
             lock.unlock()
             if isRunning() {
@@ -490,7 +499,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             connection = try connector.connect()
         } catch {
             lock.lock()
-            messages.append("container target event stream failed to connect: \(error)")
+            appendMessage("container target event stream failed to connect: \(error)")
             lock.unlock()
             return
         }
@@ -500,7 +509,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         let request = "GET /conjet-container-target-events HTTP/1.1\r\nHost: docker\r\nConnection: keep-alive\r\n\r\n"
         guard writeAllForDockerAPI(Data(request.utf8), to: connection.fileDescriptor) else {
             lock.lock()
-            messages.append("container target event stream request failed")
+            appendMessage("container target event stream request failed")
             lock.unlock()
             return
         }
@@ -531,7 +540,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                       let statusLine = headerText.split(separator: "\r\n").first,
                       statusLine.contains(" 200 ") else {
                     lock.lock()
-                    messages.append("container target event stream returned invalid response")
+                    appendMessage("container target event stream returned invalid response")
                     lock.unlock()
                     return
                 }
@@ -539,7 +548,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                 headerParsed = true
                 lock.lock()
                 targetEventWatcherRunning = true
-                messages.append("container target event stream connected")
+                appendMessage("container target event stream connected")
                 lock.unlock()
                 streamConnectedMessageSent = true
             }
@@ -553,7 +562,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                     try applyContainerTargetSnapshotData(trimmed, source: "event stream")
                 } catch {
                     lock.lock()
-                    messages.append("container target event decode failed: \(error)")
+                    appendMessage("container target event decode failed: \(error)")
                     lock.unlock()
                 }
             }
@@ -564,7 +573,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                 try applyContainerTargetSnapshotData(buffer.trimmedASCIIWhitespace(), source: "event stream")
             } catch {
                 lock.lock()
-                messages.append("container target event decode failed: \(error)")
+                appendMessage("container target event decode failed: \(error)")
                 lock.unlock()
             }
         }
@@ -584,7 +593,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             if running {
                 eventWatcherRunning = false
                 eventWatcherReconnects += 1
-                messages.append("Docker event watcher reconnecting")
+                appendMessage("Docker event watcher reconnecting")
             }
             lock.unlock()
             if isRunning() {
@@ -627,7 +636,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             lock.lock()
             eventProcess = nil
             eventWatcherRunning = false
-            messages.append("Docker event watcher failed to start: \(error)")
+            appendMessage("Docker event watcher failed to start: \(error)")
             lock.unlock()
             return
         }
@@ -709,7 +718,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             return knownPorts.union(inspectedPorts)
         } catch {
             lock.lock()
-            messages.append("port reconcile failed: \(error)")
+            appendMessage("port reconcile failed: \(error)")
             lock.unlock()
             return []
         }
@@ -740,7 +749,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             return allPorts
         } catch {
             lock.lock()
-            messages.append("targeted port reconcile failed: \(error)")
+            appendMessage("targeted port reconcile failed: \(error)")
             lock.unlock()
             return pendingPorts.union(cachedPublishedPorts(for: Set(containerIDs)))
         }
@@ -783,7 +792,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                     reconcile(publishedPorts: ports, scopedContainerIDs: [item.containerID])
                     waitForTCPPublishedTargetsReady(ports, timeoutSeconds: 0.15)
                     lock.lock()
-                    messages.append("fast-attached published ports for \(String(item.containerID.prefix(12)))")
+                    appendMessage("fast-attached published ports for \(String(item.containerID.prefix(12)))")
                     lock.unlock()
                     return
                 }
@@ -889,7 +898,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             return true
         } catch {
             lock.lock()
-            messages.append("guest container target snapshot failed: \(error)")
+            appendMessage("guest container target snapshot failed: \(error)")
             lock.unlock()
             return false
         }
@@ -924,7 +933,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         }
         containerTargetSnapshotAt = now
         eventWatcherLastEventAt = now
-        messages.append("refreshed guest container target \(source) (\(containers.count) containers)")
+        appendMessage("refreshed guest container target \(source) (\(containers.count) containers)")
         lock.unlock()
 
         for candidate in attachCandidates {
@@ -960,7 +969,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             updatePublishedPortCache(resolvedPorts, for: [item.containerID])
             reconcile(publishedPorts: resolvedPorts, scopedContainerIDs: [item.containerID])
             lock.lock()
-            messages.append("target-event attached published ports for \(String(item.containerID.prefix(12))) from \(source)")
+            appendMessage("target-event attached published ports for \(String(item.containerID.prefix(12))) from \(source)")
             lock.unlock()
         }
     }
@@ -1363,7 +1372,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             if running {
                 tcpListeners[key] = listener
                 statuses[key] = status(for: publishedPort, bindAddress: bindAddress, state: .listening, warning: warning)
-                messages.append("port forward created \(bindAddress):\(publishedPort.hostPort)/tcp")
+                appendMessage("port forward created \(bindAddress):\(publishedPort.hostPort)/tcp")
                 lock.unlock()
             } else {
                 lock.unlock()
@@ -1450,7 +1459,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             if running {
                 udpListeners[key] = listener
                 statuses[key] = status(for: publishedPort, bindAddress: bindAddress, state: .listening, warning: warning)
-                messages.append("port forward created \(bindAddress):\(publishedPort.hostPort)/udp")
+                appendMessage("port forward created \(bindAddress):\(publishedPort.hostPort)/udp")
                 lock.unlock()
             } else {
                 lock.unlock()
@@ -1499,9 +1508,16 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         lock.lock()
         statuses[key] = status
         if let error = status.error {
-            messages.append(error)
+            appendMessage(error)
         }
         lock.unlock()
+    }
+
+    private func appendMessage(_ message: String) {
+        messages.append(message)
+        if messages.count > Self.maxStatusMessages {
+            messages.removeFirst(messages.count - Self.maxStatusMessages)
+        }
     }
 
     private func updateMetrics(key: ForwardKey, metrics: ProxyMetrics) {

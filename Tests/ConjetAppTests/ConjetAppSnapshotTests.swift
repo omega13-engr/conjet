@@ -34,11 +34,22 @@ final class ConjetAppSnapshotTests: XCTestCase {
             .environmentObject(app)
             .frame(width: 1080, height: 720)
         let controller = NSHostingController(rootView: root)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentViewController = controller
+        defer { window.close() }
+
         let view = controller.view
         view.appearance = NSAppearance(named: .darkAqua)
         view.frame = NSRect(x: 0, y: 0, width: 1080, height: 720)
         view.layoutSubtreeIfNeeded()
         view.displayIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
 
         guard let representation = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             XCTFail("Could not create bitmap representation for \(section.rawValue)")
@@ -116,8 +127,31 @@ final class ConjetAppSnapshotTests: XCTestCase {
             dockerSocketAvailable: true,
             dockerReachable: true,
             daemonResponse: DaemonResponse(
-                ok: false,
-                message: "conjetd pid 123 is running but not answering at /tmp/conjet-ui-qa/home/run/conjetd.sock"
+                ok: true,
+                message: "running",
+                status: DaemonStatus(
+                    pid: 123,
+                    startedAt: Date(timeIntervalSince1970: 1_751_000_000),
+                    state: .warmIdle,
+                    socketPath: "/tmp/conjet-ui-qa/home/run/conjetd.sock",
+                    host: HostCapabilities.detect(),
+                    config: .default,
+                    vm: VMRuntimeStatus(
+                        state: .running,
+                        configured: true,
+                        manifestPath: "/tmp/conjet-ui-qa/home/state/vm/manifest.json",
+                        dockerSocketPath: socketPath,
+                        message: "running"
+                    ),
+                    network: ConjetNetworkStatus(activeTCPForwards: 6, failedForwards: 0)
+                ),
+                vm: VMRuntimeStatus(
+                    state: .running,
+                    configured: true,
+                    manifestPath: "/tmp/conjet-ui-qa/home/state/vm/manifest.json",
+                    dockerSocketPath: socketPath,
+                    message: "running"
+                )
             ),
             profiles: ["default"],
             containers: containers,

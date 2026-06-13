@@ -40,6 +40,36 @@ final class DaemonProcessSupervisorTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.socket.path))
     }
 
+    func testCustomLockPathControlsDaemonWhenSocketPathIsElsewhere() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let socketDirectory = fixture.root.appendingPathComponent("socket", isDirectory: true)
+        let lockDirectory = fixture.root.appendingPathComponent("run", isDirectory: true)
+        try FileManager.default.createDirectory(at: socketDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: lockDirectory, withIntermediateDirectories: true)
+        let socket = socketDirectory.appendingPathComponent("custom-conjetd.sock")
+        let lock = lockDirectory.appendingPathComponent("conjetd.lock")
+
+        let pid = try launchDetachedSleep()
+        defer { terminateIfRunning(pid) }
+        try writeLock(pid: pid, path: lock.path)
+        FileManager.default.createFile(atPath: socket.path, contents: nil)
+
+        let supervisor = DaemonProcessSupervisor(
+            socketPath: socket.path,
+            lockPath: lock.path,
+            expectedExecutableNames: ["sleep"]
+        )
+
+        XCTAssertEqual(supervisor.runningPID(), pid)
+        let termination = try supervisor.terminateRunningDaemon(timeoutSeconds: 2)
+        XCTAssertEqual(termination?.pid, pid)
+        XCTAssertFalse(DaemonProcessSupervisor.processExists(pid))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lock.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: socket.path))
+    }
+
     func testRefusesToTerminateUnexpectedExecutable() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

@@ -838,7 +838,9 @@ struct ConjetCLI {
         } catch {
             let message: String
             if let pid = runningDaemonPID(socketPath: socketPath) {
-                message = "conjetd pid \(pid) is running but not answering at \(socketPath)"
+                message = "conjetd pid \(pid) is running but status failed at \(socketPath): \(error)"
+            } else if FileManager.default.fileExists(atPath: socketPath) {
+                message = "conjetd socket exists but status failed at \(socketPath): \(error)"
             } else {
                 message = "conjetd is not running at \(socketPath)"
             }
@@ -1154,10 +1156,11 @@ struct ConjetCLI {
         let config = try updateProfileConfigFromStartArgs(args, paths: paths, json: json)
         try autoInstallSSHConfig(json: json)
         try ensureVMConfiguredForStart(json: json, config: config)
+        let socketPath = try startDaemonOnly(printStatus: !json)
+        persistMenuBarRuntimeBinding(paths: paths)
         if !json {
             launchContainingAppForMenuBarIfAvailable()
         }
-        let socketPath = try startDaemonOnly(printStatus: !json)
         let response = try startVMIfConfigured(socketPath: socketPath, config: config, json: json)
         if response.ok, config.ssh.enabled, FileManager.default.fileExists(atPath: paths.dockerSocket.path) {
             _ = try? reconcileSSHKnownHosts()
@@ -1195,6 +1198,17 @@ struct ConjetCLI {
             }
         } catch {
             writeDiagnostic("menu bar app launch failed: \(error)")
+        }
+    }
+
+    private static func persistMenuBarRuntimeBinding(paths: ConjetPaths) {
+        var environment = ProcessInfo.processInfo.environment
+        environment["CONJET_HOME"] = paths.rootHome.path
+        environment["CONJET_PROFILE"] = paths.profileName
+        do {
+            try ConjetEnvironment.persistRuntimeBinding(environment: environment)
+        } catch {
+            writeDiagnostic("could not persist menu bar runtime environment: \(error)")
         }
     }
 
@@ -1452,7 +1466,7 @@ struct ConjetCLI {
                 }
                 Thread.sleep(forTimeInterval: 0.1)
             }
-            let supervisor = DaemonProcessSupervisor(socketPath: socketPath)
+            let supervisor = daemonSupervisor(paths: paths, socketPath: socketPath)
             let termination = try supervisor.terminateRunningDaemon(timeoutSeconds: 3)
             if let termination {
                 let signalName = daemonTerminationSignalDescription(termination.signal)
@@ -1516,7 +1530,7 @@ struct ConjetCLI {
             )
         } catch {
             if let pid = runningDaemonPID(socketPath: currentSocketPath) {
-                let termination = try DaemonProcessSupervisor(socketPath: currentSocketPath)
+                let termination = try daemonSupervisor(paths: paths, socketPath: currentSocketPath)
                     .terminateRunningDaemon(timeoutSeconds: max(timeout, 3))
                 let suffix: String
                 if let termination {
@@ -1571,7 +1585,17 @@ struct ConjetCLI {
     }
 
     private static func runningDaemonPID(socketPath: String) -> Int32? {
-        DaemonProcessSupervisor(socketPath: socketPath).runningPID()
+        daemonSupervisor(socketPath: socketPath).runningPID()
+    }
+
+    private static func daemonSupervisor(
+        paths: ConjetPaths = .default(),
+        socketPath: String
+    ) -> DaemonProcessSupervisor {
+        DaemonProcessSupervisor(
+            socketPath: socketPath,
+            lockPath: paths.runDirectory.appendingPathComponent("conjetd.lock").path
+        )
     }
 
     private static func daemonTerminationSignalDescription(_ signal: Int32) -> String {

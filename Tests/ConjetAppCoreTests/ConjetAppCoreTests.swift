@@ -145,6 +145,42 @@ final class ConjetAppCoreTests: XCTestCase {
         XCTAssertEqual(Set(snapshot.images.map { $0.selectionID }).count, 2)
     }
 
+    func testLoadSnapshotPicksUpPersistedRuntimeBindingAfterServiceCreation() async throws {
+        let paths = try Self.makeTemporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let persistedEnvironment = paths.rootHome.appendingPathComponent("runtime-environment.json")
+        let executor = RecordingCommandExecutor { invocation in
+            Self.stubbedSnapshotResult(for: invocation, imageOutput: "")
+        }
+        let tool = ResolvedTool(executable: "/tmp/conjet-test-tool", source: "test")
+        let service = ConjetManagementService(
+            environment: ["PATH": "/usr/bin:/bin"],
+            conjetTool: tool,
+            conjetdTool: tool,
+            dockerTool: tool,
+            includeLaunchdEnvironment: false,
+            persistedRuntimeEnvironmentURL: persistedEnvironment,
+            executor: executor
+        )
+
+        try ConjetEnvironment.persistRuntimeBinding(
+            environment: ["CONJET_HOME": paths.rootHome.path, "CONJET_PROFILE": paths.profileName],
+            to: persistedEnvironment
+        )
+        let snapshot = await service.loadSnapshot()
+
+        XCTAssertEqual(snapshot.dockerSocketPath, paths.dockerSocket.path)
+        XCTAssertTrue(snapshot.dockerReachable)
+
+        let invocations = await executor.invocations
+        XCTAssertFalse(invocations.isEmpty)
+        XCTAssertTrue(invocations.allSatisfy { $0.environment["CONJET_HOME"] == paths.rootHome.path })
+        XCTAssertTrue(invocations.allSatisfy { $0.environment["CONJET_PROFILE"] == paths.profileName })
+    }
+
     func testDockerCommandsUseProfileDockerSocketWhenDaemonSocketIsOverridden() async throws {
         let paths = try Self.makeTemporaryConjetPaths()
         try paths.ensureBaseDirectories()

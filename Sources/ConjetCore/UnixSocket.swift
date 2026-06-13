@@ -142,12 +142,16 @@ private func withUnixSocketAddress<Result>(
 private func readLine(from fd: Int32, maxBytes: Int = 1_048_576) throws -> Data {
     var bytes: [UInt8] = []
     bytes.reserveCapacity(4096)
+    var receivedTerminator = false
 
     while bytes.count < maxBytes {
         var byte: UInt8 = 0
         let count = Darwin.read(fd, &byte, 1)
         if count == 1 {
-            if byte == 0x0a { break }
+            if byte == 0x0a {
+                receivedTerminator = true
+                break
+            }
             bytes.append(byte)
         } else if count == 0 {
             break
@@ -160,6 +164,9 @@ private func readLine(from fd: Int32, maxBytes: Int = 1_048_576) throws -> Data 
 
     guard !bytes.isEmpty else {
         throw ConjetError.socket("connection closed without a response")
+    }
+    guard receivedTerminator || bytes.count < maxBytes else {
+        throw ConjetError.socket("daemon response exceeded \(maxBytes) bytes")
     }
     return Data(bytes)
 }

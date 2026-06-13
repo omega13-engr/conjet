@@ -2,42 +2,53 @@ import ConjetCore
 import Foundation
 
 public struct ConjetManagementService: Sendable {
-    private let environment: [String: String]
-    private let conjetTool: ResolvedTool
-    private let conjetdTool: ResolvedTool
-    private let dockerTool: ResolvedTool
-    private let paths: ConjetPaths
+    private let baseEnvironment: [String: String]
+    private let conjetToolOverride: ResolvedTool?
+    private let conjetdToolOverride: ResolvedTool?
+    private let dockerToolOverride: ResolvedTool?
+    private let persistedRuntimeEnvironmentURL: URL?
     private let execute: @Sendable (CommandInvocation) async -> ProcessResult
 
     public init(
-        environment: [String: String] = ConjetEnvironment.app(),
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         conjetTool: ResolvedTool? = nil,
         conjetdTool: ResolvedTool? = nil,
         dockerTool: ResolvedTool? = nil,
+        includeLaunchdEnvironment: Bool = true,
+        persistedRuntimeEnvironmentURL: URL? = nil,
         executor: any CommandExecuting = LocalCommandExecutor()
     ) {
-        self.environment = environment
-        self.conjetTool = conjetTool ?? ConjetToolResolver.conjet(environment: environment)
-        self.conjetdTool = conjetdTool ?? ConjetToolResolver.conjetd(environment: environment)
-        self.dockerTool = dockerTool ?? ConjetToolResolver.docker(environment: environment)
-        self.paths = ConjetPaths.default(environment: environment)
+        self.baseEnvironment = ConjetEnvironment.app(
+            processEnvironment: environment,
+            includeLaunchdEnvironment: includeLaunchdEnvironment,
+            includePersistedRuntimeEnvironment: false
+        )
+        self.conjetToolOverride = conjetTool
+        self.conjetdToolOverride = conjetdTool
+        self.dockerToolOverride = dockerTool
+        self.persistedRuntimeEnvironmentURL = persistedRuntimeEnvironmentURL
         self.execute = { invocation in await executor.run(invocation) }
     }
 
     public func loadSnapshot() async -> DashboardSnapshot {
-        let socketPath = dockerSocketPath()
+        let context = runtimeContext()
+        let socketPath = dockerSocketPath(paths: context.paths)
         let socketAvailable = FileManager.default.fileExists(atPath: socketPath)
 
-        async let daemon = daemonStatus()
-        async let profiles = profileList()
-        async let containers = dockerContainers(socketAvailable: socketAvailable)
-        async let images = dockerImages(socketAvailable: socketAvailable)
-        async let volumes = dockerVolumes(socketAvailable: socketAvailable)
-        async let stats = dockerStats(socketAvailable: socketAvailable)
+        async let daemon = daemonStatus(context: context)
+        async let profiles = profileList(context: context)
+        async let containers = dockerContainers(socketAvailable: socketAvailable, context: context)
+        async let images = dockerImages(socketAvailable: socketAvailable, context: context)
+        async let volumes = dockerVolumes(socketAvailable: socketAvailable, context: context)
+        async let stats = dockerStats(socketAvailable: socketAvailable, context: context)
 
         let daemonResult = await daemon
         let containerList = await containers
-        async let processes = dockerTopProcesses(containers: containerList.value, socketAvailable: socketAvailable)
+        async let processes = dockerTopProcesses(
+            containers: containerList.value,
+            socketAvailable: socketAvailable,
+            context: context
+        )
 
         var warnings = daemonResult.warnings
         let profileResult = await profiles
@@ -65,9 +76,9 @@ public struct ConjetManagementService: Sendable {
         )
 
         return DashboardSnapshot(
-            conjetTool: conjetTool,
-            conjetdTool: conjetdTool,
-            dockerTool: dockerTool,
+            conjetTool: context.conjetTool,
+            conjetdTool: context.conjetdTool,
+            dockerTool: context.dockerTool,
             dockerSocketPath: socketPath,
             dockerSocketAvailable: socketAvailable,
             dockerReachable: dockerReachable,
@@ -88,10 +99,11 @@ public struct ConjetManagementService: Sendable {
         label: String,
         timeoutSeconds: Double? = 120
     ) async -> CommandLogEntry {
-        await run(conjetTool.invocation(
+        let context = runtimeContext()
+        return await run(context.conjetTool.invocation(
             arguments: arguments,
             displayName: label,
-            environment: environment,
+            environment: context.environment,
             timeoutSeconds: timeoutSeconds
         ), label: label)
     }
@@ -102,11 +114,12 @@ public struct ConjetManagementService: Sendable {
         workingDirectory: URL? = nil,
         timeoutSeconds: Double? = 120
     ) async -> CommandLogEntry {
-        let invocation = dockerTool.invocation(
-            arguments: dockerHostArguments() + arguments,
+        let context = runtimeContext()
+        let invocation = context.dockerTool.invocation(
+            arguments: dockerHostArguments(paths: context.paths) + arguments,
             displayName: label,
             workingDirectory: workingDirectory,
-            environment: environment,
+            environment: context.environment,
             timeoutSeconds: timeoutSeconds
         )
         return await run(invocation, label: label)
@@ -121,7 +134,8 @@ public struct ConjetManagementService: Sendable {
     }
 
     public func loadVMStatus() async -> DaemonResponse? {
-        freshVMStatus(socketPath: nil)
+        let context = runtimeContext()
+        return freshVMStatus(socketPath: nil, context: context)
     }
 
     private func run(_ invocation: CommandInvocation, label: String) async -> CommandLogEntry {
@@ -139,11 +153,11 @@ public struct ConjetManagementService: Sendable {
         )
     }
 
-    private func daemonStatus() async -> (value: DaemonResponse?, warnings: [String]) {
-        let result = await execute(conjetTool.invocation(
+    private func daemonStatus(context: RuntimeContext) async -> (value: DaemonResponse?, warnings: [String]) {
+        let result = await execute(context.conjetTool.invocation(
             arguments: ["status", "--json"],
             displayName: "Status",
-            environment: environment,
+            environment: context.environment,
             timeoutSeconds: 15
         ))
         guard !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -151,7 +165,7 @@ public struct ConjetManagementService: Sendable {
         }
         do {
             var response = try ConjetJSON.decoder().decode(DaemonResponse.self, from: Data(result.stdout.utf8))
-            if let freshResponse = freshVMStatus(socketPath: response.status?.socketPath) {
+            if let freshResponse = freshVMStatus(socketPath: response.status?.socketPath, context: context) {
                 response.status = freshResponse.status ?? response.status
                 response.vm = freshResponse.vm ?? freshResponse.status?.vm ?? response.vm
             }
@@ -161,18 +175,18 @@ public struct ConjetManagementService: Sendable {
         }
     }
 
-    private func freshVMStatus(socketPath: String?) -> DaemonResponse? {
-        let path = socketPath ?? daemonSocketPath()
+    private func freshVMStatus(socketPath: String?, context: RuntimeContext) -> DaemonResponse? {
+        let path = socketPath ?? daemonSocketPath(paths: context.paths)
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         return try? UnixSocketClient(socketPath: path)
             .send(DaemonRequest(command: .vmStatus), timeoutSeconds: 1)
     }
 
-    private func profileList() async -> (value: [String], warnings: [String]) {
-        let result = await execute(conjetTool.invocation(
+    private func profileList(context: RuntimeContext) async -> (value: [String], warnings: [String]) {
+        let result = await execute(context.conjetTool.invocation(
             arguments: ["profile", "list", "--json"],
             displayName: "Profiles",
-            environment: environment,
+            environment: context.environment,
             timeoutSeconds: 10
         ))
         guard result.exitCode == 0 else {
@@ -185,9 +199,9 @@ public struct ConjetManagementService: Sendable {
         }
     }
 
-    private func dockerContainers(socketAvailable: Bool) async -> ProbeResult<[DockerContainer]> {
+    private func dockerContainers(socketAvailable: Bool, context: RuntimeContext) async -> ProbeResult<[DockerContainer]> {
         guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
-        let result = await docker(["ps", "-a", "--no-trunc", "--format", "{{json .}}"], timeoutSeconds: 15)
+        let result = await docker(["ps", "-a", "--no-trunc", "--format", "{{json .}}"], timeoutSeconds: 15, context: context)
         guard result.exitCode == 0 else {
             return ProbeResult(value: [], warnings: ["docker ps: \(trim(result.stderr))"], succeeded: false)
         }
@@ -198,9 +212,9 @@ public struct ConjetManagementService: Sendable {
         )
     }
 
-    private func dockerImages(socketAvailable: Bool) async -> ProbeResult<[DockerImage]> {
+    private func dockerImages(socketAvailable: Bool, context: RuntimeContext) async -> ProbeResult<[DockerImage]> {
         guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
-        let result = await docker(["images", "--no-trunc", "--format", "{{json .}}"], timeoutSeconds: 20)
+        let result = await docker(["images", "--no-trunc", "--format", "{{json .}}"], timeoutSeconds: 20, context: context)
         guard result.exitCode == 0 else {
             return ProbeResult(value: [], warnings: ["docker images: \(trim(result.stderr))"], succeeded: false)
         }
@@ -211,14 +225,14 @@ public struct ConjetManagementService: Sendable {
         )
     }
 
-    private func dockerVolumes(socketAvailable: Bool) async -> ProbeResult<[DockerVolume]> {
+    private func dockerVolumes(socketAvailable: Bool, context: RuntimeContext) async -> ProbeResult<[DockerVolume]> {
         guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
-        let result = await docker(["volume", "ls", "--format", "{{json .}}"], timeoutSeconds: 20)
+        let result = await docker(["volume", "ls", "--format", "{{json .}}"], timeoutSeconds: 20, context: context)
         guard result.exitCode == 0 else {
             return ProbeResult(value: [], warnings: ["docker volume ls: \(trim(result.stderr))"], succeeded: false)
         }
         let volumes = DockerJSONLines.decode(DockerVolume.self, from: result.stdout)
-        let usageResult = await docker(["system", "df", "-v", "--format", "json"], timeoutSeconds: 20)
+        let usageResult = await docker(["system", "df", "-v", "--format", "json"], timeoutSeconds: 20, context: context)
         guard usageResult.exitCode == 0 else {
             return ProbeResult(value: volumes, warnings: [], succeeded: true)
         }
@@ -231,9 +245,9 @@ public struct ConjetManagementService: Sendable {
         }, warnings: [], succeeded: true)
     }
 
-    private func dockerStats(socketAvailable: Bool) async -> ProbeResult<[DockerStats]> {
+    private func dockerStats(socketAvailable: Bool, context: RuntimeContext) async -> ProbeResult<[DockerStats]> {
         guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
-        let result = await docker(["stats", "--no-stream", "--format", "{{json .}}"], timeoutSeconds: 20)
+        let result = await docker(["stats", "--no-stream", "--format", "{{json .}}"], timeoutSeconds: 20, context: context)
         guard result.exitCode == 0 else {
             return ProbeResult(value: [], warnings: ["docker stats: \(trim(result.stderr))"], succeeded: false)
         }
@@ -246,7 +260,8 @@ public struct ConjetManagementService: Sendable {
 
     private func dockerTopProcesses(
         containers: [DockerContainer],
-        socketAvailable: Bool
+        socketAvailable: Bool,
+        context: RuntimeContext
     ) async -> ProbeResult<[ContainerProcess]> {
         guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
         let running = containers.filter { $0.state.lowercased() == "running" }
@@ -254,7 +269,7 @@ public struct ConjetManagementService: Sendable {
         var warnings: [String] = []
         var succeeded = running.isEmpty
         for container in running.prefix(12) {
-            let result = await docker(["top", container.id, "-eo", "pid,ppid,user,stat,comm,args"], timeoutSeconds: 8)
+            let result = await docker(["top", container.id, "-eo", "pid,ppid,user,stat,comm,args"], timeoutSeconds: 8, context: context)
             if result.exitCode != 0 {
                 warnings.append("docker top \(container.name): \(trim(result.stderr))")
                 continue
@@ -265,28 +280,43 @@ public struct ConjetManagementService: Sendable {
         return ProbeResult(value: processes, warnings: warnings, succeeded: succeeded)
     }
 
-    private func docker(_ arguments: [String], timeoutSeconds: Double?) async -> ProcessResult {
-        await execute(dockerTool.invocation(
-            arguments: dockerHostArguments() + arguments,
+    private func docker(_ arguments: [String], timeoutSeconds: Double?, context: RuntimeContext) async -> ProcessResult {
+        await execute(context.dockerTool.invocation(
+            arguments: dockerHostArguments(paths: context.paths) + arguments,
             displayName: "Docker",
-            environment: environment,
+            environment: context.environment,
             timeoutSeconds: timeoutSeconds
         ))
     }
 
-    private func dockerHostArguments() -> [String] {
-        ["--host", "unix://\(dockerSocketPath())"]
+    private func dockerHostArguments(paths: ConjetPaths) -> [String] {
+        ["--host", "unix://\(dockerSocketPath(paths: paths))"]
     }
 
-    private func dockerSocketPath() -> String {
+    private func dockerSocketPath(paths: ConjetPaths) -> String {
         return paths.dockerSocket.path
     }
 
-    private func daemonSocketPath() -> String {
+    private func daemonSocketPath(paths: ConjetPaths) -> String {
         if let config = try? ConjetConfig.loadOrCreate(paths: paths), let socketPath = config.socketPath {
             return socketPath
         }
         return paths.socket.path
+    }
+
+    private func runtimeContext() -> RuntimeContext {
+        let environment = ConjetEnvironment.app(
+            processEnvironment: baseEnvironment,
+            includeLaunchdEnvironment: false,
+            persistedRuntimeEnvironmentURL: persistedRuntimeEnvironmentURL
+        )
+        return RuntimeContext(
+            environment: environment,
+            conjetTool: conjetToolOverride ?? ConjetToolResolver.conjet(environment: environment),
+            conjetdTool: conjetdToolOverride ?? ConjetToolResolver.conjetd(environment: environment),
+            dockerTool: dockerToolOverride ?? ConjetToolResolver.docker(environment: environment),
+            paths: ConjetPaths.default(environment: environment)
+        )
     }
 
     private func deduplicatedImages(_ images: [DockerImage]) -> [DockerImage] {
@@ -324,4 +354,12 @@ private struct ProbeResult<Value: Sendable>: Sendable {
     var value: Value
     var warnings: [String]
     var succeeded: Bool
+}
+
+private struct RuntimeContext: Sendable {
+    var environment: [String: String]
+    var conjetTool: ResolvedTool
+    var conjetdTool: ResolvedTool
+    var dockerTool: ResolvedTool
+    var paths: ConjetPaths
 }
