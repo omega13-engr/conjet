@@ -216,6 +216,14 @@ swift build -c release
 
 ---
 
+## AI Agent Workflows
+
+Project-local Claude Code and Codex CLI agents and skills live in this repo for
+release, runtime debugging, and macOS packaging work. See
+[`docs/ai-agents-and-skills.md`](docs/ai-agents-and-skills.md).
+
+---
+
 ## Releases
 
 Conjet and Conjet Core images are released separately:

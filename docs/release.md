@@ -115,6 +115,12 @@ validation, but they are not Gatekeeper-notarized production distributables.
 Production releases should use Developer ID signing, notarization, and stapling
 in GitHub Actions.
 
+## AI-Assisted Release Work
+
+Project-local Claude Code and Codex CLI agents and skills are available for
+release, runtime, and macOS packaging work. See `docs/ai-agents-and-skills.md`
+for the registry, expected trigger scopes, and validation rules.
+
 ## Runtime Updates
 
 `conjet update` updates the active profile's Conjet Core VM image from the
