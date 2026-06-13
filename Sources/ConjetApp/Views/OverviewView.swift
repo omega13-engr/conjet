@@ -5,10 +5,12 @@ struct OverviewView: View {
     @EnvironmentObject private var app: ConjetAppState
 
     var body: some View {
+        let runtime = app.runtimeHealth
+
         VStack(spacing: 0) {
             HeaderView(
                 title: "Conjet Runtime",
-                subtitle: app.snapshot.daemonResponse?.message,
+                subtitle: runtime.subtitle,
                 systemImage: "gauge.with.dots.needle.67percent"
             )
             Divider()
@@ -18,8 +20,8 @@ struct OverviewView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 12)], spacing: 12) {
                         MetricCard(
                             title: "Daemon",
-                            value: app.snapshot.daemonResponse?.status?.state.rawValue ?? "offline",
-                            detail: app.snapshot.daemonResponse?.status.map { "pid \($0.pid)" } ?? app.snapshot.dockerSocketPath,
+                            value: runtime.value,
+                            detail: runtime.detail,
                             systemImage: "bolt.horizontal.circle",
                             tint: .green
                         )
@@ -48,7 +50,7 @@ struct OverviewView: View {
 
                     AppCard("Runtime Controls") {
                         HStack {
-                            daemonBadge(app.snapshot.daemonResponse)
+                            runtimeBadge(runtime)
                             Spacer()
                             CommandBarButton(title: "Start", systemImage: "play.fill") {
                                 Task { await app.startRuntime() }

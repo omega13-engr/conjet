@@ -77,6 +77,7 @@ public struct DashboardSnapshot: Equatable, Sendable {
     public var dockerTool: ResolvedTool
     public var dockerSocketPath: String
     public var dockerSocketAvailable: Bool
+    public var dockerReachable: Bool
     public var daemonResponse: DaemonResponse?
     public var profiles: [String]
     public var containers: [DockerContainer]
@@ -94,6 +95,7 @@ public struct DashboardSnapshot: Equatable, Sendable {
         dockerTool: ResolvedTool,
         dockerSocketPath: String,
         dockerSocketAvailable: Bool,
+        dockerReachable: Bool = false,
         daemonResponse: DaemonResponse? = nil,
         profiles: [String] = [],
         containers: [DockerContainer] = [],
@@ -110,6 +112,7 @@ public struct DashboardSnapshot: Equatable, Sendable {
         self.dockerTool = dockerTool
         self.dockerSocketPath = dockerSocketPath
         self.dockerSocketAvailable = dockerSocketAvailable
+        self.dockerReachable = dockerReachable
         self.daemonResponse = daemonResponse
         self.profiles = profiles
         self.containers = containers
@@ -132,7 +135,8 @@ public struct DashboardSnapshot: Equatable, Sendable {
             conjetdTool: conjetdTool,
             dockerTool: dockerTool,
             dockerSocketPath: dockerSocketPath,
-            dockerSocketAvailable: false
+            dockerSocketAvailable: false,
+            dockerReachable: false
         )
     }
 }

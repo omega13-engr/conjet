@@ -445,12 +445,17 @@ extension EmptyStateView where Actions == EmptyView {
     }
 }
 
-func daemonBadge(_ response: DaemonResponse?) -> StatusBadge {
-    guard let response else {
-        return StatusBadge(text: "offline", state: .bad)
+func runtimeBadge(_ health: RuntimeHealth) -> StatusBadge {
+    StatusBadge(text: health.value, state: badgeState(for: health))
+}
+
+func badgeState(for health: RuntimeHealth) -> StatusBadge.BadgeState {
+    switch health.state {
+    case .online:
+        .good
+    case .degraded, .transitioning:
+        .warning
+    case .offline:
+        .bad
     }
-    if let state = response.status?.state.rawValue {
-        return StatusBadge(text: state, state: response.ok ? .good : .warning)
-    }
-    return StatusBadge(text: response.ok ? "online" : "offline", state: response.ok ? .good : .bad)
 }

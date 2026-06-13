@@ -73,6 +73,10 @@ public struct DockerImage: Identifiable, Codable, Equatable, Sendable {
         }
         return "\(repository):\(tag)"
     }
+
+    public var selectionID: String {
+        "\(reference)|\(id)"
+    }
 }
 
 public struct DockerVolume: Identifiable, Codable, Equatable, Sendable {

@@ -48,6 +48,24 @@ enum ManagementSection: String, CaseIterable, Identifiable {
     }
 }
 
+enum RuntimeHealthState: Equatable {
+    case online
+    case degraded
+    case transitioning
+    case offline
+}
+
+struct RuntimeHealth: Equatable {
+    var state: RuntimeHealthState
+    var value: String
+    var detail: String
+    var subtitle: String?
+
+    var isReachable: Bool {
+        state == .online || state == .degraded || state == .transitioning
+    }
+}
+
 @MainActor
 final class ConjetAppState: ObservableObject {
     @Published var selectedSection: ManagementSection = .overview
@@ -93,7 +111,7 @@ final class ConjetAppState: ObservableObject {
     }
 
     var selectedImage: DockerImage? {
-        snapshot.images.first { $0.id == selectedImageID } ?? snapshot.images.first
+        snapshot.images.first { Self.imageSelectionMatches($0, selectedImageID) } ?? snapshot.images.first
     }
 
     var selectedVolume: DockerVolume? {
@@ -102,6 +120,14 @@ final class ConjetAppState: ObservableObject {
 
     var currentVMState: VMRunState? {
         Self.resolvedVMState(command: commandVMState, snapshot: snapshotVMState)
+    }
+
+    var displayedVMStatus: VMRuntimeStatus? {
+        Self.vmStatus(command: commandVMState, snapshot: snapshot)
+    }
+
+    var runtimeHealth: RuntimeHealth {
+        Self.runtimeHealth(command: commandVMState, snapshot: snapshot)
     }
 
     func refresh() async {
@@ -118,8 +144,8 @@ final class ConjetAppState: ObservableObject {
         if selectedContainerID == nil {
             selectedContainerID = latest.containers.first?.id
         }
-        if selectedImageID == nil {
-            selectedImageID = latest.images.first?.id
+        if selectedImageID == nil || !latest.images.contains(where: { Self.imageSelectionMatches($0, selectedImageID) }) {
+            selectedImageID = latest.images.first?.selectionID
         }
         if selectedVolumeID == nil {
             selectedVolumeID = latest.volumes.first?.id
@@ -412,8 +438,115 @@ final class ConjetAppState: ObservableObject {
         }
     }
 
+    static func runtimeHealth(command: VMRunState?, snapshot: DashboardSnapshot) -> RuntimeHealth {
+        let actualVMState = vmState(from: snapshot)
+        if let command, !isCommandTransitionComplete(command: command, actual: actualVMState) {
+            return RuntimeHealth(
+                state: .transitioning,
+                value: command.rawValue,
+                detail: "waiting for VM \(command.rawValue)",
+                subtitle: snapshot.daemonResponse?.message
+            )
+        }
+
+        if let response = snapshot.daemonResponse, response.ok {
+            let value = response.status?.state.rawValue ?? actualVMState?.rawValue ?? "online"
+            let detail = response.status.map { "pid \($0.pid)" }
+                ?? response.vm?.dockerSocketPath
+                ?? response.message
+            return RuntimeHealth(
+                state: .online,
+                value: value,
+                detail: detail,
+                subtitle: response.message
+            )
+        }
+
+        if snapshot.dockerReachable {
+            let daemonMessage = snapshot.daemonResponse?.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            let subtitle = if let daemonMessage, !daemonMessage.isEmpty {
+                "Docker is reachable; \(daemonMessage)"
+            } else {
+                "Docker is reachable at \(snapshot.dockerSocketPath)"
+            }
+            return RuntimeHealth(
+                state: .degraded,
+                value: "degraded",
+                detail: "Docker socket reachable",
+                subtitle: subtitle
+            )
+        }
+
+        if snapshot.dockerSocketAvailable {
+            let daemonMessage = snapshot.daemonResponse?.message.trimmingCharacters(in: .whitespacesAndNewlines)
+            let subtitle = if let daemonMessage, !daemonMessage.isEmpty {
+                "Docker socket exists; \(daemonMessage)"
+            } else {
+                "Docker socket exists but did not answer yet"
+            }
+            return RuntimeHealth(
+                state: .degraded,
+                value: "socket present",
+                detail: snapshot.dockerSocketPath,
+                subtitle: subtitle
+            )
+        }
+
+        let message = snapshot.daemonResponse?.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return RuntimeHealth(
+            state: .offline,
+            value: "offline",
+            detail: snapshot.dockerSocketPath.isEmpty ? "Docker socket unavailable" : snapshot.dockerSocketPath,
+            subtitle: message?.isEmpty == false ? message : "Conjet runtime is not reachable"
+        )
+    }
+
+    static func vmStatus(command: VMRunState?, snapshot: DashboardSnapshot) -> VMRuntimeStatus? {
+        if var status = snapshot.daemonResponse?.status?.vm ?? snapshot.daemonResponse?.vm {
+            if let resolved = resolvedVMState(command: command, snapshot: status.state) {
+                status.state = resolved
+            }
+            return status
+        }
+
+        if let command {
+            return inferredVMStatus(
+                state: command,
+                socketPath: snapshot.dockerSocketPath,
+                message: "Waiting for Conjet VM \(command.rawValue)"
+            )
+        }
+
+        guard snapshot.dockerReachable else { return nil }
+        return inferredVMStatus(
+            state: .running,
+            socketPath: snapshot.dockerSocketPath,
+            message: "Docker socket is reachable; daemon VM status is unavailable"
+        )
+    }
+
     private static func vmState(from snapshot: DashboardSnapshot) -> VMRunState? {
-        snapshot.daemonResponse?.status?.vm?.state ?? snapshot.daemonResponse?.vm?.state
+        snapshot.daemonResponse?.status?.vm?.state
+            ?? snapshot.daemonResponse?.vm?.state
+            ?? (snapshot.dockerReachable ? .running : nil)
+    }
+
+    private static func inferredVMStatus(
+        state: VMRunState,
+        socketPath: String,
+        message: String
+    ) -> VMRuntimeStatus {
+        VMRuntimeStatus(
+            state: state,
+            configured: true,
+            manifestPath: "-",
+            dockerSocketPath: socketPath.isEmpty ? nil : socketPath,
+            message: message
+        )
+    }
+
+    private static func imageSelectionMatches(_ image: DockerImage, _ selection: String?) -> Bool {
+        selection == image.selectionID || selection == image.id
     }
 
     private static func daemonResponse(from stdout: String) -> DaemonResponse? {

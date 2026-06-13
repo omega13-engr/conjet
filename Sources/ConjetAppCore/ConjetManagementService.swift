@@ -45,6 +45,10 @@ public struct ConjetManagementService: Sendable {
         let volumeResult = await volumes
         let statsResult = await stats
         let processResult = await processes
+        let dockerReachable = containerList.succeeded
+            || imageResult.succeeded
+            || volumeResult.succeeded
+            || statsResult.succeeded
         warnings += profileResult.warnings
         warnings += containerList.warnings
         warnings += imageResult.warnings
@@ -66,6 +70,7 @@ public struct ConjetManagementService: Sendable {
             dockerTool: dockerTool,
             dockerSocketPath: socketPath,
             dockerSocketAvailable: socketAvailable,
+            dockerReachable: dockerReachable,
             daemonResponse: daemonResult.value,
             profiles: profileResult.value,
             containers: containerList.value,
@@ -180,60 +185,84 @@ public struct ConjetManagementService: Sendable {
         }
     }
 
-    private func dockerContainers(socketAvailable: Bool) async -> (value: [DockerContainer], warnings: [String]) {
-        guard socketAvailable else { return ([], []) }
+    private func dockerContainers(socketAvailable: Bool) async -> ProbeResult<[DockerContainer]> {
+        guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
         let result = await docker(["ps", "-a", "--no-trunc", "--format", "{{json .}}"], timeoutSeconds: 15)
-        guard result.exitCode == 0 else { return ([], ["docker ps: \(trim(result.stderr))"]) }
-        return (DockerJSONLines.decode(DockerContainer.self, from: result.stdout), [])
+        guard result.exitCode == 0 else {
+            return ProbeResult(value: [], warnings: ["docker ps: \(trim(result.stderr))"], succeeded: false)
+        }
+        return ProbeResult(
+            value: DockerJSONLines.decode(DockerContainer.self, from: result.stdout),
+            warnings: [],
+            succeeded: true
+        )
     }
 
-    private func dockerImages(socketAvailable: Bool) async -> (value: [DockerImage], warnings: [String]) {
-        guard socketAvailable else { return ([], []) }
+    private func dockerImages(socketAvailable: Bool) async -> ProbeResult<[DockerImage]> {
+        guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
         let result = await docker(["images", "--no-trunc", "--format", "{{json .}}"], timeoutSeconds: 20)
-        guard result.exitCode == 0 else { return ([], ["docker images: \(trim(result.stderr))"]) }
-        return (DockerJSONLines.decode(DockerImage.self, from: result.stdout), [])
+        guard result.exitCode == 0 else {
+            return ProbeResult(value: [], warnings: ["docker images: \(trim(result.stderr))"], succeeded: false)
+        }
+        return ProbeResult(
+            value: deduplicatedImages(DockerJSONLines.decode(DockerImage.self, from: result.stdout)),
+            warnings: [],
+            succeeded: true
+        )
     }
 
-    private func dockerVolumes(socketAvailable: Bool) async -> (value: [DockerVolume], warnings: [String]) {
-        guard socketAvailable else { return ([], []) }
+    private func dockerVolumes(socketAvailable: Bool) async -> ProbeResult<[DockerVolume]> {
+        guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
         let result = await docker(["volume", "ls", "--format", "{{json .}}"], timeoutSeconds: 20)
-        guard result.exitCode == 0 else { return ([], ["docker volume ls: \(trim(result.stderr))"]) }
+        guard result.exitCode == 0 else {
+            return ProbeResult(value: [], warnings: ["docker volume ls: \(trim(result.stderr))"], succeeded: false)
+        }
         let volumes = DockerJSONLines.decode(DockerVolume.self, from: result.stdout)
         let usageResult = await docker(["system", "df", "-v", "--format", "json"], timeoutSeconds: 20)
-        guard usageResult.exitCode == 0 else { return (volumes, []) }
+        guard usageResult.exitCode == 0 else {
+            return ProbeResult(value: volumes, warnings: [], succeeded: true)
+        }
         let usageByName = DockerSystemDiskUsage.volumeUsageByName(from: usageResult.stdout)
-        return (volumes.map { volume in
+        return ProbeResult(value: volumes.map { volume in
             guard let usage = usageByName[volume.name] else { return volume }
             var copy = volume
             copy.size = usage.size
             return copy
-        }, [])
+        }, warnings: [], succeeded: true)
     }
 
-    private func dockerStats(socketAvailable: Bool) async -> (value: [DockerStats], warnings: [String]) {
-        guard socketAvailable else { return ([], []) }
+    private func dockerStats(socketAvailable: Bool) async -> ProbeResult<[DockerStats]> {
+        guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
         let result = await docker(["stats", "--no-stream", "--format", "{{json .}}"], timeoutSeconds: 20)
-        guard result.exitCode == 0 else { return ([], ["docker stats: \(trim(result.stderr))"]) }
-        return (DockerJSONLines.decode(DockerStats.self, from: result.stdout), [])
+        guard result.exitCode == 0 else {
+            return ProbeResult(value: [], warnings: ["docker stats: \(trim(result.stderr))"], succeeded: false)
+        }
+        return ProbeResult(
+            value: DockerJSONLines.decode(DockerStats.self, from: result.stdout),
+            warnings: [],
+            succeeded: true
+        )
     }
 
     private func dockerTopProcesses(
         containers: [DockerContainer],
         socketAvailable: Bool
-    ) async -> (value: [ContainerProcess], warnings: [String]) {
-        guard socketAvailable else { return ([], []) }
+    ) async -> ProbeResult<[ContainerProcess]> {
+        guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
         let running = containers.filter { $0.state.lowercased() == "running" }
         var processes: [ContainerProcess] = []
         var warnings: [String] = []
+        var succeeded = running.isEmpty
         for container in running.prefix(12) {
             let result = await docker(["top", container.id, "-eo", "pid,ppid,user,stat,comm,args"], timeoutSeconds: 8)
             if result.exitCode != 0 {
                 warnings.append("docker top \(container.name): \(trim(result.stderr))")
                 continue
             }
+            succeeded = true
             processes += parseDockerTop(output: result.stdout, container: container)
         }
-        return (processes, warnings)
+        return ProbeResult(value: processes, warnings: warnings, succeeded: succeeded)
     }
 
     private func docker(_ arguments: [String], timeoutSeconds: Double?) async -> ProcessResult {
@@ -250,9 +279,6 @@ public struct ConjetManagementService: Sendable {
     }
 
     private func dockerSocketPath() -> String {
-        if let config = try? ConjetConfig.loadOrCreate(paths: paths), let socketPath = config.socketPath {
-            return socketPath
-        }
         return paths.dockerSocket.path
     }
 
@@ -261,6 +287,13 @@ public struct ConjetManagementService: Sendable {
             return socketPath
         }
         return paths.socket.path
+    }
+
+    private func deduplicatedImages(_ images: [DockerImage]) -> [DockerImage] {
+        var seen = Set<String>()
+        return images.filter { image in
+            seen.insert(image.selectionID).inserted
+        }
     }
 
     private func parseDockerTop(output: String, container: DockerContainer) -> [ContainerProcess] {
@@ -285,4 +318,10 @@ public struct ConjetManagementService: Sendable {
         if cleaned.count <= limit { return cleaned }
         return String(cleaned.prefix(limit)) + "..."
     }
+}
+
+private struct ProbeResult<Value: Sendable>: Sendable {
+    var value: Value
+    var warnings: [String]
+    var succeeded: Bool
 }

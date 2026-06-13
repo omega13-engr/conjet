@@ -17,7 +17,8 @@ struct ImagesView: View {
     }
 
     private var selectedImage: DockerImage? {
-        filteredImages.first { $0.id == app.selectedImageID } ?? filteredImages.first
+        filteredImages.first { $0.selectionID == app.selectedImageID || $0.id == app.selectedImageID }
+            ?? filteredImages.first
     }
 
     var body: some View {
@@ -81,9 +82,9 @@ private struct ImageMasterPanel: View {
                 )
             } else {
                 List(selection: $selection) {
-                    ForEach(images) { image in
+                    ForEach(images, id: \.selectionID) { image in
                         ImageRow(image: image)
-                            .tag(image.id)
+                            .tag(image.selectionID)
                             .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                     }
                 }

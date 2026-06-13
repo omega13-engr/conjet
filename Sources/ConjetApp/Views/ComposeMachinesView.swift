@@ -49,7 +49,7 @@ struct MachinesView: View {
     @EnvironmentObject private var app: ConjetAppState
 
     var body: some View {
-        let vm = app.snapshot.daemonResponse?.status?.vm
+        let vm = app.displayedVMStatus
 
         VStack(spacing: 0) {
             HeaderView(title: "Machines", subtitle: vm?.message, systemImage: "desktopcomputer")

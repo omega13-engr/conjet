@@ -1,4 +1,5 @@
 @testable import ConjetAppCore
+import ConjetCore
 import XCTest
 
 final class ConjetAppCoreTests: XCTestCase {
@@ -120,5 +121,138 @@ final class ConjetAppCoreTests: XCTestCase {
             ),
             executable.path
         )
+    }
+
+    func testLoadSnapshotDeduplicatesExactDockerImageRows() async throws {
+        let paths = try Self.makeTemporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.stubbedSnapshotResult(for: invocation, imageOutput: """
+            {"ID":"sha256:stable","Repository":"nginx","Tag":"alpine","Size":"92.6MB","CreatedAt":"2026-05-23 02:30:41 +0800 PST","CreatedSince":"3 weeks ago"}
+            {"ID":"sha256:stable","Repository":"nginx","Tag":"alpine","Size":"92.6MB","CreatedAt":"2026-05-23 02:30:41 +0800 PST","CreatedSince":"3 weeks ago"}
+            {"ID":"sha256:stable","Repository":"nginx","Tag":"1.31-alpine","Size":"92.6MB","CreatedAt":"2026-05-23 02:30:41 +0800 PST","CreatedSince":"3 weeks ago"}
+            """)
+        }
+        let service = Self.makeService(paths: paths, executor: executor)
+
+        let snapshot = await service.loadSnapshot()
+
+        XCTAssertTrue(snapshot.dockerReachable)
+        XCTAssertEqual(snapshot.images.map { $0.reference }, ["nginx:alpine", "nginx:1.31-alpine"])
+        XCTAssertEqual(Set(snapshot.images.map { $0.selectionID }).count, 2)
+    }
+
+    func testDockerCommandsUseProfileDockerSocketWhenDaemonSocketIsOverridden() async throws {
+        let paths = try Self.makeTemporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        let customDaemonSocket = paths.runDirectory.appendingPathComponent("custom-conjetd.sock").path
+        try ConjetConfig(socketPath: customDaemonSocket).save(paths: paths)
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.stubbedSnapshotResult(for: invocation, imageOutput: "")
+        }
+        let service = Self.makeService(paths: paths, executor: executor)
+
+        _ = await service.loadSnapshot()
+
+        let dockerHosts = await executor.invocations.compactMap { invocation -> String? in
+            guard let index = invocation.arguments.firstIndex(of: "--host"),
+                  invocation.arguments.indices.contains(index + 1) else {
+                return nil
+            }
+            return invocation.arguments[index + 1]
+        }
+
+        XCTAssertFalse(dockerHosts.isEmpty)
+        XCTAssertTrue(dockerHosts.allSatisfy { $0 == "unix://\(paths.dockerSocket.path)" })
+        XCTAssertFalse(dockerHosts.contains("unix://\(customDaemonSocket)"))
+    }
+
+    private static func makeTemporaryConjetPaths() throws -> ConjetPaths {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-app-core-tests-\(UUID().uuidString)", isDirectory: true)
+        return ConjetPaths(home: home)
+    }
+
+    private static func makeService(
+        paths: ConjetPaths,
+        executor: RecordingCommandExecutor
+    ) -> ConjetManagementService {
+        let tool = ResolvedTool(executable: "/tmp/conjet-test-tool", source: "test")
+        return ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: tool,
+            conjetdTool: tool,
+            dockerTool: tool,
+            executor: executor
+        )
+    }
+
+    private static func stubbedSnapshotResult(
+        for invocation: CommandInvocation,
+        imageOutput: String
+    ) -> ProcessResult {
+        let arguments = invocation.arguments
+        if arguments.contains("status"), arguments.contains("--json") {
+            return processResult(
+                invocation,
+                stdout: #"{"ok":false,"message":"conjetd pid 123 is running but not answering at /tmp/conjetd.sock"}"#
+            )
+        }
+        if arguments.starts(with: ["profile", "list", "--json"]) {
+            return processResult(invocation, stdout: #"["default"]"#)
+        }
+        if arguments.contains("ps") {
+            return processResult(invocation, stdout: "")
+        }
+        if arguments.contains("images") {
+            return processResult(invocation, stdout: imageOutput)
+        }
+        if arguments.contains("volume"), arguments.contains("ls") {
+            return processResult(invocation, stdout: "")
+        }
+        if arguments.contains("system"), arguments.contains("df") {
+            return processResult(invocation, stdout: #"{"Volumes":[]}"#)
+        }
+        if arguments.contains("stats") {
+            return processResult(invocation, stdout: "")
+        }
+        return processResult(invocation, stdout: "")
+    }
+
+    private static func processResult(
+        _ invocation: CommandInvocation,
+        exitCode: Int32 = 0,
+        stdout: String = "",
+        stderr: String = ""
+    ) -> ProcessResult {
+        ProcessResult(
+            executable: invocation.executable,
+            arguments: invocation.arguments,
+            exitCode: exitCode,
+            stdout: stdout,
+            stderr: stderr
+        )
+    }
+}
+
+private actor RecordingCommandExecutor: CommandExecuting {
+    private var recordedInvocations: [CommandInvocation] = []
+    private let handler: @Sendable (CommandInvocation) -> ProcessResult
+
+    init(handler: @escaping @Sendable (CommandInvocation) -> ProcessResult) {
+        self.handler = handler
+    }
+
+    var invocations: [CommandInvocation] { recordedInvocations }
+
+    func run(_ invocation: CommandInvocation) async -> ProcessResult {
+        recordedInvocations.append(invocation)
+        return handler(invocation)
     }
 }

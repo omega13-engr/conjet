@@ -99,22 +99,35 @@ private struct SidebarRow: View {
 private struct SidebarRuntimeStatus: View {
     @EnvironmentObject private var app: ConjetAppState
 
-    private var isOnline: Bool {
-        app.snapshot.daemonResponse?.ok == true
+    private var health: RuntimeHealth {
+        app.runtimeHealth
+    }
+
+    private var title: String {
+        switch health.state {
+        case .online:
+            "Engine online"
+        case .degraded:
+            "Engine degraded"
+        case .transitioning:
+            "Engine \(health.value)"
+        case .offline:
+            "Engine idle"
+        }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle()
-                    .fill(isOnline ? .green : .orange)
+                    .fill(badgeState(for: health).color)
                     .frame(width: 8, height: 8)
-                Text(isOnline ? "Engine online" : "Engine idle")
+                Text(title)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
             }
 
-            Text(app.snapshot.dockerSocketAvailable ? app.snapshot.dockerSocketPath : "Docker socket unavailable")
+            Text(health.isReachable ? health.detail : "Docker socket unavailable")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
