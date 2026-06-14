@@ -278,6 +278,24 @@ final class ConjetAppCoreTests: XCTestCase {
         XCTAssertFalse(dockerHosts.contains("unix://\(customDaemonSocket)"))
     }
 
+    func testLoadVolumesCanSkipUsageEnrichmentForFastList() async throws {
+        let paths = try Self.makeTemporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.stubbedSnapshotResult(for: invocation, imageOutput: "")
+        }
+        let service = Self.makeService(paths: paths, executor: executor)
+
+        _ = await service.loadVolumes(includeUsage: false)
+
+        let invocations = await executor.invocations
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("volume") && $0.arguments.contains("ls") })
+        XCTAssertFalse(invocations.contains { $0.arguments.contains("system") && $0.arguments.contains("df") })
+    }
+
     private static func makeTemporaryConjetPaths() throws -> ConjetPaths {
         let home = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("conjet-app-core-tests-\(UUID().uuidString)", isDirectory: true)

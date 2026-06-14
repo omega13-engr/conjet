@@ -94,6 +94,28 @@ public struct ConjetManagementService: Sendable {
         )
     }
 
+    public func loadContainers() async -> [DockerContainer] {
+        let context = runtimeContext()
+        let socketAvailable = FileManager.default.fileExists(atPath: dockerSocketPath(paths: context.paths))
+        return await dockerContainers(socketAvailable: socketAvailable, context: context).value
+    }
+
+    public func loadImages() async -> [DockerImage] {
+        let context = runtimeContext()
+        let socketAvailable = FileManager.default.fileExists(atPath: dockerSocketPath(paths: context.paths))
+        return await dockerImages(socketAvailable: socketAvailable, context: context).value
+    }
+
+    public func loadVolumes(includeUsage: Bool = false) async -> [DockerVolume] {
+        let context = runtimeContext()
+        let socketAvailable = FileManager.default.fileExists(atPath: dockerSocketPath(paths: context.paths))
+        return await dockerVolumes(
+            socketAvailable: socketAvailable,
+            includeUsage: includeUsage,
+            context: context
+        ).value
+    }
+
     public func runConjet(
         _ arguments: [String],
         label: String,
@@ -225,13 +247,20 @@ public struct ConjetManagementService: Sendable {
         )
     }
 
-    private func dockerVolumes(socketAvailable: Bool, context: RuntimeContext) async -> ProbeResult<[DockerVolume]> {
+    private func dockerVolumes(
+        socketAvailable: Bool,
+        includeUsage: Bool = true,
+        context: RuntimeContext
+    ) async -> ProbeResult<[DockerVolume]> {
         guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
         let result = await docker(["volume", "ls", "--format", "{{json .}}"], timeoutSeconds: 20, context: context)
         guard result.exitCode == 0 else {
             return ProbeResult(value: [], warnings: ["docker volume ls: \(trim(result.stderr))"], succeeded: false)
         }
         let volumes = DockerJSONLines.decode(DockerVolume.self, from: result.stdout)
+        guard includeUsage else {
+            return ProbeResult(value: volumes, warnings: [], succeeded: true)
+        }
         let usageResult = await docker(["system", "df", "-v", "--format", "json"], timeoutSeconds: 20, context: context)
         guard usageResult.exitCode == 0 else {
             return ProbeResult(value: volumes, warnings: [], succeeded: true)

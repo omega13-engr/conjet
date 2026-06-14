@@ -349,6 +349,56 @@ final class ConjetAppStateTests: XCTestCase {
     }
 
     @MainActor
+    func testContainerActionDefersFullRefreshAndOptimisticallyUpdatesSnapshot() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetdTool: Self.tool,
+            dockerTool: Self.tool,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        let container = DockerContainer(
+            id: "api",
+            name: "api",
+            image: "alpine:3.20",
+            state: "exited",
+            status: "Exited (0)"
+        )
+        app.snapshot = DashboardSnapshot(
+            conjetTool: Self.tool,
+            conjetdTool: Self.tool,
+            dockerTool: Self.tool,
+            dockerSocketPath: paths.dockerSocket.path,
+            dockerSocketAvailable: true,
+            dockerReachable: true,
+            containers: [container]
+        )
+
+        await app.containerAction("start", container: container)
+
+        XCTAssertNil(app.activeCommandLabel)
+        XCTAssertEqual(app.snapshot.containers.first?.state, "running")
+        XCTAssertEqual(app.snapshot.containers.first?.status, "Up just now")
+        XCTAssertEqual(app.snapshot.containerActivity.runningContainers, 1)
+
+        let invocations = await executor.invocations
+        XCTAssertEqual(invocations.count, 1)
+        XCTAssertTrue(invocations[0].arguments.contains("start"))
+        XCTAssertTrue(invocations[0].arguments.contains("api"))
+        XCTAssertFalse(invocations.contains { $0.arguments.contains("ps") })
+        XCTAssertFalse(invocations.contains { $0.arguments.starts(with: ["profile", "list", "--json"]) })
+    }
+
+    @MainActor
     func testDockerEditorBuildsTemporaryContextAndRunsDetachedContainer() async throws {
         let paths = Self.temporaryConjetPaths()
         try paths.ensureBaseDirectories()

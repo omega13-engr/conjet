@@ -18,6 +18,7 @@ let package = Package(
         .target(
             name: "ConjetBench",
             dependencies: [
+                .product(name: "ConjetAppCore", package: "conjet"),
                 .product(name: "ConjetCore", package: "conjet")
             ]
         ),

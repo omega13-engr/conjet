@@ -43,6 +43,8 @@ struct ConjetBenchCLI {
             try networkGate(args: args)
         case "network-segments":
             try networkSegments(args: args)
+        case "app-ui", "ui-gate":
+            try appUIBenchmark(args: args)
         case "help", "-h", "--help":
             printHelp()
         default:
@@ -794,6 +796,48 @@ struct ConjetBenchCLI {
         print("network segments: measured")
         print("  results: \(allResults.path)")
         print("  report: \(report.path)")
+    }
+
+    private static func appUIBenchmark(args: [String]) throws {
+        let outputDirectory = URL(
+            fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? defaultAppUIBenchmarkDirectory().path),
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        let targetMilliseconds = value(after: "--target-ms", in: args).flatMap(Double.init) ?? 150
+        let options = AppUIBenchmarkOptions(
+            samples: value(after: "--samples", in: args).flatMap(Int.init) ?? 20,
+            containerCount: value(after: "--containers", in: args).flatMap(Int.init) ?? 64,
+            imageCount: value(after: "--images", in: args).flatMap(Int.init) ?? 32,
+            volumeCount: value(after: "--volumes", in: args).flatMap(Int.init) ?? 32,
+            runningContainerCount: value(after: "--running-containers", in: args).flatMap(Int.init) ?? 12,
+            simulatedCommandLatencyMilliseconds: value(after: "--simulated-command-latency-ms", in: args).flatMap(Double.init) ?? 0,
+            targetMilliseconds: targetMilliseconds
+        )
+        let results = try AppUIBenchmarkSuite(options: options).run(outputDirectory: outputDirectory)
+        let allResults = outputDirectory.appendingPathComponent("app-ui-results.json")
+        try ConjetJSON.string(results).write(to: allResults, atomically: true, encoding: .utf8)
+        let markdown = renderAppUIMarkdown(results: results, targetMilliseconds: targetMilliseconds)
+        let report = outputDirectory.appendingPathComponent("app-ui.md")
+        try markdown.write(to: report, atomically: true, encoding: .utf8)
+        try markdown.write(to: outputDirectory.appendingPathComponent("REPORT.md"), atomically: true, encoding: .utf8)
+
+        print("app-ui benchmark: measured")
+        print("  output: \(outputDirectory.path)")
+        print("  results: \(allResults.path)")
+        print("  report: \(report.path)")
+        for row in appUISummaryRows(results: results, targetMilliseconds: targetMilliseconds) {
+            print("  \(row.workload): p50 \(formatMS(row.p50)) ms, p95 \(formatMS(row.p95)) ms, max \(formatMS(row.max)) ms, \(row.passed ? "pass" : "over target")")
+        }
+        if args.contains("--strict") {
+            let failures = appUISummaryRows(results: results, targetMilliseconds: targetMilliseconds)
+                .filter { !$0.passed }
+            guard failures.isEmpty else {
+                throw ConjetError.unavailable(
+                    "app-ui benchmark exceeded \(String(format: "%.1f", targetMilliseconds)) ms target: \(failures.map(\.workload).joined(separator: ", "))"
+                )
+            }
+        }
     }
 
     private static func runProxyEngineComparison(
@@ -1598,6 +1642,83 @@ struct ConjetBenchCLI {
         return lines.joined(separator: "\n")
     }
 
+    private struct AppUISummaryRow {
+        var workload: String
+        var samples: Int
+        var failures: Int
+        var p50: Double?
+        var p95: Double?
+        var p99: Double?
+        var max: Double?
+        var commandInvocations: Double?
+        var passed: Bool
+    }
+
+    private static func renderAppUIMarkdown(results: [BenchmarkResult], targetMilliseconds: Double) -> String {
+        var lines = [
+            "# Conjet SwiftUI App Latency Benchmark",
+            "",
+            "This microbenchmark isolates SwiftUI app-core command orchestration and inventory decoding with a fake executor. It does not touch a live Conjet daemon, VM, container, or Docker socket.",
+            "",
+            "- Target: \(String(format: "%.1f", targetMilliseconds)) ms per sampled UI action",
+            "- Runtime: conjet-swiftui",
+            "",
+            "## Summary",
+            "",
+            "| Workload | Samples | Failures | P50 ms | P95 ms | P99 ms | Max ms | Commands | Verdict |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+        ]
+        for row in appUISummaryRows(results: results, targetMilliseconds: targetMilliseconds) {
+            lines.append("| \(row.workload) | \(row.samples) | \(row.failures) | \(formatMS(row.p50)) | \(formatMS(row.p95)) | \(formatMS(row.p99)) | \(formatMS(row.max)) | \(formatOptional(row.commandInvocations)) | \(row.passed ? "pass" : "over-target") |")
+        }
+        lines += [
+            "",
+            "## Interpretation",
+            "",
+            "- `ui-list-containers`, `ui-list-images`, and `ui-list-volumes-fast` measure the lightweight list probes used for development navigation.",
+            "- `ui-list-volumes-with-usage` includes `docker system df -v`; this is intentionally tracked separately because size enrichment is heavier than listing volume names.",
+            "- `ui-refresh-snapshot-full` measures the current full dashboard refresh shape, including stats and process probes.",
+            "- `ui-docker-start-command` and `ui-vm-start-command` measure command dispatch/reporting overhead around the app-core service, not real container start time or VM boot time.",
+            "",
+            BenchmarkMarkdownReport.render(results: results, title: "Raw App UI Results")
+        ]
+        return lines.joined(separator: "\n")
+    }
+
+    private static func appUISummaryRows(
+        results: [BenchmarkResult],
+        targetMilliseconds: Double
+    ) -> [AppUISummaryRow] {
+        let grouped = Dictionary(grouping: results) { $0.workload }
+        return grouped.keys.sorted().compactMap { workload -> AppUISummaryRow? in
+            guard let group = grouped[workload] else { return nil }
+            let durations = group.map(appUIDurationMilliseconds).sorted()
+            let failures = group.filter { $0.exitCode != 0 }.count
+            let p95 = percentile(durations, 0.95)
+            let commandInvocations = percentile(group.compactMap { $0.metrics["command_invocations"] }.sorted(), 0.50)
+            return AppUISummaryRow(
+                workload: workload,
+                samples: group.count,
+                failures: failures,
+                p50: percentile(durations, 0.50),
+                p95: p95,
+                p99: percentile(durations, 0.99),
+                max: durations.last,
+                commandInvocations: commandInvocations,
+                passed: failures == 0 && (p95 ?? .greatestFiniteMagnitude) <= targetMilliseconds
+            )
+        }
+    }
+
+    private static func appUIDurationMilliseconds(_ result: BenchmarkResult) -> Double {
+        result.metrics["duration_ms"] ?? (result.durationSeconds * 1_000)
+    }
+
+    private static func formatOptional(_ value: Double?) -> String {
+        guard let value else { return "null" }
+        return String(format: "%.0f", value)
+    }
+
     private static func renderRunAllMarkdown(_ outcome: BenchmarkRunAllOutcome) -> String {
         var lines = [
             "# Conjet Benchmark Run",
@@ -1639,6 +1760,7 @@ struct ConjetBenchCLI {
               conjet-bench ipv6-gate [--start] [--output-dir DIR]
               conjet-bench network-gate [options]
               conjet-bench network-segments [options]
+              conjet-bench app-ui [options]
               conjet-bench gate --reports PATH[,PATH...]
 
             Commands:
@@ -1651,6 +1773,7 @@ struct ConjetBenchCLI {
               network-gate Run ConjetNet localhost TCP/UDP network gate.
               network-segments
                           Run ConjetNet path-segmentation microbenchmarks.
+              app-ui       Measure SwiftUI app-core inventory and command latency with an isolated fake executor.
               gate         Score existing raw JSON reports.
               help         Show this help text.
 
@@ -1679,6 +1802,17 @@ struct ConjetBenchCLI {
               --no-network             Skip network gate
               --no-cache-suite         Skip no-cache gate
               --required-baselines LIST Hard-fail gate baselines for existing-report scoring
+
+            App UI options:
+              --samples N              App UI samples (default: 20)
+              --containers N           Generated container rows (default: 64)
+              --images N               Generated image rows (default: 32)
+              --volumes N              Generated volume rows (default: 32)
+              --running-containers N   Generated running containers for stats/top probes (default: 12)
+              --simulated-command-latency-ms N
+                                      Add fake executor latency per command (default: 0)
+              --target-ms N            UI latency target in milliseconds (default: 150)
+              --strict                 Fail when any app UI p95 exceeds target
 
             Notes:
               Only energy-gate executes sudo -v because powermetrics requires privilege.
@@ -1941,6 +2075,14 @@ struct ConjetBenchCLI {
             .appendingPathComponent("benchmarks", isDirectory: true)
             .appendingPathComponent("reports", isDirectory: true)
             .appendingPathComponent("run-all-\(formatter.string(from: now))", isDirectory: true)
+    }
+
+    private static func defaultAppUIBenchmarkDirectory(now: Date = Date()) -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-app-ui-benchmark-\(formatter.string(from: now))", isDirectory: true)
     }
 }
 

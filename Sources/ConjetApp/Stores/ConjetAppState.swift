@@ -91,10 +91,14 @@ final class ConjetAppState: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var transitionRefreshTask: Task<Void, Never>?
     private var containerGroupRefreshTask: Task<Void, Never>?
+    private var deferredRefreshTask: Task<Void, Never>?
     private var fastRefreshUntil = Date.distantPast
+    private var needsRefreshAfterCurrent = false
+    private var pendingContainerSelectionName: String?
 
     private static let transitionRefreshDelayNanoseconds: UInt64 = 250_000_000
     private static let containerGroupRefreshDelayNanoseconds: UInt64 = 1_000_000_000
+    private static let deferredCommandRefreshDelayNanoseconds: UInt64 = 75_000_000
     private static let fastRefreshDelayNanoseconds: UInt64 = 350_000_000
     private static let normalRefreshDelayNanoseconds: UInt64 = 2_000_000_000
     private static let launchFastRefreshDuration: TimeInterval = 12
@@ -115,6 +119,7 @@ final class ConjetAppState: ObservableObject {
         refreshTask?.cancel()
         transitionRefreshTask?.cancel()
         containerGroupRefreshTask?.cancel()
+        deferredRefreshTask?.cancel()
     }
 
     var selectedContainer: DockerContainer? {
@@ -142,26 +147,37 @@ final class ConjetAppState: ObservableObject {
     }
 
     func refresh() async {
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        let latest = await service.loadSnapshot()
-        completeCommandTransitionIfNeeded(actual: Self.vmState(from: latest))
-        snapshot = latest
-        selectedBindPolicy = latest.daemonResponse?.status?.network?.bindPolicy ?? selectedBindPolicy
-        if let bridge = latest.daemonResponse?.status?.network?.requestedBridgeEngine
-            .flatMap(ConjetNetworkBridgeEngine.init(rawValue:)) {
-            selectedBridgeEngine = bridge
+        if isRefreshing {
+            needsRefreshAfterCurrent = true
+            return
         }
-        if selectedContainerID == nil {
-            selectedContainerID = latest.containers.first?.id
-        }
-        if selectedImageID == nil || !latest.images.contains(where: { Self.imageSelectionMatches($0, selectedImageID) }) {
-            selectedImageID = latest.images.first?.selectionID
-        }
-        if selectedVolumeID == nil {
-            selectedVolumeID = latest.volumes.first?.id
-        }
-        isRefreshing = false
+
+        repeat {
+            needsRefreshAfterCurrent = false
+            isRefreshing = true
+            let latest = await service.loadSnapshot()
+            completeCommandTransitionIfNeeded(actual: Self.vmState(from: latest))
+            snapshot = latest
+            selectedBindPolicy = latest.daemonResponse?.status?.network?.bindPolicy ?? selectedBindPolicy
+            if let bridge = latest.daemonResponse?.status?.network?.requestedBridgeEngine
+                .flatMap(ConjetNetworkBridgeEngine.init(rawValue:)) {
+                selectedBridgeEngine = bridge
+            }
+            if let pendingContainerSelectionName {
+                selectedContainerID = latest.containers.first { $0.name == pendingContainerSelectionName }?.id ?? selectedContainerID
+                self.pendingContainerSelectionName = nil
+            }
+            if selectedContainerID == nil {
+                selectedContainerID = latest.containers.first?.id
+            }
+            if selectedImageID == nil || !latest.images.contains(where: { Self.imageSelectionMatches($0, selectedImageID) }) {
+                selectedImageID = latest.images.first?.selectionID
+            }
+            if selectedVolumeID == nil {
+                selectedVolumeID = latest.volumes.first?.id
+            }
+            isRefreshing = false
+        } while needsRefreshAfterCurrent
     }
 
     func startAutoRefresh() {
@@ -280,8 +296,10 @@ final class ConjetAppState: ObservableObject {
         )
         recordCommand(runEntry)
         activeCommandLabel = nil
-        await refresh()
-        selectedContainerID = snapshot.containers.first { $0.name == containerName }?.id ?? selectedContainerID
+        if runEntry.succeeded {
+            pendingContainerSelectionName = containerName
+        }
+        scheduleDeferredRefresh()
     }
 
     func containerAction(_ action: String, container: DockerContainer) async {
@@ -295,6 +313,8 @@ final class ConjetAppState: ObservableObject {
         }
         await runAndRefresh(label: label) {
             await service.runDocker(args, label: label, timeoutSeconds: 60)
+        } optimisticUpdate: { [action] _ in
+            self.applyOptimisticContainerAction(action, containerIDs: [container.id])
         }
     }
 
@@ -309,6 +329,8 @@ final class ConjetAppState: ObservableObject {
                     workingDirectory: compose.workingDirectory,
                     label: "Compose Up \(compose.project)"
                 )
+            } optimisticUpdate: { _ in
+                self.applyOptimisticContainerAction("start", containerIDs: Set(group.startableContainers.map(\.id)))
             }
             startContainerGroupPolling(groupID: group.id)
         case "down":
@@ -319,6 +341,8 @@ final class ConjetAppState: ObservableObject {
                     workingDirectory: compose.workingDirectory,
                     label: "Compose Down \(compose.project)"
                 )
+            } optimisticUpdate: { _ in
+                self.applyOptimisticContainerAction("remove", containerIDs: Set(group.containers.map(\.id)))
             }
             startContainerGroupPolling(groupID: group.id)
         case "start":
@@ -326,6 +350,8 @@ final class ConjetAppState: ObservableObject {
             guard !ids.isEmpty else { return }
             await runAndRefresh(label: label) {
                 await service.runDocker(["start"] + ids, label: label, timeoutSeconds: 60)
+            } optimisticUpdate: { _ in
+                self.applyOptimisticContainerAction("start", containerIDs: Set(ids))
             }
             startContainerGroupPolling(groupID: group.id)
         case "stop":
@@ -336,6 +362,8 @@ final class ConjetAppState: ObservableObject {
                         workingDirectory: compose.workingDirectory,
                         label: "Compose Stop \(compose.project)"
                     )
+                } optimisticUpdate: { _ in
+                    self.applyOptimisticContainerAction("stop", containerIDs: Set(group.containers.filter(\.isRunning).map(\.id)))
                 }
                 return
             }
@@ -343,6 +371,8 @@ final class ConjetAppState: ObservableObject {
             guard !ids.isEmpty else { return }
             await runAndRefresh(label: label) {
                 await service.runDocker(["stop"] + ids, label: label, timeoutSeconds: 60)
+            } optimisticUpdate: { _ in
+                self.applyOptimisticContainerAction("stop", containerIDs: Set(ids))
             }
         case "restart":
             if let compose = composeContext(for: group) {
@@ -352,6 +382,8 @@ final class ConjetAppState: ObservableObject {
                         workingDirectory: compose.workingDirectory,
                         label: "Compose Restart \(compose.project)"
                     )
+                } optimisticUpdate: { _ in
+                    self.applyOptimisticContainerAction("restart", containerIDs: Set(group.containers.map(\.id)))
                 }
                 startContainerGroupPolling(groupID: group.id)
                 return
@@ -360,6 +392,8 @@ final class ConjetAppState: ObservableObject {
             guard !ids.isEmpty else { return }
             await runAndRefresh(label: label) {
                 await service.runDocker(["restart"] + ids, label: label, timeoutSeconds: 120)
+            } optimisticUpdate: { _ in
+                self.applyOptimisticContainerAction("restart", containerIDs: Set(ids))
             }
             startContainerGroupPolling(groupID: group.id)
         default:
@@ -394,12 +428,16 @@ final class ConjetAppState: ObservableObject {
     func removeImage(_ image: DockerImage) async {
         await runAndRefresh(label: "Remove \(image.reference)") {
             await service.runDocker(["rmi", image.reference], label: "Remove \(image.reference)", timeoutSeconds: 120)
+        } optimisticUpdate: { _ in
+            self.removeImageFromSnapshot(image)
         }
     }
 
     func removeVolume(_ volume: DockerVolume) async {
         await runAndRefresh(label: "Remove volume \(volume.name)") {
             await service.runDocker(["volume", "rm", volume.name], label: "Remove volume \(volume.name)", timeoutSeconds: 60)
+        } optimisticUpdate: { _ in
+            self.removeVolumeFromSnapshot(volume)
         }
     }
 
@@ -492,7 +530,8 @@ final class ConjetAppState: ObservableObject {
     private func runAndRefresh(
         label: String,
         vmTransition: VMRunState? = nil,
-        operation: () async -> CommandLogEntry
+        operation: () async -> CommandLogEntry,
+        optimisticUpdate: ((CommandLogEntry) -> Void)? = nil
     ) async {
         activeCommandLabel = label
         if let vmTransition {
@@ -504,11 +543,14 @@ final class ConjetAppState: ObservableObject {
         if let response = Self.daemonResponse(from: entry.stdout) {
             applyDaemonResponse(response)
         }
+        if entry.succeeded {
+            optimisticUpdate?(entry)
+        }
         activeCommandLabel = nil
         if vmTransition != nil {
             setCommandVMState(nil)
         }
-        await refresh()
+        scheduleDeferredRefresh()
     }
 
     private func recordCommand(_ entry: CommandLogEntry) {
@@ -542,6 +584,65 @@ final class ConjetAppState: ObservableObject {
         latest.daemonResponse = response
         completeCommandTransitionIfNeeded(actual: Self.vmState(from: latest))
         snapshot = latest
+    }
+
+    private func scheduleDeferredRefresh() {
+        prioritizeRefresh(for: Self.commandFastRefreshDuration)
+        deferredRefreshTask?.cancel()
+        deferredRefreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.deferredCommandRefreshDelayNanoseconds)
+            guard !Task.isCancelled, let self else { return }
+            await self.refresh()
+            if !Task.isCancelled {
+                self.deferredRefreshTask = nil
+            }
+        }
+    }
+
+    private func applyOptimisticContainerAction(_ action: String, containerIDs: Set<String>) {
+        guard !containerIDs.isEmpty else { return }
+        switch action {
+        case "remove", "rm", "down":
+            snapshot.containers.removeAll { containerIDs.contains($0.id) }
+            if let selectedContainerID, containerIDs.contains(selectedContainerID) {
+                self.selectedContainerID = snapshot.containers.first?.id
+            }
+        default:
+            snapshot.containers = snapshot.containers.map { container in
+                guard containerIDs.contains(container.id) else { return container }
+                var copy = container
+                switch action {
+                case "start", "restart", "up":
+                    copy.state = "running"
+                    copy.status = "Up just now"
+                case "stop":
+                    copy.state = "exited"
+                    copy.status = "Exited"
+                default:
+                    break
+                }
+                return copy
+            }
+        }
+        snapshot.containerActivity = ContainerActivitySnapshot(
+            containers: snapshot.containers,
+            stats: snapshot.stats,
+            processes: snapshot.containerProcesses
+        )
+    }
+
+    private func removeImageFromSnapshot(_ image: DockerImage) {
+        snapshot.images.removeAll { Self.imageSelectionMatches($0, image.selectionID) || $0.id == image.id }
+        if selectedImageID == image.selectionID || selectedImageID == image.id {
+            selectedImageID = snapshot.images.first?.selectionID
+        }
+    }
+
+    private func removeVolumeFromSnapshot(_ volume: DockerVolume) {
+        snapshot.volumes.removeAll { $0.id == volume.id }
+        if selectedVolumeID == volume.id {
+            selectedVolumeID = snapshot.volumes.first?.id
+        }
     }
 
     private func refreshTransitionVMStatus() async {
