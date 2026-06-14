@@ -179,10 +179,18 @@ private struct ContainerGroupRow: View {
         app.activeContainerGroupID == group.id
     }
 
+    private var hasRunningComposeContainers: Bool {
+        group.canRunComposeUp && group.runningCount > 0
+    }
+
+    private var actionsDisabled: Bool {
+        group.containers.isEmpty || app.activeCommandLabel != nil
+    }
+
     private var lifecycleAction: LifecycleCommand {
         if group.canRunComposeUp {
             if group.runningCount > 0 {
-                return LifecycleCommand(title: "Down", systemImage: "stop.fill", action: "down", role: .destructive)
+                return LifecycleCommand(title: "Down", systemImage: "arrow.down.circle", action: "down", role: .destructive)
             }
             return LifecycleCommand(title: "Up", systemImage: "play.fill", action: "up")
         }
@@ -193,7 +201,7 @@ private struct ContainerGroupRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(alignment: .top, spacing: 9) {
             Button(action: toggle) {
                 HStack(spacing: 8) {
                     Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
@@ -209,38 +217,63 @@ private struct ContainerGroupRow: View {
             .buttonStyle(.plain)
             .help(isCollapsed ? "Expand compose group" : "Collapse compose group")
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 7) {
-                    Text(group.title)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    StatusBadge(text: group.readiness.displayName, state: group.readiness.badgeState)
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .center, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 7) {
+                            Text(group.title)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            StatusBadge(text: group.readiness.displayName, state: group.readiness.badgeState)
+                        }
+                        Text(group.subtitle)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 6)
+
+                    if isPolling {
+                        ProgressView()
+                            .controlSize(.small)
+                            .help("Polling health status")
+                    }
+
+                    if !hasRunningComposeContainers {
+                        lifecycleButton
+                    }
                 }
-                Text(group.subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
 
-            Spacer(minLength: 6)
-
-            if isPolling {
-                ProgressView()
-                    .controlSize(.small)
-                    .help("Polling health status")
+                if hasRunningComposeContainers {
+                    HStack(spacing: 8) {
+                        Spacer(minLength: 0)
+                        CommandBarButton(title: "Restart", systemImage: "arrow.clockwise") {
+                            Task { await app.containerGroupAction("restart", group: group) }
+                        }
+                        .disabled(actionsDisabled)
+                        lifecycleButton
+                        CommandBarButton(title: "Stop", systemImage: "stop.fill", role: .destructive) {
+                            Task { await app.containerGroupAction("stop", group: group) }
+                        }
+                        .disabled(actionsDisabled)
+                    }
+                }
             }
-
-            CommandBarButton(
-                title: lifecycleAction.title,
-                systemImage: lifecycleAction.systemImage,
-                role: lifecycleAction.role
-            ) {
-                Task { await app.containerGroupAction(lifecycleAction.action, group: group) }
-            }
-            .disabled(group.containers.isEmpty || app.activeCommandLabel != nil)
         }
         .padding(.vertical, 5)
+    }
+
+    private var lifecycleButton: some View {
+        CommandBarButton(
+            title: lifecycleAction.title,
+            systemImage: lifecycleAction.systemImage,
+            role: lifecycleAction.role
+        ) {
+            Task { await app.containerGroupAction(lifecycleAction.action, group: group) }
+        }
+        .disabled(actionsDisabled)
     }
 }
 

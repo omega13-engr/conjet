@@ -302,30 +302,22 @@ final class ConjetAppState: ObservableObject {
         let label = "\(action.capitalized) \(group.title)"
         switch action {
         case "up":
-            guard let project = group.composeProject,
-                  let workingDirectory = group.composeWorkingDirectory else {
-                return
-            }
-            let fileArguments = group.composeConfigFiles.flatMap { ["-f", $0] }
-            await runAndRefresh(label: "Compose Up \(project)") {
+            guard let compose = composeContext(for: group) else { return }
+            await runAndRefresh(label: "Compose Up \(compose.project)") {
                 await service.runCompose(
-                    fileArguments + ["-p", project, "up", "--detach"],
-                    workingDirectory: URL(fileURLWithPath: workingDirectory, isDirectory: true),
-                    label: "Compose Up \(project)"
+                    compose.fileArguments + ["-p", compose.project, "up", "--detach"],
+                    workingDirectory: compose.workingDirectory,
+                    label: "Compose Up \(compose.project)"
                 )
             }
             startContainerGroupPolling(groupID: group.id)
         case "down":
-            guard let project = group.composeProject,
-                  let workingDirectory = group.composeWorkingDirectory else {
-                return
-            }
-            let fileArguments = group.composeConfigFiles.flatMap { ["-f", $0] }
-            await runAndRefresh(label: "Compose Down \(project)") {
+            guard let compose = composeContext(for: group) else { return }
+            await runAndRefresh(label: "Compose Down \(compose.project)") {
                 await service.runCompose(
-                    fileArguments + ["-p", project, "down"],
-                    workingDirectory: URL(fileURLWithPath: workingDirectory, isDirectory: true),
-                    label: "Compose Down \(project)"
+                    compose.fileArguments + ["-p", compose.project, "down"],
+                    workingDirectory: compose.workingDirectory,
+                    label: "Compose Down \(compose.project)"
                 )
             }
             startContainerGroupPolling(groupID: group.id)
@@ -337,12 +329,33 @@ final class ConjetAppState: ObservableObject {
             }
             startContainerGroupPolling(groupID: group.id)
         case "stop":
+            if let compose = composeContext(for: group) {
+                await runAndRefresh(label: "Compose Stop \(compose.project)") {
+                    await service.runCompose(
+                        compose.fileArguments + ["-p", compose.project, "stop"],
+                        workingDirectory: compose.workingDirectory,
+                        label: "Compose Stop \(compose.project)"
+                    )
+                }
+                return
+            }
             let ids = group.containers.filter(\.isRunning).map(\.id)
             guard !ids.isEmpty else { return }
             await runAndRefresh(label: label) {
                 await service.runDocker(["stop"] + ids, label: label, timeoutSeconds: 60)
             }
         case "restart":
+            if let compose = composeContext(for: group) {
+                await runAndRefresh(label: "Compose Restart \(compose.project)") {
+                    await service.runCompose(
+                        compose.fileArguments + ["-p", compose.project, "restart"],
+                        workingDirectory: compose.workingDirectory,
+                        label: "Compose Restart \(compose.project)"
+                    )
+                }
+                startContainerGroupPolling(groupID: group.id)
+                return
+            }
             let ids = group.containers.map(\.id)
             guard !ids.isEmpty else { return }
             await runAndRefresh(label: label) {
@@ -352,6 +365,22 @@ final class ConjetAppState: ObservableObject {
         default:
             return
         }
+    }
+
+    private func composeContext(for group: ContainerGroup) -> (
+        project: String,
+        workingDirectory: URL,
+        fileArguments: [String]
+    )? {
+        guard let project = group.composeProject,
+              let workingDirectory = group.composeWorkingDirectory else {
+            return nil
+        }
+        return (
+            project: project,
+            workingDirectory: URL(fileURLWithPath: workingDirectory, isDirectory: true),
+            fileArguments: group.composeConfigFiles.flatMap { ["-f", $0] }
+        )
     }
 
     func pullImageAction() async {
