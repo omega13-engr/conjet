@@ -64,14 +64,27 @@ struct ContainersView: View {
 
 private struct ContainerMasterPanel: View {
     @EnvironmentObject private var app: ConjetAppState
+    @AppStorage("containers.collapsedComposeGroupIDs") private var collapsedComposeGroupIDs = ""
 
     let containers: [DockerContainer]
     let totalCount: Int
     @Binding var searchText: String
     @Binding var selection: String?
 
-    private var groups: [ContainerGroup] {
+    private var composeGroups: [ContainerGroup] {
         ContainerGrouping.groups(containers: containers)
+    }
+
+    private var standaloneContainers: [DockerContainer] {
+        containers
+            .filter { $0.composeProject == nil }
+            .sorted { lhs, rhs in
+                lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    private var collapsedGroupIDs: Set<String> {
+        Set(collapsedComposeGroupIDs.split(separator: "\n").map(String.init))
     }
 
     var body: some View {
@@ -96,57 +109,105 @@ private struct ContainerMasterPanel: View {
                         : "Try a different name, image, status, or state."
                 )
             } else {
-                List(selection: $selection) {
-                    ForEach(groups) { group in
-                        Section {
-                            ForEach(group.containers) { container in
-                                ContainerRow(container: container)
-                                    .tag(container.id)
-                                    .listRowInsets(EdgeInsets(top: 5, leading: 18, bottom: 5, trailing: 12))
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(composeGroups) { group in
+                            let collapsed = isCollapsed(group)
+                            VStack(spacing: 0) {
+                                ContainerGroupRow(
+                                    group: group,
+                                    isCollapsed: collapsed
+                                ) {
+                                    toggleGroup(group)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+
+                                if !collapsed {
+                                    ForEach(group.containers) { container in
+                                        ContainerSelectableRow(container: container, selection: $selection)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 3)
+                                    }
+                                }
                             }
-                        } header: {
-                            ContainerGroupHeader(group: group)
-                                .textCase(nil)
-                                .padding(.top, 4)
+
+                            Divider()
+                                .padding(.leading, 54)
+                        }
+
+                        ForEach(standaloneContainers) { container in
+                            ContainerSelectableRow(container: container, selection: $selection)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 3)
+                            Divider()
+                                .padding(.leading, 54)
                         }
                     }
+                    .padding(.vertical, 8)
                 }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
             }
 
             Divider()
             ContainerDockerEditorPanel()
         }
     }
+
+    private func isCollapsed(_ group: ContainerGroup) -> Bool {
+        collapsedGroupIDs.contains(group.id)
+    }
+
+    private func toggleGroup(_ group: ContainerGroup) {
+        var ids = collapsedGroupIDs
+        if ids.contains(group.id) {
+            ids.remove(group.id)
+        } else {
+            ids.insert(group.id)
+        }
+        collapsedComposeGroupIDs = ids.sorted().joined(separator: "\n")
+    }
 }
 
-private struct ContainerGroupHeader: View {
+private struct ContainerGroupRow: View {
     @EnvironmentObject private var app: ConjetAppState
 
     let group: ContainerGroup
+    let isCollapsed: Bool
+    let toggle: () -> Void
 
     private var isPolling: Bool {
         app.activeContainerGroupID == group.id
     }
 
-    private var primaryAction: (title: String, systemImage: String, action: String) {
+    private var lifecycleAction: LifecycleCommand {
         if group.canRunComposeUp {
-            return ("Up", "play.fill", "up")
+            if group.runningCount > 0 {
+                return LifecycleCommand(title: "Down", systemImage: "stop.fill", action: "down", role: .destructive)
+            }
+            return LifecycleCommand(title: "Up", systemImage: "play.fill", action: "up")
         }
-        if group.stoppedCount > 0 {
-            return ("Start", "play.fill", "start")
+        if group.runningCount > 0 {
+            return LifecycleCommand(title: "Stop", systemImage: "stop.fill", action: "stop", role: .destructive)
         }
-        return ("Restart", "arrow.clockwise", "restart")
+        return LifecycleCommand(title: "Start", systemImage: "play.fill", action: "start")
     }
 
     var body: some View {
         HStack(spacing: 9) {
-            ResourceIcon(
-                systemImage: group.composeProject == nil ? "shippingbox" : "square.stack.3d.up",
-                tint: group.readiness.tint,
-                size: 24
-            )
+            Button(action: toggle) {
+                HStack(spacing: 8) {
+                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 10)
+                    ResourceIcon(
+                        systemImage: "square.stack.3d.up",
+                        tint: group.readiness.tint,
+                        size: 24
+                    )
+                }
+            }
+            .buttonStyle(.plain)
+            .help(isCollapsed ? "Expand compose group" : "Collapse compose group")
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 7) {
@@ -170,17 +231,22 @@ private struct ContainerGroupHeader: View {
                     .help("Polling health status")
             }
 
-            CommandBarButton(title: primaryAction.title, systemImage: primaryAction.systemImage) {
-                Task { await app.containerGroupAction(primaryAction.action, group: group) }
+            CommandBarButton(
+                title: lifecycleAction.title,
+                systemImage: lifecycleAction.systemImage,
+                role: lifecycleAction.role
+            ) {
+                Task { await app.containerGroupAction(lifecycleAction.action, group: group) }
             }
             .disabled(group.containers.isEmpty || app.activeCommandLabel != nil)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 5)
     }
 }
 
 private struct ContainerRow: View {
     let container: DockerContainer
+    var isSelected = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -194,6 +260,7 @@ private struct ContainerRow: View {
                 HStack(spacing: 6) {
                     Text(container.composeService ?? container.name)
                         .font(.callout.weight(.semibold))
+                        .foregroundStyle(isSelected ? .white : .primary)
                         .lineLimit(1)
                     StatusBadge(text: container.state, state: container.isRunning ? .good : .neutral)
                     if container.healthState != .none {
@@ -202,18 +269,47 @@ private struct ContainerRow: View {
                 }
                 Text(container.name == (container.composeService ?? container.name) ? container.image : "\(container.name) - \(container.image)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? .white.opacity(0.78) : .secondary)
                     .lineLimit(1)
                 if !container.status.isEmpty {
                     Text(container.status)
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(isSelected ? .white.opacity(0.58) : .secondary.opacity(0.65))
                         .lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
         }
         .padding(.vertical, 2)
+    }
+}
+
+private struct ContainerSelectableRow: View {
+    let container: DockerContainer
+    @Binding var selection: String?
+
+    private var isSelected: Bool {
+        selection == container.id
+    }
+
+    var body: some View {
+        Button {
+            selection = container.id
+        } label: {
+            ContainerRow(container: container, isSelected: isSelected)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .background {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.accentColor)
+            }
+        }
+        .accessibilityLabel(container.name)
     }
 }
 
@@ -233,6 +329,13 @@ private struct ContainerDetail: View {
 
     private var isRunning: Bool {
         container.isRunning
+    }
+
+    private var lifecycleAction: LifecycleCommand {
+        if isRunning {
+            return LifecycleCommand(title: "Stop", systemImage: "stop.fill", action: "stop", role: .destructive)
+        }
+        return LifecycleCommand(title: "Start", systemImage: "play.fill", action: "start")
     }
 
     private var matchingStat: DockerStats? {
@@ -277,12 +380,14 @@ private struct ContainerDetail: View {
                 }
 
                 HStack {
-                    CommandBarButton(title: "Start", systemImage: "play.fill") {
-                        Task { await app.containerAction("start", container: container) }
+                    CommandBarButton(
+                        title: lifecycleAction.title,
+                        systemImage: lifecycleAction.systemImage,
+                        role: lifecycleAction.role
+                    ) {
+                        Task { await app.containerAction(lifecycleAction.action, container: container) }
                     }
-                    CommandBarButton(title: "Stop", systemImage: "stop.fill") {
-                        Task { await app.containerAction("stop", container: container) }
-                    }
+                    .disabled(app.activeCommandLabel != nil)
                     CommandBarButton(title: "Restart", systemImage: "arrow.clockwise") {
                         Task { await app.containerAction("restart", container: container) }
                     }

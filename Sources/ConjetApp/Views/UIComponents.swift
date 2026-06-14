@@ -351,6 +351,20 @@ struct CommandBarButton: View {
     }
 }
 
+struct LifecycleCommand {
+    let title: String
+    let systemImage: String
+    let action: String
+    var role: ButtonRole?
+}
+
+struct LifecycleAction {
+    let title: String
+    let systemImage: String
+    var role: ButtonRole?
+    let run: () async -> Void
+}
+
 struct KeyValueRows: View {
     let rows: [(String, String)]
 

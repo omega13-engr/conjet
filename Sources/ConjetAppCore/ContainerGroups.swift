@@ -132,7 +132,7 @@ public enum ContainerGrouping {
             return (project, container)
         }, by: { $0.0 })
 
-        var groups = composeBuckets.map { project, entries in
+        let groups = composeBuckets.map { project, entries in
             ContainerGroup(
                 id: "compose:\(project)",
                 title: project,
@@ -141,18 +141,6 @@ public enum ContainerGrouping {
             )
         }
         .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-
-        let standalone = containers
-            .filter { $0.composeProject == nil }
-            .sortedByDisplayName()
-        if !standalone.isEmpty {
-            groups.append(ContainerGroup(
-                id: "standalone",
-                title: "Standalone",
-                kind: .standalone,
-                containers: standalone
-            ))
-        }
 
         return groups
     }

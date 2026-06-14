@@ -315,6 +315,20 @@ final class ConjetAppState: ObservableObject {
                 )
             }
             startContainerGroupPolling(groupID: group.id)
+        case "down":
+            guard let project = group.composeProject,
+                  let workingDirectory = group.composeWorkingDirectory else {
+                return
+            }
+            let fileArguments = group.composeConfigFiles.flatMap { ["-f", $0] }
+            await runAndRefresh(label: "Compose Down \(project)") {
+                await service.runCompose(
+                    fileArguments + ["-p", project, "down"],
+                    workingDirectory: URL(fileURLWithPath: workingDirectory, isDirectory: true),
+                    label: "Compose Down \(project)"
+                )
+            }
+            startContainerGroupPolling(groupID: group.id)
         case "start":
             let ids = group.startableContainers.map(\.id)
             guard !ids.isEmpty else { return }
@@ -322,6 +336,12 @@ final class ConjetAppState: ObservableObject {
                 await service.runDocker(["start"] + ids, label: label, timeoutSeconds: 60)
             }
             startContainerGroupPolling(groupID: group.id)
+        case "stop":
+            let ids = group.containers.filter(\.isRunning).map(\.id)
+            guard !ids.isEmpty else { return }
+            await runAndRefresh(label: label) {
+                await service.runDocker(["stop"] + ids, label: label, timeoutSeconds: 60)
+            }
         case "restart":
             let ids = group.containers.map(\.id)
             guard !ids.isEmpty else { return }

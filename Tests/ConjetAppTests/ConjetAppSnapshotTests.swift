@@ -21,20 +21,34 @@ final class ConjetAppSnapshotTests: XCTestCase {
         app.selectedContainerID = app.snapshot.containers.first?.id
         let defaults = UserDefaults.standard
         let collapsedKey = "containers.dockerEditorCollapsed"
+        let composeCollapsedKey = "containers.collapsedComposeGroupIDs"
         let previousCollapsedValue = defaults.object(forKey: collapsedKey)
+        let previousComposeCollapsedValue = defaults.object(forKey: composeCollapsedKey)
         defer {
             if let previousCollapsedValue {
                 defaults.set(previousCollapsedValue, forKey: collapsedKey)
             } else {
                 defaults.removeObject(forKey: collapsedKey)
             }
+            if let previousComposeCollapsedValue {
+                defaults.set(previousComposeCollapsedValue, forKey: composeCollapsedKey)
+            } else {
+                defaults.removeObject(forKey: composeCollapsedKey)
+            }
         }
 
         try render(section: .overview, app: app, to: outputDirectory.appendingPathComponent("overview.png"))
         defaults.set(false, forKey: collapsedKey)
+        defaults.set("", forKey: composeCollapsedKey)
         try render(section: .containers, app: app, to: outputDirectory.appendingPathComponent("containers.png"))
+        defaults.set("compose:chum-mem", forKey: composeCollapsedKey)
+        try render(section: .containers, app: app, to: outputDirectory.appendingPathComponent("containers-compose-collapsed.png"))
+        defaults.set("", forKey: composeCollapsedKey)
         defaults.set(true, forKey: collapsedKey)
         try render(section: .containers, app: app, to: outputDirectory.appendingPathComponent("containers-collapsed.png"))
+        app.composeDirectory = "/Users/sly/Workspace/Org/chum-mem"
+        try render(section: .compose, app: app, to: outputDirectory.appendingPathComponent("compose.png"))
+        try render(section: .machines, app: app, to: outputDirectory.appendingPathComponent("machines.png"))
         try render(section: .images, app: app, to: outputDirectory.appendingPathComponent("images.png"))
     }
 
@@ -92,11 +106,34 @@ final class ConjetAppSnapshotTests: XCTestCase {
             ),
             DockerContainer(
                 id: "c2",
+                name: "chum-mem-postgres-1",
+                image: "pgvector/pgvector:pg18",
+                state: "running",
+                status: "Up 10 minutes (healthy)",
+                labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=postgres,com.docker.compose.project.working_dir=/Users/sly/Workspace/Org/chum-mem,com.docker.compose.project.config_files=/Users/sly/Workspace/Org/chum-mem/docker-compose.yml"
+            ),
+            DockerContainer(
+                id: "c3",
+                name: "chum-mem-web-1",
+                image: "chum-mem-web",
+                state: "running",
+                status: "Up 9 minutes",
+                labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=web,com.docker.compose.project.working_dir=/Users/sly/Workspace/Org/chum-mem,com.docker.compose.project.config_files=/Users/sly/Workspace/Org/chum-mem/docker-compose.yml"
+            ),
+            DockerContainer(
+                id: "c4",
                 name: "chum-mem-worker-1",
                 image: "chum-mem-worker",
                 state: "running",
                 status: "Up 9 minutes (health: starting)",
                 labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=worker,com.docker.compose.project.working_dir=/Users/sly/Workspace/Org/chum-mem,com.docker.compose.project.config_files=/Users/sly/Workspace/Org/chum-mem/docker-compose.yml"
+            ),
+            DockerContainer(
+                id: "c5",
+                name: "manual-shell",
+                image: "alpine:3.20",
+                state: "exited",
+                status: "Exited (0)"
             )
         ]
         let images = [
@@ -206,6 +243,10 @@ private struct SnapshotHarness: View {
                 OverviewView()
             case .containers:
                 ContainersView()
+            case .compose:
+                ComposeView()
+            case .machines:
+                MachinesView()
             case .images:
                 ImagesView()
             default:

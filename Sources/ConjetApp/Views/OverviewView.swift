@@ -6,6 +6,7 @@ struct OverviewView: View {
 
     var body: some View {
         let runtime = app.runtimeHealth
+        let lifecycleAction = runtimeLifecycleAction
 
         VStack(spacing: 0) {
             HeaderView(
@@ -52,14 +53,16 @@ struct OverviewView: View {
                         HStack {
                             runtimeBadge(runtime)
                             Spacer()
-                            CommandBarButton(title: "Start", systemImage: "play.fill") {
-                                Task { await app.startRuntime() }
+                            CommandBarButton(
+                                title: lifecycleAction.title,
+                                systemImage: lifecycleAction.systemImage,
+                                role: lifecycleAction.role
+                            ) {
+                                Task { await lifecycleAction.run() }
                             }
+                            .disabled(app.activeCommandLabel != nil)
                             CommandBarButton(title: "Restart", systemImage: "arrow.triangle.2.circlepath") {
                                 Task { await app.restartRuntime() }
-                            }
-                            CommandBarButton(title: "Stop", systemImage: "stop.fill", role: .destructive) {
-                                Task { await app.stopRuntime() }
                             }
                             CommandBarButton(title: "Update Core", systemImage: "arrow.down.circle") {
                                 Task { await app.updateRuntime() }
@@ -93,6 +96,19 @@ struct OverviewView: View {
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .background(WorkbenchPalette.contentBackground)
+        }
+    }
+
+    private var runtimeLifecycleAction: LifecycleAction {
+        switch app.currentVMState {
+        case .running, .starting:
+            LifecycleAction(title: "Stop", systemImage: "stop.fill", role: .destructive) {
+                await app.stopRuntime()
+            }
+        case .stopping, .stopped, .unconfigured, .error, nil:
+            LifecycleAction(title: "Start", systemImage: "play.fill") {
+                await app.startRuntime()
+            }
         }
     }
 }

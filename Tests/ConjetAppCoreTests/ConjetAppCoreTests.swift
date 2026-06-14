@@ -51,7 +51,7 @@ final class ConjetAppCoreTests: XCTestCase {
 
         let groups = ContainerGrouping.groups(containers: containers)
 
-        XCTAssertEqual(groups.map(\.title), ["demo", "Standalone"])
+        XCTAssertEqual(groups.map(\.title), ["demo"])
         XCTAssertEqual(groups[0].id, "compose:demo")
         XCTAssertEqual(groups[0].readiness, .starting)
         XCTAssertEqual(groups[0].healthyCount, 1)
@@ -59,7 +59,6 @@ final class ConjetAppCoreTests: XCTestCase {
         XCTAssertEqual(groups[0].composeWorkingDirectory, "/tmp/demo")
         XCTAssertEqual(groups[0].composeConfigFiles, ["/tmp/demo/compose.yml"])
         XCTAssertTrue(groups[0].canRunComposeUp)
-        XCTAssertEqual(groups[1].readiness, .stopped)
     }
 
     func testContainerGroupingMarksUnhealthyComposeGroupDegraded() throws {

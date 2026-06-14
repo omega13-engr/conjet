@@ -175,6 +175,96 @@ final class ConjetAppStateTests: XCTestCase {
     }
 
     @MainActor
+    func testComposeGroupDownUsesProjectContext() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetdTool: Self.tool,
+            dockerTool: Self.tool,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        let container = DockerContainer(
+            id: "api",
+            name: "chum-mem-api-1",
+            image: "chum-mem-api",
+            state: "running",
+            status: "Up 2 minutes",
+            labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=api,com.docker.compose.project.working_dir=/tmp/chum-mem,com.docker.compose.project.config_files=/tmp/chum-mem/compose.yml"
+        )
+        let group = try XCTUnwrap(ContainerGrouping.groups(containers: [container]).first)
+
+        await app.containerGroupAction("down", group: group)
+
+        let invocations = await executor.invocations
+        let composeInvocation = try XCTUnwrap(invocations.first { $0.displayName == "Compose Down chum-mem" })
+        XCTAssertEqual(composeInvocation.workingDirectory?.path, "/tmp/chum-mem")
+        XCTAssertTrue(composeInvocation.arguments.contains("compose"))
+        XCTAssertTrue(composeInvocation.arguments.contains("-p"))
+        XCTAssertTrue(composeInvocation.arguments.contains("chum-mem"))
+        XCTAssertTrue(composeInvocation.arguments.contains("-f"))
+        XCTAssertTrue(composeInvocation.arguments.contains("/tmp/chum-mem/compose.yml"))
+        XCTAssertTrue(composeInvocation.arguments.contains("down"))
+        XCTAssertFalse(composeInvocation.arguments.contains("--detach"))
+        XCTAssertEqual(app.activeContainerGroupID, "compose:chum-mem")
+    }
+
+    @MainActor
+    func testContainerGroupStopOnlyTargetsRunningContainers() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetdTool: Self.tool,
+            dockerTool: Self.tool,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        let containers = [
+            DockerContainer(
+                id: "api",
+                name: "demo-api-1",
+                image: "demo-api",
+                state: "running",
+                status: "Up 2 minutes",
+                labels: "com.docker.compose.project=demo,com.docker.compose.service=api"
+            ),
+            DockerContainer(
+                id: "worker",
+                name: "demo-worker-1",
+                image: "demo-worker",
+                state: "exited",
+                status: "Exited (0)",
+                labels: "com.docker.compose.project=demo,com.docker.compose.service=worker"
+            )
+        ]
+        let group = try XCTUnwrap(ContainerGrouping.groups(containers: containers).first)
+
+        await app.containerGroupAction("stop", group: group)
+
+        let invocations = await executor.invocations
+        let stopInvocation = try XCTUnwrap(invocations.first { $0.displayName == "Stop demo" })
+        XCTAssertTrue(stopInvocation.arguments.contains("stop"))
+        XCTAssertTrue(stopInvocation.arguments.contains("api"))
+        XCTAssertFalse(stopInvocation.arguments.contains("worker"))
+    }
+
+    @MainActor
     func testDockerEditorBuildsTemporaryContextAndRunsDetachedContainer() async throws {
         let paths = Self.temporaryConjetPaths()
         try paths.ensureBaseDirectories()
