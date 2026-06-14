@@ -110,7 +110,29 @@ final class DaemonProcessSupervisorTests: XCTestCase {
         guard result.succeeded, let pid = Int32(text), pid > 0 else {
             throw ConjetError.processFailed(executable: result.executable, exitCode: result.exitCode, stderr: result.stderr)
         }
+        try waitForProcess(pid, named: "sleep")
         return pid
+    }
+
+    private func waitForProcess(_ pid: Int32, named expectedName: String) throws {
+        let deadline = Date().addingTimeInterval(2)
+        var lastExecutable = "unknown"
+        while Date() < deadline {
+            if DaemonProcessSupervisor.processExists(pid),
+               let executable = DaemonProcessSupervisor.executablePath(pid: pid)
+                ?? DaemonProcessSupervisor.commandPath(pid: pid) {
+                lastExecutable = executable
+                if URL(fileURLWithPath: executable).lastPathComponent == expectedName {
+                    return
+                }
+            } else {
+                lastExecutable = "missing"
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        throw ConjetError.unavailable(
+            "timed out waiting for \(expectedName) pid \(pid); last executable: \(lastExecutable)"
+        )
     }
 
     private func firstMissingPID() -> Int32 {
