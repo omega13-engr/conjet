@@ -75,6 +75,7 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
       - name: Test Conjet
+        timeout-minutes: 10
         run: swift test
 
       - name: Import Developer ID certificate
