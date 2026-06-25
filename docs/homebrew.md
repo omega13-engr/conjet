@@ -41,7 +41,7 @@ When `.github/workflows/release-conjet.yml` runs, it:
 - renders a binary Homebrew formula with the stapled DMG SHA256,
 - renders a Homebrew cask for `/Applications/Conjet.app`,
 - uploads the formula and cask as release assets,
-- updates `Formula/conjet.rb` and `Casks/conjet.rb` in the source repository.
+- opens a pull request that updates `Formula/conjet.rb` and `Casks/conjet.rb`.
 
 The pushed `conjet-vX.Y.Z` tag is the source of truth for the release version.
 
