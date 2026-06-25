@@ -1,6 +1,6 @@
 cask "conjet" do
-  version "1.0.1"
-  sha256 "78873db310d32576cc537838e96d8cfb5a9b34e91469ac5c02217dadd1a23769"
+  version "1.0.0"
+  sha256 "3052d88d4197f42b1a77fd997808bdef8a3d3f5295c8504100bd7f3ad5c00f87"
 
   url "https://github.com/omega13-engr/conjet/releases/download/conjet-v#{version}/conjet-#{version}-macos-arm64.dmg"
   name "Conjet"
@@ -17,13 +17,13 @@ cask "conjet" do
 
   app "Conjet.app"
   binary "bin/conjet"
-  binary "bin/Conjet Core"
+  binary "bin/conjetd"
 
   postflight do
     [
       "#{appdir}/Conjet.app",
       "#{staged_path}/bin/conjet",
-      "#{staged_path}/bin/Conjet Core",
+      "#{staged_path}/bin/conjetd",
     ].each do |path|
       system_command "/usr/bin/xattr", args: ["-cr", path] if File.exist?(path)
     end
@@ -46,7 +46,7 @@ cask "conjet" do
 
   caveats <<~EOS
     This cask installs Conjet.app into /Applications and links the bundled
-    conjet and Conjet Core command-line tools into Homebrew's bin directory.
+    conjet and conjetd command-line tools into Homebrew's bin directory.
 
     If CONJET_HOME points under /Volumes, grant Removable Volumes or Full Disk
     Access to your terminal app and Conjet.app in System Settings.
