@@ -571,11 +571,13 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(imageScript.contains("sha512sum \"$(basename \"${OUT_IMAGE}\")\""))
     }
 
-    func testConjetCoreAarch64ReleaseWorkflowPublishesDirectKernelAsset() throws {
+    func testConjetCoreReleaseWorkflowPublishesOnlyJetstreamLinuxKernelAsset() throws {
         let workflowURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent(".github/workflows/conjet-core-image-aarch64.yml")
+            .appendingPathComponent(".github/workflows/conjet-core-image.yml")
         let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
 
+        XCTAssertTrue(workflow.contains("name: Jetstream Linux Kernel Release"))
+        XCTAssertTrue(workflow.contains("Build Jetstream Linux kernel asset"))
         XCTAssertTrue(workflow.contains("kernel_version:"))
         XCTAssertTrue(workflow.contains("guest/kernel/scripts/build-linux.sh"))
         XCTAssertTrue(workflow.contains("conjet-linux-${KERNEL_VERSION}-aarch64-Image"))
@@ -583,15 +585,19 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(workflow.contains("guest/kernel/dist/out/conjet-linux-*-aarch64-Image"))
         XCTAssertTrue(workflow.contains("guest/kernel/dist/out/conjet-linux-*-aarch64-Image.sha512sum"))
         XCTAssertTrue(workflow.contains("guest/kernel/dist/out/conjet-linux-*-aarch64-Image.json"))
+        XCTAssertFalse(workflow.contains("root_disk_gb:"))
+        XCTAssertFalse(workflow.contains("Build Conjet Core image"))
+        XCTAssertFalse(workflow.contains("make -C guest/image/conjet-core image"))
+        XCTAssertFalse(workflow.contains("*.raw.gz"))
     }
 
-    func testConjetCoreReleaseNotesDeclareHVFPrimaryAndRosettaFallback() throws {
+    func testConjetCoreReleaseNotesDeclareKernelOnlyHVFBackendPolicy() throws {
         let workflowURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".github/workflows/conjet-core-image.yml")
         let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
 
-        XCTAssertTrue(workflow.contains("Jetstream HVF direct-kernel is primary"))
-        XCTAssertTrue(workflow.contains("Virtualization.framework remains the Rosetta fallback"))
+        XCTAssertTrue(workflow.contains("Jetstream Linux Kernel v${{ needs.meta.outputs.version }}"))
+        XCTAssertTrue(workflow.contains("Jetstream HVF direct-kernel uses only this custom Linux kernel asset."))
     }
 
     func testLocalConjetCoreReleaseRehearsalRunsWorkflowCommandsInContainer() throws {
