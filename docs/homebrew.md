@@ -44,6 +44,9 @@ When `.github/workflows/release-conjet.yml` runs, it:
 - opens a pull request that updates `Formula/conjet.rb` and `Casks/conjet.rb`.
 
 The pushed `conjet-vX.Y.Z` tag is the source of truth for the release version.
+The DMG `bin/` directory must include `ConjetCoreVMM/Conjet Core` beside
+`conjetd`; Homebrew cask launches the daemon through `bin/conjetd`, and the
+daemon resolves the Jetstream VMM from that sibling directory.
 
 ## Developer Builds
 

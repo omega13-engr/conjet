@@ -208,6 +208,26 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(cli.contains("\"--image\", \"--url\", \"--repository\", \"--boot-disk-gb\", \"--kernel\", \"--cmdline\""))
     }
 
+    func testMacOSDMGPackagesCaskResolvableJetstreamSiblingVMM() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let dmgScriptURL = root.appendingPathComponent("build-support/create-macos-dmg.sh")
+        let caskTemplateURL = root.appendingPathComponent("build-support/render-homebrew-cask.sh")
+        let ciWorkflowURL = root.appendingPathComponent(".github/workflows/ci.yml")
+        let releaseWorkflowURL = root.appendingPathComponent(".github/workflows/release-conjet.yml")
+        let dmgScript = try String(contentsOf: dmgScriptURL, encoding: .utf8)
+        let caskTemplate = try String(contentsOf: caskTemplateURL, encoding: .utf8)
+        let ciWorkflow = try String(contentsOf: ciWorkflowURL, encoding: .utf8)
+        let releaseWorkflow = try String(contentsOf: releaseWorkflowURL, encoding: .utf8)
+
+        let syntax = try ProcessRunner.run("/bin/bash", ["-n", dmgScriptURL.path])
+        XCTAssertTrue(syntax.succeeded, syntax.stderr)
+        XCTAssertTrue(dmgScript.contains(#"/usr/bin/ditto "$APP_BUNDLE/Contents/Resources/ConjetTools/ConjetCoreVMM" "$STAGING_ROOT/bin/ConjetCoreVMM""#))
+        XCTAssertTrue(dmgScript.contains(#"/usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/ConjetCoreVMM/Conjet Core""#))
+        XCTAssertTrue(caskTemplate.contains(##""#{staged_path}/bin/ConjetCoreVMM","##))
+        XCTAssertTrue(ciWorkflow.contains(#"test -x "${mount_dir}/bin/ConjetCoreVMM/Conjet Core""#))
+        XCTAssertTrue(releaseWorkflow.contains(#"test -x "dist/dmg-staging/${artifact_base}/bin/ConjetCoreVMM/Conjet Core""#))
+    }
+
     func testCLIDirectKernelConjetCoreDownloadsAndValidatesKernelMetadata() throws {
         let cliURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("Sources/ConjetCLI/main.swift")
