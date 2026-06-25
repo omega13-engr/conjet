@@ -1,4 +1,4 @@
-name: Conjet Core Image Release
+name: Jetstream Linux Kernel Release
 
 on:
   push:
@@ -10,20 +10,8 @@ on:
         description: Semantic version to release, without the conjet-core-v prefix
         required: true
         default: 1.0.0
-      root_disk_gb:
-        description: Root disk size for the raw image
-        required: true
-        default: "16"
-      runtime:
-        description: Guest runtime to bake into the image
-        required: true
-        default: docker
-        type: choice
-        options:
-          - docker
-          - none
       kernel_version:
-        description: Linux kernel version for the Jetstream/HVF direct-kernel asset
+        description: Linux kernel version for the Jetstream HVF direct-kernel asset
         required: true
         default: 6.12.86
 
@@ -31,7 +19,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: conjet-core-image-${{ github.ref }}
+  group: conjet-core-kernel-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -41,8 +29,6 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
-      root_disk_gb: ${{ steps.meta.outputs.root_disk_gb }}
-      runtime: ${{ steps.meta.outputs.runtime }}
       kernel_version: ${{ steps.meta.outputs.kernel_version }}
     steps:
       - name: Resolve metadata
@@ -52,14 +38,10 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             version="${{ inputs.version }}"
             tag="conjet-core-v${version}"
-            root_disk_gb="${{ inputs.root_disk_gb }}"
-            runtime="${{ inputs.runtime }}"
             kernel_version="${{ inputs.kernel_version }}"
           else
             tag="${GITHUB_REF_NAME}"
             version="${tag#conjet-core-v}"
-            root_disk_gb="16"
-            runtime="docker"
             kernel_version="6.12.86"
           fi
 
@@ -73,19 +55,6 @@ jobs:
             exit 1
           fi
 
-          case "${runtime}" in
-            docker|none) ;;
-            *)
-              echo "invalid runtime: ${runtime}" >&2
-              exit 1
-              ;;
-          esac
-
-          if ! printf '%s\n' "${root_disk_gb}" | grep -Eq '^[0-9]+$'; then
-            echo "root_disk_gb must be an integer" >&2
-            exit 1
-          fi
-
           if ! printf '%s\n' "${kernel_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "kernel_version must be X.Y.Z" >&2
             exit 1
@@ -94,41 +63,97 @@ jobs:
           {
             echo "tag=${tag}"
             echo "version=${version}"
-            echo "root_disk_gb=${root_disk_gb}"
-            echo "runtime=${runtime}"
             echo "kernel_version=${kernel_version}"
           } >> "${GITHUB_OUTPUT}"
 
-  build-aarch64:
-    name: Build aarch64
+  build-jetstream-kernel:
+    name: Build Jetstream Linux kernel
+    runs-on: ubuntu-24.04-arm
     needs:
       - meta
-    uses: ./.github/workflows/conjet-core-image-aarch64.yml
-    with:
-      version: ${{ needs.meta.outputs.version }}
-      root_disk_gb: ${{ needs.meta.outputs.root_disk_gb }}
-      runtime: ${{ needs.meta.outputs.runtime }}
-      kernel_version: ${{ needs.meta.outputs.kernel_version }}
+    env:
+      CONJET_CORE_VERSION: ${{ needs.meta.outputs.version }}
+      KERNEL_VERSION: ${{ needs.meta.outputs.kernel_version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-  build-x86_64:
-    name: Build x86_64
-    needs:
-      - meta
-    uses: ./.github/workflows/conjet-core-image-x86_64.yml
-    with:
-      version: ${{ needs.meta.outputs.version }}
-      root_disk_gb: ${{ needs.meta.outputs.root_disk_gb }}
-      runtime: ${{ needs.meta.outputs.runtime }}
+      - name: Verify Conjet kernel release VERSION
+        run: |
+          set -euo pipefail
+          actual="$(tr -d '[:space:]' < guest/image/conjet-core/VERSION)"
+          if [ "${actual}" != "${CONJET_CORE_VERSION}" ]; then
+            echo "guest/image/conjet-core/VERSION=${actual}, expected ${CONJET_CORE_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Install Linux kernel build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            bzip2 \
+            clang \
+            curl \
+            dwarves \
+            flex \
+            gcc \
+            gzip \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            llvm \
+            make \
+            perl \
+            tar \
+            xz-utils
+
+      - name: Build Jetstream Linux kernel asset
+        run: |
+          set -euo pipefail
+          kernel_out="${RUNNER_TEMP}/conjet-linux-${KERNEL_VERSION}-aarch64"
+          jobs="${CONJET_KERNEL_MAX_JOBS:-2}"
+          case "${jobs}" in
+            ""|*[!0-9]*) jobs=2 ;;
+          esac
+          host_jobs="$(nproc)"
+          if [ "${jobs}" -gt "${host_jobs}" ]; then
+            jobs="${host_jobs}"
+          fi
+          ulimit -n 65536 2>/dev/null || true
+          export MAKE_FLAGS="-j${jobs} LLVM=1"
+          OUT_DIR="${kernel_out}" guest/kernel/scripts/build-linux.sh
+
+          release_out="guest/kernel/dist/out"
+          mkdir -p "${release_out}"
+          kernel_asset="${release_out}/conjet-linux-${KERNEL_VERSION}-aarch64-Image"
+          cp "${kernel_out}/Image" "${kernel_asset}"
+          cp "${kernel_out}/manifest.json" "${kernel_asset}.json"
+          (
+            cd "$(dirname "${kernel_asset}")"
+            sha512sum "$(basename "${kernel_asset}")" > "$(basename "${kernel_asset}").sha512sum"
+          )
+
+      - name: Upload Jetstream Linux kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jetstream-linux-kernel-${{ needs.meta.outputs.version }}-aarch64
+          if-no-files-found: error
+          path: |
+            guest/kernel/dist/out/conjet-linux-*-aarch64-Image
+            guest/kernel/dist/out/conjet-linux-*-aarch64-Image.sha512sum
+            guest/kernel/dist/out/conjet-linux-*-aarch64-Image.json
 
   release:
-    name: Publish Conjet Core image release
+    name: Publish Jetstream Linux kernel release
     runs-on: ubuntu-24.04
     needs:
       - meta
-      - build-aarch64
-      - build-x86_64
+      - build-jetstream-kernel
     steps:
-      - name: Download image artifacts
+      - name: Download Jetstream Linux kernel artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -138,13 +163,11 @@ jobs:
           set -euo pipefail
           notes="release-notes.md"
           {
-            echo "Conjet Core v${{ needs.meta.outputs.version }}"
+            echo "Jetstream Linux Kernel v${{ needs.meta.outputs.version }}"
             echo
             echo "Release tag: ${{ needs.meta.outputs.tag }}"
-            echo "Runtime: ${{ needs.meta.outputs.runtime }}"
-            echo "Root disk: ${{ needs.meta.outputs.root_disk_gb }} GiB"
             echo "Jetstream Linux kernel: ${{ needs.meta.outputs.kernel_version }}"
-            echo "Backend policy: Jetstream HVF direct-kernel is primary for aarch64 Conjet Core; Virtualization.framework remains the Rosetta fallback for linux/amd64 workloads."
+            echo "Backend policy: Jetstream HVF direct-kernel uses only this custom Linux kernel asset."
             echo "Commit: ${GITHUB_SHA}"
             echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
@@ -166,6 +189,6 @@ jobs:
           gh release create "${{ needs.meta.outputs.tag }}" "${assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${GITHUB_SHA}" \
-            --title "Conjet Core v${{ needs.meta.outputs.version }}" \
+            --title "Jetstream Linux Kernel v${{ needs.meta.outputs.version }}" \
             --notes-file release-notes.md \
             --latest=false
