@@ -52,6 +52,9 @@ struct ImagesView: View {
             }
         }
         .background(WorkbenchPalette.contentBackground)
+        .task {
+            await app.refresh()
+        }
     }
 }
 
@@ -242,6 +245,9 @@ struct VolumesView: View {
             }
         }
         .background(WorkbenchPalette.contentBackground)
+        .task {
+            await app.refresh()
+        }
     }
 }
 

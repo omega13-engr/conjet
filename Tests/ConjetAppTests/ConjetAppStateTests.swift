@@ -377,7 +377,7 @@ final class ConjetAppStateTests: XCTestCase {
     }
 
     @MainActor
-    func testPulseConnectedForegroundVolumeRefreshSkipsDockerInventory() async throws {
+    func testPulseConnectedForegroundVolumeRefreshLoadsVisibleResourceInventory() async throws {
         let paths = Self.temporaryConjetPaths()
         try paths.ensureBaseDirectories()
         FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
@@ -396,6 +396,24 @@ final class ConjetAppStateTests: XCTestCase {
         )
         let app = ConjetAppState(service: service)
         app.selectedSection = .volumes
+        app.snapshot = DashboardSnapshot(
+            conjetTool: Self.tool,
+            conjetCoreTool: Self.tool,
+            dockerTool: Self.tool,
+            dockerSocketPath: paths.dockerSocket.path,
+            dockerSocketAvailable: true,
+            dockerReachable: true,
+            volumes: [
+                DockerVolume(
+                    name: "api-data",
+                    driver: "local",
+                    scope: "local",
+                    mountpoint: "/var/lib/docker/volumes/api-data/_data",
+                    labels: ""
+                )
+            ],
+            refreshStatus: .succeeded
+        )
         app.setInteractiveSurfaceVisible(true)
         app.applyPulseFrameForTesting(.heartbeat(state: ConjetPulseState(highWatermark: 9, replayAvailableFrom: 1)))
 
@@ -406,10 +424,54 @@ final class ConjetAppStateTests: XCTestCase {
         XCTAssertTrue(app.pulseConnected)
         XCTAssertFalse(invocations.contains { $0.arguments.contains("ps") })
         XCTAssertFalse(invocations.contains { $0.arguments.contains("images") })
-        XCTAssertFalse(invocations.contains { $0.arguments.contains("volume") && $0.arguments.contains("ls") })
-        XCTAssertFalse(invocations.contains { $0.arguments.contains("system") && $0.arguments.contains("df") })
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("volume") && $0.arguments.contains("ls") })
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("system") && $0.arguments.contains("df") })
         XCTAssertFalse(invocations.contains { $0.arguments.contains("stats") })
         XCTAssertFalse(invocations.contains { $0.arguments.contains("top") })
+    }
+
+    @MainActor
+    func testPulseConnectedForegroundImageRefreshLoadsWhenSnapshotWasNeverLoaded() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            if invocation.arguments.contains("images") {
+                return ProcessResult(
+                    executable: invocation.executable,
+                    arguments: invocation.arguments,
+                    exitCode: 0,
+                    stdout: """
+                    {"ID":"sha256:ubuntu","Repository":"ubuntu","Tag":"24.04","Size":"101MB","CreatedAt":"2026-05-20 09:37:34 +0800 PST","CreatedSince":"5 weeks ago"}
+                    """,
+                    stderr: ""
+                )
+            }
+            return Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetCoreTool: Self.tool,
+            dockerTool: Self.tool,
+            includeLaunchdEnvironment: false,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        app.selectedSection = .images
+        app.setInteractiveSurfaceVisible(true)
+        app.applyPulseFrameForTesting(.heartbeat(state: ConjetPulseState(highWatermark: 10, replayAvailableFrom: 1)))
+
+        await app.refreshAutomaticallyForTesting()
+
+        XCTAssertTrue(app.pulseConnected)
+        XCTAssertEqual(app.snapshot.images.map(\.reference), ["ubuntu:24.04"])
+        let invocations = await executor.invocations
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("images") })
+        XCTAssertFalse(invocations.contains { $0.arguments.contains("ps") })
+        XCTAssertFalse(invocations.contains { $0.arguments.contains("volume") && $0.arguments.contains("ls") })
     }
 
     @MainActor

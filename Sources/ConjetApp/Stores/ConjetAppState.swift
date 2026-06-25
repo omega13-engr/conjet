@@ -1096,10 +1096,6 @@ final class ConjetAppState: ObservableObject {
         guard trigger == .manual || interactiveSurfaceVisible else {
             return .statusOnly
         }
-        if trigger == .automatic, pulseConnected, !selectedSectionNeedsContinuousRefresh {
-            return .statusOnly
-        }
-
         switch selectedSection {
         case .activity:
             var scope = DashboardSnapshotRefreshScope.containers
