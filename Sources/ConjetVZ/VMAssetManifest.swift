@@ -288,6 +288,8 @@ public struct VMImageStore: Sendable {
         "CONFIG_BINFMT_ELF",
         "CONFIG_BINFMT_SCRIPT",
         "CONFIG_BINFMT_MISC",
+        "CONFIG_MEMORY_HOTPLUG",
+        "CONFIG_MEMORY_HOTREMOVE",
         "CONFIG_PSI",
         "CONFIG_ZSMALLOC",
         "CONFIG_ZRAM",
@@ -400,7 +402,7 @@ public struct VMImageStore: Sendable {
         kernelCommandLine: String?,
         rootDiskSizeBytes: Int64 = 2 * 1024 * 1024 * 1024,
         dataDiskSizeBytes: Int64 = 20 * 1024 * 1024 * 1024,
-        swapDiskSizeBytes: Int64 = 1024 * 1024 * 1024,
+        swapDiskSizeBytes: Int64 = 8 * 1024 * 1024 * 1024,
         source: String = "local"
     ) throws -> VMAssetManifest {
         try paths.ensureBaseDirectories()
@@ -444,7 +446,7 @@ public struct VMImageStore: Sendable {
         kernelCommandLine: String? = nil,
         rootDiskSizeBytes: Int64 = 2 * 1024 * 1024 * 1024,
         dataDiskSizeBytes: Int64 = 20 * 1024 * 1024 * 1024,
-        swapDiskSizeBytes: Int64 = 1024 * 1024 * 1024
+        swapDiskSizeBytes: Int64 = 8 * 1024 * 1024 * 1024
     ) throws -> VMAssetManifest {
         let manifestURL = URL(fileURLWithPath: manifestPath).standardizedFileURL
         guard FileManager.default.fileExists(atPath: manifestURL.path) else {
@@ -521,7 +523,7 @@ public struct VMImageStore: Sendable {
         kernelCommandLine: String? = nil,
         force: Bool = false,
         dataDiskSizeBytes: Int64? = 20 * 1024 * 1024 * 1024,
-        swapDiskSizeBytes: Int64? = 1024 * 1024 * 1024
+        swapDiskSizeBytes: Int64? = 8 * 1024 * 1024 * 1024
     ) throws -> VMAssetManifest {
         try paths.ensureBaseDirectories()
         let kernelURL = URL(fileURLWithPath: kernelPath).standardizedFileURL
@@ -590,7 +592,7 @@ public struct VMImageStore: Sendable {
         cloudInitSeedPath: String? = nil,
         bootDiskMinimumSizeBytes: Int64? = nil,
         dataDiskSizeBytes: Int64 = 20 * 1024 * 1024 * 1024,
-        swapDiskSizeBytes: Int64 = 1024 * 1024 * 1024
+        swapDiskSizeBytes: Int64 = 8 * 1024 * 1024 * 1024
     ) throws -> VMAssetManifest {
         try paths.ensureBaseDirectories()
         let sourceURL = URL(fileURLWithPath: sourcePath).standardizedFileURL
@@ -639,7 +641,7 @@ public struct VMImageStore: Sendable {
         force: Bool = false,
         rootDiskSizeBytes: Int64 = 2 * 1024 * 1024 * 1024,
         dataDiskSizeBytes: Int64 = 20 * 1024 * 1024 * 1024,
-        swapDiskSizeBytes: Int64 = 1024 * 1024 * 1024
+        swapDiskSizeBytes: Int64 = 8 * 1024 * 1024 * 1024
     ) throws -> VMAssetManifest {
         try paths.ensureBaseDirectories()
         let kernel = paths.vmDirectory.appendingPathComponent("vmlinuz-virt")
@@ -692,7 +694,7 @@ public struct VMImageStore: Sendable {
         force: Bool = false,
         rootDiskSizeBytes: Int64 = 4 * 1024 * 1024 * 1024,
         dataDiskSizeBytes: Int64 = 20 * 1024 * 1024 * 1024,
-        swapDiskSizeBytes: Int64 = 1024 * 1024 * 1024
+        swapDiskSizeBytes: Int64 = 8 * 1024 * 1024 * 1024
     ) throws -> VMAssetManifest {
         try paths.ensureBaseDirectories()
         let kernel = paths.vmDirectory.appendingPathComponent("fedora-\(source.release)-vmlinuz")
@@ -742,7 +744,7 @@ public struct VMImageStore: Sendable {
         force: Bool = false,
         rootDiskSizeBytes: Int64 = 4 * 1024 * 1024 * 1024,
         dataDiskSizeBytes: Int64 = 20 * 1024 * 1024 * 1024,
-        swapDiskSizeBytes: Int64 = 1024 * 1024 * 1024
+        swapDiskSizeBytes: Int64 = 8 * 1024 * 1024 * 1024
     ) throws -> VMAssetManifest {
         try paths.ensureBaseDirectories()
         let kernel = paths.vmDirectory.appendingPathComponent("debian-\(source.suite)-linux")

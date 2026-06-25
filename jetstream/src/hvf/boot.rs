@@ -114,6 +114,7 @@ struct SharedBootState {
     console_output: Mutex<String>,
     stages: Mutex<Vec<HvfBootStage>>,
     event_reclaim: Mutex<EventReclaimMetrics>,
+    offlined_memory_drop: Mutex<OfflinedMemoryDropMetrics>,
     event_reclaim_inflight: AtomicBool,
     event_reclaim_pending: AtomicBool,
     stop_reason: Mutex<Option<String>>,
@@ -131,6 +132,24 @@ struct EventReclaimMetrics {
     parsed_range_bytes: u64,
     applied_range_bytes: u64,
     last_reason: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct OfflinedMemoryDropMetrics {
+    requests: u64,
+    requested_ranges: u64,
+    requested_bytes: u64,
+    applied_ranges: u64,
+    applied_bytes: u64,
+    failed_bytes: u64,
+    skipped_bytes: u64,
+    last_requested_ranges: u64,
+    last_requested_bytes: u64,
+    last_applied_ranges: u64,
+    last_applied_bytes: u64,
+    last_failed_bytes: u64,
+    last_skipped_bytes: u64,
     last_error: Option<String>,
 }
 
@@ -502,6 +521,7 @@ impl HvfBootRunner {
             console_output: Mutex::new(String::new()),
             stages: Mutex::new(Vec::new()),
             event_reclaim: Mutex::new(EventReclaimMetrics::default()),
+            offlined_memory_drop: Mutex::new(OfflinedMemoryDropMetrics::default()),
             event_reclaim_inflight: AtomicBool::new(false),
             event_reclaim_pending: AtomicBool::new(false),
             stop_reason: Mutex::new(None),
@@ -596,6 +616,7 @@ impl HvfBootRunner {
             match spawn_memory_control_socket(
                 socket_path.clone(),
                 shared.clone(),
+                vm.clone(),
                 gic.clone(),
                 vcpu_ids.clone(),
                 self.virtio_devices.clone(),
@@ -1753,6 +1774,7 @@ enum MemoryControlRequest {
     Metrics,
     SetTargetBytes { target_bytes: u64 },
     SetTargetMib { target_mib: u64 },
+    DecommitOfflinedRanges { ranges: Vec<PageRange> },
 }
 
 #[derive(Debug, Serialize)]
@@ -1764,6 +1786,7 @@ struct MemoryControlResponse {
     target_pages: u32,
     docker_phase_events: DockerPhaseControlMetrics,
     event_reclaim: EventReclaimMetrics,
+    offlined_memory_drop: OfflinedMemoryDropMetrics,
     balloon: BalloonMetrics,
     host_memory: HostMemoryFootprint,
 }
@@ -1788,6 +1811,7 @@ struct HostMemoryFootprint {
 fn spawn_memory_control_socket(
     socket_path: PathBuf,
     shared: Arc<SharedBootState>,
+    vm: Arc<Vm>,
     gic: Arc<Gic>,
     vcpu_ids: Arc<Mutex<Vec<u64>>>,
     devices: Vec<VirtioMmioDevicePlan>,
@@ -1816,6 +1840,7 @@ fn spawn_memory_control_socket(
                         handle_memory_control_stream(
                             stream,
                             &shared,
+                            &vm,
                             &gic,
                             &vcpu_ids,
                             &devices,
@@ -1841,6 +1866,7 @@ fn spawn_memory_control_socket(
 fn handle_memory_control_stream(
     mut stream: UnixStream,
     shared: &SharedBootState,
+    vm: &Arc<Vm>,
     gic: &Gic,
     vcpu_ids: &Arc<Mutex<Vec<u64>>>,
     devices: &[VirtioMmioDevicePlan],
@@ -1856,6 +1882,7 @@ fn handle_memory_control_stream(
                     Ok(request) => handle_memory_control_request(
                         request,
                         shared,
+                        vm,
                         gic,
                         vcpu_ids,
                         devices,
@@ -1885,6 +1912,7 @@ fn handle_memory_control_stream(
 fn handle_memory_control_request(
     request: MemoryControlRequest,
     shared: &SharedBootState,
+    vm: &Arc<Vm>,
     gic: &Gic,
     vcpu_ids: &Arc<Mutex<Vec<u64>>>,
     devices: &[VirtioMmioDevicePlan],
@@ -1908,6 +1936,10 @@ fn handle_memory_control_request(
             )?;
             let ids = vcpu_ids.lock().expect("vCPU id mutex poisoned").clone();
             let _ = exit_vcpus(&ids);
+            memory_control_snapshot(shared, configured_memory_mib)
+        }
+        MemoryControlRequest::DecommitOfflinedRanges { ranges } => {
+            decommit_offlined_memory_ranges(shared, vm, ranges)?;
             memory_control_snapshot(shared, configured_memory_mib)
         }
     }
@@ -1986,6 +2018,123 @@ fn balloon_target_pages(configured_memory_mib: u64, target_bytes: u64) -> u32 {
     ((configured_bytes.saturating_sub(target_bytes)) / 4096).min(u64::from(u32::MAX)) as u32
 }
 
+const OFFLINED_MEMORY_DROP_MAX_RANGES: usize = 1024;
+const OFFLINED_MEMORY_DROP_PROTECTED_LOW_BYTES: u64 = 1024 * 1024 * 1024;
+
+fn decommit_offlined_memory_ranges(
+    shared: &SharedBootState,
+    vm: &Arc<Vm>,
+    ranges: Vec<PageRange>,
+) -> Result<(), String> {
+    if ranges.is_empty() {
+        return Err("offlined memory range list is empty".to_string());
+    }
+    if ranges.len() > OFFLINED_MEMORY_DROP_MAX_RANGES {
+        return Err(format!(
+            "offlined memory range list exceeds {} entries",
+            OFFLINED_MEMORY_DROP_MAX_RANGES
+        ));
+    }
+    let requested_ranges = ranges.len() as u64;
+    let requested_bytes = ranges
+        .iter()
+        .fold(0u64, |total, range| total.saturating_add(range.size));
+
+    let vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
+    let guest_base = shared_plan_ram_base();
+    let memory_len = vm_state.memory.len() as u64;
+    let host_page_size = vm_state.memory.host_page_size() as u64;
+    let (eligible, pre_skipped_bytes) =
+        filter_offlined_memory_drop_ranges(&ranges, guest_base, memory_len, host_page_size);
+    if eligible.is_empty() {
+        let mut metrics = shared
+            .offlined_memory_drop
+            .lock()
+            .expect("offlined memory drop mutex poisoned");
+        metrics.requests = metrics.requests.saturating_add(1);
+        metrics.requested_ranges = metrics.requested_ranges.saturating_add(requested_ranges);
+        metrics.requested_bytes = metrics.requested_bytes.saturating_add(requested_bytes);
+        metrics.skipped_bytes = metrics.skipped_bytes.saturating_add(requested_bytes);
+        metrics.last_requested_ranges = requested_ranges;
+        metrics.last_requested_bytes = requested_bytes;
+        metrics.last_applied_ranges = 0;
+        metrics.last_applied_bytes = 0;
+        metrics.last_failed_bytes = 0;
+        metrics.last_skipped_bytes = requested_bytes;
+        metrics.last_error = Some("no eligible offlined memory ranges".to_string());
+        return Err("no eligible offlined memory ranges".to_string());
+    }
+
+    let reclaimer = HvfGuestMemoryReclaimer {
+        vm: vm.clone(),
+        flags: HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC,
+    };
+    let report = reclaimer.reclaim_ranges(&vm_state.memory, guest_base, &eligible);
+    let applied_bytes = report.discard_advised_bytes;
+    let failed_bytes = report.discard_failed_bytes;
+    let skipped_bytes = pre_skipped_bytes.saturating_add(report.discard_skipped_bytes);
+    drop(vm_state);
+
+    let mut metrics = shared
+        .offlined_memory_drop
+        .lock()
+        .expect("offlined memory drop mutex poisoned");
+    metrics.requests = metrics.requests.saturating_add(1);
+    metrics.requested_ranges = metrics.requested_ranges.saturating_add(requested_ranges);
+    metrics.requested_bytes = metrics.requested_bytes.saturating_add(requested_bytes);
+    metrics.applied_ranges = metrics.applied_ranges.saturating_add(eligible.len() as u64);
+    metrics.applied_bytes = metrics.applied_bytes.saturating_add(applied_bytes);
+    metrics.failed_bytes = metrics.failed_bytes.saturating_add(failed_bytes);
+    metrics.skipped_bytes = metrics.skipped_bytes.saturating_add(skipped_bytes);
+    metrics.last_requested_ranges = requested_ranges;
+    metrics.last_requested_bytes = requested_bytes;
+    metrics.last_applied_ranges = eligible.len() as u64;
+    metrics.last_applied_bytes = applied_bytes;
+    metrics.last_failed_bytes = failed_bytes;
+    metrics.last_skipped_bytes = skipped_bytes;
+    metrics.last_error = if applied_bytes == 0 {
+        Some("offlined memory decommit applied zero bytes".to_string())
+    } else {
+        None
+    };
+    if applied_bytes == 0 {
+        Err("offlined memory decommit applied zero bytes".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn filter_offlined_memory_drop_ranges(
+    ranges: &[PageRange],
+    guest_base: u64,
+    memory_len: u64,
+    host_page_size: u64,
+) -> (Vec<PageRange>, u64) {
+    let ram_end = guest_base.saturating_add(memory_len);
+    let protected_start = guest_base.saturating_add(OFFLINED_MEMORY_DROP_PROTECTED_LOW_BYTES);
+    let mut eligible = Vec::with_capacity(ranges.len());
+    let mut skipped_bytes = 0u64;
+    for range in ranges {
+        let Some(end) = range.start.checked_add(range.size) else {
+            skipped_bytes = skipped_bytes.saturating_add(range.size);
+            continue;
+        };
+        let host_aligned = host_page_size == 0
+            || (range.start % host_page_size == 0 && range.size % host_page_size == 0);
+        if range.size == 0
+            || range.start < protected_start
+            || range.start < guest_base
+            || end > ram_end
+            || !host_aligned
+        {
+            skipped_bytes = skipped_bytes.saturating_add(range.size);
+            continue;
+        }
+        eligible.push(*range);
+    }
+    (eligible, skipped_bytes)
+}
+
 fn memory_control_snapshot(
     shared: &SharedBootState,
     configured_memory_mib: u64,
@@ -1998,6 +2147,11 @@ fn memory_control_snapshot(
         .event_reclaim
         .lock()
         .expect("event reclaim mutex poisoned")
+        .clone();
+    let offlined_memory_drop = shared
+        .offlined_memory_drop
+        .lock()
+        .expect("offlined memory drop mutex poisoned")
         .clone();
     let balloon_bases = vm_state.devices.balloon.keys().copied().collect::<Vec<_>>();
     let target_pages = balloon_bases
@@ -2030,6 +2184,7 @@ fn memory_control_snapshot(
             response_bytes: docker_phase_events.response_bytes,
         },
         event_reclaim,
+        offlined_memory_drop,
         balloon,
         host_memory: host_memory_footprint(),
     })
@@ -2056,6 +2211,7 @@ fn memory_control_error(message: &str, configured_memory_mib: u64) -> MemoryCont
         target_pages: 0,
         docker_phase_events: DockerPhaseControlMetrics::default(),
         event_reclaim: EventReclaimMetrics::default(),
+        offlined_memory_drop: OfflinedMemoryDropMetrics::default(),
         balloon: BalloonMetrics::default(),
         host_memory: host_memory_footprint(),
     }
@@ -2689,6 +2845,14 @@ mod tests {
             .unwrap(),
             MemoryControlRequest::SetTargetMib { target_mib: 4096 }
         ));
+        assert!(matches!(
+            serde_json::from_str::<MemoryControlRequest>(
+                r#"{"command":"decommit_offlined_ranges","ranges":[{"start":5368709120,"size":1073741824}]}"#
+            )
+            .unwrap(),
+            MemoryControlRequest::DecommitOfflinedRanges { ranges }
+                if ranges == vec![PageRange { start: 5_368_709_120, size: 1_073_741_824 }]
+        ));
     }
 
     #[test]
@@ -2697,6 +2861,42 @@ mod tests {
             r#"{"command":"reclaim_ranges","ranges":[{"start":1073741824,"size":16384}]}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn offlined_memory_drop_filter_rejects_low_unaligned_and_out_of_ram_ranges() {
+        let guest_base = shared_plan_ram_base();
+        let gib = 1024 * 1024 * 1024;
+        let ranges = vec![
+            PageRange {
+                start: guest_base,
+                size: gib,
+            },
+            PageRange {
+                start: guest_base + gib,
+                size: 16 * 1024,
+            },
+            PageRange {
+                start: guest_base + (2 * gib) + 1,
+                size: 16 * 1024,
+            },
+            PageRange {
+                start: guest_base + (9 * gib),
+                size: gib,
+            },
+        ];
+
+        let (eligible, skipped) =
+            filter_offlined_memory_drop_ranges(&ranges, guest_base, 8 * gib, 16 * 1024);
+
+        assert_eq!(
+            eligible,
+            vec![PageRange {
+                start: guest_base + gib,
+                size: 16 * 1024
+            }]
+        );
+        assert_eq!(skipped, (2 * gib) + (16 * 1024));
     }
 
     #[test]
@@ -2710,6 +2910,8 @@ mod tests {
         assert!(json["host_memory"]
             .get("physical_footprint_bytes")
             .is_some());
+        assert!(json.get("offlined_memory_drop").is_some());
+        assert_eq!(json["offlined_memory_drop"]["applied_bytes"], 0);
     }
 
     #[test]

@@ -38,10 +38,10 @@ final class ConfigTests: XCTestCase {
         let config = ConjetConfig.default
 
         XCTAssertEqual(config.vmCPUs, 2)
-        XCTAssertEqual(config.memoryMiB, 4096)
+        XCTAssertEqual(config.memoryMiB, 8192)
         XCTAssertEqual(config.vmProfile, .dockerCompatibility)
         XCTAssertEqual(config.effectiveVMCPUs, 2)
-        XCTAssertEqual(config.effectiveMemoryMiB, 4096)
+        XCTAssertEqual(config.effectiveMemoryMiB, 8192)
         XCTAssertEqual(config.architecture, "aarch64")
         XCTAssertEqual(config.diskGiB, 100)
         XCTAssertNil(config.diskImagePath)
@@ -49,7 +49,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.runtime, "docker")
         XCTAssertEqual(config.vmBackend, .hvfExperimental)
         XCTAssertEqual(config.energyMode, .balanced)
-        XCTAssertEqual(config.memoryProfile, .eco)
+        XCTAssertEqual(config.memoryProfile, .balanced)
         XCTAssertEqual(config.networkBridgeEngine, .conjetNetdC)
         XCTAssertTrue(config.ssh.enabled)
         XCTAssertEqual(config.ssh.transport, "proxy-command")

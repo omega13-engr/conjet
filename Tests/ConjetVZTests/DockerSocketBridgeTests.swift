@@ -234,6 +234,108 @@ final class DockerSocketBridgeTests: XCTestCase {
         XCTAssertFalse(rewritten.contains("/conjet.slice/conjet-build.slice"))
     }
 
+    func testBuildStreamPermitOnlyAppliesToBuildSolveRequests() {
+        let build = Data("""
+        POST /v1.52/build?t=demo HTTP/1.1\r
+        Host: docker\r
+        Content-Length: 0\r
+        \r
+
+        """.utf8)
+        let session = Data("""
+        POST /v1.52/session HTTP/1.1\r
+        Host: docker\r
+        Content-Length: 0\r
+        \r
+
+        """.utf8)
+        let grpc = Data("""
+        POST /grpc HTTP/1.1\r
+        Host: docker\r
+        Connection: Upgrade\r
+        Upgrade: h2c\r
+        Content-Length: 0\r
+        \r
+
+        """.utf8)
+        let attach = Data("""
+        POST /v1.52/containers/abcdef/attach?stream=1&stdout=1 HTTP/1.1\r
+        Host: docker\r
+        Connection: Upgrade\r
+        Upgrade: tcp\r
+        Content-Length: 0\r
+        \r
+
+        """.utf8)
+
+        XCTAssertTrue(DockerSocketBridge.dockerRequestNeedsBuildStreamPermit(build))
+        XCTAssertTrue(DockerSocketBridge.dockerRequestNeedsBuildStreamPermit(grpc))
+        XCTAssertFalse(DockerSocketBridge.dockerRequestNeedsBuildStreamPermit(session))
+        XCTAssertFalse(DockerSocketBridge.dockerRequestNeedsBuildStreamPermit(attach))
+    }
+
+    func testBuildStreamLimitQueuesConcurrentBuildSolveRequests() throws {
+        let root = URL(fileURLWithPath: "/tmp/cjbr-buildlimit-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let request = """
+        POST /v1.52/build?t=demo HTTP/1.1\r
+        Host: docker\r
+        Content-Length: 0\r
+        \r
+
+        """
+        let connector = GatedDockerResponseGuestConnectionConnector()
+        let socket = root.appendingPathComponent("docker.sock")
+        let bridge = DockerSocketBridge(
+            socketPath: socket.path,
+            connector: connector,
+            maxConcurrentBuildStreams: 1
+        )
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let firstDone = DispatchSemaphore(value: 0)
+        let secondDone = DispatchSemaphore(value: 0)
+        let responses = LockedStringArray()
+        DispatchQueue.global(qos: .userInitiated).async {
+            responses.append((try? sendRawSocketBridgeTestRequest(socketPath: socket.path, request: request)) ?? "error")
+            firstDone.signal()
+        }
+
+        XCTAssertTrue(connector.waitForRequestCount(1))
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            responses.append((try? sendRawSocketBridgeTestRequest(socketPath: socket.path, request: request)) ?? "error")
+            secondDone.signal()
+        }
+
+        XCTAssertFalse(connector.waitForRequestCount(2, timeoutSeconds: 0.05))
+        connector.releaseNextResponse()
+        XCTAssertEqual(firstDone.wait(timeout: .now() + 2), .success)
+        XCTAssertTrue(connector.waitForRequestCount(2))
+        connector.releaseNextResponse()
+        XCTAssertEqual(secondDone.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(responses.values.filter { $0.contains("204 No Content") }.count, 2)
+    }
+
+    func testDefaultBuildStreamLimitCanBeOverriddenByEnvironment() {
+        XCTAssertEqual(DockerSocketBridge.defaultMaxConcurrentBuildStreams(environment: [:]), 1)
+        XCTAssertEqual(
+            DockerSocketBridge.defaultMaxConcurrentBuildStreams(
+                environment: ["CONJET_DOCKER_BUILD_STREAM_LIMIT": "4"]
+            ),
+            4
+        )
+        XCTAssertEqual(
+            DockerSocketBridge.defaultMaxConcurrentBuildStreams(
+                environment: ["CONJET_DOCKER_BUILD_STREAM_LIMIT": "0"]
+            ),
+            1
+        )
+    }
+
     func testStreamingDockerRequestStillNeedsClientPump() {
         let request = """
         GET /v1.52/events?filters=%7B%7D HTTP/1.1\r
@@ -499,6 +601,43 @@ final class DockerSocketBridgeTests: XCTestCase {
         let request = """
         POST /v1.52/session HTTP/1.1\r
         Host: docker\r
+        Content-Length: 0\r
+        \r
+
+        """
+        let connector = DockerStartResponseGuestConnectionConnector(statusCode: 204)
+        let observed = ObservedMemoryActivityCallbacks()
+        let socket = root.appendingPathComponent("docker.sock")
+        let bridge = DockerSocketBridge(
+            socketPath: socket.path,
+            connector: connector,
+            activityHandler: { activity in
+                observed.append(activity)
+            }
+        )
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let response = try sendRawRequest(socketPath: socket.path, request: request)
+
+        XCTAssertTrue(response.contains("204 No Content"))
+        XCTAssertTrue(waitUntil { observed.events.contains(where: { $0.kind == .workloadStarted }) })
+        let started = observed.events.first { $0.kind == .workloadStarted }
+        XCTAssertEqual(started?.workload, .build)
+        XCTAssertEqual(started?.pressureStreams, 1)
+        XCTAssertEqual(started?.buildLike, true)
+    }
+
+    func testBridgeClassifiesBuildKitGRPCAsBuildMemoryActivity() throws {
+        let root = URL(fileURLWithPath: "/tmp/cjbr-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let request = """
+        POST /grpc HTTP/1.1\r
+        Host: docker\r
+        Connection: Upgrade\r
+        Upgrade: h2c\r
         Content-Length: 0\r
         \r
 
@@ -1514,6 +1653,86 @@ private final class RawDockerResponseGuestConnectionConnector: GuestConnectionCo
     }
 }
 
+private final class GatedDockerResponseGuestConnectionConnector: GuestConnectionConnector, @unchecked Sendable {
+    private let lock = NSLock()
+    private let responsePermits = DispatchSemaphore(value: 0)
+    private var seenRequests: [String] = []
+
+    var requests: [String] {
+        lock.lock()
+        let value = seenRequests
+        lock.unlock()
+        return value
+    }
+
+    func waitForRequestCount(_ count: Int, timeoutSeconds: TimeInterval = 1) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if requests.count >= count {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return requests.count >= count
+    }
+
+    func releaseNextResponse() {
+        responsePermits.signal()
+    }
+
+    func connect() throws -> GuestConnection {
+        var fds = [Int32](repeating: -1, count: 2)
+        guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
+            throw ConjetError.socket("socketpair() failed")
+        }
+
+        let clientFD = fds[0]
+        let serverFD = fds[1]
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { Darwin.close(serverFD) }
+            let request = readAllSocketBridgeTestBytes(from: serverFD)
+            let requestText = String(data: request, encoding: .utf8) ?? ""
+            self.lock.lock()
+            self.seenRequests.append(requestText)
+            self.lock.unlock()
+
+            _ = self.responsePermits.wait(timeout: .now() + 5)
+            let response = """
+            HTTP/1.1 204 No Content\r
+            Content-Length: 0\r
+            \r
+
+            """
+            _ = response.withCString { pointer in
+                Darwin.write(serverFD, pointer, strlen(pointer))
+            }
+            Darwin.shutdown(serverFD, SHUT_WR)
+        }
+
+        return GuestConnection(fileDescriptor: clientFD) {
+            Darwin.close(clientFD)
+        }
+    }
+}
+
+private final class LockedStringArray: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var values: [String] {
+        lock.lock()
+        let value = storage
+        lock.unlock()
+        return value
+    }
+
+    func append(_ value: String) {
+        lock.lock()
+        storage.append(value)
+        lock.unlock()
+    }
+}
+
 private final class ObservedCreateCallbacks: @unchecked Sendable {
     private let lock = NSLock()
     private var capturedIntent: DockerCreatePublicationIntent?
@@ -1638,6 +1857,57 @@ private func readAllSocketBridgeTestBytes(from fd: Int32) -> Data {
         }
     }
     return data
+}
+
+private func sendRawSocketBridgeTestRequest(socketPath: String, request: String) throws -> String {
+    let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else {
+        throw ConjetError.socket("socket() failed")
+    }
+    defer { Darwin.close(fd) }
+
+    try withSocketBridgeTestUnixSocketAddress(path: socketPath) { address, length in
+        guard Darwin.connect(fd, address, length) == 0 else {
+            throw ConjetError.socket("connect() failed")
+        }
+    }
+
+    _ = request.withCString { pointer in
+        Darwin.write(fd, pointer, strlen(pointer))
+    }
+    Darwin.shutdown(fd, SHUT_WR)
+
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+        let count = Darwin.read(fd, &buffer, buffer.count)
+        if count > 0 {
+            data.append(buffer, count: count)
+        } else if count < 0, errno == EINTR {
+            continue
+        } else {
+            break
+        }
+    }
+    return String(data: data, encoding: .utf8) ?? ""
+}
+
+private func withSocketBridgeTestUnixSocketAddress<Result>(
+    path: String,
+    _ body: (UnsafePointer<sockaddr>, socklen_t) throws -> Result
+) throws -> Result {
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = path.utf8CString.map { UInt8(bitPattern: $0) }
+    withUnsafeMutableBytes(of: &address.sun_path) { rawBuffer in
+        rawBuffer.copyBytes(from: pathBytes)
+    }
+    let length = socklen_t(MemoryLayout<sockaddr_un>.size)
+    return try withUnsafePointer(to: &address) { pointer in
+        try pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+            try body(socketAddress, length)
+        }
+    }
 }
 
 private func readManagedHostMountHTTPRequest(from fd: Int32) -> Data {

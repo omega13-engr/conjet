@@ -393,6 +393,43 @@ private final class DaemonRuntime: @unchecked Sendable {
                 ])
                 return response(ok: false, message: vm.message, status: status(state: .warmIdle, vm: vm), vm: vm)
             }
+        case .memoryHardDrop:
+            invalidateStatusCache()
+            do {
+                let dropMiB = request.parameters["drop_mib"].flatMap(UInt64.init)
+                    ?? UInt64(config.memoryPolicy.idleMemoryReclaimTargetMiB)
+                let dropBytes = dropMiB > UInt64.max / 1_048_576
+                    ? UInt64.max
+                    : dropMiB * 1_048_576
+                let result = try vmController.hardDropIdleMemory(
+                    config: config,
+                    store: vmStore,
+                    dropBytes: dropBytes
+                )
+                invalidateStatusCache()
+                let vm = status(state: .warmIdle).vm
+                    ?? vmStore.status(state: .running, message: result.message)
+                publish(.memoryReclaimed, subjectID: "vm", message: "hard memory drop completed", payload: [
+                    "requestedBytes": String(result.requestedBytes),
+                    "guestOfflinedBytes": String(result.guestOfflinedBytes),
+                    "hostDecommittedBytes": String(result.hostDecommittedBytes)
+                ])
+                return response(
+                    ok: true,
+                    message: result.message,
+                    status: status(state: .warmIdle, vm: vm),
+                    vm: vm,
+                    memoryHardDrop: result
+                )
+            } catch {
+                invalidateStatusCache()
+                let vm = vmController.status(store: vmStore, backend: config.vmBackend)
+                publish(.memoryReclaimed, subjectID: "vm", message: "hard memory drop failed", payload: [
+                    "ok": "false",
+                    "error": String(describing: error)
+                ])
+                return response(ok: false, message: String(describing: error), status: status(state: .warmIdle, vm: vm), vm: vm)
+            }
         case .pulseSubscribe:
             return response(ok: false, message: "pulse-subscribe requires a streaming connection")
         case .stop:
@@ -449,7 +486,8 @@ private final class DaemonRuntime: @unchecked Sendable {
         status: DaemonStatus? = nil,
         vm: VMRuntimeStatus? = nil,
         dockerRun: DockerRunResult? = nil,
-        dockerCompose: DockerComposeResult? = nil
+        dockerCompose: DockerComposeResult? = nil,
+        memoryHardDrop: ConjetMemoryHardDropResult? = nil
     ) -> DaemonResponse {
         DaemonResponse(
             ok: ok,
@@ -458,7 +496,8 @@ private final class DaemonRuntime: @unchecked Sendable {
             vm: vm,
             dockerRun: dockerRun,
             dockerCompose: dockerCompose,
-            pulse: pulse.state()
+            pulse: pulse.state(),
+            memoryHardDrop: memoryHardDrop
         )
     }
 
@@ -694,7 +733,8 @@ private extension DaemonCommand {
              .networkRepair,
              .clockRepair,
              .pruneCache,
-             .memoryReclaim:
+             .memoryReclaim,
+             .memoryHardDrop:
             true
         }
     }

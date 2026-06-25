@@ -642,7 +642,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
 
     public init(
         vmCPUs: Int = 2,
-        memoryMiB: Int = 4096,
+        memoryMiB: Int = 8192,
         vmProfile: ConjetVMProfile = .dockerCompatibility,
         architecture: String = "aarch64",
         diskGiB: Int = 100,
@@ -662,7 +662,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkLANAllowedCIDRs: [String] = [],
         networkLANAllowedPorts: [Int] = [],
         energyMode: ConjetEnergyMode = .balanced,
-        memoryProfile: ConjetMemoryProfile = .eco,
+        memoryProfile: ConjetMemoryProfile = .balanced,
         ssh: ConjetSSHPolicy = ConjetSSHPolicy()
     ) {
         self.vmCPUs = vmCPUs
@@ -692,7 +692,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
 
     public init(
         vmCPUs: Int = 2,
-        memoryMiB: Int = 4096,
+        memoryMiB: Int = 8192,
         vmProfile: ConjetVMProfile = .dockerCompatibility,
         architecture: String = "aarch64",
         diskGiB: Int = 100,
@@ -711,7 +711,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkLANAllowedCIDRs: [String] = [],
         networkLANAllowedPorts: [Int] = [],
         energyMode: ConjetEnergyMode = .balanced,
-        memoryProfile: ConjetMemoryProfile = .eco,
+        memoryProfile: ConjetMemoryProfile = .balanced,
         ssh: ConjetSSHPolicy = ConjetSSHPolicy()
     ) {
         self.init(
@@ -743,10 +743,10 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
 
     public static let `default` = ConjetConfig(
         vmCPUs: 2,
-        memoryMiB: 4096,
+        memoryMiB: 8192,
         vmProfile: .dockerCompatibility,
         networkBridgeEngine: .conjetNetdC,
-        memoryProfile: .eco
+        memoryProfile: .balanced
     )
 
     public var containerRuntime: ConjetContainerRuntimeKind {

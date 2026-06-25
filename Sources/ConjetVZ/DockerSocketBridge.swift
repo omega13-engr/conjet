@@ -603,6 +603,80 @@ private struct GuestControlHTTPResponse {
     }
 }
 
+private final class DockerBuildStreamLimiter: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let limit: Int
+    private var activeBuildStreams = 0
+    private var closed = false
+
+    init(limit: Int) {
+        self.limit = max(1, limit)
+    }
+
+    func open() {
+        condition.lock()
+        closed = false
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func close() {
+        condition.lock()
+        closed = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func acquireIfNeeded(forDockerRequest data: Data, shouldLimit: Bool) throws -> DockerBuildStreamPermit? {
+        guard shouldLimit else { return nil }
+        condition.lock()
+        while !closed && activeBuildStreams >= limit {
+            condition.wait()
+        }
+        guard !closed else {
+            condition.unlock()
+            throw ConjetError.unavailable("Docker build stream bridge stopped before request could run")
+        }
+        activeBuildStreams += 1
+        condition.unlock()
+        return DockerBuildStreamPermit { [weak self] in
+            self?.release()
+        }
+    }
+
+    private func release() {
+        condition.lock()
+        activeBuildStreams = max(0, activeBuildStreams - 1)
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
+private final class DockerBuildStreamPermit: @unchecked Sendable {
+    private let lock = NSLock()
+    private let releaseHandler: @Sendable () -> Void
+    private var released = false
+
+    init(releaseHandler: @escaping @Sendable () -> Void) {
+        self.releaseHandler = releaseHandler
+    }
+
+    deinit {
+        release()
+    }
+
+    func release() {
+        lock.lock()
+        guard !released else {
+            lock.unlock()
+            return
+        }
+        released = true
+        lock.unlock()
+        releaseHandler()
+    }
+}
+
 public final class DockerSocketBridge: @unchecked Sendable {
     public typealias CreatePublicationIntentHandler = @Sendable (DockerCreatePublicationIntent) -> Void
     public typealias CreatePublicationResolutionHandler = @Sendable (DockerCreatePublicationResolution) -> Void
@@ -622,6 +696,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
     private let activityHandler: ActivityHandler?
     private let managedHostMounts: (any DockerManagedHostMounting)?
     private let managedHostMountEventHandler: ManagedHostMountEventHandler?
+    private let buildStreamLimiter: DockerBuildStreamLimiter
     private let lock = NSLock()
     private var listenerFD: Int32 = -1
     private var running = false
@@ -639,7 +714,8 @@ public final class DockerSocketBridge: @unchecked Sendable {
         containerStartHandler: ContainerStartHandler? = nil,
         activityHandler: ActivityHandler? = nil,
         managedHostMounts: (any DockerManagedHostMounting)? = nil,
-        managedHostMountEventHandler: ManagedHostMountEventHandler? = nil
+        managedHostMountEventHandler: ManagedHostMountEventHandler? = nil,
+        maxConcurrentBuildStreams: Int = DockerSocketBridge.defaultMaxConcurrentBuildStreams()
     ) {
         self.socketPath = socketPath
         self.guestPort = guestPort
@@ -651,6 +727,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
         self.activityHandler = activityHandler
         self.managedHostMounts = managedHostMounts
         self.managedHostMountEventHandler = managedHostMountEventHandler
+        self.buildStreamLimiter = DockerBuildStreamLimiter(limit: maxConcurrentBuildStreams)
     }
 
     deinit {
@@ -693,6 +770,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
             listenerFD = fd
             running = true
             lock.unlock()
+            buildStreamLimiter.open()
 
             let thread = Thread { [weak self] in
                 self?.acceptLoop(listenerFD: fd)
@@ -713,6 +791,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
         listenerFD = -1
         running = false
         lock.unlock()
+        buildStreamLimiter.close()
 
         if fd >= 0 {
             Darwin.shutdown(fd, SHUT_RDWR)
@@ -771,7 +850,13 @@ public final class DockerSocketBridge: @unchecked Sendable {
                 managedHostMountEventHandler?("managed Docker host mount rewrite skipped: no eligible host bind mount")
             }
             initialClientData = Self.addBuildCgroupParentForDockerBuildRequest(initialClientData)
-            let activity = beginActivity(initialClientData: initialClientData)
+            let buildPermit = try buildStreamLimiter.acquireIfNeeded(
+                forDockerRequest: initialClientData,
+                shouldLimit: Self.dockerRequestNeedsBuildStreamPermit(initialClientData)
+            )
+            defer { buildPermit?.release() }
+            let workload = Self.classifyWorkload(initialClientData)
+            let activity = beginActivity(workload: workload)
             defer { endActivity(activity) }
             let createIntent = DockerCreateRequestParser.intent(from: initialClientData)
             if let intent = createIntent {
@@ -953,8 +1038,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
         Darwin.close(clientFD)
     }
 
-    private func beginActivity(initialClientData: Data) -> DockerMemoryActivity {
-        let workload = Self.classifyWorkload(initialClientData)
+    private func beginActivity(workload: DockerMemoryActivity.Workload) -> DockerMemoryActivity {
         let pressureStream = workload.countsAsMemoryPressureStream
         lock.lock()
         activeStreams += 1
@@ -1043,7 +1127,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
         guard let text = String(data: prefix, encoding: .utf8) else {
             return .unknown
         }
-        if text.contains(" /build") || text.contains("/build?") || text.contains("/session") {
+        if text.contains(" /build") || text.contains("/build?") || text.contains(" /grpc ") || text.contains("/session") {
             return .build
         }
         if text.contains("/images/create") {
@@ -1144,6 +1228,35 @@ public final class DockerSocketBridge: @unchecked Sendable {
         return rewritten
     }
 
+    public static func defaultMaxConcurrentBuildStreams(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int {
+        guard let raw = environment["CONJET_DOCKER_BUILD_STREAM_LIMIT"],
+              let parsed = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parsed > 0 else {
+            return 1
+        }
+        return min(parsed, 16)
+    }
+
+    static func dockerRequestNeedsBuildStreamPermit(_ data: Data) -> Bool {
+        let delimiter = Data([13, 10, 13, 10])
+        let headerData: Data.SubSequence
+        if let headerRange = data.range(of: delimiter) {
+            headerData = data[..<headerRange.lowerBound]
+        } else {
+            headerData = data.prefix(2048)
+        }
+        guard let headerText = String(data: headerData, encoding: .utf8),
+              let requestLine = headerText.split(separator: "\r\n", maxSplits: 1).first else {
+            return false
+        }
+        let parts = requestLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+        return parts.count == 3
+            && parts[0] == "POST"
+            && (isDockerBuildRequestPath(parts[1]) || isDockerBuildxGRPCRequestPath(parts[1]))
+    }
+
     private static func isDockerBuildRequestPath(_ path: String) -> Bool {
         let pathOnly = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path
         if pathOnly == "/build" {
@@ -1157,6 +1270,11 @@ public final class DockerSocketBridge: @unchecked Sendable {
         return !version.isEmpty && version.allSatisfy { character in
             character.isNumber || character == "."
         }
+    }
+
+    private static func isDockerBuildxGRPCRequestPath(_ path: String) -> Bool {
+        let pathOnly = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path
+        return pathOnly == "/grpc"
     }
 
     private static func dockerRequestPathHasQueryParameter(_ path: String, name: String) -> Bool {

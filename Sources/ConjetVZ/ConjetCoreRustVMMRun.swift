@@ -125,6 +125,11 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
         try request(Request(command: "metrics", targetBytes: nil))
     }
 
+    @discardableResult
+    func decommitOfflinedRanges(_ ranges: [ConjetMemoryRange]) throws -> Response {
+        try request(Request(command: "decommit_offlined_ranges", ranges: ranges))
+    }
+
     private func request(_ request: Request) throws -> Response {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
@@ -234,15 +239,18 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
     private struct Request: Encodable {
         var command: String
         var targetBytes: UInt64?
+        var ranges: [ConjetMemoryRange]?
 
-        init(command: String, targetBytes: UInt64? = nil) {
+        init(command: String, targetBytes: UInt64? = nil, ranges: [ConjetMemoryRange]? = nil) {
             self.command = command
             self.targetBytes = targetBytes
+            self.ranges = ranges
         }
 
         enum CodingKeys: String, CodingKey {
             case command
             case targetBytes = "target_bytes"
+            case ranges
         }
     }
 
@@ -254,6 +262,7 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
         var targetPages: UInt32
         var balloon: Balloon
         var hostMemory: HostMemory
+        var offlinedMemoryDrop: OfflinedMemoryDrop?
 
         enum CodingKeys: String, CodingKey {
             case ok
@@ -263,6 +272,7 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
             case targetPages = "target_pages"
             case balloon
             case hostMemory = "host_memory"
+            case offlinedMemoryDrop = "offlined_memory_drop"
         }
     }
 
@@ -295,6 +305,40 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
         enum CodingKeys: String, CodingKey {
             case residentBytes = "resident_bytes"
             case physicalFootprintBytes = "physical_footprint_bytes"
+        }
+    }
+
+    struct OfflinedMemoryDrop: Decodable, Equatable, Sendable {
+        var requests: UInt64
+        var requestedRanges: UInt64
+        var requestedBytes: UInt64
+        var appliedRanges: UInt64
+        var appliedBytes: UInt64
+        var failedBytes: UInt64
+        var skippedBytes: UInt64
+        var lastRequestedRanges: UInt64
+        var lastRequestedBytes: UInt64
+        var lastAppliedRanges: UInt64
+        var lastAppliedBytes: UInt64
+        var lastFailedBytes: UInt64
+        var lastSkippedBytes: UInt64
+        var lastError: String?
+
+        enum CodingKeys: String, CodingKey {
+            case requests
+            case requestedRanges = "requested_ranges"
+            case requestedBytes = "requested_bytes"
+            case appliedRanges = "applied_ranges"
+            case appliedBytes = "applied_bytes"
+            case failedBytes = "failed_bytes"
+            case skippedBytes = "skipped_bytes"
+            case lastRequestedRanges = "last_requested_ranges"
+            case lastRequestedBytes = "last_requested_bytes"
+            case lastAppliedRanges = "last_applied_ranges"
+            case lastAppliedBytes = "last_applied_bytes"
+            case lastFailedBytes = "last_failed_bytes"
+            case lastSkippedBytes = "last_skipped_bytes"
+            case lastError = "last_error"
         }
     }
 }

@@ -30,8 +30,10 @@ The output is intentionally Conjet-specific:
   fast path. The Python bridge remains installed as fallback.
 - `conjet-memd`, a separate guest memory telemetry service on VSOCK port `2376`
   that reports cgroup v2 memory, `/proc/meminfo`, and PSI pressure for dynamic
-  host-side balloon control, plus `conjet-reclaimd` for scoped cgroup-v2
-  `memory.reclaim` jobs after Docker/build activity.
+  host-side balloon control. It also exposes guest-coordinated hard drops where
+  Linux-removable memory blocks are offlined before the host decommits their
+  backing pages, plus `conjet-reclaimd` for scoped cgroup-v2 `memory.reclaim`
+  jobs after Docker/build activity.
 - DHCP networkd/netplan fallback for the VZ NAT interface.
 - Cloud-init disabled by default to avoid first-boot datasource waits.
 - `vsock`, `virtio_balloon`, `virtiofs`, and `zram` modules requested on boot.

@@ -17,14 +17,31 @@ public struct DockerContextResult: Codable, Equatable, Sendable {
 
 public struct DockerContextManager {
     public var contextName: String
+    public var buildkitMaxParallelism: Int
+    public var buildkitConfigDirectory: URL?
     public var runner: (String, [String]) throws -> ProcessResult
 
     public init(
         contextName: String = "conjet",
+        buildkitMaxParallelism: Int = DockerContextManager.defaultBuildKitMaxParallelism(),
+        buildkitConfigDirectory: URL? = nil,
         runner: @escaping (String, [String]) throws -> ProcessResult = ProcessRunner.run
     ) {
         self.contextName = contextName
+        self.buildkitMaxParallelism = max(1, min(buildkitMaxParallelism, 16))
+        self.buildkitConfigDirectory = buildkitConfigDirectory
         self.runner = runner
+    }
+
+    public static func defaultBuildKitMaxParallelism(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int {
+        guard let raw = environment["CONJET_BUILDKIT_MAX_PARALLELISM"],
+              let parsed = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parsed > 0 else {
+            return 1
+        }
+        return min(parsed, 16)
     }
 
     public func ensureContext(
@@ -104,11 +121,20 @@ public struct DockerContextManager {
         forContext contextName: String,
         makeCurrent: Bool
     ) throws -> (name: String, action: DockerContextAction) {
-        let builderName = contextName
+        let builderName = "\(contextName)-buildkit"
         let inspect = try runDocker(["buildx", "inspect", builderName, "--timeout", "2s"])
         if inspect.succeeded {
             let driver = buildxField(named: "Driver", from: inspect.stdout)
             let endpoint = buildxField(named: "Endpoint", from: inspect.stdout)
+            if driver == "docker-container", endpoint == contextName {
+                guard buildxConfigMatchesDesiredMaxParallelism(inspect.stdout) else {
+                    try requireSuccess(runDocker(["buildx", "rm", "--force", builderName]))
+                    try createBuildxBuilder(named: builderName, forContext: contextName, makeCurrent: makeCurrent)
+                    return (builderName, .updated)
+                }
+                try selectBuildxBuilder(named: builderName, makeCurrent: makeCurrent)
+                return (builderName, .unchanged)
+            }
             guard driver == "docker",
                   endpoint == nil || endpoint == contextName else {
                 throw ConjetError.processFailed(
@@ -117,22 +143,60 @@ public struct DockerContextManager {
                     stderr: "Buildx builder \(builderName) is not the Docker driver for context \(contextName)"
                 )
             }
-            try selectBuildxBuilder(named: builderName, makeCurrent: makeCurrent)
-            return (builderName, .unchanged)
+            try requireSuccess(runDocker(["buildx", "rm", "--force", builderName]))
+            try createBuildxBuilder(named: builderName, forContext: contextName, makeCurrent: makeCurrent)
+            return (builderName, .updated)
         }
 
-        throw ConjetError.processFailed(
-            executable: inspect.executable,
-            exitCode: inspect.exitCode,
-            stderr: inspect.stderr.isEmpty
-                ? "Buildx context builder \(builderName) was not available"
-                : inspect.stderr
-        )
+        try createBuildxBuilder(named: builderName, forContext: contextName, makeCurrent: makeCurrent)
+        return (builderName, .created)
     }
 
     private func selectBuildxBuilder(named builderName: String, makeCurrent: Bool) throws {
         guard makeCurrent else { return }
         try requireSuccess(runDocker(["buildx", "use", "--default", builderName]))
+    }
+
+    private func createBuildxBuilder(named builderName: String, forContext contextName: String, makeCurrent: Bool) throws {
+        let configURL = try writeBuildKitConfig(named: builderName)
+        var arguments = [
+            "buildx", "create",
+            "--name", builderName,
+            "--driver", "docker-container",
+            "--buildkitd-config", configURL.path,
+            "--bootstrap"
+        ]
+        if makeCurrent {
+            arguments.append("--use")
+        }
+        arguments.append(contextName)
+        try requireSuccess(runDocker(arguments))
+        try selectBuildxBuilder(named: builderName, makeCurrent: makeCurrent)
+    }
+
+    private func writeBuildKitConfig(named builderName: String) throws -> URL {
+        let directory = buildkitConfigDirectory ?? defaultBuildKitConfigDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let safeName = builderName.map { character -> Character in
+            character.isLetter || character.isNumber || character == "-" || character == "_" ? character : "-"
+        }
+        let url = directory.appendingPathComponent("\(String(safeName))-buildkitd.toml")
+        let content = """
+        [worker.oci]
+          max-parallelism = \(buildkitMaxParallelism)
+
+        """
+        try content.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    private func defaultBuildKitConfigDirectory() -> URL {
+        let manager = FileManager.default
+        let base = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? manager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return base
+            .appendingPathComponent("Conjet", isDirectory: true)
+            .appendingPathComponent("buildkit", isDirectory: true)
     }
 
     private func buildxField(named field: String, from output: String) -> String? {
@@ -146,5 +210,23 @@ public struct DockerContextManager {
             return value.isEmpty ? nil : value
         }
         return nil
+    }
+
+    private func buildxConfigMatchesDesiredMaxParallelism(_ output: String) -> Bool {
+        for line in output.split(separator: "\n") {
+            let normalized = line
+                .replacingOccurrences(of: ">", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            guard normalized.hasPrefix("max-parallelism") else {
+                continue
+            }
+            let parts = normalized.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2,
+                  let parsed = Int(parts[1].trimmingCharacters(in: .whitespaces)) else {
+                return false
+            }
+            return parsed == buildkitMaxParallelism
+        }
+        return false
     }
 }

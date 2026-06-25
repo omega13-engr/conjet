@@ -665,6 +665,209 @@ public final class VirtualMachineController {
         #endif
     }
 
+    public func hardDropIdleMemory(
+        config: ConjetConfig,
+        store: VMImageStore,
+        dropBytes: UInt64,
+        timeoutSeconds: TimeInterval = 30
+    ) throws -> ConjetMemoryHardDropResult {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+
+        guard dropBytes > 0 else {
+            throw ConjetError.invalidArgument("hard memory drop bytes must be greater than zero")
+        }
+
+        #if canImport(Virtualization)
+        guard config.vmBackend == .hvfExperimental else {
+            throw ConjetError.unavailable("hard memory drop currently requires the Rust HVF backend")
+        }
+        guard hvfRun?.isRunning == true else {
+            throw ConjetError.unavailable("\(config.vmBackend.displayName) VM is not running")
+        }
+
+        let manifest = try store.loadManifest()
+        let memorySocketPath = Self.rustMemorySocketPath(dockerSocketPath: manifest.dockerSocketPath)
+        let controlSocketPath = Self.rustMemoryControlSocketPath(dockerSocketPath: manifest.dockerSocketPath)
+        let metricsClient = GuestMemoryMetricsClient(
+            connector: RetryingGuestConnectionConnector(
+                base: UnixSocketGuestConnectionConnector(socketPath: memorySocketPath, timeoutSeconds: 3),
+                timeoutSeconds: timeoutSeconds,
+                intervalSeconds: 0.5
+            )
+        )
+        let controlClient = ConjetCoreRustMemoryControlClient(
+            socketPath: controlSocketPath,
+            timeoutSeconds: Int(max(1, timeoutSeconds))
+        )
+
+        setProgress(
+            state: .running,
+            phase: "memory-hard-drop",
+            message: "offlining guest memory blocks for host decommit"
+        )
+        let hostBeforeMetrics = try? controlClient.metrics()
+        let hostBefore = hostBeforeMetrics?.hostMemory.physicalFootprintBytes
+        let guestDrop: GuestMemoryHardDropResponse
+        do {
+            guestDrop = try metricsClient.hardDrop(bytes: dropBytes)
+        } catch {
+            return try hardDropIdleMemoryWithBalloonFallback(
+                config: config,
+                dropBytes: dropBytes,
+                guestFailure: "\(error)",
+                hostBeforeMetrics: hostBeforeMetrics,
+                metricsClient: metricsClient,
+                controlClient: controlClient
+            )
+        }
+        guard guestDrop.accepted, guestDrop.offlinedBytes > 0, !guestDrop.ranges.isEmpty else {
+            return try hardDropIdleMemoryWithBalloonFallback(
+                config: config,
+                dropBytes: dropBytes,
+                guestFailure: "guest memory hard drop was not accepted: \(guestDrop.message)",
+                hostBeforeMetrics: hostBeforeMetrics,
+                metricsClient: metricsClient,
+                controlClient: controlClient
+            )
+        }
+        let hostDrop = try controlClient.decommitOfflinedRanges(guestDrop.ranges)
+        let hostAfter = try? controlClient.metrics().hostMemory.physicalFootprintBytes
+        let footprintDrop: UInt64?
+        if let hostBefore, let hostAfter {
+            footprintDrop = hostBefore > hostAfter ? hostBefore - hostAfter : 0
+        } else {
+            footprintDrop = nil
+        }
+        let decommittedBytes = hostDrop.offlinedMemoryDrop?.lastAppliedBytes ?? 0
+        let message = "hard memory drop offlined \(guestDrop.offlinedBytes / 1_048_576) MiB and decommitted \(decommittedBytes / 1_048_576) MiB"
+        setProgress(state: .running, phase: "ready", message: message)
+        return ConjetMemoryHardDropResult(
+            requestedBytes: guestDrop.requestedBytes,
+            guestOfflinedBytes: guestDrop.offlinedBytes,
+            hostDecommittedBytes: decommittedBytes,
+            rangeCount: guestDrop.rangeCount,
+            hostFootprintBeforeBytes: hostBefore,
+            hostFootprintAfterBytes: hostAfter,
+            hostFootprintDropBytes: footprintDrop,
+            message: message,
+            ranges: guestDrop.ranges
+        )
+        #else
+        throw ConjetError.unavailable("Virtualization.framework is not available in this build")
+        #endif
+    }
+
+    #if canImport(Virtualization)
+    private func hardDropIdleMemoryWithBalloonFallback(
+        config: ConjetConfig,
+        dropBytes: UInt64,
+        guestFailure: String,
+        hostBeforeMetrics: ConjetCoreRustMemoryControlClient.Response?,
+        metricsClient: GuestMemoryMetricsClient,
+        controlClient: ConjetCoreRustMemoryControlClient
+    ) throws -> ConjetMemoryHardDropResult {
+        let policy = config.memoryPolicy
+        let bytesPerMiB: UInt64 = 1_048_576
+        let currentTargetMiB = Int(hostBeforeMetrics?.targetMiB ?? UInt64(config.memoryMiB))
+        let requestedDropMiB = max(1, Int((dropBytes + bytesPerMiB - 1) / bytesPerMiB))
+        var floorMiB = policy.dynamicMemoryMinimumMiB
+        if let guestMetrics = try? metricsClient.snapshot() {
+            let guestUsedBytes = guestMetrics.memTotalBytes > guestMetrics.memAvailableBytes
+                ? guestMetrics.memTotalBytes - guestMetrics.memAvailableBytes
+                : 0
+            let guestUsedMiB = Int((guestUsedBytes + bytesPerMiB - 1) / bytesPerMiB)
+            floorMiB = max(
+                floorMiB,
+                roundUpMiB(guestUsedMiB + policy.dynamicMemoryHeadroomMiB, quantum: 128)
+            )
+        }
+        let desiredTargetMiB = max(floorMiB, currentTargetMiB - requestedDropMiB)
+        let boundedTargetMiB = min(currentTargetMiB - 1, max(policy.dynamicMemoryMinimumMiB, desiredTargetMiB))
+        guard boundedTargetMiB > 0, boundedTargetMiB < currentTargetMiB else {
+            throw ConjetError.unavailable("\(guestFailure); virtio-balloon fallback had no safe lower target from \(currentTargetMiB) MiB")
+        }
+
+        setProgress(
+            state: .running,
+            phase: "memory-hard-drop",
+            message: "guest block offline failed; lowering virtio-balloon target to \(boundedTargetMiB) MiB"
+        )
+        let beforeMetrics = hostBeforeMetrics ?? (try? controlClient.metrics())
+        _ = try controlClient.setTargetBytes(UInt64(boundedTargetMiB) * bytesPerMiB)
+        let afterMetrics = observeRustMemoryControlConvergence(
+            controlClient: controlClient,
+            beforeMetrics: beforeMetrics
+        )
+        let hostBefore = beforeMetrics?.hostMemory.physicalFootprintBytes
+        let hostAfter = afterMetrics?.hostMemory.physicalFootprintBytes
+        let footprintDrop: UInt64? = {
+            guard let hostBefore, let hostAfter else { return nil }
+            return hostBefore > hostAfter ? hostBefore - hostAfter : 0
+        }()
+        guard let footprintDrop, footprintDrop > 0 else {
+            throw ConjetError.unavailable("\(guestFailure); virtio-balloon fallback reached \(boundedTargetMiB) MiB target but host footprint did not drop")
+        }
+
+        dynamicMemoryManager?.recordHardDropBalloonTarget(
+            targetMiB: boundedTargetMiB,
+            reason: "memory-hard-drop.balloon-fallback",
+            hostFootprintBefore: hostBefore,
+            hostFootprintAfter: hostAfter,
+            hostFootprintDrop: footprintDrop
+        )
+        let message = "hard memory drop used virtio-balloon fallback after guest block offline failed; target \(currentTargetMiB) -> \(boundedTargetMiB) MiB, host footprint dropped \(footprintDrop / bytesPerMiB) MiB"
+        setProgress(state: .running, phase: "ready", message: message)
+        return ConjetMemoryHardDropResult(
+            requestedBytes: dropBytes,
+            guestOfflinedBytes: 0,
+            hostDecommittedBytes: footprintDrop,
+            rangeCount: 0,
+            hostFootprintBeforeBytes: hostBefore,
+            hostFootprintAfterBytes: hostAfter,
+            hostFootprintDropBytes: footprintDrop,
+            message: message,
+            ranges: []
+        )
+    }
+
+    private func observeRustMemoryControlConvergence(
+        controlClient: ConjetCoreRustMemoryControlClient,
+        beforeMetrics: ConjetCoreRustMemoryControlClient.Response?
+    ) -> ConjetCoreRustMemoryControlClient.Response? {
+        var latest = beforeMetrics
+        let beforeFootprint = beforeMetrics?.hostMemory.physicalFootprintBytes
+        let beforeReclaimed = beforeMetrics?.balloon.reclaimedBytes ?? 0
+        var previousDelay: TimeInterval = 0
+        for delay in [0.5, 2.0, 5.0, 10.0, 20.0] as [TimeInterval] {
+            Thread.sleep(forTimeInterval: max(0, delay - previousDelay))
+            previousDelay = delay
+            guard let sample = try? controlClient.metrics() else {
+                continue
+            }
+            latest = sample
+            let reclaimed = sample.balloon.reclaimedBytes > beforeReclaimed
+                ? sample.balloon.reclaimedBytes - beforeReclaimed
+                : 0
+            let footprintDrop: UInt64
+            if let beforeFootprint, let after = sample.hostMemory.physicalFootprintBytes {
+                footprintDrop = beforeFootprint > after ? beforeFootprint - after : 0
+            } else {
+                footprintDrop = 0
+            }
+            if reclaimed > 0 || footprintDrop > 0 {
+                break
+            }
+        }
+        return latest
+    }
+
+    private func roundUpMiB(_ value: Int, quantum: Int) -> Int {
+        guard quantum > 1 else { return value }
+        return ((value + quantum - 1) / quantum) * quantum
+    }
+    #endif
+
     #if canImport(Virtualization)
     private func mapState(_ state: VZVirtualMachine.State) -> VMRunState {
         switch state {
@@ -1038,6 +1241,19 @@ public final class VirtualMachineController {
             },
             hostFootprintBytes: {
                 try controlClient.metrics().hostMemory.physicalFootprintBytes
+            },
+            hostMemorySnapshot: {
+                let metrics = try controlClient.metrics()
+                return HostMemoryRuntimeSnapshot(
+                    physicalFootprintBytes: metrics.hostMemory.physicalFootprintBytes,
+                    balloonActualPages: metrics.balloon.actualPages,
+                    balloonInflatePages: metrics.balloon.inflatePages,
+                    balloonDeflatePages: metrics.balloon.deflatePages,
+                    balloonReportedFreePages: metrics.balloon.reportedFreePages,
+                    balloonReportedFreeReclaimedBytes: metrics.balloon.reportedFreeReclaimedBytes,
+                    balloonReclaimFailures: metrics.balloon.reclaimFailures,
+                    balloonMalformedReports: metrics.balloon.malformedReports
+                )
             }
         )
         dynamicMemoryManager = manager
@@ -1397,7 +1613,7 @@ private enum VZConfigurationBuilder {
             }
             if let swapDiskPath = manifest.swapDiskPath {
                 if #available(macOS 14.0, *) {
-                    try recreateSparseDisk(path: swapDiskPath, fallbackSizeBytes: 1024 * 1024 * 1024)
+                    try recreateSparseDisk(path: swapDiskPath, fallbackSizeBytes: 8 * 1024 * 1024 * 1024)
                     devices.append(try nvmeDevice(path: swapDiskPath, identifier: "conjet-swap", readOnly: false))
                 } else {
                     devices.append(try ephemeralSwapBlockDevice(path: swapDiskPath))
@@ -1408,7 +1624,7 @@ private enum VZConfigurationBuilder {
     }
 
     private static func ephemeralSwapBlockDevice(path: String) throws -> VZVirtioBlockDeviceConfiguration {
-        try recreateSparseDisk(path: path, fallbackSizeBytes: 1024 * 1024 * 1024)
+        try recreateSparseDisk(path: path, fallbackSizeBytes: 8 * 1024 * 1024 * 1024)
         return try blockDevice(path: path, identifier: "conjet-swap", readOnly: false)
     }
 

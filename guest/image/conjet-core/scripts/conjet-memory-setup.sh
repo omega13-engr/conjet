@@ -83,7 +83,9 @@ setup_zram() {
 swap_candidate() {
     for dev in \
         /dev/disk/by-id/virtio-conjet-swap \
-        /dev/disk/by-label/conjet-swap; do
+        /dev/disk/by-label/conjet-swap \
+        /dev/disk/by-id/virtio-conjet-blk2 \
+        /dev/vdc; do
         if [ -b "${dev}" ]; then
             printf '%s\n' "${dev}"
             return 0

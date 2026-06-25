@@ -19,12 +19,15 @@ built-in:
 
 Conjet's HVF memory model uses guest telemetry for policy, virtio-balloon
 target changes for hard pressure, and virtio-balloon free-page reporting for
-automatic page-level reclaim below the guest-visible memory cap. The legacy
-manual pulse reclaim path is fallback only. Reclaim-capable kernels must keep
+automatic page-level reclaim below the guest-visible memory cap. The hard-drop
+path additionally lets the guest offline Linux-removable memory blocks and lets
+the host decommit the exact offlined guest-physical spans, which gives macOS a
+real mapping/accounting drop instead of only a free-page hint. The legacy manual
+pulse reclaim path is fallback only. Reclaim-capable kernels must keep
 `CONFIG_VIRTIO_BALLOON`, `CONFIG_PAGE_REPORTING`,
-`CONFIG_BALLOON_COMPACTION`, `CONFIG_COMPACTION`, `CONFIG_PSI`,
-`CONFIG_SWAP`, `CONFIG_ZSMALLOC`, and `CONFIG_ZRAM` enabled; the Docker profile
-also enables `CONFIG_ZRAM_WRITEBACK`.
+`CONFIG_BALLOON_COMPACTION`, `CONFIG_COMPACTION`, `CONFIG_MEMORY_HOTPLUG`,
+`CONFIG_MEMORY_HOTREMOVE`, `CONFIG_PSI`, `CONFIG_SWAP`, `CONFIG_ZSMALLOC`, and
+`CONFIG_ZRAM` enabled; the Docker profile also enables `CONFIG_ZRAM_WRITEBACK`.
 
 The reproducible builder is:
 

@@ -438,6 +438,8 @@ cat >"${MOUNT_DIR}/etc/systemd/system/conjet-daemons.slice" <<'UNIT'
 Description=Conjet Docker daemon processes
 
 [Slice]
+MemoryMin=256M
+MemoryLow=768M
 UNIT
 
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-build.slice" <<'UNIT'
@@ -445,6 +447,7 @@ cat >"${MOUNT_DIR}/etc/systemd/system/conjet-build.slice" <<'UNIT'
 Description=Conjet build workloads
 
 [Slice]
+MemoryHigh=60%
 UNIT
 
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-services.slice" <<'UNIT'
@@ -452,6 +455,7 @@ cat >"${MOUNT_DIR}/etc/systemd/system/conjet-services.slice" <<'UNIT'
 Description=Conjet long-running container services
 
 [Slice]
+MemoryMin=128M
 MemoryLow=512M
 UNIT
 
@@ -461,10 +465,16 @@ mkdir -p \
 cat >"${MOUNT_DIR}/etc/systemd/system/containerd.service.d/conjet-cgroup.conf" <<'UNIT'
 [Service]
 Slice=conjet-daemons.slice
+OOMScoreAdjust=-999
+MemoryMin=128M
+MemoryLow=256M
 UNIT
 cat >"${MOUNT_DIR}/etc/systemd/system/docker.service.d/conjet-cgroup.conf" <<'UNIT'
 [Service]
 Slice=conjet-daemons.slice
+OOMScoreAdjust=-500
+MemoryMin=128M
+MemoryLow=256M
 UNIT
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-docker-lifecycle.service" <<'UNIT'
 [Unit]
@@ -523,6 +533,9 @@ Wants=conjet-docker-lifecycle.service docker.socket
 
 [Service]
 Type=simple
+OOMScoreAdjust=-1000
+MemoryMin=64M
+MemoryLow=128M
 ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
 ExecStartPre=/bin/sh -c 'if [ "${CONJET_DOCKER_REPAIR_ON_BOOT:-0}" = "1" ]; then exec /usr/local/sbin/conjet-docker-service-guard.sh repair-if-required; fi'
 ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; mountpoint -q /mnt/conjetboot || mount -t virtiofs conjetboot /mnt/conjetboot 2>/dev/null || true; rm -f /run/conjet/docker-vsock-ready'
@@ -544,6 +557,9 @@ Wants=conjet-memory-setup.service
 
 [Service]
 Type=simple
+OOMScoreAdjust=-1000
+MemoryMin=64M
+MemoryLow=128M
 ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
 ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet; rm -f /run/conjet/memory-vsock-ready'
 ExecStart=/usr/local/sbin/conjet-memd

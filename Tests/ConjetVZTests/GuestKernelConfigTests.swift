@@ -427,6 +427,8 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(configBuiltIns.contains("CONFIG_SECURITY_APPARMOR"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_SECURITY_SELINUX"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_IKCONFIG_PROC"))
+        XCTAssertTrue(configBuiltIns.contains("CONFIG_MEMORY_HOTPLUG"))
+        XCTAssertTrue(configBuiltIns.contains("CONFIG_MEMORY_HOTREMOVE"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_COMPACTION"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_BALLOON_COMPACTION"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_PSI"))
@@ -514,6 +516,8 @@ final class GuestKernelConfigTests: XCTestCase {
             "CONFIG_NET_NS",
             "CONFIG_CGROUPS",
             "CONFIG_MEMCG",
+            "CONFIG_MEMORY_HOTPLUG",
+            "CONFIG_MEMORY_HOTREMOVE",
             "CONFIG_COMPACTION",
             "CONFIG_BALLOON_COMPACTION",
             "CONFIG_PSI",
@@ -569,6 +573,13 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertFalse(imageScript.contains("enable_unit buildkit.socket sockets.target"))
         XCTAssertFalse(imageScript.contains("enable_unit buildkit.service conjet-appliance.target"))
         XCTAssertTrue(imageScript.contains("MemoryLow=512M"))
+        XCTAssertTrue(imageScript.contains("MemoryHigh=60%"))
+        XCTAssertTrue(imageScript.contains("MemoryMin=256M"))
+        XCTAssertTrue(imageScript.contains("OOMScoreAdjust=-1000"))
+        XCTAssertTrue(imageScript.contains("OOMScoreAdjust=-999"))
+        XCTAssertTrue(imageScript.contains("OOMScoreAdjust=-500"))
+        XCTAssertTrue(imageScript.contains("virtio-conjet-blk2"))
+        XCTAssertTrue(imageScript.contains("/dev/vdc"))
         XCTAssertTrue(imageScript.contains("CONJET_DOCKER_REPAIR_ON_BOOT:-0"))
         XCTAssertTrue(imageScript.contains("conjet-init-ready.service"))
         XCTAssertTrue(imageScript.contains("After=conjet-docker-vsock.service"))

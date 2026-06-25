@@ -220,6 +220,50 @@ public struct ConjetMemoryTraceEvent: Codable, Equatable, Sendable {
     }
 }
 
+public struct ConjetMemoryRange: Codable, Equatable, Sendable {
+    public var start: UInt64
+    public var size: UInt64
+
+    public init(start: UInt64, size: UInt64) {
+        self.start = start
+        self.size = size
+    }
+}
+
+public struct ConjetMemoryHardDropResult: Codable, Equatable, Sendable {
+    public var requestedBytes: UInt64
+    public var guestOfflinedBytes: UInt64
+    public var hostDecommittedBytes: UInt64
+    public var rangeCount: Int
+    public var hostFootprintBeforeBytes: UInt64?
+    public var hostFootprintAfterBytes: UInt64?
+    public var hostFootprintDropBytes: UInt64?
+    public var message: String
+    public var ranges: [ConjetMemoryRange]
+
+    public init(
+        requestedBytes: UInt64,
+        guestOfflinedBytes: UInt64,
+        hostDecommittedBytes: UInt64,
+        rangeCount: Int,
+        hostFootprintBeforeBytes: UInt64? = nil,
+        hostFootprintAfterBytes: UInt64? = nil,
+        hostFootprintDropBytes: UInt64? = nil,
+        message: String,
+        ranges: [ConjetMemoryRange] = []
+    ) {
+        self.requestedBytes = requestedBytes
+        self.guestOfflinedBytes = guestOfflinedBytes
+        self.hostDecommittedBytes = hostDecommittedBytes
+        self.rangeCount = rangeCount
+        self.hostFootprintBeforeBytes = hostFootprintBeforeBytes
+        self.hostFootprintAfterBytes = hostFootprintAfterBytes
+        self.hostFootprintDropBytes = hostFootprintDropBytes
+        self.message = message
+        self.ranges = ranges
+    }
+}
+
 public struct ConjetQueueRuntimeMetrics: Codable, Equatable, Sendable {
     public var bufferedCount: Int
     public var bufferedBytes: Int

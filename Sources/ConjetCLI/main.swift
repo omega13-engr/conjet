@@ -1218,6 +1218,51 @@ struct ConjetCLI {
             let response = try UnixSocketClient(socketPath: try socketPath(paths: paths))
                 .send(DaemonRequest(command: .memoryReclaim), timeoutSeconds: 30)
             try printDaemonResponse(response, json: json, failOnError: true)
+        case "hard-drop":
+            var remaining = Array(args.dropFirst())
+            var dropMiB: UInt64?
+            while !remaining.isEmpty {
+                let flag = remaining.removeFirst()
+                switch flag {
+                case "--drop-mib":
+                    let value = try consumeValue(flag, from: &remaining)
+                    guard let parsed = UInt64(value), parsed > 0 else {
+                        throw ConjetError.invalidArgument("--drop-mib must be a positive integer")
+                    }
+                    dropMiB = parsed
+                default:
+                    throw ConjetError.invalidArgument("unknown memory hard-drop option '\(flag)'")
+                }
+            }
+            var parameters: [String: String] = [:]
+            if let dropMiB {
+                parameters["drop_mib"] = String(dropMiB)
+            }
+            try ensureDaemon()
+            let paths = ConjetPaths.default()
+            let response = try UnixSocketClient(socketPath: try socketPath(paths: paths))
+                .send(DaemonRequest(command: .memoryHardDrop, parameters: parameters), timeoutSeconds: 120)
+            if json {
+                print(try ConjetJSON.string(response))
+                if !response.ok {
+                    try throwResponseError(response.message)
+                }
+            } else if response.ok, let result = response.memoryHardDrop {
+                print(result.message)
+                print("  requested: \(result.requestedBytes / 1_048_576) MiB")
+                print("  guest offlined: \(result.guestOfflinedBytes / 1_048_576) MiB")
+                print("  host decommitted: \(result.hostDecommittedBytes / 1_048_576) MiB")
+                if let before = result.hostFootprintBeforeBytes,
+                   let after = result.hostFootprintAfterBytes {
+                    print("  host footprint: \(before / 1_048_576) -> \(after / 1_048_576) MiB")
+                    if let drop = result.hostFootprintDropBytes {
+                        print("  footprint drop: \(drop / 1_048_576) MiB")
+                    }
+                }
+                print("  ranges: \(result.rangeCount)")
+            } else {
+                try printDaemonResponse(response, json: false, failOnError: true)
+            }
         case "trace":
             try ensureDaemon()
             let paths = ConjetPaths.default()
@@ -5221,7 +5266,7 @@ struct ConjetCLI {
                     """
                 )
             case "memory":
-                print("Usage:\n  conjet vm memory status|trace|reclaim [--json]")
+                print("Usage:\n  conjet vm memory status|trace|reclaim|hard-drop [--drop-mib N] [--json]")
             case "logs":
                 print("Usage:\n  conjet vm logs [--lines N]")
             default:
@@ -5265,6 +5310,8 @@ struct ConjetCLI {
                 print("Usage:\n  conjet memory status [--json]")
             case "reclaim":
                 print("Usage:\n  conjet memory reclaim [--json]")
+            case "hard-drop":
+                print("Usage:\n  conjet memory hard-drop [--drop-mib N] [--json]")
             case "trace":
                 print("Usage:\n  conjet memory trace [--json]")
             default:
@@ -5284,6 +5331,7 @@ struct ConjetCLI {
               status    Show memory profile and live dynamic target
               trace     Show recent dynamic memory governor decisions
               reclaim   Request guest cache cleanup and memory target recompute
+              hard-drop Offline removable guest memory blocks and decommit host backing pages
             """
         )
     }

@@ -500,6 +500,9 @@ public enum CloudInitSeedBuilder {
               [Service]
               Type=simple
               Environment=PYTHONUNBUFFERED=1
+              OOMScoreAdjust=-1000
+              MemoryMin=64M
+              MemoryLow=128M
               ExecStartPre=/bin/sh -c 'modprobe vmw_vsock_virtio_transport 2>/dev/null || modprobe virtio_vsock 2>/dev/null || true'
               ExecStartPre=/bin/sh -c 'mkdir -p /run/conjet /mnt/conjetboot /etc/conjet; mountpoint -q /mnt/conjetboot || mount -t virtiofs conjetboot /mnt/conjetboot 2>/dev/null || true; rm -f /run/conjet/docker-vsock-ready'
               ExecStart=/usr/local/sbin/conjet-docker-vsock-entrypoint.sh

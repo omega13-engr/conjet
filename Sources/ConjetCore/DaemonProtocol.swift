@@ -23,6 +23,7 @@ public enum DaemonCommand: String, Codable, Equatable, Sendable {
     case clockRepair = "clock-repair"
     case pruneCache = "prune-cache"
     case memoryReclaim = "memory-reclaim"
+    case memoryHardDrop = "memory-hard-drop"
     case pulseSubscribe = "pulse-subscribe"
 }
 
@@ -390,6 +391,7 @@ public struct DaemonResponse: Codable, Equatable, Sendable {
     public var dockerRun: DockerRunResult?
     public var dockerCompose: DockerComposeResult?
     public var pulse: ConjetPulseState?
+    public var memoryHardDrop: ConjetMemoryHardDropResult?
 
     public init(
         ok: Bool,
@@ -398,7 +400,8 @@ public struct DaemonResponse: Codable, Equatable, Sendable {
         vm: VMRuntimeStatus? = nil,
         dockerRun: DockerRunResult? = nil,
         dockerCompose: DockerComposeResult? = nil,
-        pulse: ConjetPulseState? = nil
+        pulse: ConjetPulseState? = nil,
+        memoryHardDrop: ConjetMemoryHardDropResult? = nil
     ) {
         self.ok = ok
         self.message = message
@@ -407,6 +410,7 @@ public struct DaemonResponse: Codable, Equatable, Sendable {
         self.dockerRun = dockerRun
         self.dockerCompose = dockerCompose
         self.pulse = pulse
+        self.memoryHardDrop = memoryHardDrop
     }
 }
 

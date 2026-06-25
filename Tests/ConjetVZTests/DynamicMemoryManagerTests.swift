@@ -5,6 +5,45 @@ import Foundation
 import XCTest
 
 final class DynamicMemoryManagerTests: XCTestCase {
+    func testGuestMemoryHardDropRequestParsesOfflinedRanges() throws {
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: "{}",
+            hardDropBody: #"{"accepted":true,"requested_bytes":536870912,"offlined_bytes":1073741824,"failed_bytes":0,"candidate_count":1,"range_count":1,"failed_count":0,"error_number":0,"last_failed_error_number":0,"last_failed_start":0,"last_failed_size":0,"message":"ok","ranges":[{"start":5368709120,"size":1073741824}],"source":"test"}"#
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+
+        let response = try metricsClient.hardDrop(bytes: 536_870_912)
+
+        XCTAssertTrue(response.accepted)
+        XCTAssertEqual(response.requestedBytes, 536_870_912)
+        XCTAssertEqual(response.offlinedBytes, 1_073_741_824)
+        XCTAssertEqual(response.ranges, [ConjetMemoryRange(start: 5_368_709_120, size: 1_073_741_824)])
+        XCTAssertTrue(connector.lastRequest.contains("POST /conjet-memory-hard-drop?bytes=536870912"))
+        XCTAssertEqual(connector.hardDropRequests, 1)
+    }
+
+    func testGuestMemoryHardDropFailureIncludesGuestDiagnostics() throws {
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: "{}",
+            hardDropBody: #"{"accepted":false,"requested_bytes":536870912,"offlined_bytes":0,"failed_bytes":1073741824,"candidate_count":1,"range_count":0,"failed_count":1,"error_number":16,"last_failed_error_number":16,"last_failed_start":3221225472,"last_failed_size":1073741824,"message":"memory block offline failed: 1 of 1 candidates failed, last errno 16 (Device busy)","ranges":[],"source":"test"}"#,
+            hardDropStatusCode: 503
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+
+        XCTAssertThrowsError(try metricsClient.hardDrop(bytes: 536_870_912)) { error in
+            guard case ConjetError.unavailable(let message) = error else {
+                return XCTFail("expected unavailable error, got \(error)")
+            }
+            XCTAssertTrue(message.contains("HTTP 503"))
+            XCTAssertTrue(message.contains("Device busy"))
+            XCTAssertTrue(message.contains("errno 16"))
+            XCTAssertTrue(message.contains("candidates 1"))
+            XCTAssertTrue(message.contains("failed 1"))
+            XCTAssertTrue(message.contains("failed 1024 MiB"))
+        }
+        XCTAssertEqual(connector.hardDropRequests, 1)
+    }
+
     func testForceRecomputePreservesConfiguredGuestCapacity() throws {
         let policy = Self.policy()
         let metricsBody = """
@@ -77,6 +116,39 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(pressureTrace?.action, "observe")
         XCTAssertEqual(pressureTrace?.reason, "test.swap-pressure")
         XCTAssertEqual(appliedTargets.values, [])
+    }
+
+    func testResidualDiskSwapBelowNoiseFloorAllowsIdleAutodrop() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":629145600,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"swap_total":10722738176,"swap_free":10684989440,"disk_swap_total":4294967296,"disk_swap_free":4257218560,"zram_orig_data_size":67108864,"zram_compr_data_size":16777216,"zram_mem_used_total":25165824,"container_memory_current":0,"container_memory_peak":4294967296,"container_swap_current":0,"container_memory_oom_kill_events":0,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: idleMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let footprintSamples = HostFootprintSamples([
+            UInt64(12 * 1024 * 1024 * 1024),
+            UInt64(12 * 1024 * 1024 * 1024)
+        ])
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            hostFootprintBytes: { footprintSamples.next() },
+            hostFootprintConvergenceDelays: [0]
+        )
+
+        try manager.forceRecompute(reason: "docker.workloadFinished")
+
+        let status = manager.status()
+        XCTAssertEqual(status.diskSwapUsedMiB, 36)
+        XCTAssertEqual(status.pressure, .low)
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(appliedTargets.values, [1280])
+        XCTAssertEqual(status.currentTargetMiB, 1280)
+        XCTAssertEqual(status.trace?.last?.action, "idle-autodrop")
     }
 
     func testManualIdleReclaimKeepsConfiguredCapacityAndDoesNotPulse() throws {
@@ -790,10 +862,13 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
     private var body: String
     private var reclaimBody: String
     private var reclaimStatusBody: String
+    private var hardDropBody: String
     private var reclaimStatusCode: Int
+    private var hardDropStatusCode: Int
     private var capturedReclaimRequests = 0
     private var capturedReclaimCancelRequests = 0
     private var capturedReclaimStatusRequests = 0
+    private var capturedHardDropRequests = 0
     private var capturedLastRequest = ""
 
     var reclaimRequests: Int {
@@ -824,16 +899,27 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
         return value
     }
 
+    var hardDropRequests: Int {
+        lock.lock()
+        let value = capturedHardDropRequests
+        lock.unlock()
+        return value
+    }
+
     init(
         body: String,
         reclaimBody: String? = nil,
         reclaimStatusBody: String? = nil,
-        reclaimStatusCode: Int = 202
+        hardDropBody: String? = nil,
+        reclaimStatusCode: Int = 202,
+        hardDropStatusCode: Int = 200
     ) {
         self.body = body
         self.reclaimBody = reclaimBody ?? #"{"accepted":true,"epoch":1,"state":"queued","source":"test"}"#
         self.reclaimStatusBody = reclaimStatusBody ?? #"{"epoch":1,"state":"done","requested_bytes":67108864,"observed_current_drop_bytes":67108864,"source":"test"}"#
+        self.hardDropBody = hardDropBody ?? #"{"accepted":true,"requested_bytes":67108864,"offlined_bytes":67108864,"failed_bytes":0,"candidate_count":1,"range_count":1,"failed_count":0,"error_number":0,"last_failed_error_number":0,"last_failed_start":0,"last_failed_size":0,"message":"ok","ranges":[{"start":2147483648,"size":67108864}],"source":"test"}"#
         self.reclaimStatusCode = reclaimStatusCode
+        self.hardDropStatusCode = hardDropStatusCode
     }
 
     func setBody(_ body: String) {
@@ -895,6 +981,11 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
             capturedReclaimCancelRequests += 1
             snapshot = #"{"epoch":2,"state":"cancelled","requested_bytes":0,"observed_current_drop_bytes":0,"source":"test"}"#
             statusCode = 200
+        } else if request.contains("/conjet-memory-hard-drop") {
+            capturedLastRequest = request
+            capturedHardDropRequests += 1
+            snapshot = hardDropBody
+            statusCode = hardDropStatusCode
         } else if request.contains("/conjet-memory-reclaim/status") {
             capturedReclaimStatusRequests += 1
             snapshot = reclaimStatusBody
@@ -916,6 +1007,8 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
             statusText = "OK"
         case 202:
             statusText = "Accepted"
+        case 503:
+            statusText = "Service Unavailable"
         default:
             statusText = "Not Found"
         }

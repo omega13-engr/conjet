@@ -70,6 +70,7 @@ static int inotify_add_watch(int fd, const char *path, uint32_t mask) {
 #define CONJET_MEMD_PORT 2376
 #define MAX_CGROUP_DEPTH 8
 #define MIN_EVENT_INTERVAL_MS 1000
+#define MAX_MEMORY_HARD_DROP_RANGES 256
 
 struct memory_metrics {
     uint64_t mem_total;
@@ -120,6 +121,27 @@ struct reclaim_status {
     enum reclaim_state state;
     int error_number;
     char reason[64];
+};
+
+struct memory_hard_drop_range {
+    uint64_t start;
+    uint64_t size;
+};
+
+struct memory_hard_drop_result {
+    bool accepted;
+    uint64_t requested_bytes;
+    uint64_t offlined_bytes;
+    uint64_t failed_bytes;
+    size_t candidate_count;
+    size_t range_count;
+    size_t failed_count;
+    int error_number;
+    int last_failed_error_number;
+    uint64_t last_failed_start;
+    uint64_t last_failed_size;
+    char message[128];
+    struct memory_hard_drop_range ranges[MAX_MEMORY_HARD_DROP_RANGES];
 };
 
 static pthread_mutex_t reclaim_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -654,6 +676,278 @@ static uint64_t extract_query_u64(const char *request, const char *name) {
     return strtoull(cursor, NULL, 10);
 }
 
+static const char *configured_memory_sysfs_root(void) {
+    const char *root = getenv("CONJET_MEMORY_SYSFS_ROOT");
+    if (root != NULL && root[0] != '\0') {
+        return root;
+    }
+    return "/sys/devices/system/memory";
+}
+
+static int join_memory_path(char *out, size_t out_len, const char *lhs, const char *rhs) {
+    int written = snprintf(out, out_len, "%s/%s", lhs, rhs);
+    return written > 0 && (size_t)written < out_len ? 0 : ENAMETOOLONG;
+}
+
+static bool read_text_file(const char *path, char *out, size_t out_len) {
+    if (out_len == 0) {
+        return false;
+    }
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return false;
+    }
+    size_t n = fread(out, 1, out_len - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' ' || out[n - 1] == '\t')) {
+        out[--n] = '\0';
+    }
+    return n > 0;
+}
+
+static bool read_memory_u64_file(const char *path, uint64_t *value) {
+    char text[64];
+    if (!read_text_file(path, text, sizeof(text))) {
+        return false;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long long parsed = strtoull(text, &end, 0);
+    if (errno != 0 || end == text) {
+        return false;
+    }
+    *value = (uint64_t)parsed;
+    return true;
+}
+
+static bool write_text_file(const char *path, const char *value, int *error_out) {
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (error_out != NULL) {
+            *error_out = errno == 0 ? EIO : errno;
+        }
+        return false;
+    }
+    bool ok = write_full(fd, value, strlen(value)) == 0;
+    int saved = ok ? 0 : (errno == 0 ? EIO : errno);
+    if (close(fd) != 0 && saved == 0) {
+        saved = errno == 0 ? EIO : errno;
+        ok = false;
+    }
+    if (error_out != NULL) {
+        *error_out = saved;
+    }
+    return ok;
+}
+
+struct memory_block_candidate {
+    uint64_t start;
+    uint64_t size;
+    char state_path[4096];
+};
+
+static int compare_memory_block_desc(const void *lhs, const void *rhs) {
+    const struct memory_block_candidate *a = (const struct memory_block_candidate *)lhs;
+    const struct memory_block_candidate *b = (const struct memory_block_candidate *)rhs;
+    if (a->start < b->start) {
+        return 1;
+    }
+    if (a->start > b->start) {
+        return -1;
+    }
+    return 0;
+}
+
+static bool memory_entry_index(const char *name, uint64_t *index_out) {
+    if (strncmp(name, "memory", 6) != 0 || name[6] == '\0') {
+        return false;
+    }
+    const char *cursor = name + 6;
+    for (const char *p = cursor; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+    }
+    *index_out = strtoull(cursor, NULL, 10);
+    return true;
+}
+
+static size_t collect_removable_memory_blocks(
+    const char *root,
+    uint64_t block_size,
+    struct memory_block_candidate *candidates,
+    size_t candidate_capacity
+) {
+    DIR *dir = opendir(root);
+    if (dir == NULL) {
+        return 0;
+    }
+    size_t count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (count >= candidate_capacity) {
+            break;
+        }
+        uint64_t fallback_index = 0;
+        if (!memory_entry_index(entry->d_name, &fallback_index)) {
+            continue;
+        }
+        char block_dir[4096];
+        char state_path[4096];
+        char removable_path[4096];
+        char phys_index_path[4096];
+        char state[64];
+        uint64_t removable = 0;
+        uint64_t phys_index = fallback_index;
+        if (join_memory_path(block_dir, sizeof(block_dir), root, entry->d_name) != 0 ||
+            join_memory_path(state_path, sizeof(state_path), block_dir, "state") != 0 ||
+            join_memory_path(removable_path, sizeof(removable_path), block_dir, "removable") != 0 ||
+            join_memory_path(phys_index_path, sizeof(phys_index_path), block_dir, "phys_index") != 0) {
+            continue;
+        }
+        if (!read_text_file(state_path, state, sizeof(state)) ||
+            strncmp(state, "online", strlen("online")) != 0 ||
+            !read_memory_u64_file(removable_path, &removable) ||
+            removable == 0) {
+            continue;
+        }
+        (void)read_memory_u64_file(phys_index_path, &phys_index);
+        candidates[count].start = phys_index * block_size;
+        candidates[count].size = block_size;
+        snprintf(candidates[count].state_path, sizeof(candidates[count].state_path), "%s", state_path);
+        count++;
+    }
+    closedir(dir);
+    qsort(candidates, count, sizeof(candidates[0]), compare_memory_block_desc);
+    return count;
+}
+
+static struct memory_hard_drop_result offline_guest_memory_blocks(uint64_t requested_bytes) {
+    struct memory_hard_drop_result result;
+    memset(&result, 0, sizeof(result));
+    result.requested_bytes = requested_bytes;
+    result.accepted = false;
+    snprintf(result.message, sizeof(result.message), "not attempted");
+
+    if (requested_bytes == 0) {
+        result.error_number = EINVAL;
+        snprintf(result.message, sizeof(result.message), "bytes must be greater than zero");
+        return result;
+    }
+
+    const char *root = configured_memory_sysfs_root();
+    char block_size_path[4096];
+    uint64_t block_size = 0;
+    if (join_memory_path(block_size_path, sizeof(block_size_path), root, "block_size_bytes") != 0 ||
+        !read_memory_u64_file(block_size_path, &block_size) ||
+        block_size == 0) {
+        result.error_number = ENOENT;
+        snprintf(result.message, sizeof(result.message), "memory block size is unavailable");
+        return result;
+    }
+
+    struct memory_block_candidate candidates[MAX_MEMORY_HARD_DROP_RANGES];
+    size_t candidate_count = collect_removable_memory_blocks(
+        root,
+        block_size,
+        candidates,
+        MAX_MEMORY_HARD_DROP_RANGES
+    );
+    result.candidate_count = candidate_count;
+    if (candidate_count == 0) {
+        result.error_number = ENODATA;
+        snprintf(result.message, sizeof(result.message), "no removable online memory blocks");
+        return result;
+    }
+
+    for (size_t i = 0; i < candidate_count && result.offlined_bytes < requested_bytes; i++) {
+        int write_error = 0;
+        if (!write_text_file(candidates[i].state_path, "offline\n", &write_error)) {
+            int saved = write_error == 0 ? EIO : write_error;
+            result.failed_count++;
+            result.failed_bytes += candidates[i].size;
+            result.last_failed_error_number = saved;
+            result.last_failed_start = candidates[i].start;
+            result.last_failed_size = candidates[i].size;
+            if (result.error_number == 0) {
+                result.error_number = saved;
+            }
+            continue;
+        }
+        result.ranges[result.range_count].start = candidates[i].start;
+        result.ranges[result.range_count].size = candidates[i].size;
+        result.range_count++;
+        result.offlined_bytes += candidates[i].size;
+    }
+
+    result.accepted = result.offlined_bytes > 0;
+    if (result.accepted) {
+        result.error_number = 0;
+        snprintf(result.message, sizeof(result.message), "offlined %llu bytes across %zu memory blocks",
+                 (unsigned long long)result.offlined_bytes,
+                 result.range_count);
+    } else if (result.error_number == 0) {
+        result.error_number = EBUSY;
+        snprintf(result.message, sizeof(result.message), "removable memory blocks could not be offlined");
+    } else {
+        snprintf(result.message, sizeof(result.message),
+                 "memory block offline failed: %zu of %zu candidates failed, last errno %d (%s)",
+                 result.failed_count,
+                 result.candidate_count,
+                 result.last_failed_error_number,
+                 strerror(result.last_failed_error_number));
+    }
+    return result;
+}
+
+static void memory_hard_drop_json(
+    char *body,
+    size_t body_len,
+    const struct memory_hard_drop_result *result
+) {
+    size_t offset = 0;
+    int n = snprintf(body, body_len,
+        "{\"accepted\":%s,\"requested_bytes\":%llu,\"offlined_bytes\":%llu,"
+        "\"failed_bytes\":%llu,\"candidate_count\":%zu,"
+        "\"range_count\":%zu,\"failed_count\":%zu,"
+        "\"error_number\":%d,\"last_failed_error_number\":%d,"
+        "\"last_failed_start\":%llu,\"last_failed_size\":%llu,"
+        "\"message\":\"%s\",\"ranges\":[",
+        result->accepted ? "true" : "false",
+        (unsigned long long)result->requested_bytes,
+        (unsigned long long)result->offlined_bytes,
+        (unsigned long long)result->failed_bytes,
+        result->candidate_count,
+        result->range_count,
+        result->failed_count,
+        result->error_number,
+        result->last_failed_error_number,
+        (unsigned long long)result->last_failed_start,
+        (unsigned long long)result->last_failed_size,
+        result->message);
+    if (n < 0) {
+        return;
+    }
+    offset = (size_t)n < body_len ? (size_t)n : body_len;
+    for (size_t i = 0; i < result->range_count && offset < body_len; i++) {
+        n = snprintf(body + offset, body_len - offset,
+            "%s{\"start\":%llu,\"size\":%llu}",
+            i == 0 ? "" : ",",
+            (unsigned long long)result->ranges[i].start,
+            (unsigned long long)result->ranges[i].size);
+        if (n < 0) {
+            return;
+        }
+        offset += (size_t)n < body_len - offset ? (size_t)n : body_len - offset;
+    }
+    if (offset < body_len) {
+        snprintf(body + offset, body_len - offset, "],\"source\":\"conjet-memd\"}\n");
+    } else if (body_len > 0) {
+        body[body_len - 1] = '\0';
+    }
+}
+
 static void reclaim_submission_json(char *body, size_t body_len, const struct reclaim_status *status, bool accepted) {
     snprintf(body, body_len,
         "{\"accepted\":%s,\"epoch\":%llu,\"state\":\"%s\",\"error_number\":%d,\"source\":\"conjet-memd\"}\n",
@@ -877,6 +1171,19 @@ static void write_reclaim_status_response(int client, const char *request) {
     write_http_response(client, "200 OK", "application/json", body);
 }
 
+static void write_memory_hard_drop_response(int client, const char *request) {
+    uint64_t bytes = extract_query_u64(request, "bytes");
+    struct memory_hard_drop_result result = offline_guest_memory_blocks(bytes);
+    char body[16 * 1024];
+    memory_hard_drop_json(body, sizeof(body), &result);
+    write_http_response(
+        client,
+        result.accepted ? "200 OK" : "503 Service Unavailable",
+        "application/json",
+        body
+    );
+}
+
 static void write_http_response(int fd, const char *status, const char *content_type, const char *body) {
     char header[512];
     size_t body_len = strlen(body);
@@ -1044,12 +1351,16 @@ static void handle_client(int client) {
     const char reclaim_post_path[] = "POST /conjet-memory-reclaim";
     const char reclaim_cancel_path[] = "POST /conjet-memory-reclaim/cancel-before";
     const char reclaim_status_path[] = "GET /conjet-memory-reclaim/status";
+    const char hard_drop_path[] = "POST /conjet-memory-hard-drop";
     if ((size_t)n >= sizeof(metrics_path) - 1 &&
         memcmp(first, metrics_path, sizeof(metrics_path) - 1) == 0) {
         char body[4096];
         struct memory_metrics metrics = collect_metrics();
         metrics_json(&metrics, body, sizeof(body));
         write_http_response(client, "200 OK", "application/json", body);
+    } else if ((size_t)n >= sizeof(hard_drop_path) - 1 &&
+               memcmp(first, hard_drop_path, sizeof(hard_drop_path) - 1) == 0) {
+        write_memory_hard_drop_response(client, first);
     } else if ((size_t)n >= sizeof(reclaim_status_path) - 1 &&
                memcmp(first, reclaim_status_path, sizeof(reclaim_status_path) - 1) == 0) {
         write_reclaim_status_response(client, first);
@@ -1068,7 +1379,7 @@ static void handle_client(int client) {
     } else if ((size_t)n >= sizeof(capabilities_path) - 1 &&
                memcmp(first, capabilities_path, sizeof(capabilities_path) - 1) == 0) {
         write_http_response(client, "200 OK", "application/json",
-            "{\"version\":2,\"dynamic_memory_events\":true,\"cache_reclaim\":true,\"source\":\"conjet-memd\"}\n");
+            "{\"version\":3,\"dynamic_memory_events\":true,\"cache_reclaim\":true,\"memory_hard_drop\":true,\"source\":\"conjet-memd\"}\n");
     } else {
         write_http_response(client, "404 Not Found", "text/plain", "not found\n");
     }

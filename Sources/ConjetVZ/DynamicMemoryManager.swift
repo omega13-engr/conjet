@@ -126,6 +126,56 @@ final class GuestMemoryMetricsClient: @unchecked Sendable {
         return try ConjetJSON.decoder().decode(GuestMemoryReclaimStatus.self, from: response.body)
     }
 
+    @discardableResult
+    func hardDrop(bytes: UInt64) throws -> GuestMemoryHardDropResponse {
+        let connection = try connector.connect()
+        defer { connection.close() }
+        Self.setNoSigpipe(connection.fileDescriptor)
+        Self.setSocketTimeout(connection.fileDescriptor, seconds: 10)
+        try Self.writeHTTPPost(path: "/conjet-memory-hard-drop?bytes=\(bytes)", fd: connection.fileDescriptor)
+        let response = try Self.readHTTPResponse(fd: connection.fileDescriptor, maxBytes: 32 * 1024)
+        guard response.statusCode == 200 else {
+            throw ConjetError.unavailable(Self.hardDropFailureMessage(
+                statusCode: response.statusCode,
+                body: response.body
+            ))
+        }
+        return try ConjetJSON.decoder().decode(GuestMemoryHardDropResponse.self, from: response.body)
+    }
+
+    private static func hardDropFailureMessage(statusCode: Int, body: Data) -> String {
+        var message = "guest memory hard-drop endpoint returned HTTP \(statusCode)"
+        guard let decoded = try? ConjetJSON.decoder().decode(GuestMemoryHardDropResponse.self, from: body) else {
+            if let text = String(data: body, encoding: .utf8) {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    message += ": \(trimmed)"
+                }
+            }
+            return message
+        }
+        message += ": \(decoded.message)"
+        message += " (errno \(decoded.errorNumber)"
+        if let last = decoded.lastFailedErrorNumber, last != 0, last != decoded.errorNumber {
+            message += ", last errno \(last)"
+        }
+        if let candidateCount = decoded.candidateCount {
+            message += ", candidates \(candidateCount)"
+        }
+        if let failedCount = decoded.failedCount {
+            message += ", failed \(failedCount)"
+        }
+        if let failedBytes = decoded.failedBytes {
+            message += ", failed \(Self.bytesToMiB(failedBytes)) MiB"
+        }
+        message += ")"
+        return message
+    }
+
+    private static func bytesToMiB(_ bytes: UInt64) -> UInt64 {
+        bytes / 1_048_576
+    }
+
     func streamEvents(
         shouldContinue: @escaping @Sendable () -> Bool,
         onConnection: @escaping @Sendable (GuestConnection) -> Void = { _ in },
@@ -290,6 +340,17 @@ final class GuestMemoryMetricsClient: @unchecked Sendable {
     }
 }
 
+struct HostMemoryRuntimeSnapshot: Equatable, Sendable {
+    var physicalFootprintBytes: UInt64?
+    var balloonActualPages: UInt64?
+    var balloonInflatePages: UInt64?
+    var balloonDeflatePages: UInt64?
+    var balloonReportedFreePages: UInt64?
+    var balloonReportedFreeReclaimedBytes: UInt64?
+    var balloonReclaimFailures: UInt64?
+    var balloonMalformedReports: UInt64?
+}
+
 struct GuestMemoryReclaimSubmission: Codable, Equatable, Sendable {
     var accepted: Bool
     var epoch: UInt64
@@ -313,11 +374,46 @@ struct GuestMemoryReclaimStatus: Codable, Equatable, Sendable {
     }
 }
 
+struct GuestMemoryHardDropResponse: Codable, Equatable, Sendable {
+    var accepted: Bool
+    var requestedBytes: UInt64
+    var offlinedBytes: UInt64
+    var failedBytes: UInt64?
+    var candidateCount: Int?
+    var rangeCount: Int
+    var failedCount: Int?
+    var errorNumber: Int
+    var lastFailedErrorNumber: Int?
+    var lastFailedStart: UInt64?
+    var lastFailedSize: UInt64?
+    var message: String
+    var ranges: [ConjetMemoryRange]
+    var source: String?
+
+    enum CodingKeys: String, CodingKey {
+        case accepted
+        case requestedBytes = "requested_bytes"
+        case offlinedBytes = "offlined_bytes"
+        case failedBytes = "failed_bytes"
+        case candidateCount = "candidate_count"
+        case rangeCount = "range_count"
+        case failedCount = "failed_count"
+        case errorNumber = "error_number"
+        case lastFailedErrorNumber = "last_failed_error_number"
+        case lastFailedStart = "last_failed_start"
+        case lastFailedSize = "last_failed_size"
+        case message
+        case ranges
+        case source
+    }
+}
+
 final class DynamicMemoryManager: @unchecked Sendable {
     private let policy: ConjetMemoryPolicy
     private let metricsClient: GuestMemoryMetricsClient
     private let setTargetBytes: @Sendable (UInt64) throws -> Void
     private let hostFootprintBytes: (@Sendable () throws -> UInt64?)?
+    private let hostMemorySnapshot: (@Sendable () throws -> HostMemoryRuntimeSnapshot?)?
     private let hostFootprintConvergenceDelays: [TimeInterval]
     private let activeReclaimFootprintRefreshInterval: TimeInterval
     private let lock = NSLock()
@@ -339,6 +435,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private var lastReclaimFootprintBeforeBytes: UInt64?
     private var lastReclaimFootprintAfterBytes: UInt64?
     private var lastReclaimFootprintDropBytes: UInt64?
+    private var lastHostMemorySnapshot: HostMemoryRuntimeSnapshot?
     private var reclaimGeneration = 0
     private var activeReclaimEpoch: UInt64?
     private var idleBalloonActive = false
@@ -350,6 +447,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         metricsClient: GuestMemoryMetricsClient,
         setTargetBytes: @escaping @Sendable (UInt64) throws -> Void,
         hostFootprintBytes: (@Sendable () throws -> UInt64?)? = nil,
+        hostMemorySnapshot: (@Sendable () throws -> HostMemoryRuntimeSnapshot?)? = nil,
         hostFootprintConvergenceDelays: [TimeInterval] = [0, 2, 5, 10, 30],
         activeReclaimFootprintRefreshInterval: TimeInterval = 2.0
     ) {
@@ -357,6 +455,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         self.metricsClient = metricsClient
         self.setTargetBytes = setTargetBytes
         self.hostFootprintBytes = hostFootprintBytes
+        self.hostMemorySnapshot = hostMemorySnapshot
         self.hostFootprintConvergenceDelays = hostFootprintConvergenceDelays
         self.activeReclaimFootprintRefreshInterval = activeReclaimFootprintRefreshInterval
         self.currentTargetMiB = policy.configuredMemoryMiB
@@ -467,6 +566,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let traceSnapshot = trace
         let hostFootprintMiB = lastHostFootprintBytes.map(Self.bytesToMiB)
         let hostReclaimedMiB = lastReclaimFootprintDropBytes.map(Self.bytesToMiB)
+        let hostSnapshot = lastHostMemorySnapshot
         lock.unlock()
 
         let guestAvailableMiB = metrics.map { Self.bytesToMiB($0.memAvailableBytes) }
@@ -485,7 +585,14 @@ final class DynamicMemoryManager: @unchecked Sendable {
             currentTargetMiB: target,
             balloonedMiB: max(0, policy.configuredMemoryMiB - target),
             hostFootprintMiB: hostFootprintMiB,
+            balloonActualMiB: hostSnapshot?.balloonActualPages.map { Self.bytesToMiB($0 * 4096) },
             hostReclaimedMiB: hostReclaimedMiB,
+            balloonInflatePages: hostSnapshot?.balloonInflatePages,
+            balloonDeflatePages: hostSnapshot?.balloonDeflatePages,
+            balloonReportedFreePages: hostSnapshot?.balloonReportedFreePages,
+            balloonReportedFreeReclaimedMiB: hostSnapshot?.balloonReportedFreeReclaimedBytes.map(Self.bytesToMiB),
+            balloonReclaimFailures: hostSnapshot?.balloonReclaimFailures,
+            balloonMalformedReports: hostSnapshot?.balloonMalformedReports,
             guestAvailableMiB: guestAvailableMiB,
             containerMemoryMiB: containerMiB,
             buildCgroupMemoryMiB: buildCgroupMiB,
@@ -503,6 +610,39 @@ final class DynamicMemoryManager: @unchecked Sendable {
             message: statusMessage,
             trace: traceSnapshot
         )
+    }
+
+    func recordHardDropBalloonTarget(
+        targetMiB: Int,
+        reason: String,
+        hostFootprintBefore: UInt64?,
+        hostFootprintAfter: UInt64?,
+        hostFootprintDrop: UInt64?
+    ) {
+        lock.lock()
+        currentTargetMiB = max(effectiveMinimumMiB(), min(policy.configuredMemoryMiB, targetMiB))
+        idleBalloonActive = currentTargetMiB < policy.configuredMemoryMiB
+        lastTargetChangeAt = Date()
+        lastAdjustmentReason = reason
+        lastReclaimFootprintBeforeBytes = hostFootprintBefore
+        lastReclaimFootprintAfterBytes = hostFootprintAfter
+        lastReclaimFootprintDropBytes = hostFootprintDrop
+        if let hostFootprintAfter {
+            lastHostFootprintBytes = hostFootprintAfter
+        }
+        message = "hard memory drop lowered guest target to \(currentTargetMiB) MiB"
+        recordTraceLocked(ConjetMemoryTraceEvent(
+            timestamp: Date(),
+            targetMiB: currentTargetMiB,
+            desiredMiB: currentTargetMiB,
+            action: "hard-drop-balloon",
+            reason: reason,
+            pressure: .low,
+            hostFootprintBeforeBytes: hostFootprintBefore,
+            hostFootprintAfterBytes: hostFootprintAfter,
+            hostFootprintDropBytes: hostFootprintDrop
+        ))
+        lock.unlock()
     }
 
     private func eventLoop() {
@@ -562,7 +702,12 @@ final class DynamicMemoryManager: @unchecked Sendable {
     }
 
     private func schedulePostWorkloadReclaims(reason: String, generation: Int) {
-        for (suffix, delay) in [("quiesced", 0.5), ("observe", 2.75)] {
+        for (suffix, delay) in [
+            ("quiesced", 0.5),
+            ("observe", 2.75),
+            ("settled", 10.0),
+            ("swap-drained", 30.0)
+        ] as [(String, TimeInterval)] {
             let scheduledReason = "\(reason).\(suffix)"
             let item = DispatchWorkItem { [weak self] in
                 self?.requestSnapshot(reason: scheduledReason, generation: generation)
@@ -741,6 +886,25 @@ final class DynamicMemoryManager: @unchecked Sendable {
     }
 
     private func sampleHostFootprintBytes() -> UInt64? {
+        if let hostMemorySnapshot {
+            do {
+                let snapshot = try hostMemorySnapshot()
+                lock.lock()
+                if let snapshot {
+                    lastHostMemorySnapshot = snapshot
+                    if let footprint = snapshot.physicalFootprintBytes {
+                        lastHostFootprintBytes = footprint
+                    }
+                }
+                lock.unlock()
+                return snapshot?.physicalFootprintBytes
+            } catch {
+                lock.lock()
+                message = "host memory snapshot unavailable: \(error)"
+                lock.unlock()
+                return nil
+            }
+        }
         guard let hostFootprintBytes else { return nil }
         do {
             let sample = try hostFootprintBytes()
@@ -1125,11 +1289,16 @@ final class DynamicMemoryManager: @unchecked Sendable {
     }
 
     private static func pressureState(_ metrics: GuestMemoryMetrics) -> ConjetMemoryPressureState {
-        if metrics.containerOOMKillEvents > 0 || metrics.diskSwapUsedBytes > 0 {
+        if metrics.containerOOMKillEvents > 0 {
             return .high
         }
         if metrics.psiFullAvg10 > 0.05 || bytesToMiB(metrics.memAvailableBytes) < 512 {
             return .high
+        }
+        let significantSwapUse = metrics.diskSwapUsedBytes > reclaimSwapNoiseFloorBytes
+            || metrics.containerSwapCurrentBytes > reclaimSwapNoiseFloorBytes
+        if significantSwapUse {
+            return .elevated
         }
         if metrics.psiSomeAvg10 > 0.5 {
             return .elevated
