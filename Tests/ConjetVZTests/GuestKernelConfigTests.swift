@@ -571,36 +571,38 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(imageScript.contains("sha512sum \"$(basename \"${OUT_IMAGE}\")\""))
     }
 
-    func testConjetCoreReleaseWorkflowPublishesOnlyJetstreamLinuxKernelAsset() throws {
+    func testConjetCoreReleaseWorkflowPublishesJetstreamKernelAndRootfsAssets() throws {
         let workflowURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".github/workflows/conjet-core-image.yml")
         let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
 
-        XCTAssertTrue(workflow.contains("name: Jetstream Linux Kernel Release"))
+        XCTAssertTrue(workflow.contains("name: Conjet Core Jetstream Assets Release"))
         XCTAssertTrue(workflow.contains("Build Jetstream Linux kernel asset"))
+        XCTAssertTrue(workflow.contains("Build Conjet Core Jetstream rootfs appliance"))
         XCTAssertTrue(workflow.contains("kernel_version:"))
+        XCTAssertTrue(workflow.contains("root_disk_gb:"))
         XCTAssertTrue(workflow.contains("guest/kernel/scripts/build-linux.sh"))
+        XCTAssertTrue(workflow.contains("make -C guest/image/conjet-core image"))
         XCTAssertTrue(workflow.contains("conjet-linux-${KERNEL_VERSION}-aarch64-Image"))
         XCTAssertTrue(workflow.contains("sha512sum \"$(basename \"${kernel_asset}\")\" > \"$(basename \"${kernel_asset}\").sha512sum\""))
         XCTAssertTrue(workflow.contains("guest/kernel/dist/out/conjet-linux-*-aarch64-Image"))
         XCTAssertTrue(workflow.contains("guest/kernel/dist/out/conjet-linux-*-aarch64-Image.sha512sum"))
         XCTAssertTrue(workflow.contains("guest/kernel/dist/out/conjet-linux-*-aarch64-Image.json"))
-        XCTAssertFalse(workflow.contains("root_disk_gb:"))
-        XCTAssertFalse(workflow.contains("Build Conjet Core image"))
-        XCTAssertFalse(workflow.contains("make -C guest/image/conjet-core image"))
-        XCTAssertFalse(workflow.contains("*.raw.gz"))
+        XCTAssertTrue(workflow.contains("guest/image/conjet-core/dist/out/*.raw.gz"))
+        XCTAssertTrue(workflow.contains("guest/image/conjet-core/dist/out/*.raw.gz.sha512sum"))
+        XCTAssertTrue(workflow.contains("guest/image/conjet-core/dist/out/*.raw.gz.json"))
     }
 
-    func testConjetCoreReleaseNotesDeclareKernelOnlyHVFBackendPolicy() throws {
+    func testConjetCoreReleaseNotesDeclareJetstreamKernelAndRootfsBackendPolicy() throws {
         let workflowURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".github/workflows/conjet-core-image.yml")
         let workflow = try String(contentsOf: workflowURL, encoding: .utf8)
 
-        XCTAssertTrue(workflow.contains("Jetstream Linux Kernel v${{ needs.meta.outputs.version }}"))
-        XCTAssertTrue(workflow.contains("Jetstream HVF direct-kernel uses only this custom Linux kernel asset."))
+        XCTAssertTrue(workflow.contains("Conjet Core Jetstream Assets v${{ needs.meta.outputs.version }}"))
+        XCTAssertTrue(workflow.contains("Jetstream HVF direct-kernel boots the custom Linux kernel with the Conjet Core Docker rootfs appliance."))
     }
 
-    func testLocalConjetCoreReleaseRehearsalBuildsOnlyJetstreamKernelTriplet() throws {
+    func testLocalConjetCoreReleaseRehearsalBuildsJetstreamKernelAndRootfsTriplets() throws {
         let scriptURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("build-support/run-conjet-core-release-local.sh")
         let script = try String(contentsOf: scriptURL, encoding: .utf8)
@@ -613,15 +615,16 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(script.contains("docker --host \"${docker_host}\" run --rm"))
         XCTAssertTrue(script.contains("--ulimit nofile=65536:65536"))
         XCTAssertTrue(script.contains("container_platform=\"linux/arm64\""))
+        XCTAssertTrue(script.contains("--root-disk-gb"))
+        XCTAssertTrue(script.contains("ROOT_DISK_GB=\"${root_disk_gb}\""))
+        XCTAssertTrue(script.contains("docker.io"))
         XCTAssertTrue(script.contains("guest/kernel/scripts/build-linux.sh"))
         XCTAssertTrue(script.contains("conjet-linux-${KERNEL_VERSION}-aarch64-Image"))
         XCTAssertTrue(script.contains("sha512sum \"$(basename \"${kernel_asset}\")\" > \"$(basename \"${kernel_asset}\").sha512sum\""))
+        XCTAssertTrue(script.contains("make -C guest/image/conjet-core image"))
+        XCTAssertTrue(script.contains("guest/image/conjet-core/dist/out/*.raw.gz"))
         XCTAssertTrue(script.contains("ARTIFACT_DIR=\"${artifact_dir}\""))
-        XCTAssertFalse(script.contains("root_disk_gb"))
         XCTAssertFalse(script.contains("ROOTFS_ONLY"))
-        XCTAssertFalse(script.contains("make -C guest/image/conjet-core image"))
-        XCTAssertFalse(script.contains("*.raw.gz"))
-        XCTAssertFalse(script.contains("docker.io"))
     }
 
     func testPhase9OfflineVerifierRequiresFullDockerKernelConfigBuiltIns() throws {

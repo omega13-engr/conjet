@@ -1,4 +1,4 @@
-name: Jetstream Linux Kernel Release
+name: Conjet Core Jetstream Assets Release
 
 on:
   push:
@@ -14,6 +14,10 @@ on:
         description: Linux kernel version for the Jetstream HVF direct-kernel asset
         required: true
         default: 6.12.86
+      root_disk_gb:
+        description: Root disk size for the Conjet Core Docker appliance
+        required: true
+        default: "16"
 
 permissions:
   contents: write
@@ -30,6 +34,7 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
       kernel_version: ${{ steps.meta.outputs.kernel_version }}
+      root_disk_gb: ${{ steps.meta.outputs.root_disk_gb }}
     steps:
       - name: Resolve metadata
         id: meta
@@ -43,6 +48,11 @@ jobs:
             tag="${GITHUB_REF_NAME}"
             version="${tag#conjet-core-v}"
             kernel_version="6.12.86"
+            root_disk_gb="16"
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            root_disk_gb="${{ inputs.root_disk_gb }}"
           fi
 
           if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -59,11 +69,16 @@ jobs:
             echo "kernel_version must be X.Y.Z" >&2
             exit 1
           fi
+          if ! printf '%s\n' "${root_disk_gb}" | grep -Eq '^[0-9]+$'; then
+            echo "root_disk_gb must be an integer" >&2
+            exit 1
+          fi
 
           {
             echo "tag=${tag}"
             echo "version=${version}"
             echo "kernel_version=${kernel_version}"
+            echo "root_disk_gb=${root_disk_gb}"
           } >> "${GITHUB_OUTPUT}"
 
   build-jetstream-kernel:
@@ -146,14 +161,58 @@ jobs:
             guest/kernel/dist/out/conjet-linux-*-aarch64-Image.sha512sum
             guest/kernel/dist/out/conjet-linux-*-aarch64-Image.json
 
+  build-jetstream-rootfs:
+    name: Build Jetstream Docker rootfs appliance
+    runs-on: ubuntu-24.04-arm
+    needs:
+      - meta
+    env:
+      CONJET_CORE_VERSION: ${{ needs.meta.outputs.version }}
+      ROOT_DISK_GB: ${{ needs.meta.outputs.root_disk_gb }}
+      RUNTIME: docker
+      OS_ARCH: aarch64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify Conjet Core release VERSION
+        run: |
+          set -euo pipefail
+          actual="$(tr -d '[:space:]' < guest/image/conjet-core/VERSION)"
+          if [ "${actual}" != "${CONJET_CORE_VERSION}" ]; then
+            echo "guest/image/conjet-core/VERSION=${actual}, expected ${CONJET_CORE_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Build Conjet Core Jetstream rootfs appliance
+        run: |
+          set -euo pipefail
+          docker version
+          make -C guest/image/conjet-core image \
+            OS_ARCH="${OS_ARCH}" \
+            CONJET_CORE_VERSION="${CONJET_CORE_VERSION}" \
+            ROOT_DISK_GB="${ROOT_DISK_GB}" \
+            RUNTIME="${RUNTIME}"
+
+      - name: Upload Jetstream rootfs artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: jetstream-rootfs-${{ needs.meta.outputs.version }}-aarch64
+          if-no-files-found: error
+          path: |
+            guest/image/conjet-core/dist/out/*.raw.gz
+            guest/image/conjet-core/dist/out/*.raw.gz.sha512sum
+            guest/image/conjet-core/dist/out/*.raw.gz.json
+
   release:
-    name: Publish Jetstream Linux kernel release
+    name: Publish Conjet Core Jetstream assets release
     runs-on: ubuntu-24.04
     needs:
       - meta
       - build-jetstream-kernel
+      - build-jetstream-rootfs
     steps:
-      - name: Download Jetstream Linux kernel artifacts
+      - name: Download Jetstream release artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
@@ -163,11 +222,12 @@ jobs:
           set -euo pipefail
           notes="release-notes.md"
           {
-            echo "Jetstream Linux Kernel v${{ needs.meta.outputs.version }}"
+            echo "Conjet Core Jetstream Assets v${{ needs.meta.outputs.version }}"
             echo
             echo "Release tag: ${{ needs.meta.outputs.tag }}"
             echo "Jetstream Linux kernel: ${{ needs.meta.outputs.kernel_version }}"
-            echo "Backend policy: Jetstream HVF direct-kernel uses only this custom Linux kernel asset."
+            echo "Jetstream Docker rootfs: ${{ needs.meta.outputs.root_disk_gb }} GiB raw.gz appliance"
+            echo "Backend policy: Jetstream HVF direct-kernel boots the custom Linux kernel with the Conjet Core Docker rootfs appliance."
             echo "Commit: ${GITHUB_SHA}"
             echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
@@ -175,7 +235,7 @@ jobs:
             find release-assets -type f -print | sort | sed 's#^#- #'
           } > "${notes}"
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -186,9 +246,19 @@ jobs:
             exit 1
           fi
 
-          gh release create "${{ needs.meta.outputs.tag }}" "${assets[@]}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --target "${GITHUB_SHA}" \
-            --title "Jetstream Linux Kernel v${{ needs.meta.outputs.version }}" \
-            --notes-file release-notes.md \
-            --latest=false
+          if gh release view "${{ needs.meta.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${{ needs.meta.outputs.tag }}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+            gh release edit "${{ needs.meta.outputs.tag }}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Conjet Core Jetstream Assets v${{ needs.meta.outputs.version }}" \
+              --notes-file release-notes.md
+          else
+            gh release create "${{ needs.meta.outputs.tag }}" "${assets[@]}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "Conjet Core Jetstream Assets v${{ needs.meta.outputs.version }}" \
+              --notes-file release-notes.md \
+              --latest=false
+          fi
