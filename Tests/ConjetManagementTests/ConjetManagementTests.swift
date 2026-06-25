@@ -100,7 +100,10 @@ final class ConjetManagementTests: XCTestCase {
         }
 
         try withCurrentDirectory(root) {
-            let resolved = ConjetToolResolver.conjetCore(environment: ["PATH": binDirectory.path])
+            let resolved = ConjetToolResolver.conjetCore(environment: [
+                "CONJET_TOOL_RESOLVER_PATH_ONLY": "1",
+                "PATH": binDirectory.path
+            ])
             let executableName = URL(fileURLWithPath: resolved.executable).lastPathComponent
 
             XCTAssertEqual(executableName, "Conjet Core")

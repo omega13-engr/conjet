@@ -62,23 +62,25 @@ public enum ConjetToolResolver {
         if let override = executableOverride("CONJET_APP_CONJET_CORE_PATH", environment: environment) {
             return ResolvedTool(executable: override, source: "CONJET_APP_CONJET_CORE_PATH")
         }
-        if let bundled = bundledTool(named: "conjetd") {
-            return ResolvedTool(executable: bundled, source: "app bundle")
-        }
-        if let bundled = bundledTool(named: "Conjet Core") {
-            return ResolvedTool(executable: bundled, source: "legacy app bundle")
-        }
-        if let sibling = siblingTool(named: "conjetd", environment: environment) {
-            return ResolvedTool(executable: sibling, source: "sibling executable")
-        }
-        if let sibling = siblingTool(named: "Conjet Core", environment: environment) {
-            return ResolvedTool(executable: sibling, source: "legacy sibling executable")
-        }
-        if let local = localBuildTool(named: "conjetd") {
-            return ResolvedTool(executable: local, source: "SwiftPM build")
-        }
-        if let local = localBuildTool(named: "Conjet Core") {
-            return ResolvedTool(executable: local, source: "legacy SwiftPM build")
+        if !pathOnlyResolution(environment: environment) {
+            if let bundled = bundledTool(named: "conjetd") {
+                return ResolvedTool(executable: bundled, source: "app bundle")
+            }
+            if let bundled = bundledTool(named: "Conjet Core") {
+                return ResolvedTool(executable: bundled, source: "legacy app bundle")
+            }
+            if let sibling = siblingTool(named: "conjetd", environment: environment) {
+                return ResolvedTool(executable: sibling, source: "sibling executable")
+            }
+            if let sibling = siblingTool(named: "Conjet Core", environment: environment) {
+                return ResolvedTool(executable: sibling, source: "legacy sibling executable")
+            }
+            if let local = localBuildTool(named: "conjetd") {
+                return ResolvedTool(executable: local, source: "SwiftPM build")
+            }
+            if let local = localBuildTool(named: "Conjet Core") {
+                return ResolvedTool(executable: local, source: "legacy SwiftPM build")
+            }
         }
         if let path = findExecutable(named: "conjetd", environment: environment) {
             return ResolvedTool(executable: path, source: "PATH")
@@ -147,7 +149,9 @@ public enum ConjetToolResolver {
         named name: String,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String? {
-        let searchPath = ConjetEnvironment.mergedExecutableSearchPath(environment["PATH"])
+        let searchPath = pathOnlyResolution(environment: environment)
+            ? (environment["PATH"] ?? "")
+            : ConjetEnvironment.mergedExecutableSearchPath(environment["PATH"])
         for directory in searchPath.split(separator: ":").map(String.init) {
             let candidate = URL(fileURLWithPath: directory).appendingPathComponent(name).path
             if FileManager.default.isExecutableFile(atPath: candidate) {
@@ -160,6 +164,10 @@ public enum ConjetToolResolver {
     private static func executableOverride(_ key: String, environment: [String: String]) -> String? {
         guard let value = environment[key], !value.isEmpty else { return nil }
         return FileManager.default.isExecutableFile(atPath: value) ? value : nil
+    }
+
+    private static func pathOnlyResolution(environment: [String: String]) -> Bool {
+        environment["CONJET_TOOL_RESOLVER_PATH_ONLY"] == "1"
     }
 
     private static func bundledTool(named name: String) -> String? {

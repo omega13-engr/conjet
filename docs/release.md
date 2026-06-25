@@ -45,6 +45,13 @@ Production notarized releases require these repository secrets:
 - `APPLE_TEAM_ID`: Apple Developer Team ID
 - `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for notarization
 
+Optional release automation secret:
+
+- `CONJET_RELEASE_PR_TOKEN`: fine-grained token with pull request creation
+  permission. If omitted and the default GitHub Actions token cannot create
+  pull requests, the release workflow still pushes the Homebrew update branch
+  and prints the manual PR creation URL instead of failing the release.
+
 Manual release:
 
 ```sh
