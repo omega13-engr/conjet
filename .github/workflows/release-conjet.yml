@@ -9,7 +9,7 @@ on:
       version:
         description: Semantic version to release, without the conjet-v prefix
         required: true
-        default: 1.0.0
+        default: 1.0.1
 
 permissions:
   contents: write
@@ -247,7 +247,7 @@ jobs:
       - name: Open Homebrew formula and cask pull request
         id: homebrew_pr
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CONJET_RELEASE_PR_TOKEN || github.token }}
         run: |
           set -euo pipefail
           version="${{ needs.build.outputs.version }}"
@@ -291,12 +291,20 @@ jobs:
             --json url \
             --jq '.[0].url // empty')"
           if [ -z "${pr_url}" ]; then
-            pr_url="$(gh pr create \
+            pr_create_output="$(mktemp)"
+            if gh pr create \
               --repo "${GITHUB_REPOSITORY}" \
               --base "${default_branch}" \
               --head "${update_branch}" \
               --title "chore(release): update conjet ${version}" \
-              --body-file "${body_file}")"
+              --body-file "${body_file}" >"${pr_create_output}" 2>&1; then
+              pr_url="$(cat "${pr_create_output}")"
+            else
+              echo "::warning::Could not create the Homebrew update PR automatically."
+              cat "${pr_create_output}" >&2
+              pr_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/new/${update_branch}"
+              echo "::notice::Open the Homebrew update PR manually: ${pr_url}"
+            fi
           fi
           echo "Homebrew update PR: ${pr_url}"
           echo "url=${pr_url}" >> "${GITHUB_OUTPUT}"
