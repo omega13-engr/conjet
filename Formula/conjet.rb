@@ -1,9 +1,9 @@
 class Conjet < Formula
   desc "Super Sonic Speed containers for macOS developers"
   homepage "https://github.com/omega13-engr/conjet"
-  url "https://github.com/omega13-engr/conjet/releases/download/conjet-v1.0.1/conjet-1.0.1-macos-arm64.dmg"
-  version "1.0.1"
-  sha256 "78873db310d32576cc537838e96d8cfb5a9b34e91469ac5c02217dadd1a23769"
+  url "https://github.com/omega13-engr/conjet/releases/download/conjet-v1.0.0/conjet-1.0.0-macos-arm64.dmg"
+  version "1.0.0"
+  sha256 "3052d88d4197f42b1a77fd997808bdef8a3d3f5295c8504100bd7f3ad5c00f87"
   head "https://github.com/omega13-engr/conjet.git", branch: "main"
 
   livecheck do
@@ -39,7 +39,7 @@ class Conjet < Formula
 
     tools = appdir/"Conjet.app/Contents/Resources/ConjetTools"
     bin.install_symlink tools/"conjet" => "conjet"
-    bin.install_symlink tools/"Conjet Core" => "Conjet Core"
+    bin.install_symlink tools/"conjetd" => "conjetd"
   end
 
   def post_install
@@ -57,7 +57,7 @@ class Conjet < Formula
       The formula installs Homebrew-managed CLI tools and keeps Conjet.app inside the keg:
         #{prefix}/Applications/Conjet.app
 
-      For the standard one-step install of Conjet.app plus conjet/Conjet Core, use the cask:
+      For the standard one-step install of Conjet.app plus conjet/conjetd, use the cask:
         brew install --cask omega13-engr/conjet/conjet
 
       If CONJET_HOME points under /Volumes, grant Removable Volumes or Full Disk
