@@ -600,7 +600,7 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(workflow.contains("Jetstream HVF direct-kernel uses only this custom Linux kernel asset."))
     }
 
-    func testLocalConjetCoreReleaseRehearsalRunsWorkflowCommandsInContainer() throws {
+    func testLocalConjetCoreReleaseRehearsalBuildsOnlyJetstreamKernelTriplet() throws {
         let scriptURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("build-support/run-conjet-core-release-local.sh")
         let script = try String(contentsOf: scriptURL, encoding: .utf8)
@@ -609,15 +609,19 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(syntax.succeeded, syntax.stderr)
         XCTAssertTrue(script.contains("CONJET_QA_ROOT_BASE:-/tmp"))
         XCTAssertTrue(script.contains("mktemp -d \"${qa_root_base%/}/conjet-core-release-local.XXXXXX\""))
-        XCTAssertTrue(script.contains("--rootfs-only"))
-        XCTAssertTrue(script.contains("ROOTFS_ONLY=\"${rootfs_only}\""))
-        XCTAssertTrue(script.contains("docker --host \"${docker_host}\" run --rm --privileged"))
+        XCTAssertTrue(script.contains("Docker socket is not available"))
+        XCTAssertTrue(script.contains("docker --host \"${docker_host}\" run --rm"))
         XCTAssertTrue(script.contains("--ulimit nofile=65536:65536"))
-        XCTAssertTrue(script.contains("--platform \"${container_platform}\""))
+        XCTAssertTrue(script.contains("container_platform=\"linux/arm64\""))
         XCTAssertTrue(script.contains("guest/kernel/scripts/build-linux.sh"))
         XCTAssertTrue(script.contains("conjet-linux-${KERNEL_VERSION}-aarch64-Image"))
         XCTAssertTrue(script.contains("sha512sum \"$(basename \"${kernel_asset}\")\" > \"$(basename \"${kernel_asset}\").sha512sum\""))
         XCTAssertTrue(script.contains("ARTIFACT_DIR=\"${artifact_dir}\""))
+        XCTAssertFalse(script.contains("root_disk_gb"))
+        XCTAssertFalse(script.contains("ROOTFS_ONLY"))
+        XCTAssertFalse(script.contains("make -C guest/image/conjet-core image"))
+        XCTAssertFalse(script.contains("*.raw.gz"))
+        XCTAssertFalse(script.contains("docker.io"))
     }
 
     func testPhase9OfflineVerifierRequiresFullDockerKernelConfigBuiltIns() throws {
