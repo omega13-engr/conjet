@@ -9,7 +9,7 @@ on:
       version:
         description: Semantic version to release, without the conjet-core-v prefix
         required: true
-        default: 1.0.2
+        default: 1.0.0
       root_disk_gb:
         description: Root disk size for the raw image
         required: true
