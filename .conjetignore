@@ -1,0 +1,4 @@
+# ConjetFS already keeps dependency and build churn in VM-native storage.
+# Add project-specific files here only when they should be ignored entirely.
+*.log
+*.tmp

@@ -1,0 +1,83 @@
+// swift-tools-version: 6.1
+
+import PackageDescription
+
+let package = Package(
+    name: "conjet",
+    platforms: [
+        .macOS(.v14)
+    ],
+    products: [
+        .executable(name: "conjet", targets: ["ConjetCLI"]),
+        .executable(name: "conjetd", targets: ["ConjetDaemon"]),
+        .executable(name: "Conjet Core", targets: ["ConjetDaemon"]),
+        .executable(name: "ConjetApp", targets: ["ConjetApp"]),
+        .library(name: "ConjetAppCore", targets: ["ConjetAppCore"]),
+        .library(name: "ConjetCore", targets: ["ConjetCore"]),
+        .library(name: "ConjetManagement", targets: ["ConjetManagement"]),
+        .library(name: "ConjetPower", targets: ["ConjetPower"]),
+        .library(name: "ConjetVZ", targets: ["ConjetVZ"])
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.78.0"),
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.13.0")
+    ],
+    targets: [
+        .target(
+            name: "ConjetCore",
+            linkerSettings: [
+                .linkedFramework("CoreServices", .when(platforms: [.macOS]))
+            ]
+        ),
+        .target(name: "ConjetPower", dependencies: ["ConjetCore"]),
+        .target(
+            name: "ConjetVZ",
+            dependencies: [
+                "ConjetCore",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio")
+            ],
+            linkerSettings: [
+                .linkedFramework("Virtualization", .when(platforms: [.macOS])),
+                .linkedFramework("vmnet", .when(platforms: [.macOS]))
+            ]
+        ),
+        .target(
+            name: "ConjetManagement",
+            dependencies: ["ConjetCore"]
+        ),
+        .executableTarget(
+            name: "ConjetCLI",
+            dependencies: ["ConjetCore", "ConjetManagement", "ConjetPower", "ConjetVZ"]
+        ),
+        .executableTarget(
+            name: "ConjetDaemon",
+            dependencies: ["ConjetCore", "ConjetPower", "ConjetVZ"]
+        ),
+        .target(
+            name: "ConjetAppCore",
+            dependencies: ["ConjetCore", "ConjetManagement"]
+        ),
+        .executableTarget(
+            name: "ConjetApp",
+            dependencies: [
+                "ConjetAppCore",
+                "ConjetCore",
+                "ConjetManagement",
+                .product(name: "SwiftTerm", package: "SwiftTerm")
+            ],
+            resources: [
+                .process("Resources")
+            ],
+            linkerSettings: [
+                .linkedFramework("ServiceManagement", .when(platforms: [.macOS]))
+            ]
+        ),
+        .testTarget(name: "ConjetCoreTests", dependencies: ["ConjetCore"]),
+        .testTarget(name: "ConjetManagementTests", dependencies: ["ConjetManagement"]),
+        .testTarget(name: "ConjetPowerTests", dependencies: ["ConjetPower"]),
+        .testTarget(name: "ConjetVZTests", dependencies: ["ConjetVZ"]),
+        .testTarget(name: "ConjetAppCoreTests", dependencies: ["ConjetAppCore", "ConjetManagement"]),
+        .testTarget(name: "ConjetAppTests", dependencies: ["ConjetApp", "ConjetManagement"])
+    ]
+)

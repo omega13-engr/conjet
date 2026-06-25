@@ -1,0 +1,179 @@
+name: Jetstream Kernel Assets
+
+on:
+  push:
+    branches:
+      - dev
+    paths:
+      - ".github/workflows/jetstream-kernel-assets.yml"
+      - "Package.swift"
+      - "Sources/ConjetVZ/**"
+      - "Tests/ConjetVZTests/**"
+      - "build-support/run-jetstream-boot-proof.sh"
+      - "guest/kernel/**"
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: Linux kernel version to build
+        required: true
+        default: 6.12.86
+      busybox_version:
+        description: BusyBox version to build
+        required: true
+        default: 1.38.0
+      proof_url:
+        description: Guest outbound HTTP proof URL
+        required: true
+        default: http://example.com
+      guest_service_port:
+        description: BusyBox httpd proof service port
+        required: true
+        default: "8080"
+
+env:
+  JETSTREAM_KERNEL_VERSION: ${{ inputs.kernel_version || '6.12.86' }}
+  JETSTREAM_BUSYBOX_VERSION: ${{ inputs.busybox_version || '1.38.0' }}
+  JETSTREAM_PROOF_URL: ${{ inputs.proof_url || 'http://example.com' }}
+  JETSTREAM_GUEST_SERVICE_PORT: ${{ inputs.guest_service_port || '8080' }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jetstream-kernel-assets-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-phase9-assets:
+    name: Build Phase 9 network proof assets
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            bzip2 \
+            clang \
+            cpio \
+            curl \
+            dwarves \
+            fakeroot \
+            file \
+            flex \
+            gcc \
+            gzip \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            llvm \
+            make \
+            perl \
+            tar
+
+      - name: Validate builder scripts
+        run: |
+          set -euo pipefail
+          bash -n guest/kernel/scripts/build-linux.sh
+          bash -n guest/kernel/scripts/build-busybox.sh
+          bash -n guest/kernel/scripts/build-network-proof-initramfs.sh
+          bash -n guest/kernel/scripts/build-phase9-network-proof-assets.sh
+          perl -c guest/kernel/scripts/verify-phase9-network-proof-assets.pl
+          guest/kernel/scripts/build-phase9-network-proof-assets.sh --check-tools
+
+      - name: Validate Linux kernel config
+        env:
+          KERNEL_VERSION: ${{ env.JETSTREAM_KERNEL_VERSION }}
+        run: |
+          set -euo pipefail
+          guest/kernel/scripts/build-linux.sh --validate-config
+
+      - name: Build Phase 9 asset bundle
+        env:
+          KERNEL_VERSION: ${{ env.JETSTREAM_KERNEL_VERSION }}
+          BUSYBOX_VERSION: ${{ env.JETSTREAM_BUSYBOX_VERSION }}
+        run: |
+          set -euo pipefail
+          jobs="${CONJET_KERNEL_MAX_JOBS:-2}"
+          case "${jobs}" in
+            ""|*[!0-9]*) jobs=2 ;;
+          esac
+          host_jobs="$(nproc)"
+          if [ "${jobs}" -gt "${host_jobs}" ]; then
+            jobs="${host_jobs}"
+          fi
+          ulimit -n 65536 2>/dev/null || true
+          export MAKE_FLAGS="-j${jobs} LLVM=1"
+          out_dir="${RUNNER_TEMP}/phase9-network-proof"
+          guest/kernel/scripts/build-phase9-network-proof-assets.sh \
+            --output-dir "${out_dir}" \
+            --proof-url "${{ env.JETSTREAM_PROOF_URL }}" \
+            --guest-service-port "${{ env.JETSTREAM_GUEST_SERVICE_PORT }}"
+          tar -C "${RUNNER_TEMP}" -czf \
+            "conjet-phase9-network-proof-${{ env.JETSTREAM_KERNEL_VERSION }}.tar.gz" \
+            phase9-network-proof
+
+      - name: Upload Phase 9 asset bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: conjet-phase9-network-proof-${{ env.JETSTREAM_KERNEL_VERSION }}
+          path: conjet-phase9-network-proof-${{ env.JETSTREAM_KERNEL_VERSION }}.tar.gz
+          if-no-files-found: error
+
+  validate-macos-import:
+    name: Validate import on macOS
+    runs-on: macos-15
+    needs:
+      - build-phase9-assets
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Phase 9 asset bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: conjet-phase9-network-proof-${{ env.JETSTREAM_KERNEL_VERSION }}
+          path: phase9-artifact
+
+      - name: Build Conjet debug tools
+        run: swift build
+
+      - name: Preflight bundle with signed Jetstream harness
+        run: |
+          set -euo pipefail
+          unpack_dir="${RUNNER_TEMP}/phase9-unpack"
+          mkdir -p "${unpack_dir}"
+          tar -xzf "phase9-artifact/conjet-phase9-network-proof-${{ env.JETSTREAM_KERNEL_VERSION }}.tar.gz" \
+            -C "${unpack_dir}"
+          manifest="$(find "${unpack_dir}" -name phase9-network-proof-assets.json -print -quit)"
+          if [ -z "${manifest}" ]; then
+            echo "phase9-network-proof-assets.json not found" >&2
+            exit 1
+          fi
+          qa_root="$(mktemp -d "${RUNNER_TEMP}/conjet-kernel-preflight.XXXXXX")"
+          build-support/run-jetstream-boot-proof.sh \
+            --phase9-manifest "${manifest}" \
+            --qa-root "${qa_root}" \
+            --preflight-only \
+            --skip-build
+          cat "${qa_root}/import.json"
+          cat "${qa_root}/boot-plan.json"
+          cat "${qa_root}/readiness-phase2.json"
+          cat "${qa_root}/jetstream-boot-proof-summary.json"
+          test -s "${qa_root}/jetstream-phase9.dtb"
+          mkdir -p phase9-preflight-qa
+          find "${qa_root}" -type f ! -name '*.raw' -print | while IFS= read -r file; do
+            relative_path="${file#"${qa_root}/"}"
+            mkdir -p "phase9-preflight-qa/$(dirname "${relative_path}")"
+            cp "${file}" "phase9-preflight-qa/${relative_path}"
+          done
+
+      - name: Upload macOS preflight QA artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: conjet-phase9-preflight-${{ env.JETSTREAM_KERNEL_VERSION }}
+          path: phase9-preflight-qa
+          if-no-files-found: error

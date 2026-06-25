@@ -1,0 +1,7 @@
+import ConjetManagement
+
+public typealias ResolvedTool = ConjetManagement.ResolvedTool
+public typealias ConjetToolResolver = ConjetManagement.ConjetToolResolver
+public typealias ConjetProfileActivationResult = ConjetManagement.ConjetProfileActivationResult
+public typealias ConjetProfileConfigResult = ConjetManagement.ConjetProfileConfigResult
+public typealias ConjetProfileStatus = ConjetManagement.ConjetProfileStatus

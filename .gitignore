@@ -1,0 +1,15 @@
+.build/
+.swiftpm/
+target/
+jetstream/target/
+.conjet/
+benchmarks/reports/**/*.json
+benchmarks/reports/**/*.md
+benchmarks/reports/**/work/
+docs/security/
+DerivedData/
+dist/
+*.xcuserstate
+.DS_Store
+.chum-cache/
+.chum-mem

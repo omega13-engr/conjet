@@ -1,0 +1,372 @@
+@testable import ConjetApp
+@testable import ConjetAppCore
+import AppKit
+import ConjetCore
+import SwiftUI
+import XCTest
+
+final class ConjetAppSnapshotTests: XCTestCase {
+    @MainActor
+    func testWritesQAScreenshotsWhenRequested() throws {
+        guard let directory = ProcessInfo.processInfo.environment["CONJET_QA_SCREENSHOT_DIR"],
+              !directory.isEmpty else {
+            throw XCTSkip("Set CONJET_QA_SCREENSHOT_DIR to write QA screenshots.")
+        }
+
+        let outputDirectory = URL(fileURLWithPath: directory, isDirectory: true)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+
+        let app = ConjetAppState()
+        app.snapshot = Self.qaSnapshot()
+        app.selectedContainerID = app.snapshot.containers.first?.id
+        app.selectedProfileName = app.snapshot.profileContexts.first(where: { $0.isCurrent })?.name
+        app.profileConfigDraft = ProfileConfigDraft(
+            profileName: app.selectedProfileName ?? "default",
+            config: .default
+        )
+        let defaults = UserDefaults.standard
+        let collapsedKey = "containers.dockerEditorCollapsed"
+        let composeCollapsedKey = "containers.collapsedComposeGroupIDs"
+        let previousCollapsedValue = defaults.object(forKey: collapsedKey)
+        let previousComposeCollapsedValue = defaults.object(forKey: composeCollapsedKey)
+        defer {
+            if let previousCollapsedValue {
+                defaults.set(previousCollapsedValue, forKey: collapsedKey)
+            } else {
+                defaults.removeObject(forKey: collapsedKey)
+            }
+            if let previousComposeCollapsedValue {
+                defaults.set(previousComposeCollapsedValue, forKey: composeCollapsedKey)
+            } else {
+                defaults.removeObject(forKey: composeCollapsedKey)
+            }
+        }
+
+        try render(section: .overview, app: app, to: outputDirectory.appendingPathComponent("overview.png"))
+        try render(section: .profiles, app: app, to: outputDirectory.appendingPathComponent("profiles.png"))
+        defaults.set(false, forKey: collapsedKey)
+        defaults.set("", forKey: composeCollapsedKey)
+        try render(section: .containers, app: app, to: outputDirectory.appendingPathComponent("containers.png"))
+        let terminalApp = Self.qaAppForTerminalSnapshot()
+        try render(
+            section: .containers,
+            app: terminalApp,
+            to: outputDirectory.appendingPathComponent("containers-terminal.png"),
+            showContainerTerminal: true
+        )
+        defaults.set("compose:chum-mem", forKey: composeCollapsedKey)
+        try render(section: .containers, app: app, to: outputDirectory.appendingPathComponent("containers-compose-collapsed.png"))
+        defaults.set("", forKey: composeCollapsedKey)
+        defaults.set(true, forKey: collapsedKey)
+        try render(section: .containers, app: app, to: outputDirectory.appendingPathComponent("containers-collapsed.png"))
+        app.composeDirectory = "/Users/sly/Workspace/Org/chum-mem"
+        try render(section: .compose, app: app, to: outputDirectory.appendingPathComponent("compose.png"))
+        try render(section: .machines, app: app, to: outputDirectory.appendingPathComponent("machines.png"))
+        try render(section: .images, app: app, to: outputDirectory.appendingPathComponent("images.png"))
+        try render(section: .volumes, app: app, to: outputDirectory.appendingPathComponent("volumes.png"))
+        try render(section: .network, app: app, to: outputDirectory.appendingPathComponent("network.png"))
+    }
+
+    @MainActor
+    private func render(
+        section: ManagementSection,
+        app: ConjetAppState,
+        to url: URL,
+        showContainerTerminal: Bool = false
+    ) throws {
+        app.selectedSection = section
+        if section == .images {
+            app.selectedImageID = app.snapshot.images.first?.selectionID
+        }
+
+        let root = SnapshotHarness(section: section, showContainerTerminal: showContainerTerminal)
+            .environmentObject(app)
+            .frame(width: 1080, height: 720)
+        let controller = NSHostingController(rootView: root)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentViewController = controller
+        defer { window.close() }
+
+        let view = controller.view
+        view.appearance = NSAppearance(named: .darkAqua)
+        view.frame = NSRect(x: 0, y: 0, width: 1080, height: 720)
+        view.layoutSubtreeIfNeeded()
+        view.displayIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+
+        guard let representation = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            XCTFail("Could not create bitmap representation for \(section.rawValue)")
+            return
+        }
+        view.cacheDisplay(in: view.bounds, to: representation)
+        guard let data = representation.representation(using: .png, properties: [:]) else {
+            XCTFail("Could not encode PNG for \(section.rawValue)")
+            return
+        }
+        try data.write(to: url, options: .atomic)
+    }
+
+    @MainActor
+    private static func qaAppForTerminalSnapshot() -> ConjetAppState {
+        let tool = ResolvedTool(executable: "/bin/echo", source: "snapshot")
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": "/tmp/conjet-ui-qa/home"],
+            conjetTool: tool,
+            conjetCoreTool: tool,
+            dockerTool: tool,
+            includeLaunchdEnvironment: false
+        )
+        let app = ConjetAppState(service: service)
+        app.snapshot = qaSnapshot()
+        app.selectedContainerID = app.snapshot.containers.first?.id
+        app.selectedProfileName = app.snapshot.profileContexts.first(where: { $0.isCurrent })?.name
+        app.containerTerminalDebugEnabled = true
+        return app
+    }
+
+    private static func qaSnapshot() -> DashboardSnapshot {
+        let tool = ResolvedTool(executable: "/tmp/conjet-ui-qa/tool", source: "test")
+        let socketPath = "/tmp/conjet-ui-qa/home/profiles/security_research_lab/run/docker.sock"
+        let daemonSocketPath = "/tmp/conjet-ui-qa/home/profiles/security_research_lab/run/conjetd.sock"
+        let vmManifestPath = "/tmp/conjet-ui-qa/home/profiles/security_research_lab/state/vm/manifest.json"
+        let containers = [
+            DockerContainer(
+                id: "c1",
+                name: "chum-mem-api-1",
+                image: "chum-mem-api",
+                state: "running",
+                status: "Up 10 minutes (healthy)",
+                labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=api,com.docker.compose.project.working_dir=/Users/sly/Workspace/Org/chum-mem,com.docker.compose.project.config_files=/Users/sly/Workspace/Org/chum-mem/docker-compose.yml"
+            ),
+            DockerContainer(
+                id: "c2",
+                name: "chum-mem-postgres-1",
+                image: "pgvector/pgvector:pg18",
+                state: "running",
+                status: "Up 10 minutes (healthy)",
+                labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=postgres,com.docker.compose.project.working_dir=/Users/sly/Workspace/Org/chum-mem,com.docker.compose.project.config_files=/Users/sly/Workspace/Org/chum-mem/docker-compose.yml"
+            ),
+            DockerContainer(
+                id: "c3",
+                name: "chum-mem-web-1",
+                image: "chum-mem-web",
+                state: "running",
+                status: "Up 9 minutes",
+                labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=web,com.docker.compose.project.working_dir=/Users/sly/Workspace/Org/chum-mem,com.docker.compose.project.config_files=/Users/sly/Workspace/Org/chum-mem/docker-compose.yml"
+            ),
+            DockerContainer(
+                id: "c4",
+                name: "chum-mem-worker-1",
+                image: "chum-mem-worker",
+                state: "running",
+                status: "Up 9 minutes (health: starting)",
+                labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=worker,com.docker.compose.project.working_dir=/Users/sly/Workspace/Org/chum-mem,com.docker.compose.project.config_files=/Users/sly/Workspace/Org/chum-mem/docker-compose.yml"
+            ),
+            DockerContainer(
+                id: "c5",
+                name: "manual-shell",
+                image: "alpine:3.20",
+                state: "exited",
+                status: "Exited (0)"
+            )
+        ]
+        let images = [
+            DockerImage(
+                id: "sha256:stable",
+                repository: "nginx",
+                tag: "alpine",
+                size: "92.6MB",
+                createdAt: "2026-05-23 02:30:41 +0800 PST",
+                createdSince: "3 weeks ago"
+            ),
+            DockerImage(
+                id: "sha256:stable",
+                repository: "nginx",
+                tag: "1.31-alpine",
+                size: "92.6MB",
+                createdAt: "2026-05-23 02:30:41 +0800 PST",
+                createdSince: "3 weeks ago"
+            ),
+            DockerImage(
+                id: "sha256:redis",
+                repository: "redis",
+                tag: "7.2",
+                size: "191MB",
+                createdAt: "2026-05-24 10:00:00 +0800 PST",
+                createdSince: "3 weeks ago"
+            )
+        ]
+        let volumes = [
+            DockerVolume(
+                name: "db_data",
+                driver: "local",
+                scope: "local",
+                mountpoint: "/var/lib/docker/volumes/db_data/_data",
+                labels: "",
+                size: "42MB"
+            )
+        ]
+        let networks = [
+            DockerNetwork(
+                id: "cnet-bridge",
+                name: "bridge",
+                driver: "bridge",
+                scope: "local",
+                ipv6: "false",
+                internalNetwork: "false"
+            ),
+            DockerNetwork(
+                id: "cnet-chum-mem",
+                name: "chum-mem_default",
+                driver: "bridge",
+                scope: "local",
+                ipv6: "false",
+                internalNetwork: "false",
+                labels: "com.docker.compose.project=chum-mem"
+            )
+        ]
+        let stats = [
+            DockerStats(
+                container: "c1",
+                name: "api",
+                cpuPercent: "1.0%",
+                memoryUsage: "16MiB / 2GiB",
+                memoryPercent: "0.8%",
+                networkIO: "1kB / 1kB",
+                blockIO: "0B / 0B",
+                pids: "4"
+            )
+        ]
+        let profileContexts = [
+            ConjetProfileContext(
+                name: "default",
+                rootHomePath: "/tmp/conjet-ui-qa/home",
+                homePath: "/tmp/conjet-ui-qa/home",
+                configPath: "/tmp/conjet-ui-qa/home/config.toml",
+                runDirectoryPath: "/tmp/conjet-ui-qa/home/run",
+                daemonSocketPath: "/tmp/conjet-ui-qa/home/run/conjetd.sock",
+                dockerSocketPath: "/tmp/conjet-ui-qa/home/run/docker.sock",
+                logsDirectoryPath: "/tmp/conjet-ui-qa/home/logs",
+                daemonLogPath: "/tmp/conjet-ui-qa/home/logs/conjetd.log",
+                stateDirectoryPath: "/tmp/conjet-ui-qa/home/state",
+                vmManifestPath: "/tmp/conjet-ui-qa/home/state/vm/manifest.json",
+                serialLogPath: "/tmp/conjet-ui-qa/home/logs/vm-serial.log"
+            ),
+            ConjetProfileContext(
+                name: "security_research_lab",
+                isCurrent: true,
+                rootHomePath: "/tmp/conjet-ui-qa/home",
+                homePath: "/tmp/conjet-ui-qa/home/profiles/security_research_lab",
+                configPath: "/tmp/conjet-ui-qa/home/profiles/security_research_lab/config.toml",
+                runDirectoryPath: "/tmp/conjet-ui-qa/home/profiles/security_research_lab/run",
+                daemonSocketPath: "/tmp/conjet-ui-qa/home/profiles/security_research_lab/run/conjetd.sock",
+                dockerSocketPath: socketPath,
+                logsDirectoryPath: "/tmp/conjet-ui-qa/home/profiles/security_research_lab/logs",
+                daemonLogPath: "/tmp/conjet-ui-qa/home/profiles/security_research_lab/logs/conjetd.log",
+                stateDirectoryPath: "/tmp/conjet-ui-qa/home/profiles/security_research_lab/state",
+                vmManifestPath: "/tmp/conjet-ui-qa/home/profiles/security_research_lab/state/vm/manifest.json",
+                serialLogPath: "/tmp/conjet-ui-qa/home/profiles/security_research_lab/logs/vm-serial.log"
+            ),
+            ConjetProfileContext(
+                name: "staging",
+                rootHomePath: "/tmp/conjet-ui-qa/home",
+                homePath: "/tmp/conjet-ui-qa/home/profiles/staging",
+                configPath: "/tmp/conjet-ui-qa/home/profiles/staging/config.toml",
+                runDirectoryPath: "/tmp/conjet-ui-qa/home/profiles/staging/run",
+                daemonSocketPath: "/tmp/conjet-ui-qa/home/profiles/staging/run/conjetd.sock",
+                dockerSocketPath: "/tmp/conjet-ui-qa/home/profiles/staging/run/docker.sock",
+                logsDirectoryPath: "/tmp/conjet-ui-qa/home/profiles/staging/logs",
+                daemonLogPath: "/tmp/conjet-ui-qa/home/profiles/staging/logs/conjetd.log",
+                stateDirectoryPath: "/tmp/conjet-ui-qa/home/profiles/staging/state",
+                vmManifestPath: "/tmp/conjet-ui-qa/home/profiles/staging/state/vm/manifest.json",
+                serialLogPath: "/tmp/conjet-ui-qa/home/profiles/staging/logs/vm-serial.log"
+            )
+        ]
+
+        return DashboardSnapshot(
+            conjetTool: tool,
+            conjetCoreTool: tool,
+            dockerTool: tool,
+            dockerSocketPath: socketPath,
+            dockerSocketAvailable: true,
+            dockerReachable: true,
+            daemonResponse: DaemonResponse(
+                ok: true,
+                message: "running",
+                status: DaemonStatus(
+                    pid: 123,
+                    startedAt: Date(timeIntervalSince1970: 1_751_000_000),
+                    state: .warmIdle,
+                    socketPath: daemonSocketPath,
+                    host: HostCapabilities.detect(),
+                    config: .default,
+                    vm: VMRuntimeStatus(
+                        state: .running,
+                        configured: true,
+                        manifestPath: vmManifestPath,
+                        dockerSocketPath: socketPath,
+                        message: "running"
+                    ),
+                    network: ConjetNetworkStatus(activeTCPForwards: 6, failedForwards: 0)
+                ),
+                vm: VMRuntimeStatus(
+                    state: .running,
+                    configured: true,
+                    manifestPath: vmManifestPath,
+                    dockerSocketPath: socketPath,
+                    message: "running"
+                )
+            ),
+            profiles: profileContexts.map(\.name),
+            profileContexts: profileContexts,
+            containers: containers,
+            images: images,
+            volumes: volumes,
+            dockerNetworks: networks,
+            stats: stats,
+            containerActivity: ContainerActivitySnapshot(containers: containers, stats: stats, processes: []),
+            warnings: []
+        )
+    }
+}
+
+private struct SnapshotHarness: View {
+    let section: ManagementSection
+    var showContainerTerminal = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            SidebarView(selection: .constant(section))
+                .frame(width: 172)
+            Divider()
+            switch section {
+            case .overview:
+                OverviewView()
+            case .profiles:
+                ProfilesView()
+            case .containers:
+                ContainersView(showTerminal: showContainerTerminal)
+            case .compose:
+                ComposeView()
+            case .machines:
+                MachinesView()
+            case .images:
+                ImagesView()
+            case .volumes:
+                VolumesView()
+            case .network:
+                NetworkMonitorView()
+            default:
+                OverviewView()
+            }
+        }
+        .frame(width: 1080, height: 720)
+        .background(.regularMaterial)
+    }
+}

@@ -1,0 +1,171 @@
+name: Conjet Core Image Release
+
+on:
+  push:
+    tags:
+      - conjet-core-v*.*.*
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to release, without the conjet-core-v prefix
+        required: true
+        default: 1.0.2
+      root_disk_gb:
+        description: Root disk size for the raw image
+        required: true
+        default: "16"
+      runtime:
+        description: Guest runtime to bake into the image
+        required: true
+        default: docker
+        type: choice
+        options:
+          - docker
+          - none
+      kernel_version:
+        description: Linux kernel version for the Jetstream/HVF direct-kernel asset
+        required: true
+        default: 6.12.86
+
+permissions:
+  contents: write
+
+concurrency:
+  group: conjet-core-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    name: Resolve release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      root_disk_gb: ${{ steps.meta.outputs.root_disk_gb }}
+      runtime: ${{ steps.meta.outputs.runtime }}
+      kernel_version: ${{ steps.meta.outputs.kernel_version }}
+    steps:
+      - name: Resolve metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+            tag="conjet-core-v${version}"
+            root_disk_gb="${{ inputs.root_disk_gb }}"
+            runtime="${{ inputs.runtime }}"
+            kernel_version="${{ inputs.kernel_version }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#conjet-core-v}"
+            root_disk_gb="16"
+            runtime="docker"
+            kernel_version="6.12.86"
+          fi
+
+          if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "invalid Conjet Core semantic version: ${version}" >&2
+            exit 1
+          fi
+
+          if [ "${tag}" != "conjet-core-v${version}" ]; then
+            echo "Conjet Core release tags must use conjet-core-vX.Y.Z" >&2
+            exit 1
+          fi
+
+          case "${runtime}" in
+            docker|none) ;;
+            *)
+              echo "invalid runtime: ${runtime}" >&2
+              exit 1
+              ;;
+          esac
+
+          if ! printf '%s\n' "${root_disk_gb}" | grep -Eq '^[0-9]+$'; then
+            echo "root_disk_gb must be an integer" >&2
+            exit 1
+          fi
+
+          if ! printf '%s\n' "${kernel_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "kernel_version must be X.Y.Z" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "root_disk_gb=${root_disk_gb}"
+            echo "runtime=${runtime}"
+            echo "kernel_version=${kernel_version}"
+          } >> "${GITHUB_OUTPUT}"
+
+  build-aarch64:
+    name: Build aarch64
+    needs:
+      - meta
+    uses: ./.github/workflows/conjet-core-image-aarch64.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      root_disk_gb: ${{ needs.meta.outputs.root_disk_gb }}
+      runtime: ${{ needs.meta.outputs.runtime }}
+      kernel_version: ${{ needs.meta.outputs.kernel_version }}
+
+  build-x86_64:
+    name: Build x86_64
+    needs:
+      - meta
+    uses: ./.github/workflows/conjet-core-image-x86_64.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      root_disk_gb: ${{ needs.meta.outputs.root_disk_gb }}
+      runtime: ${{ needs.meta.outputs.runtime }}
+
+  release:
+    name: Publish Conjet Core image release
+    runs-on: ubuntu-24.04
+    needs:
+      - meta
+      - build-aarch64
+      - build-x86_64
+    steps:
+      - name: Download image artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create release notes
+        run: |
+          set -euo pipefail
+          notes="release-notes.md"
+          {
+            echo "Conjet Core v${{ needs.meta.outputs.version }}"
+            echo
+            echo "Release tag: ${{ needs.meta.outputs.tag }}"
+            echo "Runtime: ${{ needs.meta.outputs.runtime }}"
+            echo "Root disk: ${{ needs.meta.outputs.root_disk_gb }} GiB"
+            echo "Jetstream Linux kernel: ${{ needs.meta.outputs.kernel_version }}"
+            echo "Backend policy: Jetstream HVF direct-kernel is primary for aarch64 Conjet Core; Virtualization.framework remains the Rosetta fallback for linux/amd64 workloads."
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Artifacts:"
+            find release-assets -type f -print | sort | sed 's#^#- #'
+          } > "${notes}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -type f -print | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "no release assets found" >&2
+            exit 1
+          fi
+
+          gh release create "${{ needs.meta.outputs.tag }}" "${assets[@]}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "Conjet Core v${{ needs.meta.outputs.version }}" \
+            --notes-file release-notes.md \
+            --latest=false

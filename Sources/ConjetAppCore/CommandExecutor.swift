@@ -1,0 +1,6 @@
+import ConjetManagement
+
+public typealias CommandInvocation = ConjetManagement.CommandInvocation
+public typealias CommandLogEntry = ConjetManagement.CommandLogEntry
+public typealias CommandExecuting = ConjetManagement.CommandExecuting
+public typealias LocalCommandExecutor = ConjetManagement.LocalCommandExecutor
