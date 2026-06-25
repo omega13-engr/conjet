@@ -24,6 +24,7 @@ cask "conjet" do
       "#{appdir}/Conjet.app",
       "#{staged_path}/bin/conjet",
       "#{staged_path}/bin/conjetd",
+      "#{staged_path}/bin/ConjetCoreVMM",
     ].each do |path|
       system_command "/usr/bin/xattr", args: ["-cr", path] if File.exist?(path)
     end

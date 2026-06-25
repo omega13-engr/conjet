@@ -84,6 +84,7 @@ mkdir -p "$STAGING_ROOT/bin"
 /usr/bin/ditto "$APP_BUNDLE" "$STAGING_ROOT/Conjet.app"
 /usr/bin/ditto "$APP_BUNDLE/Contents/Resources/ConjetTools/conjet" "$STAGING_ROOT/bin/conjet"
 /usr/bin/ditto "$APP_BUNDLE/Contents/Resources/ConjetTools/conjetd" "$STAGING_ROOT/bin/conjetd"
+/usr/bin/ditto "$APP_BUNDLE/Contents/Resources/ConjetTools/ConjetCoreVMM" "$STAGING_ROOT/bin/ConjetCoreVMM"
 ln -s /Applications "$STAGING_ROOT/Applications"
 
 if [ -f "$ROOT_DIR/README.md" ]; then
@@ -106,6 +107,7 @@ INSTALL
 /usr/bin/codesign --verify --deep --strict "$STAGING_ROOT/Conjet.app"
 /usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/conjet"
 /usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/conjetd"
+/usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/ConjetCoreVMM/Conjet Core"
 
 /usr/bin/hdiutil create \
   -volname "Conjet ${VERSION}" \

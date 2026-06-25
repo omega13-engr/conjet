@@ -155,6 +155,7 @@ jobs:
           /usr/bin/codesign -dvvv --entitlements :- dist/Conjet.app
           /usr/bin/codesign -dvvv --entitlements :- "dist/Conjet.app/Contents/Resources/ConjetTools/conjetd"
           /usr/bin/codesign -dvvv --entitlements :- "dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core"
+          test -x "dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core"
 
       - name: Create release DMG
         id: package
@@ -167,6 +168,7 @@ jobs:
             --version "${version}" \
             --dist-dir dist \
             --arch "${arch}"
+          test -x "dist/dmg-staging/${artifact_base}/bin/ConjetCoreVMM/Conjet Core"
           echo "artifact_base=${artifact_base}" >> "${GITHUB_OUTPUT}"
 
       - name: Finalize DMG notarization and checksum

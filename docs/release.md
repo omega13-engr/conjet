@@ -30,6 +30,7 @@ The DMG contains:
 - `Conjet.app`
 - `bin/conjet`
 - `bin/conjetd`
+- `bin/ConjetCoreVMM/Conjet Core`
 - an `/Applications` alias for drag-install users
 
 The formula installs the CLI tools and a keg-local app copy. The cask installs

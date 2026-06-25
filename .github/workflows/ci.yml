@@ -104,6 +104,7 @@ jobs:
           test -x "${mount_dir}/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core"
           test -x "${mount_dir}/bin/conjet"
           test -x "${mount_dir}/bin/conjetd"
+          test -x "${mount_dir}/bin/ConjetCoreVMM/Conjet Core"
           /usr/bin/codesign --verify --deep --strict "${mount_dir}/Conjet.app"
 
       - name: Validate rendered Homebrew packages
