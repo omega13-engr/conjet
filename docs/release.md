@@ -57,9 +57,9 @@ git tag conjet-v0.1.0
 git push origin conjet-v0.1.0
 ```
 
-## Jetstream Linux Kernel
+## Conjet Core Jetstream Assets
 
-Conjet Core kernel releases use their own semantic version tags:
+Conjet Core Jetstream asset releases use their own semantic version tags:
 
 ```text
 conjet-core-vX.Y.Z
@@ -69,20 +69,23 @@ The tag must match `guest/image/conjet-core/VERSION`.
 
 Publishing a tag like `conjet-core-v0.1.0` runs
 `.github/workflows/conjet-core-image.yml`. The workflow builds the ARM64
-Jetstream Linux kernel `Image` and publishes only the kernel, metadata, and
-checksum assets to a separate GitHub release. It does not build or publish an
-Ubuntu/rootfs `.raw.gz` image.
+Jetstream Linux kernel `Image` plus the Conjet-owned Docker rootfs appliance
+disk and publishes both asset triplets to a separate GitHub release. It does
+not fetch an Ubuntu cloud image; the rootfs appliance is built by the Conjet
+rootfs builder and is required for Docker-compatible Jetstream direct-kernel
+boot.
 
 Manual release:
 
 ```sh
 gh workflow run conjet-core-image.yml \
   -f version=0.1.0 \
-  -f kernel_version=6.12.86
+  -f kernel_version=6.12.86 \
+  -f root_disk_gb=16
 ```
 
-Before publishing Jetstream kernel assets, rehearse the workflow commands in a
-local Linux container and keep outputs under `/tmp`:
+Before publishing Jetstream assets, rehearse the workflow commands in a local
+Linux container and keep outputs under `/tmp`:
 
 ```sh
 build-support/run-conjet-core-release-local.sh \
@@ -134,12 +137,11 @@ for the registry, expected trigger scopes, and validation rules.
 
 `conjet update` updates the active profile's Conjet Core boot assets from the
 latest stable `conjet-core-vX.Y.Z` release, preserving the profile data disk.
-The release lane currently publishes only the Jetstream Linux kernel asset, so
-Docker-compatible guest userspace/root-disk provisioning must come from an
-explicit local disk path or a future bundled/generative appliance path. A fresh
-`conjet start` uses the same kernel resolution path automatically when the
-active profile has no VM manifest yet, so a Homebrew cask install does not
-require a manual `conjet update` just to fetch the custom kernel.
+HVF profiles fetch the matching custom Linux kernel and Docker rootfs appliance
+from the same release and import them as Jetstream direct-kernel boot assets. A
+fresh `conjet start` uses the same resolution path automatically when the active
+profile has no VM manifest yet, so a Homebrew cask install does not require a
+manual `conjet update` first.
 If Conjet is running, the command stops it before replacing the boot image and
 starts it again after the update. Use `--no-restart` to leave the runtime
 stopped, or `--restart` to start it even when it was previously stopped.

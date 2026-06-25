@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Run the Jetstream Linux kernel release workflow commands in a local Linux container.
+Run the Conjet Core Jetstream release workflow commands in a local Linux container.
 
 Usage:
   build-support/run-conjet-core-release-local.sh [options]
@@ -11,20 +11,23 @@ Usage:
 Options:
   --version VERSION        Conjet Core semantic version. Default: guest/image/conjet-core/VERSION
   --kernel-version X.Y.Z   Linux kernel version. Default: 6.12.86
+  --root-disk-gb GB        Rootfs appliance disk size. Default: 16
   --qa-root PATH           Existing QA root. Default: mktemp under CONJET_QA_ROOT_BASE or /tmp
   --docker-host URI        Docker host. Default: OrbStack socket when present, otherwise /var/run/docker.sock
   -h, --help               Show this help.
 
 The script copies the current working tree to <qa-root>/worktree before running
 the container, so generated artifacts stay under the QA root and the active
-checkout is left untouched. The Core release lane is kernel-only and emits only
-the conjet-linux-*-aarch64-Image release triplet for the selected version.
+checkout is left untouched. The Core release lane emits both the custom
+Jetstream Linux kernel triplet and the Conjet-owned Docker rootfs appliance
+triplet required for direct-kernel boot.
 USAGE
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version="$(tr -d '[:space:]' < "${repo_root}/guest/image/conjet-core/VERSION")"
 kernel_version="6.12.86"
+root_disk_gb="16"
 qa_root=""
 docker_host=""
 
@@ -36,6 +39,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --kernel-version)
       kernel_version="${2:?--kernel-version requires a value}"
+      shift 2
+      ;;
+    --root-disk-gb)
+      root_disk_gb="${2:?--root-disk-gb requires a value}"
       shift 2
       ;;
     --qa-root)
@@ -64,6 +71,11 @@ fi
 
 if ! printf '%s\n' "${kernel_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
   echo "--kernel-version must be X.Y.Z" >&2
+  exit 64
+fi
+
+if ! printf '%s\n' "${root_disk_gb}" | grep -Eq '^[0-9]+$'; then
+  echo "--root-disk-gb must be an integer" >&2
   exit 64
 fi
 
@@ -120,7 +132,7 @@ echo "docker_host=${docker_host}"
 echo "workflow_arch=aarch64"
 echo "version=${version}"
 echo "kernel_version=${kernel_version}"
-echo "kernel_only=true"
+echo "root_disk_gb=${root_disk_gb}"
 
 docker --host "${docker_host}" info > "${log_dir}/docker-info.log"
 
@@ -131,8 +143,11 @@ docker --host "${docker_host}" run --rm \
   --volume "${worktree}:${worktree}" \
   --volume "${log_dir}:${log_dir}" \
   --volume "${artifact_dir}:${artifact_dir}" \
+  --volume "${docker_socket}:/var/run/docker.sock" \
+  --env DOCKER_HOST=unix:///var/run/docker.sock \
   --env CONJET_CORE_VERSION="${version}" \
   --env KERNEL_VERSION="${kernel_version}" \
+  --env ROOT_DISK_GB="${root_disk_gb}" \
   --env ARTIFACT_DIR="${artifact_dir}" \
   --env LOG_DIR="${log_dir}" \
   --env DEBIAN_FRONTEND=noninteractive \
@@ -148,6 +163,7 @@ docker --host "${docker_host}" run --rm \
       ca-certificates \
       clang \
       curl \
+      docker.io \
       dwarves \
       flex \
       gcc \
@@ -167,6 +183,8 @@ docker --host "${docker_host}" run --rm \
       echo "guest/image/conjet-core/VERSION=${actual}, expected ${CONJET_CORE_VERSION}" >&2
       exit 1
     fi
+
+    docker info >"${LOG_DIR}/container-docker-info.log"
 
     kernel_out="${ARTIFACT_DIR}/kernel-work/conjet-linux-${KERNEL_VERSION}-aarch64"
     jobs="${CONJET_KERNEL_MAX_JOBS:-2}"
@@ -189,6 +207,16 @@ docker --host "${docker_host}" run --rm \
       cd "$(dirname "${kernel_asset}")"
       sha512sum "$(basename "${kernel_asset}")" > "$(basename "${kernel_asset}").sha512sum"
     )
+
+    make -C guest/image/conjet-core image \
+      OS_ARCH=aarch64 \
+      CONJET_CORE_VERSION="${CONJET_CORE_VERSION}" \
+      ROOT_DISK_GB="${ROOT_DISK_GB}" \
+      RUNTIME=docker
+    cp guest/image/conjet-core/dist/out/*.raw.gz \
+      guest/image/conjet-core/dist/out/*.raw.gz.sha512sum \
+      guest/image/conjet-core/dist/out/*.raw.gz.json \
+      "${ARTIFACT_DIR}/"
 
     find "${ARTIFACT_DIR}" -maxdepth 1 -type f -print | sort
   ' | tee "${log_dir}/container-release-rehearsal.log"
