@@ -99,12 +99,12 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "manual.test")
 
-        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
-        XCTAssertEqual(manager.status().balloonedMiB, 7168)
+        XCTAssertEqual(manager.status().currentTargetMiB, 640)
+        XCTAssertEqual(manager.status().balloonedMiB, 7552)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
         XCTAssertEqual(connector.reclaimRequests, 1)
         XCTAssertTrue(connector.lastRequest.contains("POST /conjet-memory-reclaim?reason=manual.test"))
-        XCTAssertEqual(appliedTargets.values, [1024])
+        XCTAssertEqual(appliedTargets.values, [640])
     }
 
     func testManualAndDockerFinishedReclaimBypassRecentReclaimCooldown() throws {
@@ -131,7 +131,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         XCTAssertEqual(connector.reclaimRequests, 1)
         XCTAssertTrue(manager.status().trace?.contains { $0.action == "idle-autodrop" } == true)
-        XCTAssertEqual(appliedTargets.values, [1024])
+        XCTAssertEqual(appliedTargets.values, [640])
     }
 
     func testDockerWorkloadFinishedDropsToContainerDemandTarget() throws {
@@ -155,9 +155,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "docker.workloadFinished")
 
         XCTAssertEqual(connector.reclaimRequests, 1)
-        XCTAssertEqual(appliedTargets.values, [1536])
-        XCTAssertEqual(manager.status().currentTargetMiB, 1536)
-        XCTAssertEqual(manager.status().balloonedMiB, 6656)
+        XCTAssertEqual(appliedTargets.values, [1152])
+        XCTAssertEqual(manager.status().currentTargetMiB, 1152)
+        XCTAssertEqual(manager.status().balloonedMiB, 7040)
     }
 
     func testGuestReclaimRangePayloadIsRejectedWithoutChangingBalloonTarget() throws {
@@ -256,8 +256,8 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "guest.event")
 
         XCTAssertEqual(connector.reclaimRequests, 1)
-        XCTAssertEqual(appliedTargets.values, [1280])
-        XCTAssertEqual(manager.status().currentTargetMiB, 1280)
+        XCTAssertEqual(appliedTargets.values, [896])
+        XCTAssertEqual(manager.status().currentTargetMiB, 896)
     }
 
     func testGuestEventWithAvailableSurplusCanReclaimWithoutPulse() throws {
@@ -282,7 +282,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
         XCTAssertEqual(connector.reclaimRequests, 1)
-        XCTAssertEqual(appliedTargets.values, [1280])
+        XCTAssertEqual(appliedTargets.values, [896])
     }
 
     func testGuestEventWithActiveWorkloadsSuppressesIdleReclaim() throws {
@@ -497,9 +497,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [1408])
-        XCTAssertEqual(manager.status().currentTargetMiB, 1408)
-        XCTAssertEqual(manager.status().balloonedMiB, 6784)
+        XCTAssertEqual(appliedTargets.values, [1024])
+        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
+        XCTAssertEqual(manager.status().balloonedMiB, 7168)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
         XCTAssertTrue(manager.status().message?.contains("demand memory reclaim lowered guest target") == true)
     }
@@ -529,9 +529,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "host.pressure.high")
 
         XCTAssertEqual(connector.reclaimRequests, 1)
-        XCTAssertEqual(appliedTargets.values, [1408])
+        XCTAssertEqual(appliedTargets.values, [1024])
         XCTAssertEqual(manager.status().hostFootprintMiB, 700)
-        XCTAssertEqual(manager.status().currentTargetMiB, 1408)
+        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
@@ -585,18 +585,18 @@ final class DynamicMemoryManagerTests: XCTestCase {
         )
 
         try manager.forceRecompute(reason: "guest.event")
-        XCTAssertEqual(manager.status().currentTargetMiB, 1408)
+        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
 
         connector.setBody(balloonPressureMetricsBody)
         try manager.forceRecompute(reason: "guest.event")
 
         let status = manager.status()
-        XCTAssertEqual(appliedTargets.values, [1408])
-        XCTAssertEqual(status.currentTargetMiB, 1408)
-        XCTAssertEqual(status.balloonedMiB, 6784)
+        XCTAssertEqual(appliedTargets.values, [1024])
+        XCTAssertEqual(status.currentTargetMiB, 1024)
+        XCTAssertEqual(status.balloonedMiB, 7168)
         XCTAssertEqual(status.pressure, .high)
         XCTAssertEqual(status.trace?.last?.action, "observe")
-        XCTAssertTrue(status.message?.contains("idle memory autodrop active") == true)
+        XCTAssertTrue(status.message?.contains("demand memory target active") == true)
     }
 
     func testEcoIdleAutodropFallsTowardLinuxFloorPlusRuntimeUsage() throws {
@@ -613,10 +613,10 @@ final class DynamicMemoryManagerTests: XCTestCase {
             idleMemoryReclaimDwellSeconds: 3,
             dynamicMemoryEnabled: true,
             dynamicMemoryMinimumMiB: 512,
-            dynamicMemoryBaseOverheadMiB: 256,
-            dynamicMemoryHeadroomMiB: 512,
-            dynamicMemoryHeadroomRatio: 0.25,
-            dynamicMemoryCacheAllowanceMiB: 256,
+            dynamicMemoryBaseOverheadMiB: 0,
+            dynamicMemoryHeadroomMiB: 128,
+            dynamicMemoryHeadroomRatio: 0.10,
+            dynamicMemoryCacheAllowanceMiB: 128,
             dynamicMemoryShrinkCooldownSeconds: 0,
             dynamicMemoryShrinkStepMiB: 256
         )
@@ -642,9 +642,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [1024])
-        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
-        XCTAssertEqual(manager.status().balloonedMiB, 3072)
+        XCTAssertEqual(appliedTargets.values, [896])
+        XCTAssertEqual(manager.status().currentTargetMiB, 896)
+        XCTAssertEqual(manager.status().balloonedMiB, 3200)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
@@ -662,10 +662,10 @@ final class DynamicMemoryManagerTests: XCTestCase {
             idleMemoryReclaimDwellSeconds: 3,
             dynamicMemoryEnabled: true,
             dynamicMemoryMinimumMiB: 512,
-            dynamicMemoryBaseOverheadMiB: 256,
-            dynamicMemoryHeadroomMiB: 512,
-            dynamicMemoryHeadroomRatio: 0.25,
-            dynamicMemoryCacheAllowanceMiB: 256,
+            dynamicMemoryBaseOverheadMiB: 0,
+            dynamicMemoryHeadroomMiB: 128,
+            dynamicMemoryHeadroomRatio: 0.10,
+            dynamicMemoryCacheAllowanceMiB: 128,
             dynamicMemoryShrinkCooldownSeconds: 0,
             dynamicMemoryShrinkStepMiB: 256
         )
@@ -722,8 +722,8 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [1024])
-        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
+        XCTAssertEqual(appliedTargets.values, [640])
+        XCTAssertEqual(manager.status().currentTargetMiB, 640)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
@@ -750,7 +750,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         )
 
         try manager.forceRecompute(reason: "guest.event")
-        XCTAssertEqual(manager.status().currentTargetMiB, 1408)
+        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
 
         manager.handleDockerActivity(DockerMemoryActivity(
             kind: .streamOpened,
@@ -760,7 +760,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
             buildLike: true
         ))
 
-        XCTAssertTrue(waitUntil { appliedTargets.values == [1408, 8192] })
+        XCTAssertTrue(waitUntil { appliedTargets.values == [1024, 8192] })
         XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertEqual(manager.status().balloonedMiB, 0)
         XCTAssertEqual(manager.status().trace?.last?.action, "restore")
@@ -779,11 +779,11 @@ final class DynamicMemoryManagerTests: XCTestCase {
             idleMemoryReclaimTargetMiB: 8192,
             idleMemoryReclaimDwellSeconds: 0,
             dynamicMemoryEnabled: true,
-            dynamicMemoryMinimumMiB: 1024,
-            dynamicMemoryBaseOverheadMiB: 512,
-            dynamicMemoryHeadroomMiB: 512,
-            dynamicMemoryHeadroomRatio: 0.25,
-            dynamicMemoryCacheAllowanceMiB: 256,
+            dynamicMemoryMinimumMiB: 512,
+            dynamicMemoryBaseOverheadMiB: 0,
+            dynamicMemoryHeadroomMiB: 128,
+            dynamicMemoryHeadroomRatio: 0.10,
+            dynamicMemoryCacheAllowanceMiB: 128,
             dynamicMemoryShrinkCooldownSeconds: dynamicMemoryShrinkCooldownSeconds,
             dynamicMemoryShrinkStepMiB: 8192
         )

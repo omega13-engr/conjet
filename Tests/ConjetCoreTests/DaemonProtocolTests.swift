@@ -86,8 +86,8 @@ final class DaemonProtocolTests: XCTestCase {
         XCTAssertEqual(policy.idleMemoryReclaimTargetMiB, 8192)
         XCTAssertEqual(policy.idleMemoryReclaimDwellSeconds, 0)
         XCTAssertTrue(policy.dynamicMemoryEnabled)
-        XCTAssertEqual(policy.dynamicMemoryMinimumMiB, 1024)
-        XCTAssertEqual(policy.dynamicMemoryHeadroomMiB, 512)
+        XCTAssertEqual(policy.dynamicMemoryMinimumMiB, 512)
+        XCTAssertEqual(policy.dynamicMemoryHeadroomMiB, 128)
     }
 
     func testVMRuntimeStatusCarriesStartupEvents() throws {

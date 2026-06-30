@@ -644,7 +644,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         if shouldRestoreIdleBalloon {
             message = "dynamic memory restoring configured memory before new work"
         } else if idleBalloonActive {
-            message = "idle memory autodrop active; configured memory restores on next workload"
+            message = "demand memory target active; build-like work restores configured maximum"
         } else {
             message = "dynamic memory observing guest free-page reports"
         }
@@ -969,18 +969,24 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let workloadMiB = Self.bytesToMiB(Self.saturatingAdd(
             metrics.containerMemoryCurrentBytes,
             Self.saturatingAdd(
-                metrics.daemonCgroupMemoryCurrentBytes,
-                metrics.serviceCgroupMemoryCurrentBytes
+                metrics.buildCgroupMemoryCurrentBytes,
+                Self.saturatingAdd(
+                    metrics.daemonCgroupMemoryCurrentBytes,
+                    metrics.serviceCgroupMemoryCurrentBytes
+                )
             )
         ))
         let proportionalHeadroomMiB = Int(
-            (Double(max(workloadMiB, policy.dynamicMemoryMinimumMiB)) * policy.dynamicMemoryHeadroomRatio)
+            (Double(workloadMiB) * policy.dynamicMemoryHeadroomRatio)
                 .rounded(.up)
         )
         let headroomMiB = max(policy.dynamicMemoryHeadroomMiB, proportionalHeadroomMiB)
-        return max(
+        return Self.saturatingAddMiB(
             effectiveMinimumMiB(),
-            policy.dynamicMemoryBaseOverheadMiB + workloadMiB + headroomMiB
+            Self.saturatingAddMiB(
+                workloadMiB,
+                Self.saturatingAddMiB(policy.dynamicMemoryBaseOverheadMiB, headroomMiB)
+            )
         )
     }
 
@@ -1190,6 +1196,10 @@ final class DynamicMemoryManager: @unchecked Sendable {
 
     private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
         UInt64.max - lhs < rhs ? UInt64.max : lhs + rhs
+    }
+
+    private static func saturatingAddMiB(_ lhs: Int, _ rhs: Int) -> Int {
+        Int.max - lhs < rhs ? Int.max : lhs + rhs
     }
 
     private static func roundUpMiB(_ value: Int, quantum: Int) -> Int {

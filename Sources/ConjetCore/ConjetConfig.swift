@@ -389,54 +389,32 @@ public struct ConjetMemoryPolicy: Codable, Equatable, Sendable {
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        scaledMemoryMiB(
-            configuredMemoryMiB: configuredMemoryMiB,
-            ratio: 0.125,
-            minimum: 512,
-            maximum: 2048,
-            quantum: 128
-        )
+        min(configuredMemoryMiB, 512)
     }
 
     public static func defaultDynamicMemoryBaseOverheadMiB(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        scaledMemoryMiB(
-            configuredMemoryMiB: configuredMemoryMiB,
-            ratio: 1.0 / 16.0,
-            minimum: 256,
-            maximum: 1024
-        )
+        0
     }
 
     public static func defaultDynamicMemoryHeadroomMiB(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        scaledMemoryMiB(
-            configuredMemoryMiB: configuredMemoryMiB,
-            ratio: 1.0 / 16.0,
-            minimum: 256,
-            maximum: 1024
-        )
+        min(configuredMemoryMiB, 128)
     }
 
     public static func defaultDynamicMemoryHeadroomRatio(profile: ConjetMemoryProfile) -> Double {
-        0.25
+        0.10
     }
 
     public static func defaultDynamicMemoryCacheAllowanceMiB(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        scaledMemoryMiB(
-            configuredMemoryMiB: configuredMemoryMiB,
-            ratio: 1.0 / 32.0,
-            minimum: 128,
-            maximum: 512,
-            quantum: 128
-        )
+        min(configuredMemoryMiB, 128)
     }
 
     public static func defaultDynamicMemoryShrinkCooldownSeconds(
