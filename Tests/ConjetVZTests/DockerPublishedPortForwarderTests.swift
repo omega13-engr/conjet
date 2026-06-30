@@ -455,7 +455,7 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
 
         XCTAssertTrue(waitUntil { forwarder.status().forwards.first?.targetIP == "172.18.0.9" })
         XCTAssertEqual(connector.requests.filter { $0.contains("/conjet-container-targets") }.count, 0)
-        XCTAssertEqual(connector.requests.filter { $0.contains("/containers/\(containerID)/json") }.count, 0)
+        XCTAssertGreaterThanOrEqual(connector.requests.filter { $0.contains("/containers/\(containerID)/json") }.count, 1)
     }
 
     func testDockerEventStreamUsesGuestConnectionWithoutDockerEventsRunner() throws {
@@ -638,6 +638,94 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertEqual(connector.requests.filter { $0.contains("/containers/\(containerID)/json") }.count, 0)
     }
 
+    func testContainerTargetSnapshotRemovesStalePublishedListeners() throws {
+        let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        let hostPort = try reserveLoopbackPort()
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: BinaryTCPEchoConnector(),
+            capabilities: nativeTCPCapabilities()
+        )
+        defer { forwarder.stop() }
+
+        forwarder.reconcileForTesting([
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: hostPort,
+                containerPort: 80,
+                protocol: .tcp,
+                containerID: containerID,
+                containerName: "web",
+                targetIP: "172.18.0.9"
+            )
+        ])
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+
+        try forwarder.applyContainerTargetSnapshotDataForTesting(Data("[]".utf8))
+
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().isEmpty })
+        let status = forwarder.status()
+        XCTAssertEqual(status.activeTCPForwards, 0)
+        XCTAssertEqual(status.staleForwards, 1)
+        XCTAssertEqual(status.forwards.first?.state, .stale)
+        XCTAssertTrue(status.messages.contains("removed stale published ports for missing container abcdef012345"))
+    }
+
+    func testContainerTargetSnapshotDiscoversPublishedPortsWithoutCreateIntent() throws {
+        let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
+        FileManager.default.createFile(atPath: socketURL.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: socketURL) }
+
+        let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        let hostPort = try reserveLoopbackPort()
+        let connector = DockerAPIInspectConnector(
+            containerID: containerID,
+            containerName: "web",
+            hostPort: hostPort,
+            containerPort: 80,
+            targetIP: "172.18.0.9"
+        )
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketURL.path,
+            connector: connector,
+            capabilities: nativeTCPCapabilities(),
+            runner: { _, arguments, _ in
+                if arguments.contains("ps") {
+                    return ProcessResult(
+                        executable: "/usr/bin/env",
+                        arguments: arguments,
+                        exitCode: 0,
+                        stdout: "",
+                        stderr: ""
+                    )
+                }
+                XCTFail("runner should not be used for target snapshot inspect: \(arguments)")
+                return ProcessResult(
+                    executable: "/usr/bin/env",
+                    arguments: arguments,
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "unexpected runner call"
+                )
+            }
+        )
+        defer { forwarder.stop() }
+        forwarder.reconcileForTesting([])
+
+        let snapshot = """
+        [{"Id":"\(containerID)","Names":["/web"],"NetworkSettings":{"Networks":{"default":{"IPAddress":"172.18.0.9"}}}}]
+        """
+        try forwarder.applyContainerTargetSnapshotDataForTesting(Data(snapshot.utf8))
+
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+        let status = forwarder.status()
+        XCTAssertEqual(status.activeTCPForwards, 1)
+        XCTAssertEqual(status.forwards.first?.targetIP, "172.18.0.9")
+        XCTAssertEqual(status.forwards.first?.containerID, containerID)
+        XCTAssertGreaterThanOrEqual(connector.requests.filter { $0.contains("/containers/\(containerID)/json") }.count, 1)
+    }
+
     func testContainerStartIntentPrepublishesConfiguredPortsBeforeContainerIsRunning() throws {
         let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
@@ -679,15 +767,15 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
 
         XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
         let status = forwarder.status()
-        XCTAssertEqual(status.activeTCPForwards, 0)
-        XCTAssertEqual(status.forwards.first?.state, .reservedWaitingForTarget)
+        XCTAssertEqual(status.activeTCPForwards, 1)
+        XCTAssertEqual(status.forwards.first?.state, .listening)
         XCTAssertNil(status.forwards.first?.targetIP)
         XCTAssertEqual(forwarder.pendingCreatePortsForTesting(containerID: containerID).first?.hostPort, hostPort)
         XCTAssertTrue(forwarder.status().messages.contains("prepublished Docker start port intent abcdef012345"))
     }
 
-    func testCreateIntentPrepublishesNativeTCPListenerBeforeTargetIsResolved() throws {
-        let connector = BinaryTCPEchoConnector()
+    func testCreateIntentPrepublishesLegacyTCPListenerBeforeTargetIsResolved() throws {
+        let connector = TCPProxyEchoConnector()
         let hostPort = try reserveLoopbackPort()
         let forwarder = DockerPublishedPortForwarder(
             socketPath: "/tmp/missing-\(UUID().uuidString).sock",
@@ -713,13 +801,13 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
 
         XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
         let status = forwarder.status()
-        XCTAssertEqual(status.activeTCPForwards, 0)
-        XCTAssertEqual(status.forwards.first?.state, .reservedWaitingForTarget)
+        XCTAssertEqual(status.activeTCPForwards, 1)
+        XCTAssertEqual(status.forwards.first?.state, .listening)
         XCTAssertNil(status.forwards.first?.targetIP)
     }
 
-    func testPrepublishedNativeTCPListenerWaitsForTargetAndThenForwards() throws {
-        let connector = BinaryTCPEchoConnector()
+    func testPrepublishedLegacyTCPListenerForwardsAfterTargetReconcile() throws {
+        let connector = TCPProxyEchoConnector()
         let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         let hostPort = try reserveLoopbackPort()
         let forwarder = DockerPublishedPortForwarder(
@@ -765,12 +853,12 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         let response = readAllTestBytes(from: fd)
 
         XCTAssertEqual(String(data: response, encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.openTargets.contains("172.18.0.9:80") })
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(hostPort)") })
         XCTAssertEqual(forwarder.status().forwards.first?.targetIP, "172.18.0.9")
     }
 
-    func testNativeTCPReconcileWithoutTargetReportsNoRoutableTarget() throws {
-        let connector = BinaryTCPEchoConnector()
+    func testLegacyTCPReconcileWithoutTargetStillPublishesGuestHostPort() throws {
+        let connector = TCPProxyEchoConnector()
         let hostPort = try reserveLoopbackPort()
         let forwarder = DockerPublishedPortForwarder(
             socketPath: "/tmp/missing-\(UUID().uuidString).sock",
@@ -790,9 +878,9 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         ])
 
         let status = forwarder.status()
-        XCTAssertEqual(status.activeTCPForwards, 0)
-        XCTAssertEqual(status.forwards.first?.state, .failedNoRoutableTarget)
-        XCTAssertFalse(forwarder.listenerPortsForTesting().contains(hostPort))
+        XCTAssertEqual(status.activeTCPForwards, 1)
+        XCTAssertEqual(status.forwards.first?.state, .listening)
+        XCTAssertTrue(forwarder.listenerPortsForTesting().contains(hostPort))
     }
 
     func testTargetedReconcilePrunesContainerWhenInspectReportsNoSuchContainer() throws {
@@ -1035,8 +1123,8 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertEqual(forwarder.status().tcpMode, "legacy-tcp-proxy")
     }
 
-    func testNativeTCPBridgePoolSelectedWhenCapabilitiesArePresent() throws {
-        let connector = BinaryTCPEchoConnector()
+    func testTCPPublishedPortsUseLegacyProxyWhenNativePoolIsAvailable() throws {
+        let connector = TCPProxyEchoConnector()
         let port = try reserveLoopbackPort()
         let forwarder = DockerPublishedPortForwarder(
             socketPath: "/tmp/missing-\(UUID().uuidString).sock",
@@ -1063,10 +1151,10 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         let response = readAllTestBytes(from: fd)
 
         XCTAssertEqual(String(data: response, encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.openTargets.contains("172.17.0.2:80") })
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(port)") })
         let status = forwarder.status()
         XCTAssertEqual(status.bridgeEngine, "conjet-netd-c")
-        XCTAssertEqual(status.tcpMode, "persistent-binary-tcp-pool")
+        XCTAssertEqual(status.tcpMode, "legacy-tcp-proxy")
         XCTAssertTrue(status.tcpBinaryFrames)
         XCTAssertTrue(status.persistentTCPVsock)
         XCTAssertTrue(status.tcpVsockPool)
@@ -1075,33 +1163,28 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
 
     func testNativeTCPBridgePoolReportsOpenErrors() throws {
         let connector = BinaryTCPEchoConnector(errorOnOpen: true)
-        let port = try reserveLoopbackPort()
-        let forwarder = DockerPublishedPortForwarder(
-            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
-            connector: connector,
-            capabilities: nativeTCPCapabilities()
+        let pool = NativeTCPBridgePool(connector: connector, maxConnections: 1, minimumIdleConnections: 0)
+        defer { pool.close() }
+        let fds = try makeTestSocketPair()
+        let clientFD = fds[0]
+        let peerFD = fds[1]
+        defer {
+            Darwin.close(clientFD)
+            Darwin.close(peerFD)
+        }
+        let connection = try pool.borrow()
+        defer { connection.close() }
+
+        let result = connection.forward(
+            clientFD: clientFD,
+            targetHost: "172.17.0.2",
+            targetPort: 63000,
+            onClientBytes: { _ in },
+            onTargetBytes: { _ in }
         )
-        defer { forwarder.stop() }
 
-        forwarder.reconcileForTesting([
-            DockerPublishedPort(
-                hostIP: "127.0.0.1",
-                hostPort: port,
-                containerPort: 63000,
-                protocol: .tcp,
-                targetIP: "172.17.0.2"
-            )
-        ])
-        XCTAssertTrue(waitUntil { forwarder.status().activeTCPForwards == 1 })
-
-        let fd = try connectLoopback(port: port)
-        defer { Darwin.close(fd) }
-        XCTAssertTrue(writeAllTestBytes(Data("ping".utf8), to: fd))
-        Darwin.shutdown(fd, SHUT_WR)
-        let response = readAllTestBytes(from: fd)
-
-        XCTAssertTrue(String(data: response, encoding: .utf8)?.contains("502 Bad Gateway") == true)
-        XCTAssertTrue(waitUntil { forwarder.status().forwards.first?.connectionErrors == 1 })
+        XCTAssertFalse(result.opened)
+        XCTAssertTrue(result.hadError)
     }
 
 

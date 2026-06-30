@@ -902,12 +902,17 @@ public final class DockerSocketBridge: @unchecked Sendable {
             ? DockerStreamPhaseDetector(workload: activity.workload)
             : nil
         let upgradedStream = Self.looksLikeDockerUpgradeStream(initialClientData)
+        let longLivedResponse = upgradedStream || Self.dockerRequestHasLongLivedResponse(initialClientData)
         let pumpClientToGuest = Self.dockerRequestNeedsClientToGuestPump(initialClientData)
         if pumpClientToGuest {
             group.enter()
             DispatchQueue.global(qos: .userInitiated).async {
-                copyBytes(from: clientFD, to: guest.fileDescriptor)
-                if !upgradedStream {
+                copyBytes(
+                    from: clientFD,
+                    to: guest.fileDescriptor,
+                    idleTimeoutMilliseconds: longLivedResponse ? nil : 5_000
+                )
+                if !upgradedStream && !longLivedResponse {
                     Darwin.shutdown(guest.fileDescriptor, SHUT_WR)
                 }
                 group.leave()
@@ -915,18 +920,23 @@ public final class DockerSocketBridge: @unchecked Sendable {
         }
         group.enter()
         DispatchQueue.global(qos: .userInitiated).async {
-            copyBytes(from: guest.fileDescriptor, to: clientFD) { [weak self] bytes in
-                guard let self,
-                      let phaseDetector,
-                      phaseDetector.feed(bytes: bytes) > 0 else {
-                    return
-                }
-                self.emitActivity(
-                    kind: .streamPhaseFinished,
-                    workload: activity.workload,
-                    buildLike: activity.buildLike
-                )
-            }
+            copyBytes(
+                from: guest.fileDescriptor,
+                to: clientFD,
+                onChunk: { [weak self] bytes in
+                    guard let self,
+                          let phaseDetector,
+                          phaseDetector.feed(bytes: bytes) > 0 else {
+                        return
+                    }
+                    self.emitActivity(
+                        kind: .streamPhaseFinished,
+                        workload: activity.workload,
+                        buildLike: activity.buildLike
+                    )
+                },
+                idleTimeoutMilliseconds: longLivedResponse ? nil : 5_000
+            )
             Darwin.shutdown(clientFD, SHUT_WR)
             if upgradedStream {
                 Darwin.shutdown(clientFD, SHUT_RDWR)
@@ -1095,6 +1105,13 @@ public final class DockerSocketBridge: @unchecked Sendable {
         return !request.bodyIsComplete
     }
 
+    static func dockerRequestHasLongLivedResponse(_ data: Data) -> Bool {
+        if looksLikeDockerUpgradeStream(data) {
+            return true
+        }
+        return DockerHTTPRequestEnvelope(data: data)?.isStreamingHTTP == true
+    }
+
     static func forceConnectionCloseForInterceptableRequest(_ data: Data) -> Data {
         let delimiter = Data([13, 10, 13, 10])
         guard let headerRange = data.range(of: delimiter),
@@ -1174,10 +1191,9 @@ public final class DockerSocketBridge: @unchecked Sendable {
         headers: S
     ) -> Bool where S.Element == String {
         let lowercasedPath = path.lowercased()
-        if lowercasedPath.contains("/events")
+        if dockerRequestPathHasLongLivedResponse(lowercasedPath)
             || lowercasedPath.contains("/attach")
-            || lowercasedPath.contains("/exec/")
-            || lowercasedPath.contains("/logs?") && lowercasedPath.contains("follow=1") {
+            || lowercasedPath.contains("/exec/") {
             return false
         }
         for header in headers {
@@ -1193,6 +1209,48 @@ public final class DockerSocketBridge: @unchecked Sendable {
             }
         }
         return true
+    }
+
+    private static func dockerRequestPathHasLongLivedResponse(_ lowercasedPath: String) -> Bool {
+        if lowercasedPath.contains("/events") {
+            return true
+        }
+        if lowercasedPath.contains("/logs"),
+           dockerRequestPathHasTruthyQueryParameter(lowercasedPath, name: "follow") {
+            return true
+        }
+        if lowercasedPath.contains("/stats"),
+           !dockerRequestPathHasFalseyQueryParameter(lowercasedPath, name: "stream") {
+            return true
+        }
+        return false
+    }
+
+    private static func dockerRequestPathHasTruthyQueryParameter(_ path: String, name: String) -> Bool {
+        guard let value = dockerRequestPathQueryValue(path, name: name) else {
+            return false
+        }
+        return value == "1" || value == "true"
+    }
+
+    private static func dockerRequestPathHasFalseyQueryParameter(_ path: String, name: String) -> Bool {
+        guard let value = dockerRequestPathQueryValue(path, name: name) else {
+            return false
+        }
+        return value == "0" || value == "false"
+    }
+
+    private static func dockerRequestPathQueryValue(_ path: String, name: String) -> String? {
+        guard let queryStart = path.firstIndex(of: "?") else {
+            return nil
+        }
+        let query = path[path.index(after: queryStart)...]
+        for item in query.split(separator: "&", omittingEmptySubsequences: false) {
+            let parts = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.first.map(String.init) == name else { continue }
+            return parts.count > 1 ? String(parts[1]) : ""
+        }
+        return nil
     }
 
     private static func httpStatusCode(from data: Data) -> Int? {
@@ -1611,7 +1669,8 @@ private final class VZConnectionHolder: @unchecked Sendable {
 private func copyBytes(
     from sourceFD: Int32,
     to destinationFD: Int32,
-    onChunk: ((UnsafeBufferPointer<UInt8>) -> Void)? = nil
+    onChunk: ((UnsafeBufferPointer<UInt8>) -> Void)? = nil,
+    idleTimeoutMilliseconds: Int32? = 5_000
 ) {
     var buffer = [UInt8](repeating: 0, count: 64 * 1024)
     while true {
@@ -1648,9 +1707,16 @@ private func copyBytes(
                 continue
             }
             if readErrno == EAGAIN || readErrno == EWOULDBLOCK {
-                if waitForReadableFD(sourceFD, timeoutMilliseconds: 5_000) {
+                if let idleTimeoutMilliseconds {
+                    if waitForReadableFD(sourceFD, timeoutMilliseconds: idleTimeoutMilliseconds) {
+                        continue
+                    }
+                    return
+                }
+                if waitForReadableFD(sourceFD, timeoutMilliseconds: 1_000) {
                     continue
                 }
+                continue
             }
             return
         } else {
@@ -1674,7 +1740,7 @@ private func waitForWritableFD(_ fd: Int32, timeoutMilliseconds: Int32) -> Bool 
     while true {
         let result = Darwin.poll(&descriptor, 1, timeoutMilliseconds)
         if result > 0 {
-            return (descriptor.revents & Int16(POLLOUT | POLLHUP | POLLERR)) != 0
+            return (descriptor.revents & Int16(POLLOUT | POLLHUP | POLLERR | POLLNVAL)) != 0
         }
         if result < 0, errno == EINTR {
             continue
@@ -1688,7 +1754,7 @@ private func waitForReadableFD(_ fd: Int32, timeoutMilliseconds: Int32) -> Bool 
     while true {
         let result = Darwin.poll(&descriptor, 1, timeoutMilliseconds)
         if result > 0 {
-            return (descriptor.revents & Int16(POLLIN | POLLHUP | POLLERR)) != 0
+            return (descriptor.revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0
         }
         if result < 0, errno == EINTR {
             continue

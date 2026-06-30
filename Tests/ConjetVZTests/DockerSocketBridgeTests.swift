@@ -812,6 +812,65 @@ final class DockerSocketBridgeTests: XCTestCase {
         XCTAssertFalse(rewritten.contains("Connection: close"))
     }
 
+    func testManagedHostMountInterceptionKeepsFollowTrueLogsOpen() {
+        let request = Data("""
+        GET /v1.52/containers/abcdef/logs?follow=true&stdout=1&stderr=1 HTTP/1.1\r
+        Host: docker\r
+        Connection: keep-alive\r
+        \r
+
+        """.utf8)
+
+        let rewritten = String(
+            data: DockerSocketBridge.forceConnectionCloseForInterceptableRequest(request),
+            encoding: .utf8
+        ) ?? ""
+
+        XCTAssertTrue(DockerSocketBridge.dockerRequestHasLongLivedResponse(request))
+        XCTAssertTrue(rewritten.contains("Connection: keep-alive"))
+        XCTAssertFalse(rewritten.contains("Connection: close"))
+    }
+
+    func testBridgeKeepsFollowLogsOpenAcrossGuestReadIdleTimeout() throws {
+        let root = URL(fileURLWithPath: "/tmp/cjbr-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let socket = root.appendingPathComponent("docker.sock")
+        let connector = IdleDockerLogStreamConnector(holdOpenSeconds: 7)
+        let bridge = DockerSocketBridge(
+            socketPath: socket.path,
+            connector: connector
+        )
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let fd = try openRawClientSocket(socketPath: socket.path)
+        defer { Darwin.close(fd) }
+        setTestSocketReceiveTimeout(fd, timeoutSeconds: 1)
+
+        let request = """
+        GET /v1.52/containers/web/logs?follow=1&stdout=1&stderr=1 HTTP/1.1\r
+        Host: docker\r
+        \r
+
+        """
+        XCTAssertTrue(writeAllSocketBridgeTestBytes(Data(request.utf8), to: fd))
+        Darwin.shutdown(fd, SHUT_WR)
+
+        let response = readUntilSocketBridgeTestBytes(from: fd, contains: Data("ready\n".utf8), timeoutSeconds: 2)
+        XCTAssertTrue(String(data: response, encoding: .utf8)?.contains("ready") == true)
+        XCTAssertTrue(waitUntil { connector.clientWriteEOFCheckCompleted })
+        XCTAssertFalse(connector.observedClientWriteEOF)
+
+        Thread.sleep(forTimeInterval: 5.4)
+        var byte: UInt8 = 0
+        errno = 0
+        let count = Darwin.read(fd, &byte, 1)
+        XCTAssertEqual(count, -1)
+        XCTAssertTrue(errno == EAGAIN || errno == EWOULDBLOCK)
+    }
+
     func testContainerRemoveParserExtractsVersionedContainerID() {
         let request = "DELETE /v1.52/containers/abcdef012345?v=true&force=false HTTP/1.1\r\nHost: docker\r\n\r\n"
 
@@ -980,13 +1039,8 @@ final class DockerSocketBridgeTests: XCTestCase {
     }
 
     private func sendRawRequest(socketPath: String, request: String) throws -> String {
-        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
-        XCTAssertGreaterThanOrEqual(fd, 0)
+        let fd = try openRawClientSocket(socketPath: socketPath)
         defer { Darwin.close(fd) }
-
-        try withUnixSocketAddress(path: socketPath) { address, length in
-            XCTAssertEqual(Darwin.connect(fd, address, length), 0)
-        }
 
         _ = request.withCString { pointer in
             Darwin.write(fd, pointer, strlen(pointer))
@@ -1004,6 +1058,20 @@ final class DockerSocketBridgeTests: XCTestCase {
             }
         }
         return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private func openRawClientSocket(socketPath: String) throws -> Int32 {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        do {
+            try withUnixSocketAddress(path: socketPath) { address, length in
+                XCTAssertEqual(Darwin.connect(fd, address, length), 0)
+            }
+            return fd
+        } catch {
+            Darwin.close(fd)
+            throw error
+        }
     }
 
     private func withUnixSocketAddress<Result>(
@@ -1514,6 +1582,71 @@ private final class RawDockerResponseGuestConnectionConnector: GuestConnectionCo
     }
 }
 
+private final class IdleDockerLogStreamConnector: GuestConnectionConnector, @unchecked Sendable {
+    private let holdOpenSeconds: TimeInterval
+    private let lock = NSLock()
+    private var sawClientWriteEOF = false
+    private var completedClientWriteEOFCheck = false
+
+    init(holdOpenSeconds: TimeInterval) {
+        self.holdOpenSeconds = holdOpenSeconds
+    }
+
+    var observedClientWriteEOF: Bool {
+        lock.lock()
+        let value = sawClientWriteEOF
+        lock.unlock()
+        return value
+    }
+
+    var clientWriteEOFCheckCompleted: Bool {
+        lock.lock()
+        let value = completedClientWriteEOFCheck
+        lock.unlock()
+        return value
+    }
+
+    func connect() throws -> GuestConnection {
+        var fds = [Int32](repeating: -1, count: 2)
+        guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
+            throw ConjetError.socket("socketpair() failed")
+        }
+
+        let clientFD = fds[0]
+        let serverFD = fds[1]
+        setTestSocketReceiveTimeout(clientFD, timeoutSeconds: 0.05)
+        let holdOpenSeconds = holdOpenSeconds
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { Darwin.close(serverFD) }
+            _ = readUntilSocketBridgeTestBytes(
+                from: serverFD,
+                contains: Data("\r\n\r\n".utf8),
+                timeoutSeconds: 2
+            )
+            let body = "ready\n"
+            let response = """
+            HTTP/1.1 200 OK\r
+            Content-Type: application/vnd.docker.raw-stream\r
+            \r
+            \(body)
+            """
+            _ = writeAllSocketBridgeTestBytes(Data(response.utf8), to: serverFD)
+            setTestSocketReceiveTimeout(serverFD, timeoutSeconds: 0.2)
+            var byte: UInt8 = 0
+            let count = Darwin.read(serverFD, &byte, 1)
+            self.lock.lock()
+            self.sawClientWriteEOF = count == 0
+            self.completedClientWriteEOFCheck = true
+            self.lock.unlock()
+            Thread.sleep(forTimeInterval: holdOpenSeconds)
+        }
+
+        return GuestConnection(fileDescriptor: clientFD) {
+            Darwin.close(clientFD)
+        }
+    }
+}
+
 private final class ObservedCreateCallbacks: @unchecked Sendable {
     private let lock = NSLock()
     private var capturedIntent: DockerCreatePublicationIntent?
@@ -1638,6 +1771,57 @@ private func readAllSocketBridgeTestBytes(from fd: Int32) -> Data {
         }
     }
     return data
+}
+
+private func readUntilSocketBridgeTestBytes(from fd: Int32, contains marker: Data, timeoutSeconds: TimeInterval) -> Data {
+    let deadline = Date().addingTimeInterval(timeoutSeconds)
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while Date() < deadline {
+        let count = Darwin.read(fd, &buffer, buffer.count)
+        if count > 0 {
+            data.append(buffer, count: count)
+            if data.range(of: marker) != nil {
+                break
+            }
+        } else if count < 0, errno == EINTR {
+            continue
+        } else if count < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+            continue
+        } else {
+            break
+        }
+    }
+    return data
+}
+
+private func writeAllSocketBridgeTestBytes(_ data: Data, to fd: Int32) -> Bool {
+    data.withUnsafeBytes { rawBuffer in
+        guard let baseAddress = rawBuffer.baseAddress else {
+            return true
+        }
+        var written = 0
+        while written < data.count {
+            let count = Darwin.write(fd, baseAddress.advanced(by: written), data.count - written)
+            if count > 0 {
+                written += count
+            } else if count < 0, errno == EINTR {
+                continue
+            } else {
+                return false
+            }
+        }
+        return true
+    }
+}
+
+private func setTestSocketReceiveTimeout(_ fd: Int32, timeoutSeconds: TimeInterval) {
+    let seconds = max(0, timeoutSeconds)
+    var timeout = timeval(
+        tv_sec: Int(seconds),
+        tv_usec: Int32((seconds.truncatingRemainder(dividingBy: 1)) * 1_000_000)
+    )
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 }
 
 private func readManagedHostMountHTTPRequest(from fd: Int32) -> Data {

@@ -2306,6 +2306,29 @@ static void handle_docker_proxy(int client, const uint8_t *first, size_t first_l
         return;
     }
 
+    if (!upgraded_stream && streaming_http && request_complete) {
+        struct pump_args *ba = calloc(1, sizeof(*ba));
+        if (ba == NULL) {
+            close_fd(upstream);
+            close_fd(client);
+            return;
+        }
+        ba->from = upstream;
+        ba->to = client;
+        ba->shutdown_to_on_eof = 1;
+        pthread_t response_thread;
+        if (pthread_create(&response_thread, NULL, pump_thread, ba) != 0) {
+            free(ba);
+            close_fd(upstream);
+            close_fd(client);
+            return;
+        }
+        pthread_join(response_thread, NULL);
+        close_fd(upstream);
+        close_fd(client);
+        return;
+    }
+
     if (!upgraded_stream && !streaming_http && request_complete) {
         struct pump_args *ba = calloc(1, sizeof(*ba));
         if (ba == NULL) {

@@ -380,6 +380,10 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         reconcile(containerIDs: containerIDs)
     }
 
+    func applyContainerTargetSnapshotDataForTesting(_ data: Data) throws {
+        try applyContainerTargetSnapshotData(data, source: "test")
+    }
+
     func observeContainerStartForTesting(_ request: DockerContainerStartRequest) {
         lock.lock()
         running = true
@@ -414,8 +418,16 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             && capabilities.tcpVsockPool
     }
 
+    private var useNativeTCPPoolForPublishedPorts: Bool {
+        // The guest-native binary TCP relay currently accepts container targets but can close
+        // established published-port streams before returning target bytes. Keep Docker-published
+        // TCP ports on the stable in-guest Docker host-port path until that relay is repaired.
+        guard nativeTCPPoolAvailable else { return false }
+        return false
+    }
+
     private var tcpModeName: String {
-        nativeTCPPoolAvailable ? "persistent-binary-tcp-pool" : "legacy-tcp-proxy"
+        useNativeTCPPoolForPublishedPorts ? "persistent-binary-tcp-pool" : "legacy-tcp-proxy"
     }
 
     private var udpModeName: String {
@@ -1046,6 +1058,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
 
     private func applyContainerTargetSnapshot(_ containers: [DockerContainerTargetSnapshot], source: String) {
         let now = Date()
+        let activeContainerIDs = Set(containers.map(\.id).filter { !$0.isEmpty })
         var snapshot: [String: String] = [:]
         var attachCandidates: [(containerID: String, targetIP: String)] = []
         var fingerprintRows: [String] = []
@@ -1092,6 +1105,12 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                 source: source
             )
         }
+        if !duplicateSnapshot {
+            removeForContainersMissingFromTargetSnapshot(activeContainerIDs: activeContainerIDs)
+            if !activeContainerIDs.isEmpty {
+                reconcile(containerIDs: activeContainerIDs)
+            }
+        }
     }
 
     private func attachPendingCreatePortsFromTargetEvent(
@@ -1119,6 +1138,27 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             reconcile(publishedPorts: resolvedPorts, scopedContainerIDs: [item.containerID])
             lock.lock()
             appendMessage("target-event attached published ports for \(String(item.containerID.prefix(12))) from \(source)")
+            lock.unlock()
+        }
+    }
+
+    private func removeForContainersMissingFromTargetSnapshot(activeContainerIDs: Set<String>) {
+        lock.lock()
+        let staleContainerIDs = Set(statuses.values.compactMap { status -> String? in
+            guard let containerID = status.containerID, !containerID.isEmpty else {
+                return nil
+            }
+            let isActive = activeContainerIDs.contains { activeContainerID in
+                containerIDsMatch(activeContainerID, containerID)
+            }
+            return isActive ? nil : containerID
+        })
+        lock.unlock()
+
+        for containerID in staleContainerIDs {
+            removeForContainer(containerID)
+            lock.lock()
+            appendMessage("removed stale published ports for missing container \(String(containerID.prefix(12)))")
             lock.unlock()
         }
     }
@@ -1470,7 +1510,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             if let target = concreteNativeTCPTarget(for: publishedPort) {
                 existing.updateTarget(host: target.host, port: target.port)
                 setStatus(for: key, status(for: publishedPort, bindAddress: bindAddress, state: .listening, warning: warning))
-            } else if nativeTCPPoolAvailable {
+            } else if useNativeTCPPoolForPublishedPorts {
                 setStatus(for: key, status(
                     for: publishedPort,
                     bindAddress: bindAddress,
@@ -1487,7 +1527,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         let listener: any PortListener
         let listenerState: ConjetPortForwardState
         let listenerError: String?
-        if nativeTCPPoolAvailable {
+        if useNativeTCPPoolForPublishedPorts {
             let target = concreteNativeTCPTarget(for: publishedPort)
             if target == nil, !allowPendingTarget {
                 setStatus(for: key, status(

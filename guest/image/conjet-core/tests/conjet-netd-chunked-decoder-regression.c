@@ -53,6 +53,7 @@ struct fake_docker_server_args {
     const char *expected_request_substring;
     char request[8192];
     size_t request_len;
+    int reject_client_eof_before_response;
     int result;
 };
 
@@ -89,7 +90,21 @@ static void *fake_docker_server_main(void *raw) {
     if (args->expected_request_substring != NULL &&
         memmem(args->request, args->request_len, args->expected_request_substring, strlen(args->expected_request_substring)) == NULL) {
         args->result = -100;
-    } else if (args->response != NULL && write_full(fd, args->response, strlen(args->response)) != 0) {
+    } else if (args->reject_client_eof_before_response) {
+        struct timeval timeout = {.tv_sec = 0, .tv_usec = 200000};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        char probe;
+        ssize_t n = read(fd, &probe, 1);
+        if (n == 0) {
+            args->result = -102;
+        } else if (n > 0) {
+            args->result = -103;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            args->result = -104;
+        }
+    }
+
+    if (args->result == 0 && args->response != NULL && write_full(fd, args->response, strlen(args->response)) != 0) {
         args->result = -101;
     }
 
@@ -147,7 +162,8 @@ static void run_proxy_fixture(
     const char *expected_upstream_substring,
     const char *server_response,
     const char *expected_client_substring,
-    int half_close_client
+    int half_close_client,
+    int reject_client_eof_before_response
 ) {
     char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
     int listen_fd = make_fake_docker_listener(socket_path, sizeof(socket_path));
@@ -162,6 +178,7 @@ static void run_proxy_fixture(
         .response = server_response,
         .expected_request_substring = expected_upstream_substring,
         .request_len = 0,
+        .reject_client_eof_before_response = reject_client_eof_before_response,
         .result = 0
     };
     pthread_t server_thread;
@@ -710,6 +727,7 @@ static void test_handle_docker_proxy_rewrites_fragmented_container_create(void) 
         "\"CgroupParent\":\"conjet-services.slice\"",
         response,
         "{\"Id\":\"abc\"}",
+        0,
         0
     );
 }
@@ -736,6 +754,7 @@ static void test_handle_docker_proxy_rewrites_fragmented_build_request(void) {
         "cgroupparent=/conjet.slice/conjet-build.slice",
         response,
         "{\"ok\":true}",
+        0,
         0
     );
 }
@@ -763,6 +782,7 @@ static void test_handle_docker_proxy_relays_informational_response_before_final(
         "\"CgroupParent\":\"conjet-services.slice\"",
         response,
         "{\"Id\":\"abc\"}",
+        0,
         0
     );
 }
@@ -787,6 +807,32 @@ static void test_handle_docker_proxy_relays_chunked_stream_after_half_close(void
         "GET /v1.52/events",
         response,
         "{\"status\":\"ok\"}",
+        1,
+        0
+    );
+}
+
+static void test_handle_docker_proxy_keeps_streaming_logs_upstream_open_after_client_half_close(void) {
+    const char request[] =
+        "GET /v1.52/containers/abcdef/logs?follow=1&stdout=1&stderr=1&tail=10 HTTP/1.1\r\n"
+        "Host: docker\r\n"
+        "\r\n";
+    const char response[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/vnd.docker.multiplexed-stream\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "\r\n"
+        "10\r\nsmoke listening\n\r\n"
+        "0\r\n\r\n";
+
+    run_proxy_fixture(
+        "streaming logs proxy keeps upstream open",
+        request,
+        "",
+        "GET /v1.52/containers/abcdef/logs?follow=1",
+        response,
+        "smoke listening",
+        1,
         1
     );
 }
@@ -820,6 +866,7 @@ int main(void) {
     test_handle_docker_proxy_rewrites_fragmented_build_request();
     test_handle_docker_proxy_relays_informational_response_before_final();
     test_handle_docker_proxy_relays_chunked_stream_after_half_close();
+    test_handle_docker_proxy_keeps_streaming_logs_upstream_open_after_client_half_close();
     puts("conjet-netd chunked decoder regression tests passed");
     return 0;
 }
