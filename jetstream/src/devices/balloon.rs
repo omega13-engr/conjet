@@ -560,7 +560,7 @@ impl BalloonQueueHandler {
             });
         }
         if !batch_ranges.is_empty() {
-            self.metrics.free_page_hint_reported_bytes += batch_reported;
+            self.reclaim_free_page_hint_ranges(memory, guest_base, batch_ranges, batch_reported);
         }
 
         self.free_page_hint_executor
@@ -569,6 +569,19 @@ impl BalloonQueueHandler {
             transport.mark_queue_used();
         }
         Ok(used)
+    }
+
+    fn reclaim_free_page_hint_ranges(
+        &mut self,
+        memory: &GuestMemory,
+        guest_base: u64,
+        batch_ranges: Vec<PageRange>,
+        batch_reported: u64,
+    ) {
+        let report = reclaim_ranges(memory, guest_base, batch_ranges, self.reclaimer.as_deref());
+        self.metrics.free_page_hint_reported_bytes += batch_reported;
+        self.metrics.free_page_hint_reclaimed_bytes += report.discard_advised_bytes;
+        self.record_reclaim_report(report, false);
     }
 
     fn record_reclaim_report(&mut self, report: ReclaimReport, free_page_report: bool) {
@@ -879,6 +892,7 @@ mod tests {
         STATUS_FEATURES_OK,
     };
     use crate::devices::virtqueue::{DescriptorChain, QueueDescriptor};
+    use std::sync::Mutex;
 
     #[test]
     fn configuration_encodes_target_and_actual_pages() {
@@ -1201,6 +1215,57 @@ mod tests {
         assert_eq!(
             metrics.current_balloon_decommitted_bytes,
             host_page_size * 2
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingReclaimer {
+        ranges: Mutex<Vec<PageRange>>,
+    }
+
+    impl GuestMemoryReclaimer for RecordingReclaimer {
+        fn reclaim_ranges(
+            &self,
+            _memory: &GuestMemory,
+            _guest_base: u64,
+            ranges: &[PageRange],
+        ) -> ReclaimReport {
+            self.ranges.lock().unwrap().extend_from_slice(ranges);
+            ReclaimReport {
+                discard_advised_bytes: ranges.iter().map(|range| range.size).sum(),
+                ..ReclaimReport::default()
+            }
+        }
+    }
+
+    #[test]
+    fn free_page_hint_ranges_are_reclaimed_not_just_counted() {
+        let guest_base = 0x4000_0000;
+        let memory = GuestMemory::anonymous(0x4000).unwrap();
+        let host_page_size = memory.host_page_size() as u64;
+        let reclaimer = Arc::new(RecordingReclaimer::default());
+        let mut handler = BalloonQueueHandler::with_reclaimer(reclaimer.clone());
+
+        handler.reclaim_free_page_hint_ranges(
+            &memory,
+            guest_base,
+            vec![PageRange {
+                start: guest_base,
+                size: host_page_size,
+            }],
+            host_page_size,
+        );
+
+        let metrics = handler.metrics();
+        assert_eq!(metrics.free_page_hint_reported_bytes, host_page_size);
+        assert_eq!(metrics.free_page_hint_reclaimed_bytes, host_page_size);
+        assert_eq!(metrics.reclaimed_bytes, host_page_size);
+        assert_eq!(
+            reclaimer.ranges.lock().unwrap().as_slice(),
+            &[PageRange {
+                start: guest_base,
+                size: host_page_size
+            }]
         );
     }
 }
