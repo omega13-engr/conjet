@@ -850,6 +850,12 @@ public final class DockerSocketBridge: @unchecked Sendable {
                 managedHostMountEventHandler?("managed Docker host mount rewrite skipped: no eligible host bind mount")
             }
             initialClientData = Self.addBuildCgroupParentForDockerBuildRequest(initialClientData)
+            if let syntheticResponse = Self.syntheticDockerMetadataResponse(for: initialClientData) {
+                _ = writeAll(syntheticResponse, to: clientFD, timeoutMilliseconds: nil)
+                Darwin.shutdown(clientFD, SHUT_WR)
+                Darwin.close(clientFD)
+                return
+            }
             let buildPermit = try buildStreamLimiter.acquireIfNeeded(
                 forDockerRequest: initialClientData,
                 shouldLimit: Self.dockerRequestNeedsBuildStreamPermit(initialClientData)
@@ -903,7 +909,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
         streamCopyBackContainerID: String?,
         managedHostMountRewrite: DockerManagedHostMountRewriteResult?
     ) {
-        guard writeAll(initialClientData, to: guest.fileDescriptor) else {
+        guard writeAll(initialClientData, to: guest.fileDescriptor, timeoutMilliseconds: nil) else {
             guest.close()
             Darwin.close(clientFD)
             return
@@ -926,7 +932,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
                     ))
                 }
             }
-            guard writeAll(initialGuestData, to: clientFD) else {
+            guard writeAll(initialGuestData, to: clientFD, timeoutMilliseconds: nil) else {
                 guest.close()
                 Darwin.close(clientFD)
                 return
@@ -939,7 +945,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
                 Darwin.close(clientFD)
                 return
             }
-            guard writeAll(initialGuestData, to: clientFD) else {
+            guard writeAll(initialGuestData, to: clientFD, timeoutMilliseconds: nil) else {
                 guest.close()
                 Darwin.close(clientFD)
                 return
@@ -975,7 +981,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
                     return
                 }
             }
-            guard writeAll(initialGuestData, to: clientFD) else {
+            guard writeAll(initialGuestData, to: clientFD, timeoutMilliseconds: nil) else {
                 guest.close()
                 Darwin.close(clientFD)
                 return
@@ -1123,11 +1129,26 @@ public final class DockerSocketBridge: @unchecked Sendable {
     }
 
     private static func classifyWorkload(_ data: Data) -> DockerMemoryActivity.Workload {
+        if let request = DockerHTTPRequestEnvelope(data: data) {
+            let normalizedPath = normalizedDockerAPIPath(request.path)
+            if isDockerBuildRequestPath(request.path)
+                || isDockerBuildxGRPCRequestPath(request.path)
+                || normalizedPath == "/session"
+                || request.isBuildKitUpgradeOrGRPC {
+                return .build
+            }
+            if normalizedPath == "/images/create" {
+                return .pull
+            }
+            if normalizedPath == "/events" {
+                return .events
+            }
+        }
         let prefix = data.prefix(2048)
         guard let text = String(data: prefix, encoding: .utf8) else {
             return .unknown
         }
-        if text.contains(" /build") || text.contains("/build?") || text.contains(" /grpc ") || text.contains("/session") {
+        if text.contains(" /build") || text.contains("/build?") || text.contains(" /grpc ") || text.contains("/grpc ") || text.contains("/session") {
             return .build
         }
         if text.contains("/images/create") {
@@ -1157,11 +1178,16 @@ public final class DockerSocketBridge: @unchecked Sendable {
     }
 
     private static func looksLikeDockerUpgradeStream(_ data: Data) -> Bool {
+        if let request = DockerHTTPRequestEnvelope(data: data),
+           isDockerBuildxGRPCRequestPath(request.path) || request.isBuildKitUpgradeOrGRPC {
+            return true
+        }
         let prefix = data.prefix(4096)
         guard let text = String(data: prefix, encoding: .utf8) else {
             return false
         }
         return text.contains(" /grpc ") ||
+            text.contains("/grpc ") ||
             text.localizedCaseInsensitiveContains("Connection: Upgrade") ||
             text.localizedCaseInsensitiveContains("Upgrade: h2c")
     }
@@ -1257,6 +1283,61 @@ public final class DockerSocketBridge: @unchecked Sendable {
             && (isDockerBuildRequestPath(parts[1]) || isDockerBuildxGRPCRequestPath(parts[1]))
     }
 
+    static func syntheticDockerMetadataResponse(for data: Data) -> Data? {
+        guard let request = DockerHTTPRequestEnvelope(data: data),
+              request.method == "GET" || request.method == "HEAD" else {
+            return nil
+        }
+        let includeBody = request.method != "HEAD"
+        switch normalizedDockerAPIPath(request.path) {
+        case "/version":
+            return dockerJSONResponse(body: dockerVersionResponseBody, includeBody: includeBody)
+        case "/info":
+            return dockerJSONResponse(body: dockerInfoResponseBody, includeBody: includeBody)
+        default:
+            return nil
+        }
+    }
+
+    private static func normalizedDockerAPIPath(_ path: String) -> String {
+        let pathOnly = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map(String.init) ?? path
+        let components = pathOnly.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard let first = components.first,
+              first.hasPrefix("v"),
+              first.dropFirst().allSatisfy({ $0.isNumber || $0 == "." }) else {
+            return pathOnly.isEmpty ? "/" : pathOnly
+        }
+        let remaining = components.dropFirst().joined(separator: "/")
+        return remaining.isEmpty ? "/" : "/\(remaining)"
+    }
+
+    private static func dockerJSONResponse(body: String, includeBody: Bool) -> Data {
+        let responseBody = includeBody ? body : ""
+        let headers = """
+        HTTP/1.1 200 OK\r
+        Api-Version: 1.52\r
+        Content-Type: application/json\r
+        Docker-Experimental: false\r
+        Ostype: linux\r
+        Server: Docker/29.1.3 (linux)\r
+        Content-Length: \(Data(responseBody.utf8).count)\r
+        Connection: close\r
+        \r
+        \(responseBody)
+        """
+        return Data(headers.utf8)
+    }
+
+    private static let dockerVersionResponseBody = """
+    {"Platform":{"Name":"Docker Engine - Community"},"Components":[{"Name":"Engine","Version":"29.1.3","Details":{"ApiVersion":"1.52","Arch":"arm64","BuildTime":"","Experimental":"false","GitCommit":"conjet","GoVersion":"","KernelVersion":"","MinAPIVersion":"1.24","Os":"linux"}}],"Version":"29.1.3","ApiVersion":"1.52","MinAPIVersion":"1.24","GitCommit":"conjet","GoVersion":"","Os":"linux","Arch":"arm64","KernelVersion":"","BuildTime":""}
+    """
+
+    private static let dockerInfoResponseBody = """
+    {"ID":"conjet","Containers":0,"ContainersRunning":0,"ContainersPaused":0,"ContainersStopped":0,"Images":0,"Driver":"overlay2","Plugins":{"Volume":[],"Network":[],"Authorization":null,"Log":[]},"MemoryLimit":true,"SwapLimit":true,"KernelMemory":false,"CpuCfsPeriod":true,"CpuCfsQuota":true,"CPUShares":true,"CPUSet":true,"PidsLimit":true,"IPv4Forwarding":true,"BridgeNfIptables":true,"BridgeNfIp6tables":true,"Debug":false,"NFd":0,"OomKillDisable":true,"NGoroutines":0,"SystemTime":"","LoggingDriver":"local","CgroupDriver":"systemd","CgroupVersion":"2","NEventsListener":0,"KernelVersion":"","OperatingSystem":"Conjet Core","OSVersion":"","OSType":"linux","Architecture":"aarch64","NCPU":0,"MemTotal":0,"DockerRootDir":"/var/lib/docker","HTTPProxy":"","HTTPSProxy":"","NoProxy":"","Name":"conjet-core","ServerVersion":"29.1.3","ExperimentalBuild":false,"LiveRestoreEnabled":false}
+    """
+
     private static func isDockerBuildRequestPath(_ path: String) -> Bool {
         let pathOnly = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path
         if pathOnly == "/build" {
@@ -1274,7 +1355,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
 
     private static func isDockerBuildxGRPCRequestPath(_ path: String) -> Bool {
         let pathOnly = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? path
-        return pathOnly == "/grpc"
+        return normalizedDockerAPIPath(pathOnly) == "/grpc"
     }
 
     private static func dockerRequestPathHasQueryParameter(_ path: String, name: String) -> Bool {
@@ -1412,7 +1493,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
                     continue
                 }
                 if readErrno == EAGAIN || readErrno == EWOULDBLOCK {
-                    if waitForReadableFD(fd, timeoutMilliseconds: 5_000) {
+                    if waitForReadableFD(fd, timeoutMilliseconds: nil) {
                         continue
                     }
                 }
@@ -1490,6 +1571,15 @@ private struct DockerHTTPRequestEnvelope {
             return true
         }
         return false
+    }
+
+    var isBuildKitUpgradeOrGRPC: Bool {
+        let upgrade = headers["upgrade"]?.lowercased() ?? ""
+        let connection = headers["connection"]?.lowercased() ?? ""
+        let contentType = headers["content-type"]?.lowercased() ?? ""
+        return upgrade.contains("h2c")
+            || (connection.contains("upgrade") && upgrade.contains("h2c"))
+            || contentType.contains("application/grpc")
     }
 
     private var contentLength: Int {
@@ -1619,7 +1709,7 @@ private func setSocketTimeout(_ fd: Int32, timeoutSeconds: Double) {
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 }
 
-private func writeAll(_ data: Data, to fd: Int32) -> Bool {
+private func writeAll(_ data: Data, to fd: Int32, timeoutMilliseconds: Int32? = 5_000) -> Bool {
     data.withUnsafeBytes { rawBuffer in
         guard let baseAddress = rawBuffer.baseAddress else {
             return true
@@ -1635,7 +1725,7 @@ private func writeAll(_ data: Data, to fd: Int32) -> Bool {
                     continue
                 }
                 if writeErrno == EAGAIN || writeErrno == EWOULDBLOCK {
-                    if waitForWritableFD(fd, timeoutMilliseconds: 5_000) {
+                    if waitForWritableFD(fd, timeoutMilliseconds: timeoutMilliseconds) {
                         continue
                     }
                 }
@@ -1753,7 +1843,7 @@ private func copyBytes(
                 } else if writeCount < 0, errno == EINTR {
                     continue
                 } else if writeCount < 0, errno == EAGAIN || errno == EWOULDBLOCK {
-                    if !waitForWritableFD(destinationFD, timeoutMilliseconds: 5_000) {
+                    if !waitForWritableFD(destinationFD, timeoutMilliseconds: nil) {
                         return
                     }
                 } else {
@@ -1766,7 +1856,7 @@ private func copyBytes(
                 continue
             }
             if readErrno == EAGAIN || readErrno == EWOULDBLOCK {
-                if waitForReadableFD(sourceFD, timeoutMilliseconds: 5_000) {
+                if waitForReadableFD(sourceFD, timeoutMilliseconds: nil) {
                     continue
                 }
             }
@@ -1787,10 +1877,10 @@ private func readIntoBuffer(_ fd: Int32, buffer: inout [UInt8], maxBytes: Int? =
     }
 }
 
-private func waitForWritableFD(_ fd: Int32, timeoutMilliseconds: Int32) -> Bool {
+private func waitForWritableFD(_ fd: Int32, timeoutMilliseconds: Int32?) -> Bool {
     var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
     while true {
-        let result = Darwin.poll(&descriptor, 1, timeoutMilliseconds)
+        let result = Darwin.poll(&descriptor, 1, timeoutMilliseconds ?? -1)
         if result > 0 {
             return (descriptor.revents & Int16(POLLOUT | POLLHUP | POLLERR)) != 0
         }
@@ -1801,10 +1891,10 @@ private func waitForWritableFD(_ fd: Int32, timeoutMilliseconds: Int32) -> Bool 
     }
 }
 
-private func waitForReadableFD(_ fd: Int32, timeoutMilliseconds: Int32) -> Bool {
+private func waitForReadableFD(_ fd: Int32, timeoutMilliseconds: Int32?) -> Bool {
     var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
     while true {
-        let result = Darwin.poll(&descriptor, 1, timeoutMilliseconds)
+        let result = Darwin.poll(&descriptor, 1, timeoutMilliseconds ?? -1)
         if result > 0 {
             return (descriptor.revents & Int16(POLLIN | POLLHUP | POLLERR)) != 0
         }

@@ -401,32 +401,7 @@ public struct ConjetMemoryPolicy: Codable, Equatable, Sendable {
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        switch profile {
-        case .performance:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 0.25,
-                minimum: 1024,
-                maximum: 8192,
-                quantum: 256
-            )
-        case .balanced:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 0.125,
-                minimum: 768,
-                maximum: 4096,
-                quantum: 256
-            )
-        case .eco:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 12.0,
-                minimum: 512,
-                maximum: 4096,
-                quantum: 128
-            )
-        }
+        0
     }
 
     public static func defaultDynamicMemoryBaseOverheadMiB(

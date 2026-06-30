@@ -736,9 +736,9 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             if event.eventName == "start" || event.eventName == "restart" {
                 emitMemoryActivity(
                     kind: .containerStarted,
-                    workload: .run,
-                    activeStreams: 1,
-                    buildLike: true
+                    workload: .start,
+                    activeStreams: 0,
+                    buildLike: false
                 )
             }
             reconcile(containerIDs: [containerID])
@@ -1916,6 +1916,24 @@ private final class ProxyMetrics: @unchecked Sendable {
     }
 }
 
+private final class ByteCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var total = 0
+
+    var hasBytes: Bool {
+        lock.lock()
+        let value = total > 0
+        lock.unlock()
+        return value
+    }
+
+    func add(_ count: Int) {
+        lock.lock()
+        total += max(0, count)
+        lock.unlock()
+    }
+}
+
 private protocol PortListener: AnyObject, Sendable {
     func start() throws
     func stop()
@@ -2574,11 +2592,16 @@ private final class NativeTCPPooledPortListener: PortListener, @unchecked Sendab
                 )
                 pool.recycle(connection, reusable: result.reusable)
                 if result.opened || Date() >= openDeadline {
-                    if result.hadError {
-                        metrics.error()
-                    }
                     if !result.opened {
+                        if forwardViaLegacyTCP(clientFD: clientFD, target: target) {
+                            return
+                        }
+                        if result.hadError {
+                            metrics.error()
+                        }
                         writeHTTPBadGateway("Conjet native TCP target did not accept the connection yet\n", to: clientFD)
+                    } else if result.hadError {
+                        metrics.error()
                     }
                     Darwin.close(clientFD)
                     return
@@ -2591,6 +2614,54 @@ private final class NativeTCPPooledPortListener: PortListener, @unchecked Sendab
                 return
             }
         }
+    }
+
+    private func forwardViaLegacyTCP(clientFD: Int32, target: (host: String, port: Int)) -> Bool {
+        do {
+            let guest = try connector.connect()
+            disableSigpipeForPortProxy(guest.fileDescriptor)
+            let preface = "CONJET-TCP \(target.host):\(target.port)\n"
+            guard writeAllBytes(Data(preface.utf8), to: guest.fileDescriptor) else {
+                guest.close()
+                return false
+            }
+            if !pipeLegacyTCP(clientFD: clientFD, guest: guest) {
+                metrics.error()
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func pipeLegacyTCP(clientFD: Int32, guest: GuestConnection) -> Bool {
+        let group = DispatchGroup()
+        let guestToClientBytes = ByteCounter()
+        group.enter()
+        let clientToGuest = Thread { [metrics] in
+            copyBytes(from: clientFD, to: guest.fileDescriptor) { metrics.inBytes($0) }
+            Darwin.shutdown(guest.fileDescriptor, SHUT_WR)
+            group.leave()
+        }
+        clientToGuest.name = "dev.conjet.native-tcp-fallback-client-to-guest.\(hostPort)"
+        clientToGuest.start()
+
+        group.enter()
+        let guestToClient = Thread { [metrics] in
+            copyBytes(from: guest.fileDescriptor, to: clientFD) { count in
+                metrics.outBytes(count)
+                guestToClientBytes.add(count)
+            }
+            Darwin.shutdown(clientFD, SHUT_WR)
+            group.leave()
+        }
+        guestToClient.name = "dev.conjet.native-tcp-fallback-guest-to-client.\(hostPort)"
+        guestToClient.start()
+
+        group.wait()
+        guest.close()
+        Darwin.close(clientFD)
+        return guestToClientBytes.hasBytes
     }
 }
 

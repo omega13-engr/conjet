@@ -93,17 +93,52 @@ final class ConjetCoreRustVMMRun: @unchecked Sendable {
     private func recordExit(_ exitCode: Int32) {
         try? stdoutHandle?.close()
         try? stderrHandle?.close()
+        let diagnostics = Self.exitDiagnostics(stdoutPath: stdoutPath, stderrPath: stderrPath)
         lock.lock()
         if exitResult == nil {
             exitResult = ExitResult(
                 exitCode: exitCode,
-                message: "Conjet Core Rust VMM exited with status \(exitCode)",
+                message: Self.exitMessage(exitCode: exitCode, diagnostics: diagnostics),
                 stdoutPath: stdoutPath,
                 stderrPath: stderrPath
             )
         }
         lock.unlock()
         waitSemaphore.signal()
+    }
+
+    private static func exitMessage(exitCode: Int32, diagnostics: String) -> String {
+        let trimmed = diagnostics.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+        if lowercased.contains("0xfae94007") || lowercased.contains("hv_denied") {
+            return """
+            Conjet Core Rust VMM exited with status \(exitCode): Hypervisor denied VM creation (HV_DENIED/0xfae94007). Verify the Jetstream VMM executable is signed with com.apple.security.hypervisor and com.apple.security.virtualization. \(trimmed)
+            """
+        }
+        guard !trimmed.isEmpty else {
+            return "Conjet Core Rust VMM exited with status \(exitCode)"
+        }
+        return "Conjet Core Rust VMM exited with status \(exitCode): \(trimmed)"
+    }
+
+    private static func exitDiagnostics(stdoutPath: String, stderrPath: String) -> String {
+        let parts = [
+            tail(path: stderrPath, label: "stderr"),
+            tail(path: stdoutPath, label: "stdout")
+        ].compactMap { $0 }
+        return parts.joined(separator: " ")
+    }
+
+    private static func tail(path: String, label: String) -> String? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              !data.isEmpty else {
+            return nil
+        }
+        let suffix = data.suffix(4096)
+        let text = String(decoding: suffix, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return "\(label): \(text)"
     }
 }
 
@@ -370,6 +405,143 @@ enum ConjetCoreRustVMMTool {
         }
         return ("/usr/bin/env", "env fallback")
     }
+
+    @discardableResult
+    static func ensureHVFEntitlementsIfPossible(
+        executable: String,
+        source: String,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> Bool {
+        #if os(macOS)
+        guard executable != "/usr/bin/env" else {
+            return false
+        }
+        let executableURL = URL(fileURLWithPath: executable).standardizedFileURL
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            return false
+        }
+        if binaryHasHVFEntitlements(executableURL) {
+            return false
+        }
+        if try repairLocalDebugSigningIfPossible(executableURL: executableURL, environment: environment) {
+            return true
+        }
+        throw ConjetError.unavailable(
+            """
+            Jetstream VMM executable from \(source) is missing Hypervisor entitlements: \(executableURL.path). \
+            Sign it with build-support/sign-debug.sh for local source builds, or reinstall a signed Conjet.app.
+            """
+        )
+        #else
+        _ = executable
+        _ = source
+        _ = environment
+        return false
+        #endif
+    }
+
+    #if os(macOS)
+    static func isLocalDebugJetstreamExecutableForSigning(
+        _ executableURL: URL,
+        repositoryRoot: URL
+    ) -> Bool {
+        let executable = executableURL.standardizedFileURL
+        guard executable.lastPathComponent == "jetstream" else {
+            return false
+        }
+        let root = repositoryRoot.standardizedFileURL
+        let rootPath = root.path.hasSuffix("/") ? root.path : "\(root.path)/"
+        guard executable.path.hasPrefix(rootPath) else {
+            return false
+        }
+        let relativePath = String(executable.path.dropFirst(rootPath.count))
+        return relativePath == "target/debug/jetstream"
+            || relativePath == "target/release/jetstream"
+            || relativePath == "jetstream/target/debug/jetstream"
+            || relativePath == "jetstream/target/release/jetstream"
+    }
+
+    private static func repairLocalDebugSigningIfPossible(
+        executableURL: URL,
+        environment: [String: String]
+    ) throws -> Bool {
+        guard let root = repositoryRoot(containing: executableURL, environment: environment),
+              isLocalDebugJetstreamExecutableForSigning(executableURL, repositoryRoot: root) else {
+            return false
+        }
+        let entitlements = root.appendingPathComponent("build-support/conjet-debug.entitlements")
+        guard FileManager.default.fileExists(atPath: entitlements.path) else {
+            return false
+        }
+        let result = try ProcessRunner.run("/usr/bin/codesign", [
+            "--force",
+            "--sign", "-",
+            "--entitlements", entitlements.path,
+            executableURL.path
+        ])
+        guard result.succeeded else {
+            throw ConjetError.processFailed(
+                executable: result.executable,
+                exitCode: result.exitCode,
+                stderr: result.stderr
+            )
+        }
+        return true
+    }
+
+    private static func binaryHasHVFEntitlements(_ executableURL: URL) -> Bool {
+        guard let result = try? ProcessRunner.run("/usr/bin/codesign", [
+            "-d",
+            "--entitlements", ":-",
+            executableURL.path
+        ]) else {
+            return false
+        }
+        let output = result.stdout + result.stderr
+        return output.contains("com.apple.security.hypervisor")
+            && output.contains("com.apple.security.virtualization")
+    }
+
+    private static func repositoryRoot(
+        containing executableURL: URL,
+        environment: [String: String]
+    ) -> URL? {
+        if let explicit = explicitRepositoryRoot(environment: environment) {
+            return explicit
+        }
+        var directory = executableURL.standardizedFileURL.deletingLastPathComponent()
+        let manager = FileManager.default
+        var visited = Set<String>()
+        while directory.path != "/", visited.insert(directory.path).inserted {
+            let entitlements = directory.appendingPathComponent("build-support/conjet-debug.entitlements")
+            if manager.fileExists(atPath: entitlements.path) {
+                return directory
+            }
+            directory.deleteLastPathComponent()
+        }
+        return nil
+    }
+
+    private static func explicitRepositoryRoot(environment: [String: String]) -> URL? {
+        let candidates = [
+            environment["CONJET_SOURCE_ROOT"],
+            environment["SWIFT_PACKAGE_DIR"],
+            environment["PWD"],
+            FileManager.default.currentDirectoryPath
+        ].compactMap { value -> String? in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }
+        for candidate in candidates {
+            let url = URL(fileURLWithPath: candidate, isDirectory: true).standardizedFileURL
+            let entitlements = url.appendingPathComponent("build-support/conjet-debug.entitlements")
+            if FileManager.default.fileExists(atPath: entitlements.path) {
+                return url
+            }
+        }
+        return nil
+    }
+    #endif
 
     private static func bundledTool() -> String? {
         guard let resourceURL = Bundle.main.resourceURL else { return nil }

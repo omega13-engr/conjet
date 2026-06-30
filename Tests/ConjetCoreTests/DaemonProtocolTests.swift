@@ -86,7 +86,7 @@ final class DaemonProtocolTests: XCTestCase {
         XCTAssertEqual(policy.idleMemoryReclaimTargetMiB, 6144)
         XCTAssertEqual(policy.idleMemoryReclaimDwellSeconds, 2)
         XCTAssertTrue(policy.dynamicMemoryEnabled)
-        XCTAssertEqual(policy.dynamicMemoryMinimumMiB, 1024)
+        XCTAssertEqual(policy.dynamicMemoryMinimumMiB, 0)
         XCTAssertEqual(policy.dynamicMemoryHeadroomMiB, 512)
     }
 
@@ -108,7 +108,7 @@ final class DaemonProtocolTests: XCTestCase {
                 dynamicEnabled: true,
                 mode: .balanced,
                 maxMiB: 8192,
-                minMiB: 1024,
+                minMiB: 0,
                 currentTargetMiB: 2560,
                 balloonedMiB: 5632,
                 guestAvailableMiB: 920,

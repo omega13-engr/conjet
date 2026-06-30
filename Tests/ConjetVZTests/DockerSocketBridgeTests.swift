@@ -258,6 +258,15 @@ final class DockerSocketBridgeTests: XCTestCase {
         \r
 
         """.utf8)
+        let versionedGRPC = Data("""
+        POST /v1.52/grpc HTTP/1.1\r
+        Host: docker\r
+        Connection: Upgrade\r
+        Upgrade: h2c\r
+        Content-Length: 0\r
+        \r
+
+        """.utf8)
         let attach = Data("""
         POST /v1.52/containers/abcdef/attach?stream=1&stdout=1 HTTP/1.1\r
         Host: docker\r
@@ -270,6 +279,7 @@ final class DockerSocketBridgeTests: XCTestCase {
 
         XCTAssertTrue(DockerSocketBridge.dockerRequestNeedsBuildStreamPermit(build))
         XCTAssertTrue(DockerSocketBridge.dockerRequestNeedsBuildStreamPermit(grpc))
+        XCTAssertTrue(DockerSocketBridge.dockerRequestNeedsBuildStreamPermit(versionedGRPC))
         XCTAssertFalse(DockerSocketBridge.dockerRequestNeedsBuildStreamPermit(session))
         XCTAssertFalse(DockerSocketBridge.dockerRequestNeedsBuildStreamPermit(attach))
     }
@@ -399,6 +409,60 @@ final class DockerSocketBridgeTests: XCTestCase {
         XCTAssertTrue(response.contains("guest not booted"))
     }
 
+    func testDockerVersionMetadataResponseDoesNotDependOnGuestEndpoint() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cjbr-version-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let socket = root.appendingPathComponent("docker.sock")
+        let bridge = DockerSocketBridge(
+            socketPath: socket.path,
+            connector: UnavailableGuestConnectionConnector(message: "guest version endpoint broken")
+        )
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let response = try sendRawRequest(socketPath: socket.path, request: """
+        GET /v1.52/version HTTP/1.1\r
+        Host: docker\r
+        \r
+
+        """)
+
+        XCTAssertTrue(response.contains("200 OK"), response)
+        XCTAssertTrue(response.contains(#""ApiVersion":"1.52""#), response)
+        XCTAssertTrue(response.contains("Server: Docker/29.1.3 (linux)"), response)
+        XCTAssertFalse(response.contains("guest version endpoint broken"), response)
+    }
+
+    func testDockerInfoMetadataResponseIsObjectWhenGuestEndpointIsBroken() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cjbr-info-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let socket = root.appendingPathComponent("docker.sock")
+        let bridge = DockerSocketBridge(
+            socketPath: socket.path,
+            connector: UnavailableGuestConnectionConnector(message: "guest info endpoint returned null")
+        )
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let response = try sendRawRequest(socketPath: socket.path, request: """
+        GET /info HTTP/1.1\r
+        Host: docker\r
+        \r
+
+        """)
+
+        XCTAssertTrue(response.contains("200 OK"), response)
+        XCTAssertTrue(response.contains(#""OperatingSystem":"Conjet Core""#), response)
+        XCTAssertFalse(response.contains("\r\n\r\nnull"), response)
+        XCTAssertFalse(response.contains("guest info endpoint returned null"), response)
+    }
+
     func testBridgeWaitsForNonblockingGuestReadiness() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("cjbr-\(shortID())", isDirectory: true)
@@ -428,6 +492,67 @@ final class DockerSocketBridgeTests: XCTestCase {
         XCTAssertTrue(waitUntil {
             connector.requests.first?.contains("GET /v1.52/containers/abcdef/json") == true
         })
+    }
+
+    func testBuildNoCacheResponseSurvivesLongNonblockingGuestSilence() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cjbr-build-idle-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let body = #"{"stream":"build completed after quiet phase\n"}"#
+        let connector = DelayedNonblockingDockerResponseGuestConnectionConnector(
+            delaySeconds: 5.25,
+            body: body
+        )
+        let socket = root.appendingPathComponent("docker.sock")
+        let bridge = DockerSocketBridge(socketPath: socket.path, connector: connector)
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let request = """
+        POST /v1.52/build?nocache=1&t=demo HTTP/1.1\r
+        Host: docker\r
+        Content-Length: 0\r
+        \r
+
+        """
+        let response = try sendRawRequest(socketPath: socket.path, request: request)
+
+        XCTAssertTrue(response.contains("200 OK"), response)
+        XCTAssertTrue(response.contains("build completed after quiet phase"), response)
+        XCTAssertTrue(waitUntil {
+            connector.requests.first?.contains("cgroupparent=/conjet.slice/conjet-build.slice") == true
+        })
+    }
+
+    func testLogsFollowResponseSurvivesLongNonblockingGuestSilence() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cjbr-logs-idle-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let body = "quiet service woke up\n"
+        let connector = DelayedNonblockingDockerResponseGuestConnectionConnector(
+            delaySeconds: 5.25,
+            body: body
+        )
+        let socket = root.appendingPathComponent("docker.sock")
+        let bridge = DockerSocketBridge(socketPath: socket.path, connector: connector)
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let request = """
+        GET /v1.52/containers/abcdef/logs?stdout=1&stderr=1&follow=1 HTTP/1.1\r
+        Host: docker\r
+        Content-Length: 0\r
+        \r
+
+        """
+        let response = try sendRawRequest(socketPath: socket.path, request: request)
+
+        XCTAssertTrue(response.contains("200 OK"), response)
+        XCTAssertTrue(response.contains("quiet service woke up"), response)
     }
 
     func testBridgeObservesCreateIntentAndResolutionWhileForwardingBytes() throws {
@@ -635,6 +760,80 @@ final class DockerSocketBridgeTests: XCTestCase {
 
         let request = """
         POST /grpc HTTP/1.1\r
+        Host: docker\r
+        Connection: Upgrade\r
+        Upgrade: h2c\r
+        Content-Length: 0\r
+        \r
+
+        """
+        let connector = DockerStartResponseGuestConnectionConnector(statusCode: 204)
+        let observed = ObservedMemoryActivityCallbacks()
+        let socket = root.appendingPathComponent("docker.sock")
+        let bridge = DockerSocketBridge(
+            socketPath: socket.path,
+            connector: connector,
+            activityHandler: { activity in
+                observed.append(activity)
+            }
+        )
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let response = try sendRawRequest(socketPath: socket.path, request: request)
+
+        XCTAssertTrue(response.contains("204 No Content"))
+        XCTAssertTrue(waitUntil { observed.events.contains(where: { $0.kind == .workloadStarted }) })
+        let started = observed.events.first { $0.kind == .workloadStarted }
+        XCTAssertEqual(started?.workload, .build)
+        XCTAssertEqual(started?.pressureStreams, 1)
+        XCTAssertEqual(started?.buildLike, true)
+    }
+
+    func testBridgeClassifiesVersionedBuildKitGRPCAsBuildMemoryActivity() throws {
+        let root = URL(fileURLWithPath: "/tmp/cjbr-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let request = """
+        POST /v1.52/grpc HTTP/1.1\r
+        Host: docker\r
+        Connection: Upgrade\r
+        Upgrade: h2c\r
+        Content-Length: 0\r
+        \r
+
+        """
+        let connector = DockerStartResponseGuestConnectionConnector(statusCode: 204)
+        let observed = ObservedMemoryActivityCallbacks()
+        let socket = root.appendingPathComponent("docker.sock")
+        let bridge = DockerSocketBridge(
+            socketPath: socket.path,
+            connector: connector,
+            activityHandler: { activity in
+                observed.append(activity)
+            }
+        )
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let response = try sendRawRequest(socketPath: socket.path, request: request)
+
+        XCTAssertTrue(response.contains("204 No Content"))
+        XCTAssertTrue(waitUntil { observed.events.contains(where: { $0.kind == .workloadStarted }) })
+        let started = observed.events.first { $0.kind == .workloadStarted }
+        XCTAssertEqual(started?.workload, .build)
+        XCTAssertEqual(started?.pressureStreams, 1)
+        XCTAssertEqual(started?.buildLike, true)
+    }
+
+    func testBridgeClassifiesBuildKitH2CUpgradeAsBuildMemoryActivity() throws {
+        let root = URL(fileURLWithPath: "/tmp/cjbr-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let request = """
+        POST /v1.52/buildkit/session HTTP/1.1\r
         Host: docker\r
         Connection: Upgrade\r
         Upgrade: h2c\r

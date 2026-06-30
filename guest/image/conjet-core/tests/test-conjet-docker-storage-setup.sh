@@ -89,6 +89,7 @@ CONJET_RUN_DIR="${run_dir}" \
 CONJET_DOCKER_DIR="${docker_dir}" \
 CONJET_DOCKER_STORAGE_TEMP_MOUNT="${temp_mount}" \
 CONJET_DOCKER_STORAGE_DEVICE_WAIT_SECONDS=0 \
+CONJET_DOCKER_STORAGE_SKIP_XATTR_PROBE=1 \
 CONJET_DOCKER_STORAGE_DEVICES="${qa_root}/missing-device" \
 "${script}"
 
@@ -105,5 +106,8 @@ fi
 
 grep -q "conjet-docker-storage-setup.sh" "${image_script}"
 grep -q "conjet-docker-storage.service" "${image_script}"
+grep -q "security.capability xattrs" "${script}"
+grep -q "CONFIG_SECURITY=y" "${script}"
+grep -q "CONFIG_EXT4_FS_SECURITY=y" "${script}"
 
 echo "conjet-docker-storage setup tests passed"

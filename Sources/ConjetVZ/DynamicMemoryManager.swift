@@ -427,6 +427,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private var lastMetricsAt: Date?
     private var lastTargetChangeAt: Date?
     private var lastGuestReclaimAt: Date?
+    private var lastBuildLikeDockerActivityAt: Date?
     private var reclaimInFlight = false
     private var lastAdjustmentReason: String?
     private var message: String?
@@ -509,8 +510,17 @@ final class DynamicMemoryManager: @unchecked Sendable {
         var delayedReclaim: (reason: String, generation: Int)?
         var cancelGuestReclaimBefore: UInt64?
         var restoreIdleBalloon = false
+        let activityAt = Date()
         lock.lock()
-        activeDockerStreams = max(0, activity.pressureStreams)
+        switch activity.kind {
+        case .streamOpened, .streamClosed, .streamPhaseFinished, .workloadStarted, .workloadFinished:
+            activeDockerStreams = max(0, activity.pressureStreams)
+        case .containerStarted, .containerStopped:
+            break
+        }
+        if activity.buildLike {
+            lastBuildLikeDockerActivityAt = activityAt
+        }
         switch activity.kind {
         case .streamOpened, .workloadStarted:
             if activity.buildLike {
@@ -523,7 +533,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
         case .streamPhaseFinished:
             if activity.buildLike {
                 reclaimGeneration += 1
-                delayedReclaim = ("docker.streamPhaseFinished.final", reclaimGeneration)
+                if activeDockerStreams == 0 {
+                    delayedReclaim = ("docker.streamPhaseFinished.final", reclaimGeneration)
+                }
             }
         case .streamClosed, .workloadFinished, .containerStopped:
             if activeDockerStreams == 0 {
@@ -557,8 +569,10 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let metricsAt = lastMetricsAt
         let target = currentTargetMiB
         let streams = activeDockerStreams
+        let recentBuild = hasRecentBuildLikeDockerActivityLocked(now: Date())
         let build = buildWorkloadActive
             || metrics?.buildWorkloadDetected == true
+            || recentBuild
         let guestWorkload = metrics.map(Self.hasActiveGuestWorkload) == true
         let reason = lastAdjustmentReason
         let targetChange = lastTargetChangeAt
@@ -748,6 +762,8 @@ final class DynamicMemoryManager: @unchecked Sendable {
         lastAdjustmentReason = reason
         if shouldRestoreIdleBalloon {
             message = "dynamic memory restoring configured memory before new work"
+        } else if hasRecentBuildLikeDockerActivityLocked(now: now) {
+            message = "dynamic memory holding configured memory for recent Docker build activity"
         } else if idleBalloonActive {
             message = "idle memory autodrop active; configured memory restores on next workload"
         } else {
@@ -780,18 +796,62 @@ final class DynamicMemoryManager: @unchecked Sendable {
             }
             lock.unlock()
             if submission.accepted {
-                pollGuestReclaimUntilTerminal(epoch: submission.epoch, hostFootprintBefore: hostFootprintBefore)
+                pollGuestReclaimUntilTerminal(
+                    epoch: submission.epoch,
+                    reason: reason,
+                    hostFootprintBefore: hostFootprintBefore
+                )
             }
         } catch {
+            let footprintAfter = sampleHostFootprintBytes()
+            let footprintDrop: UInt64?
+            if let hostFootprintBefore, let footprintAfter {
+                footprintDrop = hostFootprintBefore > footprintAfter ? hostFootprintBefore - footprintAfter : 0
+            } else {
+                footprintDrop = nil
+            }
+            var shouldAttemptIdleBalloonDrop = false
             lock.lock()
             reclaimInFlight = false
             activeReclaimEpoch = nil
-            message = "guest memory reclaim unavailable: \(error); classic balloon target unchanged"
+            lastReclaimFootprintBeforeBytes = hostFootprintBefore
+            lastReclaimFootprintAfterBytes = footprintAfter
+            lastReclaimFootprintDropBytes = footprintDrop
+            if hostFootprintBefore != nil || footprintAfter != nil || footprintDrop != nil {
+                recordTraceLocked(ConjetMemoryTraceEvent(
+                    timestamp: Date(),
+                    targetMiB: currentTargetMiB,
+                    desiredMiB: currentTargetMiB,
+                    action: "reclaim-unavailable-footprint",
+                    reason: reason,
+                    pressure: .unknown,
+                    hostFootprintBeforeBytes: hostFootprintBefore,
+                    hostFootprintAfterBytes: footprintAfter,
+                    hostFootprintDropBytes: footprintDrop
+                ))
+            }
+            shouldAttemptIdleBalloonDrop = shouldAttemptIdleBalloonDropLocked(
+                footprintAfter: footprintAfter,
+                footprintDrop: footprintDrop,
+                reason: reason
+            )
+            if shouldAttemptIdleBalloonDrop {
+                message = "guest memory reclaim unavailable: \(error); applying guarded idle autodrop"
+            } else {
+                message = "guest memory reclaim unavailable: \(error); classic balloon target unchanged"
+            }
             lock.unlock()
+            if shouldAttemptIdleBalloonDrop {
+                attemptIdleBalloonDrop(
+                    traceReason: "guest.reclaim.unavailable.autodrop",
+                    footprintAfter: footprintAfter,
+                    footprintDrop: footprintDrop
+                )
+            }
         }
     }
 
-    private func pollGuestReclaimUntilTerminal(epoch: UInt64, hostFootprintBefore: UInt64?) {
+    private func pollGuestReclaimUntilTerminal(epoch: UInt64, reason: String, hostFootprintBefore: UInt64?) {
         let deadline = Date().addingTimeInterval(90)
         var lastStatus: GuestMemoryReclaimStatus?
         var lastActiveFootprintRefreshAt = Date.distantPast
@@ -838,7 +898,8 @@ final class DynamicMemoryManager: @unchecked Sendable {
                         }
                         shouldAttemptIdleBalloonDrop = shouldAttemptIdleBalloonDropLocked(
                             footprintAfter: convergence.after,
-                            footprintDrop: convergence.drop
+                            footprintDrop: convergence.drop,
+                            reason: reason
                         )
                         shouldScheduleHostFootprintRefresh = hostFootprintBefore != nil
                             || convergence.after != nil
@@ -849,7 +910,11 @@ final class DynamicMemoryManager: @unchecked Sendable {
                         scheduleHostFootprintRefreshes(reason: "guest.reclaim.epoch.\(epoch)")
                     }
                     if shouldAttemptIdleBalloonDrop {
-                        attemptIdleBalloonDrop(epoch: epoch, footprintAfter: convergence.after)
+                        attemptIdleBalloonDrop(
+                            traceReason: "guest.reclaim.epoch.\(epoch).autodrop",
+                            footprintAfter: convergence.after,
+                            footprintDrop: convergence.drop
+                        )
                     }
                     return
                 }
@@ -1034,7 +1099,12 @@ final class DynamicMemoryManager: @unchecked Sendable {
         if !streamPhaseFinished && !strongCompletionReclaim {
             guard activeDockerStreams == 0,
                   !buildWorkloadActive,
-                  !Self.hasActiveGuestWorkload(metrics) else {
+                  !hasRecentBuildLikeDockerActivityLocked(now: now) else {
+                return false
+            }
+            if Self.hasActiveGuestWorkload(metrics),
+               reason != "guest.event",
+               reason != "dynamic.reclaim.idle" {
                 return false
             }
         }
@@ -1053,6 +1123,11 @@ final class DynamicMemoryManager: @unchecked Sendable {
             return false
         }
         if streamPhaseFinished {
+            guard activeDockerStreams == 0,
+                  !buildWorkloadActive,
+                  !Self.hasActiveGuestWorkload(metrics) else {
+                return false
+            }
             return hasIdleReclaimSurplus(metrics: metrics)
         }
         if strongCompletionReclaim {
@@ -1091,7 +1166,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
             )
         ))
         let idleGuardMiB = max(64, policy.dynamicMemoryCacheAllowanceMiB / 4)
-        return policy.dynamicMemoryMinimumMiB
+        return max(0, policy.dynamicMemoryMinimumMiB)
             + workloadMiB
             + idleGuardMiB
     }
@@ -1101,15 +1176,20 @@ final class DynamicMemoryManager: @unchecked Sendable {
             idleWorkingSetMiB(metrics: metrics),
             quantum: 128
         )
+        let safeIdleTarget = min(
+            policy.configuredMemoryMiB,
+            max(effectiveMinimumMiB(), policy.idleMemoryReclaimTargetMiB)
+        )
         return min(
             policy.configuredMemoryMiB,
-            max(effectiveMinimumMiB(), workingSetTarget)
+            max(safeIdleTarget, workingSetTarget)
         )
     }
 
     private func shouldRestoreIdleBalloonLocked(metrics: GuestMemoryMetrics) -> Bool {
         activeDockerStreams > 0
             || buildWorkloadActive
+            || hasRecentBuildLikeDockerActivityLocked()
             || metrics.buildWorkloadDetected
             || idleBalloonTargetMiB(metrics: metrics) > currentTargetMiB
             || metrics.diskSwapUsedBytes > Self.reclaimSwapNoiseFloorBytes
@@ -1119,12 +1199,14 @@ final class DynamicMemoryManager: @unchecked Sendable {
 
     private func shouldAttemptIdleBalloonDropLocked(
         footprintAfter: UInt64?,
-        footprintDrop: UInt64?
+        footprintDrop: UInt64?,
+        reason: String
     ) -> Bool {
         guard policy.automaticIdleMemoryReclaim,
               !idleBalloonActive,
               activeDockerStreams == 0,
               !buildWorkloadActive,
+              !hasRecentBuildLikeDockerActivityLocked(),
               activeReclaimEpoch == nil,
               !reclaimInFlight,
               let metrics = lastMetrics,
@@ -1134,20 +1216,32 @@ final class DynamicMemoryManager: @unchecked Sendable {
               let footprintAfter else {
             return false
         }
+        if Self.isDockerCompletionReclaimReason(reason) || reason == "guest.event" {
+            let idleTargetBytes = UInt64(idleBalloonTargetMiB(metrics: metrics)) * Self.bytesPerMiB
+            let thresholdBytes = idleTargetBytes
+                + UInt64(max(256, policy.dynamicMemoryCacheAllowanceMiB)) * Self.bytesPerMiB
+            return footprintAfter > thresholdBytes
+        }
         let minUsefulDrop = UInt64(64 * 1024 * 1024)
         guard (footprintDrop ?? 0) < minUsefulDrop else {
             return false
         }
         let configuredBytes = UInt64(policy.configuredMemoryMiB) * Self.bytesPerMiB
-        let thresholdBytes = configuredBytes + UInt64(max(128, policy.dynamicMemoryCacheAllowanceMiB)) * Self.bytesPerMiB
+        let thresholdBytes = configuredBytes
+            + UInt64(max(128, policy.dynamicMemoryCacheAllowanceMiB)) * Self.bytesPerMiB
         return footprintAfter > thresholdBytes
     }
 
-    private func attemptIdleBalloonDrop(epoch: UInt64, footprintAfter: UInt64?) {
+    private func attemptIdleBalloonDrop(
+        traceReason: String,
+        footprintAfter: UInt64?,
+        footprintDrop: UInt64?
+    ) {
         lock.lock()
         guard !idleBalloonActive,
               activeDockerStreams == 0,
               !buildWorkloadActive,
+              !hasRecentBuildLikeDockerActivityLocked(),
               let metrics = lastMetrics,
               Self.pressureState(metrics) == .low,
               !metrics.buildWorkloadDetected else {
@@ -1168,6 +1262,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
             lock.lock()
             if activeDockerStreams == 0,
                !buildWorkloadActive,
+               !hasRecentBuildLikeDockerActivityLocked(),
                activeReclaimEpoch == nil,
                let latestMetrics = lastMetrics,
                Self.pressureState(latestMetrics) == .low,
@@ -1175,17 +1270,21 @@ final class DynamicMemoryManager: @unchecked Sendable {
                 currentTargetMiB = targetMiB
                 idleBalloonActive = true
                 lastTargetChangeAt = Date()
-                lastAdjustmentReason = "guest.reclaim.epoch.\(epoch).autodrop"
-                message = "idle memory autodrop lowered guest target to \(targetMiB) MiB after zero host-footprint drop"
+                lastAdjustmentReason = traceReason
+                if let footprintDrop {
+                    message = "idle memory autodrop lowered guest target to \(targetMiB) MiB after host footprint drop \(Self.bytesToMiB(footprintDrop)) MiB"
+                } else {
+                    message = "idle memory autodrop lowered guest target to \(targetMiB) MiB after guest reclaim"
+                }
                 recordTraceLocked(ConjetMemoryTraceEvent(
                     timestamp: Date(),
                     targetMiB: targetMiB,
                     desiredMiB: targetMiB,
                     action: "idle-autodrop",
-                    reason: "guest.reclaim.epoch.\(epoch).autodrop",
+                    reason: traceReason,
                     pressure: .low,
                     hostFootprintAfterBytes: footprintAfter,
-                    hostFootprintDropBytes: 0
+                    hostFootprintDropBytes: footprintDrop
                 ))
                 appliedIdleAutodrop = true
             } else {
@@ -1194,7 +1293,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
             lock.unlock()
             if appliedIdleAutodrop {
                 _ = sampleHostFootprintBytes()
-                scheduleHostFootprintRefreshes(reason: "guest.reclaim.epoch.\(epoch).autodrop")
+                scheduleHostFootprintRefreshes(reason: traceReason)
             }
             if restoreAfterRace {
                 do {
@@ -1212,7 +1311,26 @@ final class DynamicMemoryManager: @unchecked Sendable {
         }
     }
 
+    private static func isDockerCompletionReclaimReason(_ reason: String) -> Bool {
+        reason == "docker.streamClosed"
+            || reason.hasPrefix("docker.streamClosed.final.")
+            || reason == "docker.streamPhaseFinished"
+            || reason.hasPrefix("docker.streamPhaseFinished.final.")
+            || reason == "docker.workloadFinished"
+            || reason.hasPrefix("docker.workloadFinished.final.")
+            || reason == "docker.containerStopped"
+            || reason.hasPrefix("docker.containerStopped.final.")
+    }
+
+    private func hasRecentBuildLikeDockerActivityLocked(now: Date = Date()) -> Bool {
+        guard let lastBuildLikeDockerActivityAt else {
+            return false
+        }
+        return now.timeIntervalSince(lastBuildLikeDockerActivityAt) < Self.buildActivityIdleReclaimGraceSeconds
+    }
+
     private static let reclaimSwapNoiseFloorBytes: UInt64 = 64 * 1024 * 1024
+    private static let buildActivityIdleReclaimGraceSeconds: TimeInterval = 90
     private static let bytesPerMiB: UInt64 = 1024 * 1024
 
     private func restoreConfiguredTarget(reason: String) {
@@ -1261,7 +1379,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
     }
 
     private func effectiveMinimumMiB() -> Int {
-        min(max(256, policy.dynamicMemoryMinimumMiB), policy.configuredMemoryMiB)
+        min(max(0, policy.dynamicMemoryMinimumMiB), policy.configuredMemoryMiB)
     }
 
     private func isRunning() -> Bool {

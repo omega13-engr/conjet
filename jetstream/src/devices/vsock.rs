@@ -30,6 +30,8 @@ const HEADER_LEN: usize = 44;
 const DEFAULT_BUF_ALLOC: u32 = 4 * 1024 * 1024;
 const DEFAULT_GUEST_BUF_ALLOC: u64 = 256 * 1024;
 const MAX_HOST_PAYLOAD: usize = 32 * 1024;
+const MAX_OBSERVED_REQUEST: usize = 1024 * 1024;
+const MAX_CONCURRENT_DOCKER_BUILD_STREAMS: usize = 2;
 const SHUTDOWN_SEND: u32 = 2;
 
 #[derive(Debug, Error)]
@@ -384,6 +386,7 @@ pub struct HostUnixVsockBridgeState {
     docker_phase_response_events: u64,
     docker_completed_stream_events: u64,
     docker_completed_workload_stream_events: u64,
+    docker_active_build_streams: usize,
     docker_request_bytes: u64,
     docker_response_bytes: u64,
     streams: BTreeMap<u32, HostUnixVsockStream>,
@@ -406,6 +409,7 @@ impl HostUnixVsockBridgeState {
             docker_phase_response_events: 0,
             docker_completed_stream_events: 0,
             docker_completed_workload_stream_events: 0,
+            docker_active_build_streams: 0,
             docker_request_bytes: 0,
             docker_response_bytes: 0,
             streams: BTreeMap::new(),
@@ -447,8 +451,6 @@ impl HostUnixVsockBridgeState {
         self.next_port = self.next_port.saturating_add(1);
         let _ = stream.set_nonblocking(true);
         let stream = HostUnixVsockStream::new(stream);
-        self.pending_guest_packets
-            .push_back(VsockPacket::connection_request(port, self.guest_port));
         self.streams.insert(port, stream);
         self.poll_host_stream(port);
     }
@@ -478,6 +480,11 @@ impl HostUnixVsockBridgeState {
                 .docker_completed_workload_stream_events
                 .saturating_add(completed_workloads);
         }
+        self.docker_active_build_streams = self
+            .streams
+            .values()
+            .filter(|stream| stream.docker_build_stream_admitted)
+            .count();
     }
 
     fn poll_host_stream(&mut self, host_port: u32) {
@@ -495,6 +502,53 @@ impl HostUnixVsockBridgeState {
             return;
         }
         loop {
+            if !stream.guest_connection_opened
+                && (stream.observed_request_header_complete()
+                    || stream.pending_host_input.len() >= MAX_OBSERVED_REQUEST)
+            {
+                if let Some(response) =
+                    synthetic_docker_metadata_response(&stream.pending_host_input)
+                {
+                    self.docker_response_bytes = self
+                        .docker_response_bytes
+                        .saturating_add(response.len() as u64);
+                    stream.host_shutdown_sent = true;
+                    if stream.complete_with_host_response(&response).is_err() {
+                        stream.reset = true;
+                    }
+                    break;
+                }
+                if docker_build_request_detected(&stream.pending_host_input)
+                    && !stream.docker_build_stream_admitted
+                {
+                    if self.docker_active_build_streams >= MAX_CONCURRENT_DOCKER_BUILD_STREAMS {
+                        stream.docker_build_stream_waiting = true;
+                        break;
+                    }
+                    stream.docker_build_stream_waiting = false;
+                    stream.docker_build_stream_admitted = true;
+                    stream.docker_workload_detected = true;
+                    self.docker_active_build_streams =
+                        self.docker_active_build_streams.saturating_add(1);
+                }
+                stream.guest_connection_opened = true;
+                self.pending_guest_packets
+                    .push_back(VsockPacket::connection_request(host_port, self.guest_port));
+                let payload = std::mem::take(&mut stream.pending_host_input);
+                if !payload.is_empty() {
+                    stream.bytes_sent_to_guest = stream
+                        .bytes_sent_to_guest
+                        .wrapping_add(payload.len() as u64);
+                    let fwd_cnt = stream.forward_count();
+                    self.pending_guest_packets
+                        .push_back(VsockPacket::rw_with_credit(
+                            host_port,
+                            self.guest_port,
+                            payload,
+                            fwd_cnt,
+                        ));
+                }
+            }
             let Some(reservation) = stream.reserve_guest_credit(MAX_HOST_PAYLOAD) else {
                 break;
             };
@@ -503,13 +557,20 @@ impl HostUnixVsockBridgeState {
                 Ok(0) => {
                     if !stream.host_shutdown_sent {
                         stream.host_shutdown_sent = true;
-                        let fwd_cnt = stream.forward_count();
-                        self.pending_guest_packets
-                            .push_back(VsockPacket::shutdown_with_credit(
-                                host_port,
-                                self.guest_port,
-                                fwd_cnt,
-                            ));
+                        if stream.guest_connection_opened {
+                            let fwd_cnt = stream.forward_count();
+                            self.pending_guest_packets.push_back(
+                                VsockPacket::shutdown_with_credit(
+                                    host_port,
+                                    self.guest_port,
+                                    fwd_cnt,
+                                ),
+                            );
+                        } else {
+                            stream.guest_shutdown = true;
+                            stream.guest_shutdown_pending = false;
+                            let _ = stream.socket.shutdown(Shutdown::Write);
+                        }
                     }
                     break;
                 }
@@ -520,28 +581,29 @@ impl HostUnixVsockBridgeState {
                     if self.detect_docker_phases {
                         stream.detect_docker_workload_request(&buf);
                     }
-                    let request_complete = stream.observe_host_request_bytes(&buf);
-                    stream.bytes_sent_to_guest =
-                        stream.bytes_sent_to_guest.wrapping_add(count as u64);
+                    stream.observe_host_request_bytes(&buf);
+                    if !stream.guest_connection_opened {
+                        stream.pending_host_input.extend_from_slice(&buf);
+                        if stream.observed_request_header_complete()
+                            || stream.pending_host_input.len() >= MAX_OBSERVED_REQUEST
+                        {
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
+                    let payload = buf;
+                    stream.bytes_sent_to_guest = stream
+                        .bytes_sent_to_guest
+                        .wrapping_add(payload.len() as u64);
                     let fwd_cnt = stream.forward_count();
                     self.pending_guest_packets
                         .push_back(VsockPacket::rw_with_credit(
                             host_port,
                             self.guest_port,
-                            buf,
+                            payload,
                             fwd_cnt,
                         ));
-                    if request_complete && !stream.host_shutdown_sent {
-                        stream.host_shutdown_sent = true;
-                        let fwd_cnt = stream.forward_count();
-                        self.pending_guest_packets
-                            .push_back(VsockPacket::shutdown_with_credit(
-                                host_port,
-                                self.guest_port,
-                                fwd_cnt,
-                            ));
-                        break;
-                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -564,6 +626,7 @@ impl HostUnixVsockBridgeState {
         match packet.op {
             OP_RESPONSE | OP_CREDIT_UPDATE => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
+                    stream.guest_connection_opened = true;
                     stream.update_guest_credit(&packet);
                     if packet.op == OP_RESPONSE {
                         let fwd_cnt = stream.forward_count();
@@ -581,6 +644,7 @@ impl HostUnixVsockBridgeState {
             }
             OP_RW => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
+                    stream.guest_connection_opened = true;
                     stream.update_guest_credit(&packet);
                     self.docker_response_bytes = self
                         .docker_response_bytes
@@ -621,6 +685,7 @@ impl HostUnixVsockBridgeState {
             }
             OP_SHUTDOWN => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
+                    stream.guest_connection_opened = true;
                     stream.update_guest_credit(&packet);
                     // Do not half-close the host socket until every response
                     // byte already accepted from the guest has been written.
@@ -642,7 +707,17 @@ impl HostUnixVsockBridgeState {
                     false
                 }
             }
-            OP_RESET => self.streams.remove(&host_port).is_some(),
+            OP_RESET => {
+                if let Some(stream) = self.streams.remove(&host_port) {
+                    if stream.docker_build_stream_admitted {
+                        self.docker_active_build_streams =
+                            self.docker_active_build_streams.saturating_sub(1);
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -665,6 +740,10 @@ struct HostUnixVsockStream {
     docker_exporting_to_image_seen: bool,
     docker_terminal_response_seen: bool,
     docker_response_phase_line_buffer: Vec<u8>,
+    pending_host_input: Vec<u8>,
+    guest_connection_opened: bool,
+    docker_build_stream_admitted: bool,
+    docker_build_stream_waiting: bool,
     host_request_observed: Vec<u8>,
     host_request_complete: bool,
 }
@@ -687,6 +766,10 @@ impl HostUnixVsockStream {
             docker_exporting_to_image_seen: false,
             docker_terminal_response_seen: false,
             docker_response_phase_line_buffer: Vec::new(),
+            pending_host_input: Vec::new(),
+            guest_connection_opened: false,
+            docker_build_stream_admitted: false,
+            docker_build_stream_waiting: false,
             host_request_observed: Vec::new(),
             host_request_complete: false,
         }
@@ -696,7 +779,6 @@ impl HostUnixVsockStream {
         if self.host_request_complete {
             return true;
         }
-        const MAX_OBSERVED_REQUEST: usize = 1024 * 1024;
         if self.host_request_observed.len() < MAX_OBSERVED_REQUEST {
             let remaining = MAX_OBSERVED_REQUEST - self.host_request_observed.len();
             self.host_request_observed
@@ -708,6 +790,10 @@ impl HostUnixVsockStream {
             self.host_request_complete = self.host_request_observed.len() >= required;
         }
         self.host_request_complete
+    }
+
+    fn observed_request_header_complete(&self) -> bool {
+        http_header_end(&self.pending_host_input).is_some()
     }
 
     fn detect_docker_workload_request(&mut self, payload: &[u8]) {
@@ -792,6 +878,12 @@ impl HostUnixVsockStream {
         self.host_output.extend(payload.iter().copied());
     }
 
+    fn complete_with_host_response(&mut self, payload: &[u8]) -> std::io::Result<()> {
+        self.enqueue_host_output(payload);
+        self.guest_shutdown_pending = true;
+        self.flush_host_output()
+    }
+
     fn flush_host_output(&mut self) -> std::io::Result<()> {
         while !self.host_output.is_empty() {
             let contiguous = self.host_output.make_contiguous();
@@ -828,11 +920,15 @@ impl HostUnixVsockStream {
     }
 }
 
-fn http_request_bytes_required_for_guest_shutdown(buffer: &[u8]) -> Option<usize> {
-    let header_end = buffer
+fn http_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 4)?;
+        .map(|index| index + 4)
+}
+
+fn http_request_bytes_required_for_guest_shutdown(buffer: &[u8]) -> Option<usize> {
+    let header_end = http_header_end(buffer)?;
     let headers = String::from_utf8_lossy(&buffer[..header_end]).to_ascii_lowercase();
     if headers.contains(" /grpc ")
         || headers.contains("connection: upgrade")
@@ -895,6 +991,101 @@ fn find_crlf(buffer: &[u8], offset: usize) -> Option<usize> {
         .map(|index| offset + index)
 }
 
+fn synthetic_docker_metadata_response(request: &[u8]) -> Option<Vec<u8>> {
+    let header_end = http_header_end(request)?;
+    let request_line_end = find_crlf(request, 0).unwrap_or(header_end.saturating_sub(4));
+    let request_line = std::str::from_utf8(&request[..request_line_end]).ok()?;
+    let mut parts = request_line.split_ascii_whitespace();
+    let method = parts.next()?;
+    let target = parts.next()?;
+    let include_body = match method {
+        "GET" => true,
+        "HEAD" => false,
+        _ => return None,
+    };
+    match normalized_docker_api_path(target) {
+        "/version" => Some(docker_json_response(
+            docker_version_response_body().as_str(),
+            include_body,
+        )),
+        "/info" => Some(docker_json_response(
+            docker_info_response_body().as_str(),
+            include_body,
+        )),
+        _ => None,
+    }
+}
+
+fn normalized_docker_api_path(target: &str) -> &str {
+    let path_with_query = if let Some(scheme_index) = target.find("://") {
+        let after_authority = &target[scheme_index + 3..];
+        match after_authority.find('/') {
+            Some(path_index) => &after_authority[path_index..],
+            None => "/",
+        }
+    } else {
+        target
+    };
+    let path = path_with_query
+        .split_once('?')
+        .map(|(path, _)| path)
+        .unwrap_or(path_with_query);
+    strip_docker_api_version(path)
+}
+
+fn strip_docker_api_version(path: &str) -> &str {
+    let Some(rest) = path.strip_prefix("/v") else {
+        return path;
+    };
+    let Some(slash_index) = rest.find('/') else {
+        return path;
+    };
+    let version = &rest[..slash_index];
+    if !version.is_empty()
+        && version.contains('.')
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        &rest[slash_index..]
+    } else {
+        path
+    }
+}
+
+fn docker_json_response(body: &str, include_body: bool) -> Vec<u8> {
+    let response_body = if include_body { body } else { "" };
+    format!(
+        "HTTP/1.1 200 OK\r\nApi-Version: 1.52\r\nContent-Type: application/json\r\nDocker-Experimental: false\r\nOstype: linux\r\nServer: Docker/29.1.3 (linux)\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        response_body.as_bytes().len(),
+        response_body
+    )
+    .into_bytes()
+}
+
+fn docker_version_response_body() -> String {
+    format!(
+        "{{\"Platform\":{{\"Name\":\"Docker Engine - Community\"}},\"Components\":[{{\"Name\":\"Engine\",\"Version\":\"29.1.3\",\"Details\":{{\"ApiVersion\":\"1.52\",\"Arch\":\"{}\",\"BuildTime\":\"\",\"Experimental\":\"false\",\"GitCommit\":\"conjet\",\"GoVersion\":\"\",\"KernelVersion\":\"\",\"MinAPIVersion\":\"1.24\",\"Os\":\"linux\"}}}}],\"Version\":\"29.1.3\",\"ApiVersion\":\"1.52\",\"MinAPIVersion\":\"1.24\",\"GitCommit\":\"conjet\",\"GoVersion\":\"\",\"Os\":\"linux\",\"Arch\":\"{}\",\"KernelVersion\":\"\",\"BuildTime\":\"\"}}\n",
+        docker_api_arch(),
+        docker_api_arch()
+    )
+}
+
+fn docker_info_response_body() -> String {
+    format!(
+        "{{\"ID\":\"conjet\",\"Containers\":0,\"ContainersRunning\":0,\"ContainersPaused\":0,\"ContainersStopped\":0,\"Images\":0,\"Driver\":\"overlay2\",\"Plugins\":{{\"Volume\":[],\"Network\":[],\"Authorization\":null,\"Log\":[]}},\"MemoryLimit\":true,\"SwapLimit\":true,\"KernelMemory\":false,\"CpuCfsPeriod\":true,\"CpuCfsQuota\":true,\"CPUShares\":true,\"CPUSet\":true,\"PidsLimit\":true,\"IPv4Forwarding\":true,\"BridgeNfIptables\":true,\"BridgeNfIp6tables\":true,\"Debug\":false,\"NFd\":0,\"OomKillDisable\":true,\"NGoroutines\":0,\"SystemTime\":\"\",\"LoggingDriver\":\"local\",\"CgroupDriver\":\"systemd\",\"CgroupVersion\":\"2\",\"NEventsListener\":0,\"KernelVersion\":\"\",\"OperatingSystem\":\"Conjet Core\",\"OSVersion\":\"\",\"OSType\":\"linux\",\"Architecture\":\"{}\",\"NCPU\":0,\"MemTotal\":0,\"DockerRootDir\":\"/var/lib/docker\",\"HTTPProxy\":\"\",\"HTTPSProxy\":\"\",\"NoProxy\":\"\",\"Name\":\"conjet-core\",\"ServerVersion\":\"29.1.3\",\"ExperimentalBuild\":false,\"LiveRestoreEnabled\":false}}\n",
+        docker_api_arch()
+    )
+}
+
+fn docker_api_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    }
+}
+
 fn docker_phase_marker_count(line: &[u8]) -> u64 {
     let text = String::from_utf8_lossy(line);
     let mut count = 0u64;
@@ -919,10 +1110,14 @@ fn docker_phase_marker_count(line: &[u8]) -> u64 {
 
 fn docker_workload_request_detected(payload: &[u8]) -> bool {
     let text = String::from_utf8_lossy(payload);
-    text.contains(" /build")
-        || text.contains("/build?")
+    docker_build_request_detected(payload)
         || text.contains(" /images/create")
         || text.contains("/images/create?")
+}
+
+fn docker_build_request_detected(payload: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(payload);
+    text.contains(" /build") || text.contains("/build?")
 }
 
 fn accept_loop(listener: UnixListener, state: Arc<Mutex<HostUnixVsockBridgeState>>) {
@@ -1037,19 +1232,9 @@ mod tests {
         drop(client);
 
         bridge.poll_host_streams();
-        assert!(bridge.handle_guest_packet(VsockPacket {
-            src_cid: DEFAULT_GUEST_CID,
-            dst_cid: HOST_CID,
-            src_port: DOCKER_BRIDGE_PORT,
-            dst_port: 49_152,
-            op: OP_SHUTDOWN,
-            flags: SHUTDOWN_SEND,
-            buf_alloc: DEFAULT_BUF_ALLOC,
-            fwd_cnt: 0,
-            payload: Vec::new(),
-        }));
-        bridge.poll_host_streams();
 
+        assert!(bridge.pending_guest_packets.is_empty());
+        assert!(!bridge.streams.contains_key(&49_152));
         assert_eq!(bridge.docker_completed_stream_events(), 1);
     }
 
@@ -1083,20 +1268,62 @@ mod tests {
     }
 
     #[test]
-    fn docker_get_without_client_half_close_sends_guest_shutdown() {
+    fn docker_get_without_client_half_close_does_not_shutdown_guest() {
         let (mut client, server) = UnixStream::pair().unwrap();
         client
-            .write_all(b"GET /info HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n")
+            .write_all(
+                b"GET /containers/json HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n",
+            )
             .unwrap();
 
         let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
         bridge.accept_stream(server);
         bridge.poll_host_streams();
 
-        assert_eq!(bridge.pending_guest_packets.len(), 3);
+        assert_eq!(bridge.pending_guest_packets.len(), 2);
         assert_eq!(bridge.pending_guest_packets[0].op, OP_REQUEST);
         assert_eq!(bridge.pending_guest_packets[1].op, OP_RW);
-        assert_eq!(bridge.pending_guest_packets[2].op, OP_SHUTDOWN);
+    }
+
+    #[test]
+    fn docker_version_metadata_response_does_not_open_guest_stream() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .write_all(b"GET /v1.52/version HTTP/1.1\r\nHost: docker\r\n\r\n")
+            .unwrap();
+
+        let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
+        bridge.accept_stream(server);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Api-Version: 1.52\r\n"));
+        assert!(response.contains("\"Version\":\"29.1.3\""));
+        assert!(response.contains("\"ApiVersion\":\"1.52\""));
+        assert!(bridge.pending_guest_packets.is_empty());
+        bridge.poll_host_streams();
+        assert!(!bridge.streams.contains_key(&49_152));
+    }
+
+    #[test]
+    fn docker_info_metadata_response_does_not_open_guest_stream() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .write_all(b"GET http://docker/v1.52/info?verbose=1 HTTP/1.1\r\nHost: docker\r\n\r\n")
+            .unwrap();
+
+        let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
+        bridge.accept_stream(server);
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("\"OperatingSystem\":\"Conjet Core\""));
+        assert!(response.contains("\"ServerVersion\":\"29.1.3\""));
+        assert!(bridge.pending_guest_packets.is_empty());
+        bridge.poll_host_streams();
+        assert!(!bridge.streams.contains_key(&49_152));
     }
 
     #[test]
@@ -1126,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_post_waits_for_declared_request_body_before_guest_shutdown() {
+    fn docker_post_waits_for_declared_request_body_before_forwarding_remainder() {
         let (mut client, server) = UnixStream::pair().unwrap();
         client
             .write_all(b"POST /v1.52/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: 4\r\n\r\nab")
@@ -1142,13 +1369,12 @@ mod tests {
 
         client.write_all(b"cd").unwrap();
         bridge.poll_host_streams();
-        assert_eq!(bridge.pending_guest_packets.len(), 4);
+        assert_eq!(bridge.pending_guest_packets.len(), 3);
         assert_eq!(bridge.pending_guest_packets[2].op, OP_RW);
-        assert_eq!(bridge.pending_guest_packets[3].op, OP_SHUTDOWN);
     }
 
     #[test]
-    fn docker_chunked_post_waits_for_terminal_chunk_before_guest_shutdown() {
+    fn docker_chunked_post_waits_for_terminal_chunk_before_forwarding_remainder() {
         let (mut client, server) = UnixStream::pair().unwrap();
         client
             .write_all(b"POST /v1.52/build HTTP/1.1\r\nHost: docker\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nab")
@@ -1165,14 +1391,13 @@ mod tests {
         client.write_all(b"cd\r\n0\r\n\r\n").unwrap();
         for _ in 0..4 {
             bridge.poll_host_streams();
-            if bridge.pending_guest_packets.len() >= 4 {
+            if bridge.pending_guest_packets.len() >= 3 {
                 break;
             }
             std::thread::yield_now();
         }
-        assert_eq!(bridge.pending_guest_packets.len(), 4);
+        assert_eq!(bridge.pending_guest_packets.len(), 3);
         assert_eq!(bridge.pending_guest_packets[2].op, OP_RW);
-        assert_eq!(bridge.pending_guest_packets[3].op, OP_SHUTDOWN);
     }
 
     #[test]
@@ -1202,6 +1427,56 @@ mod tests {
 
         assert_eq!(bridge.docker_completed_stream_events(), 1);
         assert_eq!(bridge.docker_completed_workload_stream_events(), 1);
+    }
+
+    #[test]
+    fn concurrent_docker_build_streams_are_throttled() {
+        let mut clients = Vec::new();
+        let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
+
+        for index in 0..MAX_CONCURRENT_DOCKER_BUILD_STREAMS {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            write!(
+                client,
+                "POST /v1.52/build?t=demo-{index} HTTP/1.1\r\nHost: docker\r\n\r\n"
+            )
+            .unwrap();
+            bridge.accept_stream(server);
+            clients.push(client);
+        }
+
+        assert_eq!(
+            bridge.docker_active_build_streams,
+            MAX_CONCURRENT_DOCKER_BUILD_STREAMS
+        );
+        bridge.pending_guest_packets.clear();
+
+        let waiting_port = 49_152 + MAX_CONCURRENT_DOCKER_BUILD_STREAMS as u32;
+        let (mut waiting_client, waiting_server) = UnixStream::pair().unwrap();
+        waiting_client
+            .write_all(b"POST /v1.52/build?t=waiting HTTP/1.1\r\nHost: docker\r\n\r\n")
+            .unwrap();
+        bridge.accept_stream(waiting_server);
+        clients.push(waiting_client);
+
+        let waiting_stream = bridge.streams.get(&waiting_port).unwrap();
+        assert!(waiting_stream.docker_build_stream_waiting);
+        assert!(!waiting_stream.guest_connection_opened);
+        assert!(bridge.pending_guest_packets.is_empty());
+
+        bridge.streams.get_mut(&49_152).unwrap().reset = true;
+        bridge.poll_host_streams();
+        bridge.poll_host_stream(waiting_port);
+
+        let waiting_stream = bridge.streams.get(&waiting_port).unwrap();
+        assert!(!waiting_stream.docker_build_stream_waiting);
+        assert!(waiting_stream.docker_build_stream_admitted);
+        assert!(waiting_stream.guest_connection_opened);
+        assert!(bridge.pending_guest_packets.iter().any(|packet| {
+            packet.dst_port == DOCKER_BRIDGE_PORT
+                && packet.src_port == waiting_port
+                && packet.op == OP_REQUEST
+        }));
     }
 
     #[test]

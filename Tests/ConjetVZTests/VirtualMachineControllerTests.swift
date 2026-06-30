@@ -114,6 +114,37 @@ final class VirtualMachineControllerTests: XCTestCase {
         )
     }
 
+    func testRustVMMToolOnlyRepairsLocalCargoJetstreamExecutables() {
+        #if os(macOS)
+        let root = URL(fileURLWithPath: "/tmp/conjet-source", isDirectory: true)
+
+        XCTAssertTrue(ConjetCoreRustVMMTool.isLocalDebugJetstreamExecutableForSigning(
+            root.appendingPathComponent("target/debug/jetstream"),
+            repositoryRoot: root
+        ))
+        XCTAssertTrue(ConjetCoreRustVMMTool.isLocalDebugJetstreamExecutableForSigning(
+            root.appendingPathComponent("target/release/jetstream"),
+            repositoryRoot: root
+        ))
+        XCTAssertTrue(ConjetCoreRustVMMTool.isLocalDebugJetstreamExecutableForSigning(
+            root.appendingPathComponent("jetstream/target/debug/jetstream"),
+            repositoryRoot: root
+        ))
+        XCTAssertFalse(ConjetCoreRustVMMTool.isLocalDebugJetstreamExecutableForSigning(
+            root.appendingPathComponent(".build/debug/conjetd"),
+            repositoryRoot: root
+        ))
+        XCTAssertFalse(ConjetCoreRustVMMTool.isLocalDebugJetstreamExecutableForSigning(
+            root.appendingPathComponent("dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core"),
+            repositoryRoot: root
+        ))
+        XCTAssertFalse(ConjetCoreRustVMMTool.isLocalDebugJetstreamExecutableForSigning(
+            URL(fileURLWithPath: "/usr/local/bin/jetstream"),
+            repositoryRoot: root
+        ))
+        #endif
+    }
+
     func testDockerBridgeReadinessPolicySkipsHostProbeForLegacyAutoBridge() {
         let policy = GuestDockerBridgeReadinessPolicy.resolve(
             requested: .auto,

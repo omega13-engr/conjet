@@ -146,8 +146,8 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(status.diskSwapUsedMiB, 36)
         XCTAssertEqual(status.pressure, .low)
         XCTAssertEqual(connector.reclaimRequests, 1)
-        XCTAssertEqual(appliedTargets.values, [1280])
-        XCTAssertEqual(status.currentTargetMiB, 1280)
+        XCTAssertEqual(appliedTargets.values, [6144])
+        XCTAssertEqual(status.currentTargetMiB, 6144)
         XCTAssertEqual(status.trace?.last?.action, "idle-autodrop")
     }
 
@@ -261,7 +261,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertTrue(manager.status().message?.contains("guest memory reclaim unavailable") == true)
     }
 
-    func testBuildStartAndStreamPhaseFinishedDoNotPulseClassicBalloon() throws {
+    func testBuildStartAndStreamPhaseFinishedDoNotReclaimWhileBuildStreamIsOpen() throws {
         let policy = Self.policy()
         let quietMetricsBody = """
         {"mem_total":8589934592,"mem_available":2147483648,"mem_free":1073741824,"page_cache_bytes":67108864,"sreclaimable_bytes":33554432,"container_memory_current":536870912,"container_memory_peak":536870912,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
@@ -303,9 +303,50 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "docker.streamPhaseFinished")
 
         XCTAssertEqual(appliedTargets.values, [])
-        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(connector.reclaimRequests, 0)
         XCTAssertEqual(manager.status().currentTargetMiB, 8192)
-        XCTAssertEqual(manager.status().trace?.last?.action, "reclaim")
+        XCTAssertEqual(manager.status().trace?.last?.action, "observe")
+    }
+
+    func testRecentBuildActivitySuppressesGuestEventIdleReclaim() throws {
+        let policy = Self.policy()
+        let reclaimableMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":536870912,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: reclaimableMetricsBody
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        manager.handleDockerActivity(DockerMemoryActivity(
+            kind: .streamOpened,
+            workload: .build,
+            activeStreams: 1,
+            pressureStreams: 1,
+            buildLike: true
+        ))
+        manager.handleDockerActivity(DockerMemoryActivity(
+            kind: .streamClosed,
+            workload: .build,
+            activeStreams: 0,
+            pressureStreams: 0,
+            buildLike: true
+        ))
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertTrue(manager.status().buildWorkloadDetected)
+        XCTAssertEqual(manager.status().trace?.last?.action, "observe")
     }
 
     func testGuestEventWithLargeIdleCacheObservesWithoutHostReclaimPulse() throws {
@@ -361,7 +402,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
     func testGuestEventWithActiveWorkloadsSuppressesIdleReclaim() throws {
         let policy = Self.policy()
         let activeMetricsBody = """
-        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":1610612736,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
+        {"mem_total":8589934592,"mem_available":268435456,"mem_free":134217728,"page_cache_bytes":268435456,"sreclaimable_bytes":0,"container_memory_current":1610612736,"container_memory_peak":4294967296,"container_memory_oom_kill_events":1,"psi_some_avg10":3.0,"psi_full_avg10":0.6,"active_workloads":1,"build_workload_detected":false,"source":"test"}
         """
         let connector = StaticHTTPGuestConnectionConnector(
             body: activeMetricsBody
@@ -383,6 +424,38 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().trace?.last?.action, "observe")
         XCTAssertEqual(connector.reclaimRequests, 0)
         XCTAssertEqual(appliedTargets.values, [])
+    }
+
+    func testGuestEventWithRunningContainersCanAutodropWhenFootprintRemainsHigh() throws {
+        let policy = Self.policy()
+        let activeMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":268435456,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: activeMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let footprintSamples = HostFootprintSamples([
+            UInt64(8 * 1024 * 1024 * 1024),
+            UInt64(8 * 1024 * 1024 * 1024)
+        ])
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            hostFootprintBytes: { footprintSamples.next() },
+            hostFootprintConvergenceDelays: [0]
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(manager.status().guestWorkloadDetected, true)
+        XCTAssertEqual(manager.status().currentTargetMiB, 6144)
+        XCTAssertEqual(manager.status().balloonedMiB, 2048)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+        XCTAssertEqual(appliedTargets.values, [6144])
     }
 
     func testStatusSeparatesBuildAndGuestWorkloads() throws {
@@ -471,6 +544,45 @@ final class DynamicMemoryManagerTests: XCTestCase {
         wait(for: [completed], timeout: 2)
         XCTAssertFalse(manager.status().buildWorkloadDetected)
         XCTAssertEqual(manager.status().guestWorkloadDetected, false)
+    }
+
+    func testContainerStartedEventDoesNotLeaveActivePressureStream() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":268435456,"service_cgroup_memory_current":67108864,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: idleMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let footprintSamples = HostFootprintSamples([
+            UInt64(12 * 1024 * 1024 * 1024),
+            UInt64(12 * 1024 * 1024 * 1024),
+            UInt64(12 * 1024 * 1024 * 1024)
+        ])
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            hostFootprintBytes: { footprintSamples.next() },
+            hostFootprintConvergenceDelays: [0]
+        )
+
+        manager.handleDockerActivity(DockerMemoryActivity(
+            kind: .containerStarted,
+            workload: .start,
+            activeStreams: 1,
+            pressureStreams: 1,
+            buildLike: false
+        ))
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(manager.status().activeDockerStreams, 0)
+        XCTAssertTrue(waitUntil { manager.status().currentTargetMiB == 6144 })
+        XCTAssertEqual(manager.status().balloonedMiB, 2048)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+        XCTAssertEqual(appliedTargets.values, [6144])
     }
 
     func testAcceptedReclaimRecordsHostFootprintConvergence() throws {
@@ -570,9 +682,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [1664])
-        XCTAssertEqual(manager.status().currentTargetMiB, 1664)
-        XCTAssertEqual(manager.status().balloonedMiB, 6528)
+        XCTAssertEqual(appliedTargets.values, [6144])
+        XCTAssertEqual(manager.status().currentTargetMiB, 6144)
+        XCTAssertEqual(manager.status().balloonedMiB, 2048)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
         XCTAssertTrue(manager.status().message?.contains("idle memory autodrop lowered guest target") == true)
     }
@@ -603,15 +715,15 @@ final class DynamicMemoryManagerTests: XCTestCase {
         )
 
         try manager.forceRecompute(reason: "guest.event")
-        XCTAssertEqual(manager.status().currentTargetMiB, 1664)
+        XCTAssertEqual(manager.status().currentTargetMiB, 6144)
 
         connector.setBody(balloonPressureMetricsBody)
         try manager.forceRecompute(reason: "guest.event")
 
         let status = manager.status()
-        XCTAssertEqual(appliedTargets.values, [1664])
-        XCTAssertEqual(status.currentTargetMiB, 1664)
-        XCTAssertEqual(status.balloonedMiB, 6528)
+        XCTAssertEqual(appliedTargets.values, [6144])
+        XCTAssertEqual(status.currentTargetMiB, 6144)
+        XCTAssertEqual(status.balloonedMiB, 2048)
         XCTAssertEqual(status.pressure, .high)
         XCTAssertEqual(status.trace?.last?.action, "observe")
         XCTAssertTrue(status.message?.contains("idle memory autodrop active") == true)
@@ -630,7 +742,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
             idleMemoryReclaimTargetMiB: 2048,
             idleMemoryReclaimDwellSeconds: 3,
             dynamicMemoryEnabled: true,
-            dynamicMemoryMinimumMiB: 512,
+            dynamicMemoryMinimumMiB: 0,
             dynamicMemoryBaseOverheadMiB: 256,
             dynamicMemoryHeadroomMiB: 512,
             dynamicMemoryHeadroomRatio: 0.25,
@@ -660,9 +772,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [896])
-        XCTAssertEqual(manager.status().currentTargetMiB, 896)
-        XCTAssertEqual(manager.status().balloonedMiB, 3200)
+        XCTAssertEqual(appliedTargets.values, [2048])
+        XCTAssertEqual(manager.status().currentTargetMiB, 2048)
+        XCTAssertEqual(manager.status().balloonedMiB, 2048)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
@@ -679,7 +791,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
             idleMemoryReclaimTargetMiB: 2048,
             idleMemoryReclaimDwellSeconds: 3,
             dynamicMemoryEnabled: true,
-            dynamicMemoryMinimumMiB: 512,
+            dynamicMemoryMinimumMiB: 0,
             dynamicMemoryBaseOverheadMiB: 256,
             dynamicMemoryHeadroomMiB: 512,
             dynamicMemoryHeadroomRatio: 0.25,
@@ -709,14 +821,43 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "docker.workloadFinished")
 
-        XCTAssertEqual(appliedTargets.values, [2688])
-        XCTAssertEqual(manager.status().currentTargetMiB, 2688)
-        XCTAssertEqual(manager.status().balloonedMiB, 1408)
+        XCTAssertEqual(appliedTargets.values, [2176])
+        XCTAssertEqual(manager.status().currentTargetMiB, 2176)
+        XCTAssertEqual(manager.status().balloonedMiB, 1920)
         XCTAssertEqual(manager.status().guestWorkloadDetected, true)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
     func testHostFootprintDropSkipsIdleAutodropBalloonTarget() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: idleMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let footprintSamples = HostFootprintSamples([
+            UInt64(3500 * 1024 * 1024),
+            UInt64(3500 * 1024 * 1024)
+        ])
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            hostFootprintBytes: { footprintSamples.next() },
+            hostFootprintConvergenceDelays: [0]
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().trace?.last?.action, "reclaim-footprint")
+    }
+
+    func testDockerCompletionAutodropsWhenFootprintRemainsHighAfterReclaim() throws {
         let policy = Self.policy()
         let idleMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
@@ -738,11 +879,78 @@ final class DynamicMemoryManagerTests: XCTestCase {
             hostFootprintConvergenceDelays: [0]
         )
 
+        try manager.forceRecompute(reason: "docker.workloadFinished")
+
+        XCTAssertEqual(appliedTargets.values, [6144])
+        XCTAssertEqual(manager.status().currentTargetMiB, 6144)
+        XCTAssertEqual(manager.status().balloonedMiB, 2048)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+        XCTAssertEqual(manager.status().trace?.last?.hostFootprintDropBytes, UInt64(4 * 1024 * 1024 * 1024))
+    }
+
+    func testGuestEventAutodropsWhenIdleFootprintRemainsAboveIdleTarget() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: idleMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let footprintSamples = HostFootprintSamples([
+            UInt64(8 * 1024 * 1024 * 1024),
+            UInt64(8 * 1024 * 1024 * 1024)
+        ])
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            hostFootprintBytes: { footprintSamples.next() },
+            hostFootprintConvergenceDelays: [0]
+        )
+
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [])
-        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
-        XCTAssertEqual(manager.status().trace?.last?.action, "reclaim-footprint")
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(appliedTargets.values, [6144])
+        XCTAssertEqual(manager.status().currentTargetMiB, 6144)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+    }
+
+    func testDockerCompletionAutodropsWhenGuestReclaimEndpointIsUnavailable() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: idleMetricsBody,
+            reclaimBody: "not found\n",
+            reclaimStatusCode: 404
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let footprintSamples = HostFootprintSamples([
+            UInt64(12 * 1024 * 1024 * 1024),
+            UInt64(8 * 1024 * 1024 * 1024)
+        ])
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            hostFootprintBytes: { footprintSamples.next() },
+            hostFootprintConvergenceDelays: [0]
+        )
+
+        try manager.forceRecompute(reason: "docker.workloadFinished")
+
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(appliedTargets.values, [6144])
+        XCTAssertEqual(manager.status().currentTargetMiB, 6144)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+        XCTAssertTrue(manager.status().message?.contains("idle memory autodrop lowered guest target") == true)
     }
 
     func testDockerStartRestoresIdleAutodropBalloonTarget() throws {
@@ -768,7 +976,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         )
 
         try manager.forceRecompute(reason: "guest.event")
-        XCTAssertEqual(manager.status().currentTargetMiB, 1664)
+        XCTAssertEqual(manager.status().currentTargetMiB, 6144)
 
         manager.handleDockerActivity(DockerMemoryActivity(
             kind: .streamOpened,
@@ -778,7 +986,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
             buildLike: true
         ))
 
-        XCTAssertTrue(waitUntil { appliedTargets.values == [1664, 8192] })
+        XCTAssertTrue(waitUntil { appliedTargets.values == [6144, 8192] })
         XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertEqual(manager.status().balloonedMiB, 0)
         XCTAssertEqual(manager.status().trace?.last?.action, "restore")
@@ -797,7 +1005,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
             idleMemoryReclaimTargetMiB: 6144,
             idleMemoryReclaimDwellSeconds: 2,
             dynamicMemoryEnabled: true,
-            dynamicMemoryMinimumMiB: 1024,
+            dynamicMemoryMinimumMiB: 0,
             dynamicMemoryBaseOverheadMiB: 512,
             dynamicMemoryHeadroomMiB: 512,
             dynamicMemoryHeadroomRatio: 0.25,

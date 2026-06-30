@@ -13,9 +13,9 @@ built-in:
 - PL011 serial console and GICv3 for early boot diagnostics.
 - virtio-mmio transport, virtio-blk root/data/swap, virtio-net, virtio-rng,
   virtio-vsock, and virtio-balloon with free-page reporting.
-- devtmpfs, initramfs gzip, ext4, overlayfs, tmpfs, namespaces, cgroup v2, PSI,
-  compaction, zram, netfilter, and bridge support for Docker/container
-  workloads.
+- devtmpfs, initramfs gzip, ext4 with security xattrs, overlayfs, tmpfs,
+  namespaces, cgroup v2, PSI, compaction, zram, netfilter, and bridge support
+  for Docker/container workloads.
 
 Conjet's HVF memory model uses guest telemetry for policy, virtio-balloon
 target changes for hard pressure, and virtio-balloon free-page reporting for

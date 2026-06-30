@@ -10,6 +10,7 @@ MOUNT_OPTIONS="${CONJET_DOCKER_STORAGE_MOUNT_OPTIONS:-rw,noatime,discard,commit=
 MIN_FALLBACK_BYTES="${CONJET_DOCKER_STORAGE_MIN_FALLBACK_BYTES:-2147483648}"
 DEVICE_WAIT_SECONDS="${CONJET_DOCKER_STORAGE_DEVICE_WAIT_SECONDS:-10}"
 MARKER=".conjet-dedicated-docker-fs"
+SKIP_XATTR_PROBE="${CONJET_DOCKER_STORAGE_SKIP_XATTR_PROBE:-0}"
 
 log() {
     printf 'conjet-docker-storage-setup: %s\n' "$*" >&2
@@ -187,6 +188,44 @@ mount_device() {
     mount -o "${MOUNT_OPTIONS}" "${dev}" "${target}"
 }
 
+probe_security_capability_xattr() {
+    target="$1"
+    [ "${SKIP_XATTR_PROBE}" = "1" ] && return 0
+    mkdir -p "${target}"
+    probe="${target}/.conjet-security-capability-probe.$$"
+    rm -f "${probe}"
+    : >"${probe}"
+    if python3 - "${probe}" <<'PY'
+import os
+import struct
+import sys
+
+path = sys.argv[1]
+cap_net_raw = 1 << 13
+vfs_cap_revision_2 = 0x02000000
+vfs_cap_flags_effective = 0x00000001
+value = struct.pack("<IIIII", vfs_cap_revision_2 | vfs_cap_flags_effective, cap_net_raw, 0, 0, 0)
+
+try:
+    os.setxattr(path, "security.capability", value, follow_symlinks=False)
+    try:
+        os.removexattr(path, "security.capability", follow_symlinks=False)
+    except OSError:
+        pass
+except OSError as error:
+    print(f"{error.errno}:{error.strerror}", file=sys.stderr)
+    sys.exit(1)
+PY
+    then
+        rm -f "${probe}"
+        return 0
+    fi
+    rc=$?
+    rm -f "${probe}"
+    log "${target} cannot store security.capability xattrs; Docker image layers with file capabilities will fail to unpack. Rebuild Conjet Core with CONFIG_SECURITY=y and CONFIG_EXT4_FS_SECURITY=y."
+    return "${rc}"
+}
+
 unmount_if_mounted() {
     target="$1"
     if mountpoint -q "${target}" 2>/dev/null; then
@@ -199,6 +238,7 @@ main() {
     {
         log "start"
         if mountpoint -q "${DOCKER_DIR}" 2>/dev/null; then
+            probe_security_capability_xattr "${DOCKER_DIR}"
             log "${DOCKER_DIR} is already a mountpoint; leaving it unchanged"
             log "done"
             return 0
@@ -213,6 +253,7 @@ main() {
         dev="$(storage_candidate_with_wait 2>/dev/null || true)"
         if [ -z "${dev}" ]; then
             log "dedicated Docker data disk not present; using root filesystem"
+            probe_security_capability_xattr "${DOCKER_DIR}"
             log "done"
             return 0
         fi
@@ -240,6 +281,7 @@ main() {
 
         mount_device "${dev}" "${DOCKER_DIR}"
         mkdir -p "${DOCKER_DIR}"
+        probe_security_capability_xattr "${DOCKER_DIR}"
         date -u +%Y-%m-%dT%H:%M:%SZ >"${DOCKER_DIR}/${MARKER}" 2>/dev/null || true
         findmnt -T "${DOCKER_DIR}" -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null || true
         log "done"

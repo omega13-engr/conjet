@@ -370,6 +370,17 @@ public final class VirtualMachineController {
             throw error
         }
         let tool = ConjetCoreRustVMMTool.resolve()
+        let repairedVMMEntitlements = try ConjetCoreRustVMMTool.ensureHVFEntitlementsIfPossible(
+            executable: tool.path,
+            source: tool.source
+        )
+        if repairedVMMEntitlements {
+            setProgress(
+                state: .starting,
+                phase: "rust-vmm-signing",
+                message: "signed local Jetstream VMM with debug Hypervisor entitlements"
+            )
+        }
         let memoryMiB = config.effectiveMemoryMiB
         let vcpus = config.effectiveVMCPUs
         let stdoutPath = manifest.serialLogPath.isEmpty
@@ -771,7 +782,7 @@ public final class VirtualMachineController {
         let bytesPerMiB: UInt64 = 1_048_576
         let currentTargetMiB = Int(hostBeforeMetrics?.targetMiB ?? UInt64(config.memoryMiB))
         let requestedDropMiB = max(1, Int((dropBytes + bytesPerMiB - 1) / bytesPerMiB))
-        var floorMiB = policy.dynamicMemoryMinimumMiB
+        var floorMiB = max(0, policy.dynamicMemoryMinimumMiB)
         if let guestMetrics = try? metricsClient.snapshot() {
             let guestUsedBytes = guestMetrics.memTotalBytes > guestMetrics.memAvailableBytes
                 ? guestMetrics.memTotalBytes - guestMetrics.memAvailableBytes
@@ -783,7 +794,7 @@ public final class VirtualMachineController {
             )
         }
         let desiredTargetMiB = max(floorMiB, currentTargetMiB - requestedDropMiB)
-        let boundedTargetMiB = min(currentTargetMiB - 1, max(policy.dynamicMemoryMinimumMiB, desiredTargetMiB))
+        let boundedTargetMiB = min(currentTargetMiB - 1, max(0, desiredTargetMiB))
         guard boundedTargetMiB > 0, boundedTargetMiB < currentTargetMiB else {
             throw ConjetError.unavailable("\(guestFailure); virtio-balloon fallback had no safe lower target from \(currentTargetMiB) MiB")
         }
