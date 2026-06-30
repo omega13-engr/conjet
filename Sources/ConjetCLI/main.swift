@@ -1548,11 +1548,6 @@ struct ConjetCLI {
                 config.energyMode = try parseEnergyMode(consumeValue(flag, from: &remaining))
             case "--memory-profile":
                 config.memoryProfile = try parseMemoryProfile(consumeValue(flag, from: &remaining))
-                if config.memoryProfile == .eco,
-                   !args.contains("--memory"),
-                   config.memoryMiB == ConjetConfig.default.memoryMiB {
-                    config.memoryMiB = config.memoryPolicy.recommendedMemoryMiB
-                }
             case "--allow-cidr":
                 config.networkLANAllowedCIDRs.append(try consumeValue(flag, from: &remaining))
             case "--allow-port":
@@ -3244,8 +3239,8 @@ struct ConjetCLI {
     }
 
     private static func parseMemoryProfile(_ value: String) throws -> ConjetMemoryProfile {
-        guard let profile = ConjetMemoryProfile(rawValue: value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
-            throw ConjetError.invalidArgument("memory profile must be performance, balanced, or eco")
+        guard let profile = ConjetMemoryProfile.parse(value) else {
+            throw ConjetError.invalidArgument("memory profile must be \(ConjetMemoryProfile.allowedValuesDescription)")
         }
         return profile
     }
@@ -4939,7 +4934,7 @@ struct ConjetCLI {
                                         Set container runtime preference
                   --arch ARCH           Set guest architecture
                   --energy-mode performance|balanced|eco
-                  --memory-profile performance|balanced|eco
+                  --memory-profile no-policy|performance|balanced|eco
                   --network-bind-policy secure-local|docker-strict|lan-allowlist
                   --proxy-engine auto|nio|event-loop|gcd-evented|gcd-fallback|turbo
                   --wait control|docker Return at control-ready by default, or wait for Docker API
@@ -4983,7 +4978,7 @@ struct ConjetCLI {
                                         Set container runtime preference
                   --arch ARCH           Set guest architecture
                   --energy-mode performance|balanced|eco
-                  --memory-profile performance|balanced|eco
+                  --memory-profile no-policy|performance|balanced|eco
                   --network-bind-policy secure-local|docker-strict|lan-allowlist
                   --proxy-engine auto|nio|event-loop|gcd-evented|gcd-fallback|turbo
                   --profile NAME        Use an isolated Conjet profile

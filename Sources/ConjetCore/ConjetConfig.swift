@@ -7,9 +7,25 @@ public enum ConjetEnergyMode: String, Codable, CaseIterable, Sendable {
 }
 
 public enum ConjetMemoryProfile: String, Codable, CaseIterable, Sendable {
+    case noPolicy = "no-policy"
     case performance
     case balanced
     case eco
+
+    public static func parse(_ value: String) -> ConjetMemoryProfile? {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "default", "none", "no-policy", "nopolicy", "no_policy":
+            return .noPolicy
+        case "performance", "balanced", "eco":
+            return ConjetMemoryProfile(rawValue: value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        default:
+            return nil
+        }
+    }
+
+    public static var allowedValuesDescription: String {
+        "no-policy, performance, balanced, or eco"
+    }
 }
 
 public enum ConjetVMProfile: String, Codable, CaseIterable, Sendable {
@@ -346,40 +362,15 @@ public struct ConjetMemoryPolicy: Codable, Equatable, Sendable {
         return min(configuredMemoryMiB, min(maximum, max(minimum, rounded)))
     }
 
-    private static func scaledSeconds(
-        configuredMemoryMiB: Int,
-        baseAtEightGiB: Int,
-        minimum: Int,
-        maximum: Int
-    ) -> Int {
-        let scaled = Int((Double(baseAtEightGiB) * Double(configuredMemoryMiB) / 8192.0)
-            .rounded(.toNearestOrAwayFromZero))
-        return min(maximum, max(minimum, scaled))
-    }
-
     public static func defaultIdleMemoryReclaimTargetMiB(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        switch profile {
-        case .performance:
-            return configuredMemoryMiB
-        case .balanced:
-            return configuredMemoryMiB > 4096 ? max(4096, (configuredMemoryMiB * 3) / 4) : configuredMemoryMiB
-        case .eco:
-            return configuredMemoryMiB > 2048 ? max(2048, configuredMemoryMiB / 2) : configuredMemoryMiB
-        }
+        configuredMemoryMiB
     }
 
     public static func defaultIdleMemoryReclaimDwellSeconds(profile: ConjetMemoryProfile) -> Double {
-        switch profile {
-        case .performance:
-            return 0
-        case .balanced:
-            return 2
-        case .eco:
-            return 3
-        }
+        0
     }
 
     public static func defaultAutomaticIdleMemoryReclaim(
@@ -387,195 +378,79 @@ public struct ConjetMemoryPolicy: Codable, Equatable, Sendable {
         configuredMemoryMiB: Int,
         targetMemoryMiB: Int
     ) -> Bool {
-        profile != .performance && targetMemoryMiB < configuredMemoryMiB
+        true
     }
 
     public static func defaultDynamicMemoryEnabled(profile: ConjetMemoryProfile) -> Bool {
-        switch profile {
-        case .performance, .balanced, .eco:
-            return true
-        }
+        true
     }
 
     public static func defaultDynamicMemoryMinimumMiB(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        switch profile {
-        case .performance:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 0.25,
-                minimum: 1024,
-                maximum: 8192,
-                quantum: 256
-            )
-        case .balanced:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 0.125,
-                minimum: 768,
-                maximum: 4096,
-                quantum: 256
-            )
-        case .eco:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 12.0,
-                minimum: 512,
-                maximum: 4096,
-                quantum: 128
-            )
-        }
+        scaledMemoryMiB(
+            configuredMemoryMiB: configuredMemoryMiB,
+            ratio: 0.125,
+            minimum: 512,
+            maximum: 2048,
+            quantum: 128
+        )
     }
 
     public static func defaultDynamicMemoryBaseOverheadMiB(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        switch profile {
-        case .performance:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 16.0,
-                minimum: 384,
-                maximum: 2048
-            )
-        case .balanced:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 16.0,
-                minimum: 256,
-                maximum: 1536
-            )
-        case .eco:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 16.0,
-                minimum: 256,
-                maximum: 1024
-            )
-        }
+        scaledMemoryMiB(
+            configuredMemoryMiB: configuredMemoryMiB,
+            ratio: 1.0 / 16.0,
+            minimum: 256,
+            maximum: 1024
+        )
     }
 
     public static func defaultDynamicMemoryHeadroomMiB(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        switch profile {
-        case .performance:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 0.25,
-                minimum: 2048,
-                maximum: 8192,
-                quantum: 256
-            )
-        case .balanced:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 16.0,
-                minimum: 512,
-                maximum: 4096
-            )
-        case .eco:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 20.0,
-                minimum: 512,
-                maximum: 2048
-            )
-        }
+        scaledMemoryMiB(
+            configuredMemoryMiB: configuredMemoryMiB,
+            ratio: 1.0 / 16.0,
+            minimum: 256,
+            maximum: 1024
+        )
     }
 
     public static func defaultDynamicMemoryHeadroomRatio(profile: ConjetMemoryProfile) -> Double {
-        switch profile {
-        case .performance, .balanced, .eco:
-            return 0.25
-        }
+        0.25
     }
 
     public static func defaultDynamicMemoryCacheAllowanceMiB(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        switch profile {
-        case .performance:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 0.25,
-                minimum: 1024,
-                maximum: 8192,
-                quantum: 256
-            )
-        case .balanced:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 0.125,
-                minimum: 512,
-                maximum: 4096,
-                quantum: 256
-            )
-        case .eco:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 16.0,
-                minimum: 256,
-                maximum: 2048,
-                quantum: 128
-            )
-        }
+        scaledMemoryMiB(
+            configuredMemoryMiB: configuredMemoryMiB,
+            ratio: 1.0 / 32.0,
+            minimum: 128,
+            maximum: 512,
+            quantum: 128
+        )
     }
 
     public static func defaultDynamicMemoryShrinkCooldownSeconds(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        switch profile {
-        case .performance:
-            return scaledSeconds(
-                configuredMemoryMiB: configuredMemoryMiB,
-                baseAtEightGiB: 120,
-                minimum: 60,
-                maximum: 180
-            )
-        case .balanced:
-            return scaledSeconds(
-                configuredMemoryMiB: configuredMemoryMiB,
-                baseAtEightGiB: 45,
-                minimum: 20,
-                maximum: 90
-            )
-        case .eco:
-            return scaledSeconds(
-                configuredMemoryMiB: configuredMemoryMiB,
-                baseAtEightGiB: 20,
-                minimum: 10,
-                maximum: 45
-            )
-        }
+        0
     }
 
     public static func defaultDynamicMemoryShrinkStepMiB(
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        switch profile {
-        case .performance, .balanced:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 32.0,
-                minimum: 256,
-                maximum: 2048
-            )
-        case .eco:
-            return scaledMemoryMiB(
-                configuredMemoryMiB: configuredMemoryMiB,
-                ratio: 1.0 / 16.0,
-                minimum: 256,
-                maximum: 2048
-            )
-        }
+        configuredMemoryMiB
     }
 
     public static func defaultDynamicMemoryBaseOverheadMiB(profile: ConjetMemoryProfile) -> Int {
@@ -662,7 +537,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkLANAllowedCIDRs: [String] = [],
         networkLANAllowedPorts: [Int] = [],
         energyMode: ConjetEnergyMode = .balanced,
-        memoryProfile: ConjetMemoryProfile = .eco,
+        memoryProfile: ConjetMemoryProfile = .noPolicy,
         ssh: ConjetSSHPolicy = ConjetSSHPolicy()
     ) {
         self.vmCPUs = vmCPUs
@@ -711,7 +586,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkLANAllowedCIDRs: [String] = [],
         networkLANAllowedPorts: [Int] = [],
         energyMode: ConjetEnergyMode = .balanced,
-        memoryProfile: ConjetMemoryProfile = .eco,
+        memoryProfile: ConjetMemoryProfile = .noPolicy,
         ssh: ConjetSSHPolicy = ConjetSSHPolicy()
     ) {
         self.init(
@@ -746,7 +621,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         memoryMiB: 4096,
         vmProfile: .dockerCompatibility,
         networkBridgeEngine: .conjetNetdC,
-        memoryProfile: .eco
+        memoryProfile: .noPolicy
     )
 
     public var containerRuntime: ConjetContainerRuntimeKind {
@@ -826,149 +701,52 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
 
     public var memoryPolicy: ConjetMemoryPolicy {
         let policyMemoryMiB = effectiveMemoryMiB
-        switch memoryProfile {
-        case .performance:
-            let reclaimTarget = ConjetMemoryPolicy.defaultIdleMemoryReclaimTargetMiB(
+        let reclaimTarget = ConjetMemoryPolicy.defaultIdleMemoryReclaimTargetMiB(
+            profile: memoryProfile,
+            configuredMemoryMiB: policyMemoryMiB
+        )
+        return ConjetMemoryPolicy(
+            profile: memoryProfile,
+            configuredMemoryMiB: policyMemoryMiB,
+            recommendedMemoryMiB: policyMemoryMiB,
+            lazyRuntimeServices: false,
+            lazyNetworkHelpers: true,
+            reclaimIdleHelpersAfterSeconds: 0,
+            idleWakeupBudgetPerSecond: 1.0,
+            automaticIdleMemoryReclaim: ConjetMemoryPolicy.defaultAutomaticIdleMemoryReclaim(
+                profile: memoryProfile,
+                configuredMemoryMiB: policyMemoryMiB,
+                targetMemoryMiB: reclaimTarget
+            ),
+            idleMemoryReclaimTargetMiB: reclaimTarget,
+            idleMemoryReclaimDwellSeconds: ConjetMemoryPolicy.defaultIdleMemoryReclaimDwellSeconds(profile: memoryProfile),
+            dynamicMemoryEnabled: ConjetMemoryPolicy.defaultDynamicMemoryEnabled(profile: memoryProfile),
+            dynamicMemoryMinimumMiB: ConjetMemoryPolicy.defaultDynamicMemoryMinimumMiB(
+                profile: memoryProfile,
+                configuredMemoryMiB: policyMemoryMiB
+            ),
+            dynamicMemoryBaseOverheadMiB: ConjetMemoryPolicy.defaultDynamicMemoryBaseOverheadMiB(
+                profile: memoryProfile,
+                configuredMemoryMiB: policyMemoryMiB
+            ),
+            dynamicMemoryHeadroomMiB: ConjetMemoryPolicy.defaultDynamicMemoryHeadroomMiB(
+                profile: memoryProfile,
+                configuredMemoryMiB: policyMemoryMiB
+            ),
+            dynamicMemoryHeadroomRatio: ConjetMemoryPolicy.defaultDynamicMemoryHeadroomRatio(profile: memoryProfile),
+            dynamicMemoryCacheAllowanceMiB: ConjetMemoryPolicy.defaultDynamicMemoryCacheAllowanceMiB(
+                profile: memoryProfile,
+                configuredMemoryMiB: policyMemoryMiB
+            ),
+            dynamicMemoryShrinkCooldownSeconds: ConjetMemoryPolicy.defaultDynamicMemoryShrinkCooldownSeconds(
+                profile: memoryProfile,
+                configuredMemoryMiB: policyMemoryMiB
+            ),
+            dynamicMemoryShrinkStepMiB: ConjetMemoryPolicy.defaultDynamicMemoryShrinkStepMiB(
                 profile: memoryProfile,
                 configuredMemoryMiB: policyMemoryMiB
             )
-            return ConjetMemoryPolicy(
-                profile: memoryProfile,
-                configuredMemoryMiB: policyMemoryMiB,
-                recommendedMemoryMiB: max(policyMemoryMiB, 8192),
-                lazyRuntimeServices: false,
-                lazyNetworkHelpers: false,
-                reclaimIdleHelpersAfterSeconds: 900,
-                idleWakeupBudgetPerSecond: 2.0,
-                automaticIdleMemoryReclaim: ConjetMemoryPolicy.defaultAutomaticIdleMemoryReclaim(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB,
-                    targetMemoryMiB: reclaimTarget
-                ),
-                idleMemoryReclaimTargetMiB: reclaimTarget,
-                idleMemoryReclaimDwellSeconds: ConjetMemoryPolicy.defaultIdleMemoryReclaimDwellSeconds(profile: memoryProfile),
-                dynamicMemoryEnabled: ConjetMemoryPolicy.defaultDynamicMemoryEnabled(profile: memoryProfile),
-                dynamicMemoryMinimumMiB: ConjetMemoryPolicy.defaultDynamicMemoryMinimumMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryBaseOverheadMiB: ConjetMemoryPolicy.defaultDynamicMemoryBaseOverheadMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryHeadroomMiB: ConjetMemoryPolicy.defaultDynamicMemoryHeadroomMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryHeadroomRatio: ConjetMemoryPolicy.defaultDynamicMemoryHeadroomRatio(profile: memoryProfile),
-                dynamicMemoryCacheAllowanceMiB: ConjetMemoryPolicy.defaultDynamicMemoryCacheAllowanceMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryShrinkCooldownSeconds: ConjetMemoryPolicy.defaultDynamicMemoryShrinkCooldownSeconds(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryShrinkStepMiB: ConjetMemoryPolicy.defaultDynamicMemoryShrinkStepMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                )
-            )
-        case .balanced:
-            let reclaimTarget = ConjetMemoryPolicy.defaultIdleMemoryReclaimTargetMiB(
-                profile: memoryProfile,
-                configuredMemoryMiB: policyMemoryMiB
-            )
-            return ConjetMemoryPolicy(
-                profile: memoryProfile,
-                configuredMemoryMiB: policyMemoryMiB,
-                recommendedMemoryMiB: policyMemoryMiB,
-                lazyRuntimeServices: false,
-                lazyNetworkHelpers: true,
-                reclaimIdleHelpersAfterSeconds: 300,
-                idleWakeupBudgetPerSecond: 1.0,
-                automaticIdleMemoryReclaim: ConjetMemoryPolicy.defaultAutomaticIdleMemoryReclaim(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB,
-                    targetMemoryMiB: reclaimTarget
-                ),
-                idleMemoryReclaimTargetMiB: reclaimTarget,
-                idleMemoryReclaimDwellSeconds: ConjetMemoryPolicy.defaultIdleMemoryReclaimDwellSeconds(profile: memoryProfile),
-                dynamicMemoryEnabled: ConjetMemoryPolicy.defaultDynamicMemoryEnabled(profile: memoryProfile),
-                dynamicMemoryMinimumMiB: ConjetMemoryPolicy.defaultDynamicMemoryMinimumMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryBaseOverheadMiB: ConjetMemoryPolicy.defaultDynamicMemoryBaseOverheadMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryHeadroomMiB: ConjetMemoryPolicy.defaultDynamicMemoryHeadroomMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryHeadroomRatio: ConjetMemoryPolicy.defaultDynamicMemoryHeadroomRatio(profile: memoryProfile),
-                dynamicMemoryCacheAllowanceMiB: ConjetMemoryPolicy.defaultDynamicMemoryCacheAllowanceMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryShrinkCooldownSeconds: ConjetMemoryPolicy.defaultDynamicMemoryShrinkCooldownSeconds(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryShrinkStepMiB: ConjetMemoryPolicy.defaultDynamicMemoryShrinkStepMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                )
-            )
-        case .eco:
-            let reclaimTarget = ConjetMemoryPolicy.defaultIdleMemoryReclaimTargetMiB(
-                profile: memoryProfile,
-                configuredMemoryMiB: policyMemoryMiB
-            )
-            return ConjetMemoryPolicy(
-                profile: memoryProfile,
-                configuredMemoryMiB: policyMemoryMiB,
-                recommendedMemoryMiB: min(policyMemoryMiB, 4096),
-                lazyRuntimeServices: true,
-                lazyNetworkHelpers: true,
-                reclaimIdleHelpersAfterSeconds: 60,
-                idleWakeupBudgetPerSecond: 0.2,
-                automaticIdleMemoryReclaim: ConjetMemoryPolicy.defaultAutomaticIdleMemoryReclaim(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB,
-                    targetMemoryMiB: reclaimTarget
-                ),
-                idleMemoryReclaimTargetMiB: reclaimTarget,
-                idleMemoryReclaimDwellSeconds: ConjetMemoryPolicy.defaultIdleMemoryReclaimDwellSeconds(profile: memoryProfile),
-                dynamicMemoryEnabled: ConjetMemoryPolicy.defaultDynamicMemoryEnabled(profile: memoryProfile),
-                dynamicMemoryMinimumMiB: ConjetMemoryPolicy.defaultDynamicMemoryMinimumMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryBaseOverheadMiB: ConjetMemoryPolicy.defaultDynamicMemoryBaseOverheadMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryHeadroomMiB: ConjetMemoryPolicy.defaultDynamicMemoryHeadroomMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryHeadroomRatio: ConjetMemoryPolicy.defaultDynamicMemoryHeadroomRatio(profile: memoryProfile),
-                dynamicMemoryCacheAllowanceMiB: ConjetMemoryPolicy.defaultDynamicMemoryCacheAllowanceMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryShrinkCooldownSeconds: ConjetMemoryPolicy.defaultDynamicMemoryShrinkCooldownSeconds(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                ),
-                dynamicMemoryShrinkStepMiB: ConjetMemoryPolicy.defaultDynamicMemoryShrinkStepMiB(
-                    profile: memoryProfile,
-                    configuredMemoryMiB: policyMemoryMiB
-                )
-            )
-        }
+        )
     }
 
     public var effectiveVMCPUs: Int {
@@ -1132,8 +910,8 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                 config.vmProfile = profile
             case "vm.memory_profile":
                 let parsed = parseString(value)
-                guard let profile = ConjetMemoryProfile(rawValue: parsed) else {
-                    throw ConjetError.decoding("vm.memory_profile must be performance, balanced, or eco")
+                guard let profile = ConjetMemoryProfile.parse(parsed) else {
+                    throw ConjetError.decoding("vm.memory_profile must be \(ConjetMemoryProfile.allowedValuesDescription)")
                 }
                 config.memoryProfile = profile
             case "vm.architecture":

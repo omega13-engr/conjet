@@ -1533,12 +1533,12 @@ final class ConjetAppStateTests: XCTestCase {
             },
             "config": {},
             "memoryPolicy": {
-              "profile": "balanced",
+              "profile": "no-policy",
               "configuredMemoryMiB": 8192,
               "recommendedMemoryMiB": 8192,
               "lazyRuntimeServices": false,
               "lazyNetworkHelpers": true,
-              "reclaimIdleHelpersAfterSeconds": 300,
+              "reclaimIdleHelpersAfterSeconds": 0,
               "idleWakeupBudgetPerSecond": 1
             },
             "vm": {

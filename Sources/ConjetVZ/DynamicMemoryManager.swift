@@ -320,6 +320,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private let hostFootprintBytes: (@Sendable () throws -> UInt64?)?
     private let hostFootprintConvergenceDelays: [TimeInterval]
     private let activeReclaimFootprintRefreshInterval: TimeInterval
+    private var hostPressureSource: DispatchSourceMemoryPressure?
     private let lock = NSLock()
     private var running = false
     private var eventThread: Thread?
@@ -370,6 +371,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         running = true
         message = "dynamic memory enabled"
         lock.unlock()
+        startHostMemoryPressureSource()
 
         if let initialMetrics {
             apply(metrics: initialMetrics, reason: "vm.started", at: Date())
@@ -397,13 +399,30 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let connection = eventConnection
         eventConnection = nil
         eventThread = nil
+        let pressureSource = hostPressureSource
+        hostPressureSource = nil
         lock.unlock()
         connection?.close()
+        pressureSource?.cancel()
     }
 
     func forceRecompute(reason: String) throws {
         let metrics = try metricsClient.snapshot()
         apply(metrics: metrics, reason: reason, at: Date())
+    }
+
+    func handleHostMemoryPressure(_ pressure: ConjetMemoryPressureState) {
+        guard pressure == .elevated || pressure == .high else {
+            return
+        }
+        lock.lock()
+        guard running else {
+            lock.unlock()
+            return
+        }
+        message = "host memory pressure \(pressure.rawValue); requesting guest reclaim"
+        lock.unlock()
+        requestSnapshot(reason: "host.pressure.\(pressure.rawValue)")
     }
 
     func handleDockerActivity(_ activity: DockerMemoryActivity) {
@@ -529,6 +548,27 @@ final class DynamicMemoryManager: @unchecked Sendable {
         }
     }
 
+    private func startHostMemoryPressureSource() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: DispatchQueue.global(qos: .utility)
+        )
+        source.setEventHandler { [weak self, weak source] in
+            guard let source else { return }
+            let pressure: ConjetMemoryPressureState = source.data.contains(.critical) ? .high : .elevated
+            self?.handleHostMemoryPressure(pressure)
+        }
+        lock.lock()
+        guard running, hostPressureSource == nil else {
+            lock.unlock()
+            source.cancel()
+            return
+        }
+        hostPressureSource = source
+        lock.unlock()
+        source.resume()
+    }
+
     private func requestSnapshot(reason: String) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self, self.isRunning() else { return }
@@ -562,7 +602,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
     }
 
     private func schedulePostWorkloadReclaims(reason: String, generation: Int) {
-        for (suffix, delay) in [("quiesced", 0.5), ("observe", 2.75)] {
+        for (suffix, delay) in [("quiesced", 0.15), ("observe", 1.0)] {
             let scheduledReason = "\(reason).\(suffix)"
             let item = DispatchWorkItem { [weak self] in
                 self?.requestSnapshot(reason: scheduledReason, generation: generation)
@@ -691,10 +731,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
                         } else {
                             message = "guest reclaim epoch \(epoch) \(status.state); reported \(guestDropMiB) MiB current drop"
                         }
-                        shouldAttemptIdleBalloonDrop = shouldAttemptIdleBalloonDropLocked(
-                            footprintAfter: convergence.after,
-                            footprintDrop: convergence.drop
-                        )
+                        shouldAttemptIdleBalloonDrop = shouldAttemptIdleBalloonDropLocked()
                         shouldScheduleHostFootprintRefresh = hostFootprintBefore != nil
                             || convergence.after != nil
                             || convergence.drop != nil
@@ -704,7 +741,11 @@ final class DynamicMemoryManager: @unchecked Sendable {
                         scheduleHostFootprintRefreshes(reason: "guest.reclaim.epoch.\(epoch)")
                     }
                     if shouldAttemptIdleBalloonDrop {
-                        attemptIdleBalloonDrop(epoch: epoch, footprintAfter: convergence.after)
+                        attemptIdleBalloonDrop(
+                            epoch: epoch,
+                            footprintAfter: convergence.after,
+                            footprintDrop: convergence.drop
+                        )
                     }
                     return
                 }
@@ -862,11 +903,13 @@ final class DynamicMemoryManager: @unchecked Sendable {
             return false
         }
         let streamPhaseFinished = reason == "docker.streamPhaseFinished"
+        let hostPressureReclaim = reason.hasPrefix("host.pressure.")
         let strongCompletionReclaim = reason.hasPrefix("manual.")
             || reason == "docker.workloadFinished"
             || reason.hasPrefix("docker.workloadFinished.final.")
             || reason == "docker.containerStopped"
             || reason.hasPrefix("docker.containerStopped.final.")
+        let bypassRecentReclaimCooldown = strongCompletionReclaim || hostPressureReclaim
         if !streamPhaseFinished && !strongCompletionReclaim {
             guard activeDockerStreams == 0,
                   !buildWorkloadActive,
@@ -884,14 +927,18 @@ final class DynamicMemoryManager: @unchecked Sendable {
             || reason == "docker.containerStopped"
             || reason.hasPrefix("docker.containerStopped.final.")
             || reason == "dynamic.reclaim.idle"
+            || (hostPressureReclaim && hasIdleReclaimSurplus(metrics: metrics))
             || (reason == "guest.event" && hasIdleReclaimSurplus(metrics: metrics))
         guard reasonAllowsReclaim else {
             return false
         }
+        if hostPressureReclaim {
+            return hasIdleReclaimSurplus(metrics: metrics)
+        }
         if streamPhaseFinished {
             return hasIdleReclaimSurplus(metrics: metrics)
         }
-        if strongCompletionReclaim {
+        if bypassRecentReclaimCooldown {
             return true
         }
         if let lastGuestReclaimAt,
@@ -915,7 +962,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let workingSetMiB = idleWorkingSetMiB(metrics: metrics)
         let surplusMiB = max(0, availableMiB - workingSetMiB)
         let cacheAllowanceMiB = max(128, policy.dynamicMemoryCacheAllowanceMiB)
-        return surplusMiB > cacheAllowanceMiB
+        return surplusMiB >= cacheAllowanceMiB
     }
 
     private func idleWorkingSetMiB(metrics: GuestMemoryMetrics) -> Int {
@@ -926,10 +973,15 @@ final class DynamicMemoryManager: @unchecked Sendable {
                 metrics.serviceCgroupMemoryCurrentBytes
             )
         ))
-        let idleGuardMiB = max(64, policy.dynamicMemoryCacheAllowanceMiB / 4)
-        return policy.dynamicMemoryMinimumMiB
-            + workloadMiB
-            + idleGuardMiB
+        let proportionalHeadroomMiB = Int(
+            (Double(max(workloadMiB, policy.dynamicMemoryMinimumMiB)) * policy.dynamicMemoryHeadroomRatio)
+                .rounded(.up)
+        )
+        let headroomMiB = max(policy.dynamicMemoryHeadroomMiB, proportionalHeadroomMiB)
+        return max(
+            effectiveMinimumMiB(),
+            policy.dynamicMemoryBaseOverheadMiB + workloadMiB + headroomMiB
+        )
     }
 
     private func idleBalloonTargetMiB(metrics: GuestMemoryMetrics) -> Int {
@@ -953,10 +1005,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
             || metrics.containerOOMKillEvents > 0
     }
 
-    private func shouldAttemptIdleBalloonDropLocked(
-        footprintAfter: UInt64?,
-        footprintDrop: UInt64?
-    ) -> Bool {
+    private func shouldAttemptIdleBalloonDropLocked() -> Bool {
         guard policy.automaticIdleMemoryReclaim,
               !idleBalloonActive,
               activeDockerStreams == 0,
@@ -966,20 +1015,13 @@ final class DynamicMemoryManager: @unchecked Sendable {
               let metrics = lastMetrics,
               Self.pressureState(metrics) == .low,
               !metrics.buildWorkloadDetected,
-              hasIdleReclaimSurplus(metrics: metrics),
-              let footprintAfter else {
+              hasIdleReclaimSurplus(metrics: metrics) else {
             return false
         }
-        let minUsefulDrop = UInt64(64 * 1024 * 1024)
-        guard (footprintDrop ?? 0) < minUsefulDrop else {
-            return false
-        }
-        let configuredBytes = UInt64(policy.configuredMemoryMiB) * Self.bytesPerMiB
-        let thresholdBytes = configuredBytes + UInt64(max(128, policy.dynamicMemoryCacheAllowanceMiB)) * Self.bytesPerMiB
-        return footprintAfter > thresholdBytes
+        return true
     }
 
-    private func attemptIdleBalloonDrop(epoch: UInt64, footprintAfter: UInt64?) {
+    private func attemptIdleBalloonDrop(epoch: UInt64, footprintAfter: UInt64?, footprintDrop: UInt64?) {
         lock.lock()
         guard !idleBalloonActive,
               activeDockerStreams == 0,
@@ -1012,7 +1054,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
                 idleBalloonActive = true
                 lastTargetChangeAt = Date()
                 lastAdjustmentReason = "guest.reclaim.epoch.\(epoch).autodrop"
-                message = "idle memory autodrop lowered guest target to \(targetMiB) MiB after zero host-footprint drop"
+                message = "demand memory reclaim lowered guest target to \(targetMiB) MiB after guest reclaim"
                 recordTraceLocked(ConjetMemoryTraceEvent(
                     timestamp: Date(),
                     targetMiB: targetMiB,
@@ -1021,7 +1063,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
                     reason: "guest.reclaim.epoch.\(epoch).autodrop",
                     pressure: .low,
                     hostFootprintAfterBytes: footprintAfter,
-                    hostFootprintDropBytes: 0
+                    hostFootprintDropBytes: footprintDrop
                 ))
                 appliedIdleAutodrop = true
             } else {
