@@ -103,7 +103,11 @@ public struct DockerContextManager {
     private func ensureBuildxBuilder(
         forContext contextName: String,
         makeCurrent: Bool
-    ) throws -> (name: String, action: DockerContextAction) {
+    ) throws -> (name: String, action: DockerContextAction)? {
+        guard try buildxIsAvailable() else {
+            return nil
+        }
+
         let builderName = contextName
         let inspect = try runDocker(["buildx", "inspect", builderName, "--timeout", "2s"])
         if inspect.succeeded {
@@ -127,6 +131,25 @@ public struct DockerContextManager {
             stderr: inspect.stderr.isEmpty
                 ? "Buildx context builder \(builderName) was not available"
                 : inspect.stderr
+        )
+    }
+
+    private func buildxIsAvailable() throws -> Bool {
+        let version = try runDocker(["buildx", "version"])
+        if version.succeeded {
+            return true
+        }
+
+        let output = "\(version.stdout)\n\(version.stderr)"
+        if output.localizedCaseInsensitiveContains("unknown command") ||
+            output.localizedCaseInsensitiveContains("not a docker command") {
+            return false
+        }
+
+        throw ConjetError.processFailed(
+            executable: version.executable,
+            exitCode: version.exitCode,
+            stderr: version.stderr
         )
     }
 

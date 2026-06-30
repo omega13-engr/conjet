@@ -19,6 +19,7 @@ final class DockerContextManagerTests: XCTestCase {
         XCTAssertEqual(runner.currentContext, "conjet")
         XCTAssertEqual(runner.currentBuilder, "conjet")
         XCTAssertTrue(runner.commands.contains(["docker", "context", "create", "conjet", "--description", "Conjet", "--docker", "host=unix:///tmp/conjet/docker.sock"]))
+        XCTAssertTrue(runner.commands.contains(["docker", "buildx", "version"]))
         XCTAssertTrue(runner.commands.contains(["docker", "buildx", "inspect", "conjet", "--timeout", "2s"]))
         XCTAssertTrue(runner.commands.contains(["docker", "buildx", "use", "--default", "conjet"]))
         XCTAssertFalse(runner.commands.contains { $0.prefix(3).elementsEqual(["docker", "buildx", "create"]) })
@@ -94,8 +95,30 @@ final class DockerContextManagerTests: XCTestCase {
         XCTAssertEqual(result.buildxBuilderAction, .unchanged)
         XCTAssertNil(runner.currentContext)
         XCTAssertNil(runner.currentBuilder)
+        XCTAssertTrue(runner.commands.contains(["docker", "buildx", "version"]))
         XCTAssertTrue(runner.commands.contains(["docker", "buildx", "inspect", "conjet", "--timeout", "2s"]))
         XCTAssertFalse(runner.commands.contains(["docker", "buildx", "use", "--default", "conjet"]))
+    }
+
+    func testKeepsDockerContextWhenBuildxPluginIsUnavailable() throws {
+        let runner = FakeDockerContextRunner()
+        runner.inspectHost = nil
+        runner.buildxAvailable = false
+
+        let result = try DockerContextManager(runner: runner.run)
+            .ensureContext(socketPath: "/tmp/conjet/docker.sock")
+
+        XCTAssertEqual(result.contextName, "conjet")
+        XCTAssertEqual(result.dockerHost, "unix:///tmp/conjet/docker.sock")
+        XCTAssertEqual(result.action, .created)
+        XCTAssertTrue(result.madeCurrent)
+        XCTAssertNil(result.buildxBuilderName)
+        XCTAssertNil(result.buildxBuilderAction)
+        XCTAssertEqual(runner.inspectHost, "unix:///tmp/conjet/docker.sock")
+        XCTAssertEqual(runner.currentContext, "conjet")
+        XCTAssertNil(runner.currentBuilder)
+        XCTAssertTrue(runner.commands.contains(["docker", "buildx", "version"]))
+        XCTAssertFalse(runner.commands.contains(["docker", "buildx", "inspect", "conjet", "--timeout", "2s"]))
     }
 }
 
@@ -108,6 +131,7 @@ private final class FakeDockerContextRunner {
     var inspectHost: String?
     var currentContext: String?
     var currentBuilder: String?
+    var buildxAvailable = true
     var contextBuilder = Builder(driver: "docker", endpoint: "conjet")
     var commands: [[String]] = []
 
@@ -148,7 +172,13 @@ private final class FakeDockerContextRunner {
     }
 
     private func runBuildx(executable: String, arguments: [String]) -> ProcessResult {
+        guard buildxAvailable else {
+            return result(executable: executable, arguments: arguments, exitCode: 1, stderr: "docker: unknown command: docker buildx")
+        }
+
         switch arguments[safe: 2] {
+        case "version":
+            return result(executable: executable, arguments: arguments, stdout: "github.com/docker/buildx v0.35.0\n")
         case "inspect":
             guard let name = arguments[safe: 3],
                   name == "conjet",
