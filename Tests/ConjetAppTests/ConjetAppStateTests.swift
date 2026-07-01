@@ -1121,6 +1121,17 @@ final class ConjetAppStateTests: XCTestCase {
             status: "Up 2 minutes",
             labels: "com.docker.compose.project=chum-mem,com.docker.compose.service=api,com.docker.compose.project.working_dir=/tmp/chum-mem,com.docker.compose.project.config_files=/tmp/chum-mem/compose.yml"
         )
+        app.snapshot = DashboardSnapshot(
+            conjetTool: Self.tool,
+            conjetCoreTool: Self.tool,
+            dockerTool: Self.tool,
+            dockerSocketPath: paths.dockerSocket.path,
+            dockerSocketAvailable: true,
+            dockerReachable: true,
+            containers: [container],
+            refreshStatus: .succeeded
+        )
+        app.selectedContainerID = "api"
         let group = try XCTUnwrap(ContainerGrouping.groups(containers: [container]).first)
 
         await app.containerGroupAction("stop", group: group)
@@ -1135,6 +1146,11 @@ final class ConjetAppStateTests: XCTestCase {
         XCTAssertTrue(composeInvocation.arguments.contains("/tmp/chum-mem/compose.yml"))
         XCTAssertTrue(composeInvocation.arguments.contains("stop"))
         XCTAssertFalse(composeInvocation.arguments.contains("down"))
+        XCTAssertEqual(app.snapshot.containers.count, 1)
+        XCTAssertEqual(app.snapshot.containers.first?.id, "api")
+        XCTAssertEqual(app.snapshot.containers.first?.state, "exited")
+        XCTAssertEqual(app.snapshot.containers.first?.status, "Exited")
+        XCTAssertEqual(app.selectedContainerID, "api")
     }
 
     @MainActor
@@ -1276,7 +1292,7 @@ final class ConjetAppStateTests: XCTestCase {
     }
 
     @MainActor
-    func testStopContainerOptimisticallyRemovesVisibleRowAndKeepsItHiddenAfterRefresh() async throws {
+    func testStopContainerOptimisticallyKeepsVisibleRowAndStoppedStateAfterRefresh() async throws {
         let paths = Self.temporaryConjetPaths()
         try paths.ensureBaseDirectories()
         FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
@@ -1348,16 +1364,23 @@ final class ConjetAppStateTests: XCTestCase {
 
         await app.containerAction("stop", container: container)
 
-        XCTAssertTrue(app.snapshot.containers.isEmpty)
+        XCTAssertEqual(app.snapshot.containers.count, 1)
+        XCTAssertEqual(app.snapshot.containers.first?.id, "api")
+        XCTAssertEqual(app.snapshot.containers.first?.state, "exited")
+        XCTAssertEqual(app.snapshot.containers.first?.status, "Exited")
         XCTAssertTrue(app.snapshot.stats.isEmpty)
         XCTAssertTrue(app.snapshot.containerProcesses.isEmpty)
-        XCTAssertNil(app.selectedContainerID)
-        XCTAssertEqual(app.snapshot.containerActivity.totalContainers, 0)
+        XCTAssertEqual(app.selectedContainerID, "api")
+        XCTAssertEqual(app.snapshot.containerActivity.totalContainers, 1)
+        XCTAssertEqual(app.snapshot.containerActivity.runningContainers, 0)
 
         await app.refresh()
 
-        XCTAssertTrue(app.snapshot.containers.isEmpty)
-        XCTAssertEqual(app.snapshot.containerActivity.totalContainers, 0)
+        XCTAssertEqual(app.snapshot.containers.count, 1)
+        XCTAssertEqual(app.snapshot.containers.first?.id, "api")
+        XCTAssertEqual(app.snapshot.containers.first?.state, "exited")
+        XCTAssertEqual(app.snapshot.containerActivity.totalContainers, 1)
+        XCTAssertEqual(app.selectedContainerID, "api")
     }
 
     @MainActor
@@ -1576,7 +1599,7 @@ final class ConjetAppStateTests: XCTestCase {
         ]))
         XCTAssertTrue(runInvocation.arguments.contains("run"))
         XCTAssertTrue(runInvocation.arguments.contains("--detach"))
-        XCTAssertTrue(runInvocation.arguments.contains("--rm"))
+        XCTAssertFalse(runInvocation.arguments.contains("--rm"))
         XCTAssertTrue(runInvocation.arguments.contains("--name"))
         XCTAssertTrue(runInvocation.arguments.contains("--label"))
         XCTAssertTrue(runInvocation.arguments.contains("io.conjet.source=docker-editor"))

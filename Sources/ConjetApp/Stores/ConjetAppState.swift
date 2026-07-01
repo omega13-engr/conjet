@@ -247,7 +247,6 @@ final class ConjetAppState: ObservableObject {
     private var pendingPulseRefreshScope: DashboardSnapshotRefreshScope?
     private var isQuitting = false
     private var pendingContainerSelectionName: String?
-    private var hiddenStoppedContainerIDs = Set<String>()
     private var lastStatsRefreshAt = Date.distantPast
     private var lastProcessesRefreshAt = Date.distantPast
     private var lastVolumeUsageRefreshAt = Date.distantPast
@@ -361,9 +360,8 @@ final class ConjetAppState: ObservableObject {
             }
             let scope = refreshScope(trigger: currentTrigger)
             let latest = await service.loadSnapshot(scope: scope)
-            let stable = Self.preservingPreviousResources(current: snapshot, latest: latest)
-            let visible = applyingContainerVisibility(to: stable)
-            completeCommandTransitionIfNeeded(actual: Self.vmState(from: stable))
+            let visible = Self.preservingPreviousResources(current: snapshot, latest: latest)
+            completeCommandTransitionIfNeeded(actual: Self.vmState(from: visible))
             snapshot = visible
             selectedBindPolicy = visible.network?.bindPolicy ?? selectedBindPolicy
             if let bridge = visible.network?.requestedBridgeEngine
@@ -751,7 +749,6 @@ final class ConjetAppState: ObservableObject {
             [
                 "run",
                 "--detach",
-                "--rm",
                 "--name", containerName,
                 "--label", "io.conjet.source=docker-editor"
             ] + splitArguments(dockerEditorRunArguments) + [imageTag],
@@ -1072,7 +1069,6 @@ final class ConjetAppState: ObservableObject {
         selectedImageID = nil
         selectedVolumeID = nil
         pendingContainerSelectionName = nil
-        hiddenStoppedContainerIDs.removeAll()
         setCommandVMState(nil)
     }
 
@@ -1341,19 +1337,11 @@ final class ConjetAppState: ObservableObject {
         guard !containerIDs.isEmpty else { return }
         switch action {
         case "remove", "rm", "down":
-            hiddenStoppedContainerIDs.subtract(containerIDs)
-            snapshot.containers.removeAll { containerIDs.contains($0.id) }
-            if let selectedContainerID, containerIDs.contains(selectedContainerID) {
-                self.selectedContainerID = snapshot.containers.first?.id
-            }
-        case "stop":
-            hiddenStoppedContainerIDs.formUnion(containerIDs)
             snapshot.containers.removeAll { containerIDs.contains($0.id) }
             if let selectedContainerID, containerIDs.contains(selectedContainerID) {
                 self.selectedContainerID = snapshot.containers.first?.id
             }
         default:
-            hiddenStoppedContainerIDs.subtract(containerIDs)
             snapshot.containers = snapshot.containers.map { container in
                 guard containerIDs.contains(container.id) else { return container }
                 var copy = container
@@ -1378,10 +1366,6 @@ final class ConjetAppState: ObservableObject {
     private func applyOptimisticRunContainer(id: String, name: String, image: String) {
         let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
         let containerID = trimmedID.isEmpty ? name : trimmedID
-        hiddenStoppedContainerIDs.remove(containerID)
-        hiddenStoppedContainerIDs = hiddenStoppedContainerIDs.filter { hiddenID in
-            !snapshot.containers.contains { $0.id == hiddenID && $0.name == name }
-        }
 
         let container = DockerContainer(
             id: containerID,
@@ -1396,31 +1380,6 @@ final class ConjetAppState: ObservableObject {
         snapshot.containers.insert(container, at: 0)
         selectedContainerID = containerID
         rebuildContainerActivity()
-    }
-
-    private func applyingContainerVisibility(to input: DashboardSnapshot) -> DashboardSnapshot {
-        var output = input
-        let presentIDs = Set(output.containers.map(\.id))
-        let runningIDs = Set(output.containers.filter(\.isRunning).map(\.id))
-        hiddenStoppedContainerIDs = hiddenStoppedContainerIDs.intersection(presentIDs)
-        hiddenStoppedContainerIDs.subtract(runningIDs)
-
-        guard !hiddenStoppedContainerIDs.isEmpty else { return output }
-        output.containers.removeAll {
-            hiddenStoppedContainerIDs.contains($0.id) && !$0.isRunning
-        }
-        output.stats.removeAll {
-            hiddenStoppedContainerIDs.contains($0.container)
-        }
-        output.containerProcesses.removeAll {
-            hiddenStoppedContainerIDs.contains($0.containerID)
-        }
-        output.containerActivity = ContainerActivitySnapshot(
-            containers: output.containers,
-            stats: output.stats,
-            processes: output.containerProcesses
-        )
-        return output
     }
 
     private func rebuildContainerActivity() {
