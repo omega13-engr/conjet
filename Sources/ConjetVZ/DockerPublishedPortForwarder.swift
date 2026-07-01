@@ -1614,11 +1614,11 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
     }
 
     private func tcpTarget(for publishedPort: DockerPublishedPort) -> (host: String, port: Int) {
-        if bridgeEngineName == ConjetNetworkBridgeEngine.conjetNetdC.rawValue,
-           let targetIP = publishedPort.targetIP,
-           !targetIP.isEmpty {
-            return (targetIP, publishedPort.containerPort)
-        }
+        // The legacy text TCP proxy runs inside the guest and should enter Docker
+        // through the guest's published host port. Deployed bootstrap proxies only
+        // accept loopback text targets, and Docker's host-port path preserves
+        // compatibility with normal published-port behavior while the binary TCP
+        // pool remains disabled for Docker-published ports.
         return ("127.0.0.1", publishedPort.hostPort)
     }
 
@@ -1711,7 +1711,9 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
     }
 
     private func udpTarget(for publishedPort: DockerPublishedPort, bindAddress: String) -> (host: String, port: Int) {
-        if bridgeEngineName == ConjetNetworkBridgeEngine.conjetNetdC.rawValue,
+        if capabilities.binaryFrames,
+           capabilities.udpBinaryFrames,
+           bridgeEngineName == ConjetNetworkBridgeEngine.conjetNetdC.rawValue,
            let targetIP = publishedPort.targetIP,
            !targetIP.isEmpty {
             return (targetIP, publishedPort.containerPort)

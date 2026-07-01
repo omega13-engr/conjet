@@ -854,7 +854,7 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         let response = readAllTestBytes(from: fd)
 
         XCTAssertEqual(String(data: response, encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 172.18.0.9:80") })
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(hostPort)") })
         XCTAssertEqual(forwarder.status().forwards.first?.targetIP, "172.18.0.9")
     }
 
@@ -1157,7 +1157,7 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         Darwin.shutdown(fd, SHUT_WR)
 
         XCTAssertEqual(String(data: readAllTestBytes(from: fd), encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 172.17.0.2:63000") })
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(port)") })
         XCTAssertEqual(forwarder.status().tcpMode, "legacy-tcp-proxy")
     }
 
@@ -1189,7 +1189,7 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         let response = readAllTestBytes(from: fd)
 
         XCTAssertEqual(String(data: response, encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 172.17.0.2:80") })
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(port)") })
         let status = forwarder.status()
         XCTAssertEqual(status.bridgeEngine, "conjet-netd-c")
         XCTAssertEqual(status.tcpMode, "legacy-tcp-proxy")
@@ -1200,9 +1200,9 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
     }
 
     func testResolvedTCPContainerTargetServesCurlStyleHTTPRequest() throws {
-        let connector = TCPProxyForwardingConnector()
         let hostPort = try reserveLoopbackPort()
         let targetPort = try reserveLoopbackPort()
+        let connector = TCPProxyForwardingConnector(hostPortTargets: [hostPort: targetPort])
         let targetServer = HTTPReadyServer(port: targetPort)
         try targetServer.start()
         defer { targetServer.stop() }
@@ -1242,7 +1242,7 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
 
         XCTAssertTrue(responseText.contains("HTTP/1.1 200 OK"), responseText)
         XCTAssertTrue(responseText.contains("\r\n\r\nready"), responseText)
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(targetPort)") })
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(hostPort)") })
     }
 
     func testMixedPublishedPortsStressAcrossTCPUDPAndBindKinds() throws {
@@ -1343,7 +1343,7 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
                 && connector.prefaces.filter { $0.hasPrefix("CONJET-UDP ") }.count >= udpPorts.count * 5
         })
         for publishedPort in publishedPorts {
-            let expected = "CONJET-\(publishedPort.protocol.rawValue.uppercased()) \(publishedPort.targetIP!):\(publishedPort.containerPort)"
+            let expected = "CONJET-\(publishedPort.protocol.rawValue.uppercased()) 127.0.0.1:\(publishedPort.hostPort)"
             XCTAssertTrue(connector.prefaces.contains(expected), "missing \(expected)")
         }
     }
@@ -1784,7 +1784,12 @@ private final class MixedTextProxyConnector: GuestConnectionConnector, @unchecke
 
 private final class TCPProxyForwardingConnector: GuestConnectionConnector, @unchecked Sendable {
     private let lock = NSLock()
+    private let hostPortTargets: [Int: Int]
     private var seenPrefaces: [String] = []
+
+    init(hostPortTargets: [Int: Int] = [:]) {
+        self.hostPortTargets = hostPortTargets
+    }
 
     var prefaces: [String] {
         lock.lock()
@@ -1804,8 +1809,12 @@ private final class TCPProxyForwardingConnector: GuestConnectionConnector, @unch
             self.seenPrefaces.append(preface)
             self.lock.unlock()
 
-            guard let target = Self.parseTarget(from: preface),
-                  let upstreamFD = try? connectTCPHost(target.host, port: target.port) else {
+            guard let target = Self.parseTarget(from: preface) else {
+                Darwin.shutdown(serverFD, SHUT_WR)
+                return
+            }
+            let upstreamPort = self.hostPortTargets[target.port] ?? target.port
+            guard let upstreamFD = try? connectTCPHost(target.host, port: upstreamPort) else {
                 Darwin.shutdown(serverFD, SHUT_WR)
                 return
             }
