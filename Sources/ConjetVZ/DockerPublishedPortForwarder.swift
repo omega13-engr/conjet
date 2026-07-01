@@ -1507,18 +1507,22 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         let existing = tcpListeners[key]
         lock.unlock()
         if let existing {
-            if let target = concreteNativeTCPTarget(for: publishedPort) {
-                existing.updateTarget(host: target.host, port: target.port)
-                setStatus(for: key, status(for: publishedPort, bindAddress: bindAddress, state: .listening, warning: warning))
-            } else if useNativeTCPPoolForPublishedPorts {
-                setStatus(for: key, status(
-                    for: publishedPort,
-                    bindAddress: bindAddress,
-                    state: .reservedWaitingForTarget,
-                    error: noRoutableTargetMessage(port: publishedPort),
-                    warning: warning
-                ))
+            if useNativeTCPPoolForPublishedPorts {
+                if let target = concreteNativeTCPTarget(for: publishedPort) {
+                    existing.updateTarget(host: target.host, port: target.port)
+                    setStatus(for: key, status(for: publishedPort, bindAddress: bindAddress, state: .listening, warning: warning))
+                } else {
+                    setStatus(for: key, status(
+                        for: publishedPort,
+                        bindAddress: bindAddress,
+                        state: .reservedWaitingForTarget,
+                        error: noRoutableTargetMessage(port: publishedPort),
+                        warning: warning
+                    ))
+                }
             } else {
+                let target = tcpTarget(for: publishedPort)
+                existing.updateTarget(host: target.host, port: target.port)
                 setStatus(for: key, status(for: publishedPort, bindAddress: bindAddress, state: .listening, warning: warning))
             }
             return
@@ -1552,12 +1556,14 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                 }
             )
         } else if useNIOProxy {
+            let target = tcpTarget(for: publishedPort)
             listenerState = .listening
             listenerError = nil
             listener = NIOTCPPublishedPortListener(
                 bindAddress: bindAddress,
                 hostPort: publishedPort.hostPort,
-                guestHostPort: publishedPort.hostPort,
+                targetHost: target.host,
+                targetPort: target.port,
                 connector: connector,
                 group: nioGroup,
                 statusHandler: { [weak self] metrics in
@@ -1565,12 +1571,14 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
                 }
             )
         } else {
+            let target = tcpTarget(for: publishedPort)
             listenerState = .listening
             listenerError = nil
             listener = TCPPublishedPortListener(
                 bindAddress: bindAddress,
                 hostPort: publishedPort.hostPort,
-                guestHostPort: publishedPort.hostPort,
+                targetHost: target.host,
+                targetPort: target.port,
                 connector: connector,
                 statusHandler: { [weak self] metrics in
                     self?.updateMetrics(key: key, metrics: metrics)
@@ -1606,7 +1614,9 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
     }
 
     private func tcpTarget(for publishedPort: DockerPublishedPort) -> (host: String, port: Int) {
-        if let targetIP = publishedPort.targetIP, !targetIP.isEmpty {
+        if bridgeEngineName == ConjetNetworkBridgeEngine.conjetNetdC.rawValue,
+           let targetIP = publishedPort.targetIP,
+           !targetIP.isEmpty {
             return (targetIP, publishedPort.containerPort)
         }
         return ("127.0.0.1", publishedPort.hostPort)
@@ -1630,11 +1640,18 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             return
         }
         lock.lock()
-        let exists = udpListeners[key] != nil || startingUDPKeys.contains(key)
+        let existing = udpListeners[key]
+        let exists = existing != nil || startingUDPKeys.contains(key)
         if !exists {
             startingUDPKeys.insert(key)
         }
         lock.unlock()
+        if let existing {
+            let target = udpTarget(for: publishedPort, bindAddress: bindAddress)
+            existing.updateTarget(host: target.host, port: target.port)
+            setStatus(for: key, status(for: publishedPort, bindAddress: bindAddress, state: .listening, warning: warning))
+            return
+        }
         guard !exists else { return }
         defer {
             lock.lock()
@@ -1645,13 +1662,13 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         let listener: any PortListener
         let binaryUDP = capabilities.binaryFrames && capabilities.udpBinaryFrames
         let portForwardID = binaryPortForwardID(hostPort: publishedPort.hostPort, targetPort: publishedPort.containerPort)
-        let targetHost = udpTargetHost(for: publishedPort, bindAddress: bindAddress)
+        let target = udpTarget(for: publishedPort, bindAddress: bindAddress)
         if useNIOProxy {
             listener = NIOUDPPublishedPortListener(
                 bindAddress: bindAddress,
                 hostPort: publishedPort.hostPort,
-                guestHost: targetHost,
-                guestHostPort: publishedPort.hostPort,
+                targetHost: target.host,
+                targetPort: target.port,
                 portForwardID: portForwardID,
                 useBinaryFrames: binaryUDP,
                 connector: connector,
@@ -1664,8 +1681,8 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             listener = UDPPublishedPortListener(
                 bindAddress: bindAddress,
                 hostPort: publishedPort.hostPort,
-                guestHost: targetHost,
-                guestHostPort: publishedPort.hostPort,
+                targetHost: target.host,
+                targetPort: target.port,
                 portForwardID: portForwardID,
                 useBinaryFrames: binaryUDP,
                 connector: connector,
@@ -1693,11 +1710,16 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         }
     }
 
-    private func udpTargetHost(for publishedPort: DockerPublishedPort, bindAddress: String) -> String {
-        if bindAddress == "::1" || publishedPort.hostIP == "::1" {
-            return "::1"
+    private func udpTarget(for publishedPort: DockerPublishedPort, bindAddress: String) -> (host: String, port: Int) {
+        if bridgeEngineName == ConjetNetworkBridgeEngine.conjetNetdC.rawValue,
+           let targetIP = publishedPort.targetIP,
+           !targetIP.isEmpty {
+            return (targetIP, publishedPort.containerPort)
         }
-        return "127.0.0.1"
+        if bindAddress == "::1" || publishedPort.hostIP == "::1" {
+            return ("::1", publishedPort.hostPort)
+        }
+        return ("127.0.0.1", publishedPort.hostPort)
     }
 
     private func status(
@@ -1983,6 +2005,13 @@ private final class MutablePortTarget: @unchecked Sendable {
         condition.unlock()
     }
 
+    func snapshot() -> (host: String, port: Int)? {
+        condition.lock()
+        let value = target
+        condition.unlock()
+        return value
+    }
+
     func wait(timeoutSeconds: TimeInterval) -> (host: String, port: Int)? {
         let deadline = Date().addingTimeInterval(max(0, timeoutSeconds))
         condition.lock()
@@ -2064,7 +2093,7 @@ private final class BinaryUDPGuestSession: @unchecked Sendable {
 private final class NIOTCPPublishedPortListener: PortListener, @unchecked Sendable {
     private let bindAddress: String
     private let hostPort: Int
-    private let guestHostPort: Int
+    private let target: MutablePortTarget
     private let connector: any GuestConnectionConnector
     private let group: MultiThreadedEventLoopGroup
     private let statusHandler: @Sendable (ProxyMetrics) -> Void
@@ -2075,20 +2104,25 @@ private final class NIOTCPPublishedPortListener: PortListener, @unchecked Sendab
     init(
         bindAddress: String,
         hostPort: Int,
-        guestHostPort: Int,
+        targetHost: String,
+        targetPort: Int,
         connector: any GuestConnectionConnector,
         group: MultiThreadedEventLoopGroup,
         statusHandler: @escaping @Sendable (ProxyMetrics) -> Void
     ) {
         self.bindAddress = bindAddress
         self.hostPort = hostPort
-        self.guestHostPort = guestHostPort
+        self.target = MutablePortTarget(host: targetHost, port: targetPort)
         self.connector = connector
         self.group = group
         self.statusHandler = statusHandler
     }
 
     deinit { stop() }
+
+    func updateTarget(host: String, port: Int) {
+        target.update(host: host, port: port)
+    }
 
     func start() throws {
         lock.lock()
@@ -2104,9 +2138,9 @@ private final class NIOTCPPublishedPortListener: PortListener, @unchecked Sendab
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.tcp_nodelay), value: 1)
             .childChannelOption(ChannelOptions.allowRemoteHalfClosure, value: true)
-            .childChannelInitializer { [connector, metrics, statusHandler, guestHostPort] channel in
+            .childChannelInitializer { [connector, metrics, statusHandler, target] channel in
                 channel.pipeline.addHandler(NIOTCPProxyHandler(
-                    guestHostPort: guestHostPort,
+                    target: target,
                     connector: connector,
                     metrics: metrics,
                     statusHandler: statusHandler
@@ -2132,7 +2166,7 @@ private final class NIOTCPProxyHandler: ChannelInboundHandler, @unchecked Sendab
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
 
-    private let guestHostPort: Int
+    private let target: MutablePortTarget
     private let connector: any GuestConnectionConnector
     private let metrics: ProxyMetrics
     private let statusHandler: @Sendable (ProxyMetrics) -> Void
@@ -2141,12 +2175,12 @@ private final class NIOTCPProxyHandler: ChannelInboundHandler, @unchecked Sendab
     private var guestClosed = false
 
     init(
-        guestHostPort: Int,
+        target: MutablePortTarget,
         connector: any GuestConnectionConnector,
         metrics: ProxyMetrics,
         statusHandler: @escaping @Sendable (ProxyMetrics) -> Void
     ) {
-        self.guestHostPort = guestHostPort
+        self.target = target
         self.connector = connector
         self.metrics = metrics
         self.statusHandler = statusHandler
@@ -2158,7 +2192,14 @@ private final class NIOTCPProxyHandler: ChannelInboundHandler, @unchecked Sendab
         do {
             let guest = try connector.connect()
             disableSigpipeForPortProxy(guest.fileDescriptor)
-            let preface = "CONJET-TCP 127.0.0.1:\(guestHostPort)\n"
+            guard let target = target.snapshot() else {
+                metrics.error()
+                statusHandler(metrics)
+                guest.close()
+                context.close(promise: nil)
+                return
+            }
+            let preface = "CONJET-TCP \(target.host):\(target.port)\n"
             guard writeAllBytes(Data(preface.utf8), to: guest.fileDescriptor) else {
                 metrics.error()
                 statusHandler(metrics)
@@ -2293,8 +2334,7 @@ private final class NIOTCPProxyHandler: ChannelInboundHandler, @unchecked Sendab
 private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendable {
     private let bindAddress: String
     private let hostPort: Int
-    private let guestHost: String
-    private let guestHostPort: Int
+    private let target: MutablePortTarget
     private let portForwardID: UInt32
     private let requestedBinaryFrames: Bool
     private let connector: any GuestConnectionConnector
@@ -2309,8 +2349,8 @@ private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendab
     init(
         bindAddress: String,
         hostPort: Int,
-        guestHost: String,
-        guestHostPort: Int,
+        targetHost: String,
+        targetPort: Int,
         portForwardID: UInt32,
         useBinaryFrames: Bool,
         connector: any GuestConnectionConnector,
@@ -2319,8 +2359,7 @@ private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendab
     ) {
         self.bindAddress = bindAddress
         self.hostPort = hostPort
-        self.guestHost = guestHost
-        self.guestHostPort = guestHostPort
+        self.target = MutablePortTarget(host: targetHost, port: targetPort)
         self.portForwardID = portForwardID
         self.requestedBinaryFrames = useBinaryFrames
         self.connector = connector
@@ -2330,6 +2369,22 @@ private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendab
 
     deinit { stop() }
 
+    func updateTarget(host: String, port: Int) {
+        target.update(host: host, port: port)
+        guard requestedBinaryFrames else { return }
+        lock.lock()
+        let enabled = binaryFramesEnabled
+        lock.unlock()
+        if enabled {
+            _ = registerBinaryUDPTarget(
+                connector: connector,
+                portForwardID: portForwardID,
+                guestHost: host,
+                guestHostPort: port
+            )
+        }
+    }
+
     func start() throws {
         lock.lock()
         if channel != nil {
@@ -2338,11 +2393,14 @@ private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendab
         }
         lock.unlock()
 
+        guard let initialTarget = target.snapshot() else {
+            throw ConjetError.socket("UDP target is not ready")
+        }
         let binaryEnabled = requestedBinaryFrames && registerBinaryUDPTarget(
             connector: connector,
             portForwardID: portForwardID,
-            guestHost: guestHost,
-            guestHostPort: guestHostPort
+            guestHost: initialTarget.host,
+            guestHostPort: initialTarget.port
         )
         let session = binaryEnabled ? BinaryUDPGuestSession(
             connector: connector,
@@ -2355,10 +2413,9 @@ private final class NIOUDPPublishedPortListener: PortListener, @unchecked Sendab
 
         let bootstrap = DatagramBootstrap(group: group)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-            .channelInitializer { [connector, metrics, statusHandler, guestHost, guestHostPort, portForwardID, binaryEnabled, session] channel in
+            .channelInitializer { [connector, metrics, statusHandler, target, portForwardID, binaryEnabled, session] channel in
                 channel.pipeline.addHandler(NIOUDPProxyHandler(
-                    guestHost: guestHost,
-                    guestHostPort: guestHostPort,
+                    target: target,
                     portForwardID: portForwardID,
                     useBinaryFrames: binaryEnabled,
                     binarySession: session,
@@ -2389,8 +2446,7 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
     typealias OutboundOut = AddressedEnvelope<ByteBuffer>
 
-    private let guestHost: String
-    private let guestHostPort: Int
+    private let target: MutablePortTarget
     private let portForwardID: UInt32
     private let useBinaryFrames: Bool
     private let binarySession: BinaryUDPGuestSession?
@@ -2399,8 +2455,7 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
     private let statusHandler: @Sendable (ProxyMetrics) -> Void
 
     init(
-        guestHost: String,
-        guestHostPort: Int,
+        target: MutablePortTarget,
         portForwardID: UInt32,
         useBinaryFrames: Bool,
         binarySession: BinaryUDPGuestSession?,
@@ -2408,8 +2463,7 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
         metrics: ProxyMetrics,
         statusHandler: @escaping @Sendable (ProxyMetrics) -> Void
     ) {
-        self.guestHost = guestHost
-        self.guestHostPort = guestHostPort
+        self.target = target
         self.portForwardID = portForwardID
         self.useBinaryFrames = useBinaryFrames
         self.binarySession = binarySession
@@ -2432,17 +2486,22 @@ private final class NIOUDPProxyHandler: ChannelInboundHandler, @unchecked Sendab
         let remoteAddress = envelope.remoteAddress
         let eventLoop = context.eventLoop
         let allocator = context.channel.allocator
-        DispatchQueue.global(qos: .userInitiated).async { [connector, guestHost, guestHostPort, useBinaryFrames, binarySession, metrics, statusHandler, weak channel = context.channel] in
+        DispatchQueue.global(qos: .userInitiated).async { [connector, target, useBinaryFrames, binarySession, metrics, statusHandler, weak channel = context.channel] in
             guard let channel else { return }
             do {
                 let response: Data
                 if useBinaryFrames, let binarySession {
                     response = try binarySession.send(payload: Data(bytes))
                 } else {
+                    guard let target = target.snapshot() else {
+                        metrics.udpDrop()
+                        statusHandler(metrics)
+                        return
+                    }
                     let guest = try connector.connect()
                     disableSigpipeForPortProxy(guest.fileDescriptor)
                     defer { guest.close() }
-                    let preface = "CONJET-UDP \(guestHost):\(guestHostPort)\n"
+                    let preface = "CONJET-UDP \(target.host):\(target.port)\n"
                     guard writeAllBytes(Data(preface.utf8) + Data(bytes), to: guest.fileDescriptor) else {
                         metrics.udpDrop()
                         statusHandler(metrics)
@@ -2637,7 +2696,7 @@ private final class NativeTCPPooledPortListener: PortListener, @unchecked Sendab
 private final class TCPPublishedPortListener: PortListener, @unchecked Sendable {
     private let bindAddress: String
     private let hostPort: Int
-    private let guestHostPort: Int
+    private let target: MutablePortTarget
     private let connector: any GuestConnectionConnector
     private let statusHandler: @Sendable (ProxyMetrics) -> Void
     private let metrics = ProxyMetrics()
@@ -2649,18 +2708,23 @@ private final class TCPPublishedPortListener: PortListener, @unchecked Sendable 
     init(
         bindAddress: String,
         hostPort: Int,
-        guestHostPort: Int,
+        targetHost: String,
+        targetPort: Int,
         connector: any GuestConnectionConnector,
         statusHandler: @escaping @Sendable (ProxyMetrics) -> Void
     ) {
         self.bindAddress = bindAddress
         self.hostPort = hostPort
-        self.guestHostPort = guestHostPort
+        self.target = MutablePortTarget(host: targetHost, port: targetPort)
         self.connector = connector
         self.statusHandler = statusHandler
     }
 
     deinit { stop() }
+
+    func updateTarget(host: String, port: Int) {
+        target.update(host: host, port: port)
+    }
 
     func start() throws {
         lock.lock()
@@ -2723,7 +2787,13 @@ private final class TCPPublishedPortListener: PortListener, @unchecked Sendable 
         }
         do {
             let guest = try connector.connect()
-            let preface = "CONJET-TCP 127.0.0.1:\(guestHostPort)\n"
+            guard let target = target.snapshot() else {
+                metrics.error()
+                guest.close()
+                Darwin.close(clientFD)
+                return
+            }
+            let preface = "CONJET-TCP \(target.host):\(target.port)\n"
             guard writeAllBytes(Data(preface.utf8), to: guest.fileDescriptor) else {
                 metrics.error()
                 guest.close()
@@ -2765,8 +2835,7 @@ private final class TCPPublishedPortListener: PortListener, @unchecked Sendable 
 private final class UDPPublishedPortListener: PortListener, @unchecked Sendable {
     private let bindAddress: String
     private let hostPort: Int
-    private let guestHost: String
-    private let guestHostPort: Int
+    private let target: MutablePortTarget
     private let portForwardID: UInt32
     private let requestedBinaryFrames: Bool
     private let connector: any GuestConnectionConnector
@@ -2782,8 +2851,8 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
     init(
         bindAddress: String,
         hostPort: Int,
-        guestHost: String,
-        guestHostPort: Int,
+        targetHost: String,
+        targetPort: Int,
         portForwardID: UInt32,
         useBinaryFrames: Bool,
         connector: any GuestConnectionConnector,
@@ -2791,8 +2860,7 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
     ) {
         self.bindAddress = bindAddress
         self.hostPort = hostPort
-        self.guestHost = guestHost
-        self.guestHostPort = guestHostPort
+        self.target = MutablePortTarget(host: targetHost, port: targetPort)
         self.portForwardID = portForwardID
         self.requestedBinaryFrames = useBinaryFrames
         self.connector = connector
@@ -2800,6 +2868,22 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
     }
 
     deinit { stop() }
+
+    func updateTarget(host: String, port: Int) {
+        target.update(host: host, port: port)
+        guard requestedBinaryFrames else { return }
+        lock.lock()
+        let enabled = binaryFramesEnabled
+        lock.unlock()
+        if enabled {
+            _ = registerBinaryUDPTarget(
+                connector: connector,
+                portForwardID: portForwardID,
+                guestHost: host,
+                guestHostPort: port
+            )
+        }
+    }
 
     func start() throws {
         lock.lock()
@@ -2809,6 +2893,10 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
         }
         lock.unlock()
 
+        let initialTarget = target.snapshot()
+        guard let initialTarget else {
+            throw ConjetError.socket("UDP target is not ready")
+        }
         let fd = try makeUDPListener(bindAddress: bindAddress, port: hostPort)
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: DispatchQueue.global(qos: .userInitiated))
         source.setEventHandler { [weak self] in
@@ -2826,8 +2914,8 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
             binaryFramesEnabled = registerBinaryUDPTarget(
                 connector: connector,
                 portForwardID: portForwardID,
-                guestHost: guestHost,
-                guestHostPort: guestHostPort
+                guestHost: initialTarget.host,
+                guestHostPort: initialTarget.port
             )
             if binaryFramesEnabled {
                 binarySession = BinaryUDPGuestSession(
@@ -2894,9 +2982,14 @@ private final class UDPPublishedPortListener: PortListener, @unchecked Sendable 
             if binaryFramesEnabled, let binarySession {
                 response = try binarySession.send(payload: payload)
             } else {
+                guard let target = target.snapshot() else {
+                    metrics.udpDrop()
+                    statusHandler(metrics)
+                    return
+                }
                 let guest = try connector.connect()
                 defer { guest.close() }
-                let preface = "CONJET-UDP \(guestHost):\(guestHostPort)\n"
+                let preface = "CONJET-UDP \(target.host):\(target.port)\n"
                 guard writeAllBytes(Data(preface.utf8) + payload, to: guest.fileDescriptor) else {
                     metrics.udpDrop()
                     statusHandler(metrics)

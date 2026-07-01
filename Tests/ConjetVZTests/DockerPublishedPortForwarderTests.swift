@@ -834,8 +834,6 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         forwarder.observeCreatePublicationIntent(intent)
         XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
 
-        let fd = try connectLoopback(port: hostPort)
-        defer { Darwin.close(fd) }
         forwarder.reconcileForTesting([
             DockerPublishedPort(
                 hostIP: "127.0.0.1",
@@ -848,12 +846,15 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
             )
         ])
         XCTAssertTrue(waitUntil { forwarder.status().forwards.first?.targetIP == "172.18.0.9" })
+
+        let fd = try connectLoopback(port: hostPort)
+        defer { Darwin.close(fd) }
         XCTAssertTrue(writeAllTestBytes(Data("ping".utf8), to: fd))
         Darwin.shutdown(fd, SHUT_WR)
         let response = readAllTestBytes(from: fd)
 
         XCTAssertEqual(String(data: response, encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(hostPort)") })
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 172.18.0.9:80") })
         XCTAssertEqual(forwarder.status().forwards.first?.targetIP, "172.18.0.9")
     }
 
@@ -1049,6 +1050,43 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertEqual(connector.udpPayloads.map { String(data: $0, encoding: .utf8) }, ["ping"])
     }
 
+    func testUDPBinaryFramePathRegistersResolvedContainerTarget() throws {
+        let connector = BinaryUDPEchoConnector()
+        let port = try reserveUDPPort()
+        let containerPort = 5353
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: connector,
+            capabilities: ConjetNetworkCapabilities(
+                tcpProxy: true,
+                udpProxy: true,
+                guestEcho: true,
+                guestMetrics: true,
+                binaryFrames: true,
+                udpBinaryFrames: true,
+                persistentVsock: true,
+                bridgeEngine: "conjet-netd-c"
+            )
+        )
+        defer { forwarder.stop() }
+
+        forwarder.reconcileForTesting([
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: port,
+                containerPort: containerPort,
+                protocol: .udp,
+                targetIP: "172.18.0.5"
+            )
+        ])
+        XCTAssertTrue(waitUntil { forwarder.status().activeUDPForwards == 1 })
+
+        let portForwardID = UInt32((port << 16) | containerPort)
+        XCTAssertTrue(waitUntil {
+            connector.registeredTargetPayloads.contains("\(portForwardID) udp 172.18.0.5 \(containerPort)")
+        })
+    }
+
     func testUDPBinaryFramePathReusesPersistentGuestConnection() throws {
         let connector = BinaryUDPEchoConnector()
         let port = try reserveUDPPort()
@@ -1119,7 +1157,7 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         Darwin.shutdown(fd, SHUT_WR)
 
         XCTAssertEqual(String(data: readAllTestBytes(from: fd), encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(port)") })
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 172.17.0.2:63000") })
         XCTAssertEqual(forwarder.status().tcpMode, "legacy-tcp-proxy")
     }
 
@@ -1151,7 +1189,7 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         let response = readAllTestBytes(from: fd)
 
         XCTAssertEqual(String(data: response, encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(port)") })
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 172.17.0.2:80") })
         let status = forwarder.status()
         XCTAssertEqual(status.bridgeEngine, "conjet-netd-c")
         XCTAssertEqual(status.tcpMode, "legacy-tcp-proxy")
@@ -1159,6 +1197,191 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertTrue(status.persistentTCPVsock)
         XCTAssertTrue(status.tcpVsockPool)
         XCTAssertFalse(status.pythonFallbackActive)
+    }
+
+    func testResolvedTCPContainerTargetServesCurlStyleHTTPRequest() throws {
+        let connector = TCPProxyForwardingConnector()
+        let hostPort = try reserveLoopbackPort()
+        let targetPort = try reserveLoopbackPort()
+        let targetServer = HTTPReadyServer(port: targetPort)
+        try targetServer.start()
+        defer { targetServer.stop() }
+
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: connector,
+            capabilities: nativeTCPCapabilities()
+        )
+        defer { forwarder.stop() }
+
+        forwarder.reconcileForTesting([
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: hostPort,
+                containerPort: targetPort,
+                protocol: .tcp,
+                containerName: "api",
+                targetIP: "127.0.0.1"
+            )
+        ])
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+
+        let fd = try connectLoopback(port: hostPort)
+        defer { Darwin.close(fd) }
+        let request = """
+        GET /ready HTTP/1.1\r
+        Host: 127.0.0.1:\(hostPort)\r
+        User-Agent: curl/8.7.1\r
+        Accept: */*\r
+        \r
+
+        """
+        XCTAssertTrue(writeAllTestBytes(Data(request.utf8), to: fd))
+        Darwin.shutdown(fd, SHUT_WR)
+        let responseText = String(data: readAllTestBytes(from: fd), encoding: .utf8) ?? ""
+
+        XCTAssertTrue(responseText.contains("HTTP/1.1 200 OK"), responseText)
+        XCTAssertTrue(responseText.contains("\r\n\r\nready"), responseText)
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(targetPort)") })
+    }
+
+    func testMixedPublishedPortsStressAcrossTCPUDPAndBindKinds() throws {
+        let connector = MixedTextProxyConnector()
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: connector,
+            capabilities: ConjetNetworkCapabilities(
+                tcpProxy: true,
+                udpProxy: true,
+                containerIPLookup: true,
+                bridgeEngine: "conjet-netd-c"
+            )
+        )
+        defer { forwarder.stop() }
+
+        let tcpLoopbackPorts = try (0..<8).map { _ in try reserveLoopbackPort() }
+        let tcpWildcardPorts = try (0..<4).map { _ in try reserveLoopbackPort() }
+        let udpLoopbackPorts = try (0..<6).map { _ in try reserveUDPPort() }
+        let udpWildcardPorts = try (0..<3).map { _ in try reserveUDPPort() }
+
+        var publishedPorts = Set<DockerPublishedPort>()
+        for (index, hostPort) in tcpLoopbackPorts.enumerated() {
+            publishedPorts.insert(DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: hostPort,
+                containerPort: 18_000 + index,
+                protocol: .tcp,
+                containerName: "tcp-loopback-\(index)",
+                targetIP: "172.18.0.\(index + 2)"
+            ))
+        }
+        for (index, hostPort) in tcpWildcardPorts.enumerated() {
+            publishedPorts.insert(DockerPublishedPort(
+                hostIP: "0.0.0.0",
+                hostPort: hostPort,
+                containerPort: 19_000 + index,
+                protocol: .tcp,
+                containerName: "tcp-wildcard-\(index)",
+                targetIP: "172.19.0.\(index + 2)"
+            ))
+        }
+        for (index, hostPort) in udpLoopbackPorts.enumerated() {
+            publishedPorts.insert(DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: hostPort,
+                containerPort: 28_000 + index,
+                protocol: .udp,
+                containerName: "udp-loopback-\(index)",
+                targetIP: "172.28.0.\(index + 2)"
+            ))
+        }
+        for (index, hostPort) in udpWildcardPorts.enumerated() {
+            publishedPorts.insert(DockerPublishedPort(
+                hostIP: "0.0.0.0",
+                hostPort: hostPort,
+                containerPort: 29_000 + index,
+                protocol: .udp,
+                containerName: "udp-wildcard-\(index)",
+                targetIP: "172.29.0.\(index + 2)"
+            ))
+        }
+
+        forwarder.reconcileForTesting(publishedPorts)
+
+        let expectedTCPForwards = tcpLoopbackPorts.count + (tcpWildcardPorts.count * 2)
+        let expectedUDPForwards = udpLoopbackPorts.count + (udpWildcardPorts.count * 2)
+        XCTAssertTrue(waitUntil(timeoutSeconds: 5) {
+            let status = forwarder.status()
+            return status.activeTCPForwards == expectedTCPForwards
+                && status.activeUDPForwards == expectedUDPForwards
+        })
+
+        let tcpPorts = tcpLoopbackPorts + tcpWildcardPorts
+        for hostPort in tcpPorts {
+            for attempt in 0..<5 {
+                let fd = try connectLoopback(port: hostPort)
+                defer { Darwin.close(fd) }
+                let payload = "tcp:\(hostPort):\(attempt)"
+                XCTAssertTrue(writeAllTestBytes(Data(payload.utf8), to: fd))
+                Darwin.shutdown(fd, SHUT_WR)
+                let response = String(data: readAllTestBytes(from: fd), encoding: .utf8)
+                XCTAssertEqual(response, "echo:\(payload)")
+            }
+        }
+
+        let udpPorts = udpLoopbackPorts + udpWildcardPorts
+        for hostPort in udpPorts {
+            for attempt in 0..<5 {
+                let payload = "udp:\(hostPort):\(attempt)"
+                let response = try sendUDPDatagram(Data(payload.utf8), to: hostPort)
+                XCTAssertEqual(String(data: response, encoding: .utf8), "echo:\(payload)")
+            }
+        }
+
+        XCTAssertTrue(waitUntil(timeoutSeconds: 5) {
+            connector.prefaces.filter { $0.hasPrefix("CONJET-TCP ") }.count >= tcpPorts.count * 5
+                && connector.prefaces.filter { $0.hasPrefix("CONJET-UDP ") }.count >= udpPorts.count * 5
+        })
+        for publishedPort in publishedPorts {
+            let expected = "CONJET-\(publishedPort.protocol.rawValue.uppercased()) \(publishedPort.targetIP!):\(publishedPort.containerPort)"
+            XCTAssertTrue(connector.prefaces.contains(expected), "missing \(expected)")
+        }
+    }
+
+    func testLegacyTCPFallsBackToGuestHostPortForPythonBridge() throws {
+        let connector = TCPProxyEchoConnector()
+        let port = try reserveLoopbackPort()
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: connector,
+            capabilities: ConjetNetworkCapabilities(
+                tcpProxy: true,
+                udpProxy: true,
+                containerIPLookup: true,
+                bridgeEngine: "python-legacy"
+            )
+        )
+        defer { forwarder.stop() }
+
+        forwarder.reconcileForTesting([
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: port,
+                containerPort: 63001,
+                protocol: .tcp,
+                targetIP: "172.18.0.3"
+            )
+        ])
+        XCTAssertTrue(waitUntil { forwarder.status().activeTCPForwards == 1 })
+
+        let fd = try connectLoopback(port: port)
+        defer { Darwin.close(fd) }
+        XCTAssertTrue(writeAllTestBytes(Data("ping".utf8), to: fd))
+        Darwin.shutdown(fd, SHUT_WR)
+
+        XCTAssertEqual(String(data: readAllTestBytes(from: fd), encoding: .utf8), "pong")
+        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(port)") })
+        XCTAssertTrue(forwarder.status().pythonFallbackActive)
     }
 
     func testNativeTCPBridgePoolReportsOpenErrors() throws {
@@ -1408,6 +1631,7 @@ private final class BinaryUDPEchoConnector: GuestConnectionConnector, @unchecked
     private let lock = NSLock()
     private var connectionIndex = 0
     private var registrations = 0
+    private var registrationPayloads: [String] = []
     private var payloads: [Data] = []
 
     var registeredTargets: Int {
@@ -1420,6 +1644,13 @@ private final class BinaryUDPEchoConnector: GuestConnectionConnector, @unchecked
     var udpPayloads: [Data] {
         lock.lock()
         let value = payloads
+        lock.unlock()
+        return value
+    }
+
+    var registeredTargetPayloads: [String] {
+        lock.lock()
+        let value = registrationPayloads
         lock.unlock()
         return value
     }
@@ -1446,6 +1677,7 @@ private final class BinaryUDPEchoConnector: GuestConnectionConnector, @unchecked
                 if index == 1, frame.type == .registerTarget {
                     self.lock.lock()
                     self.registrations += 1
+                    self.registrationPayloads.append(String(data: frame.payload, encoding: .utf8) ?? "")
                     self.lock.unlock()
                     let response = ConjetBinaryFrame(type: .helloAck, portForwardID: frame.portForwardID)
                     _ = writeAllTestBytes((try? response.encode()) ?? Data(), to: serverFD)
@@ -1507,6 +1739,110 @@ private final class TCPProxyEchoConnector: GuestConnectionConnector, @unchecked 
         return GuestConnection(fileDescriptor: clientFD) {
             Darwin.close(clientFD)
         }
+    }
+}
+
+private final class MixedTextProxyConnector: GuestConnectionConnector, @unchecked Sendable {
+    private let lock = NSLock()
+    private var seenPrefaces: [String] = []
+
+    var prefaces: [String] {
+        lock.lock()
+        let value = seenPrefaces
+        lock.unlock()
+        return value
+    }
+
+    func connect() throws -> GuestConnection {
+        let fds = try makeTestSocketPair()
+        let clientFD = fds[0]
+        let serverFD = fds[1]
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { Darwin.close(serverFD) }
+            let preface = readLineTestBytes(from: serverFD)
+            self.lock.lock()
+            self.seenPrefaces.append(preface)
+            self.lock.unlock()
+
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            let count = Darwin.read(serverFD, &buffer, buffer.count)
+            if count > 0 {
+                _ = writeAllTestBytes(Data("echo:".utf8) + Data(buffer.prefix(count)), to: serverFD)
+            }
+            if preface.hasPrefix("CONJET-UDP ") {
+                Darwin.shutdown(serverFD, SHUT_WR)
+            } else {
+                Darwin.shutdown(serverFD, SHUT_RDWR)
+            }
+        }
+
+        return GuestConnection(fileDescriptor: clientFD) {
+            Darwin.close(clientFD)
+        }
+    }
+}
+
+private final class TCPProxyForwardingConnector: GuestConnectionConnector, @unchecked Sendable {
+    private let lock = NSLock()
+    private var seenPrefaces: [String] = []
+
+    var prefaces: [String] {
+        lock.lock()
+        let value = seenPrefaces
+        lock.unlock()
+        return value
+    }
+
+    func connect() throws -> GuestConnection {
+        let fds = try makeTestSocketPair()
+        let clientFD = fds[0]
+        let serverFD = fds[1]
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { Darwin.close(serverFD) }
+            let preface = readLineTestBytes(from: serverFD)
+            self.lock.lock()
+            self.seenPrefaces.append(preface)
+            self.lock.unlock()
+
+            guard let target = Self.parseTarget(from: preface),
+                  let upstreamFD = try? connectTCPHost(target.host, port: target.port) else {
+                Darwin.shutdown(serverFD, SHUT_WR)
+                return
+            }
+            defer { Darwin.close(upstreamFD) }
+
+            let group = DispatchGroup()
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                copyTestBytes(from: serverFD, to: upstreamFD)
+                Darwin.shutdown(upstreamFD, SHUT_WR)
+                group.leave()
+            }
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                copyTestBytes(from: upstreamFD, to: serverFD)
+                Darwin.shutdown(serverFD, SHUT_WR)
+                group.leave()
+            }
+            group.wait()
+        }
+
+        return GuestConnection(fileDescriptor: clientFD) {
+            Darwin.close(clientFD)
+        }
+    }
+
+    private static func parseTarget(from preface: String) -> (host: String, port: Int)? {
+        let prefix = "CONJET-TCP "
+        guard preface.hasPrefix(prefix) else {
+            return nil
+        }
+        let target = preface.dropFirst(prefix.count)
+        guard let separator = target.lastIndex(of: ":"),
+              let port = Int(target[target.index(after: separator)...]) else {
+            return nil
+        }
+        return (String(target[..<separator]), port)
     }
 }
 
@@ -1780,6 +2116,105 @@ private final class ObservedPortConnections: @unchecked Sendable {
     }
 }
 
+private final class HTTPReadyServer: @unchecked Sendable {
+    private let lock = NSLock()
+    private let port: Int
+    private var listenFD: Int32 = -1
+    private var stopped = false
+
+    init(port: Int) {
+        self.port = port
+    }
+
+    func start() throws {
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw ConjetError.socket("test HTTP server socket failed")
+        }
+        disableTestSigpipe(fd)
+
+        var enabled: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(port).bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+        do {
+            try withUnsafePointer(to: &address) { pointer in
+                try pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                    guard Darwin.bind(fd, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0 else {
+                        throw ConjetError.socket("test HTTP server bind failed")
+                    }
+                }
+            }
+            guard Darwin.listen(fd, 8) == 0 else {
+                throw ConjetError.socket("test HTTP server listen failed")
+            }
+        } catch {
+            Darwin.close(fd)
+            throw error
+        }
+
+        lock.lock()
+        listenFD = fd
+        stopped = false
+        lock.unlock()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.acceptLoop(fd: fd)
+        }
+    }
+
+    func stop() {
+        lock.lock()
+        stopped = true
+        let fd = listenFD
+        listenFD = -1
+        lock.unlock()
+
+        if fd >= 0 {
+            Darwin.shutdown(fd, SHUT_RDWR)
+            Darwin.close(fd)
+        }
+    }
+
+    private func acceptLoop(fd: Int32) {
+        while !isStopped {
+            let clientFD = Darwin.accept(fd, nil, nil)
+            if clientFD < 0 {
+                if errno == EINTR {
+                    continue
+                }
+                break
+            }
+            disableTestSigpipe(clientFD)
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { Darwin.close(clientFD) }
+                _ = readHTTPHeaderTestBytes(from: clientFD)
+                let body = "ready"
+                let response = """
+                HTTP/1.1 200 OK\r
+                Content-Type: text/plain\r
+                Content-Length: \(Data(body.utf8).count)\r
+                Connection: close\r
+                \r
+                \(body)
+                """
+                _ = writeAllTestBytes(Data(response.utf8), to: clientFD)
+                Darwin.shutdown(clientFD, SHUT_WR)
+            }
+        }
+    }
+
+    private var isStopped: Bool {
+        lock.lock()
+        let value = stopped
+        lock.unlock()
+        return value
+    }
+}
+
 private func readLineTestBytes(from fd: Int32) -> String {
     var data = Data()
     var byte: UInt8 = 0
@@ -1790,6 +2225,37 @@ private func readLineTestBytes(from fd: Int32) -> String {
         data.append(byte)
     }
     return String(data: data, encoding: .utf8) ?? ""
+}
+
+private func connectTCPHost(_ host: String, port: Int) throws -> Int32 {
+    let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else {
+        throw ConjetError.socket("test TCP socket failed")
+    }
+    disableTestSigpipe(fd)
+
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = UInt16(port).bigEndian
+    guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+        Darwin.close(fd)
+        throw ConjetError.socket("test TCP host parse failed")
+    }
+
+    do {
+        try withUnsafePointer(to: &address) { pointer in
+            try pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                guard Darwin.connect(fd, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0 else {
+                    throw ConjetError.socket("test TCP connect failed")
+                }
+            }
+        }
+        return fd
+    } catch {
+        Darwin.close(fd)
+        throw error
+    }
 }
 
 private func makeTestSocketPair() throws -> [Int32] {
@@ -1821,6 +2287,23 @@ private func readAllTestBytes(from fd: Int32) -> Data {
         }
     }
     return data
+}
+
+private func copyTestBytes(from sourceFD: Int32, to destinationFD: Int32) {
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+        let count = Darwin.read(sourceFD, &buffer, buffer.count)
+        if count > 0 {
+            let chunk = Data(buffer.prefix(count))
+            if !writeAllTestBytes(chunk, to: destinationFD) {
+                return
+            }
+        } else if count < 0, errno == EINTR {
+            continue
+        } else {
+            return
+        }
+    }
 }
 
 private func readHTTPHeaderTestBytes(from fd: Int32) -> Data {
