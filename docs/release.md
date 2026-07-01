@@ -16,8 +16,8 @@ Publishing a tag like `conjet-v0.1.0` runs `.github/workflows/release-conjet.yml
 The workflow builds `Conjet.app`, `conjet`, `conjetd`, and the bundled Conjet
 Core VMM, runs tests, signs the app bundle, creates a read-only DMG, publishes it to
 GitHub Releases, renders the Homebrew formula and cask from the final DMG checksum,
-opens a pull request for `Formula/conjet.rb` and `Casks/conjet.rb`, and uploads
-the generated Homebrew package files to the release.
+commits `Formula/conjet.rb` and `Casks/conjet.rb` back to the default branch, and
+uploads the generated Homebrew package files to the release.
 
 If Developer ID signing secrets are configured, the workflow signs with
 Developer ID. If Apple notarization secrets are also configured, the workflow
@@ -47,10 +47,10 @@ Production notarized releases require these repository secrets:
 
 Optional release automation secret:
 
-- `CONJET_RELEASE_PR_TOKEN`: fine-grained token with pull request creation
-  permission. If omitted and the default GitHub Actions token cannot create
-  pull requests, the release workflow still pushes the Homebrew update branch
-  and prints the manual PR creation URL instead of failing the release.
+- `CONJET_RELEASE_PR_TOKEN`: fine-grained token with contents write permission
+  and any required branch-protection bypass permission for committing generated
+  Homebrew updates to the default branch. If omitted, the release workflow uses
+  the default GitHub Actions token.
 
 Manual release:
 

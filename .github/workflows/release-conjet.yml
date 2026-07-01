@@ -244,18 +244,17 @@ jobs:
           grep -q 'binary "bin/conjetd"' homebrew-cask/conjet.rb
           cp homebrew-cask/conjet.rb homebrew-cask/conjet-cask.rb
 
-      - name: Open Homebrew formula and cask pull request
-        id: homebrew_pr
+      - name: Update Homebrew formula and cask
+        id: homebrew_update
         env:
-          GH_TOKEN: ${{ secrets.CONJET_RELEASE_PR_TOKEN || github.token }}
+          PUSH_TOKEN: ${{ secrets.CONJET_RELEASE_PR_TOKEN || github.token }}
         run: |
           set -euo pipefail
           version="${{ needs.build.outputs.version }}"
           default_branch="${{ github.event.repository.default_branch }}"
-          update_branch="release/conjet-${version}-homebrew"
 
           git fetch origin "${default_branch}"
-          git checkout -B "${update_branch}" "origin/${default_branch}"
+          git checkout -B "${default_branch}" "origin/${default_branch}"
 
           cp homebrew-formula/conjet.rb Formula/conjet.rb
           mkdir -p Casks
@@ -267,51 +266,20 @@ jobs:
           git add Casks/conjet.rb Formula/conjet.rb VERSION
           if git diff --cached --quiet; then
             echo "Source formula and cask already up to date"
-            echo "url=" >> "${GITHUB_OUTPUT}"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            echo "commit=" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           git commit -m "chore(release): update conjet ${version}"
-          git push --force-with-lease origin "HEAD:${update_branch}"
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:${default_branch}"
 
-          body_file="$(mktemp)"
-          cat > "${body_file}" <<BODY
-          Updates the generated Homebrew formula and cask for Conjet ${version}.
-
-          This PR was opened by the Conjet release workflow because ${default_branch} is protected.
-
-          Release tag: ${{ needs.build.outputs.tag }}
-          Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          BODY
-
-          pr_url="$(gh pr list \
-            --repo "${GITHUB_REPOSITORY}" \
-            --head "${update_branch}" \
-            --base "${default_branch}" \
-            --state open \
-            --json url \
-            --jq '.[0].url // empty')"
-          if [ -z "${pr_url}" ]; then
-            pr_create_output="$(mktemp)"
-            if gh pr create \
-              --repo "${GITHUB_REPOSITORY}" \
-              --base "${default_branch}" \
-              --head "${update_branch}" \
-              --title "chore(release): update conjet ${version}" \
-              --body-file "${body_file}" >"${pr_create_output}" 2>&1; then
-              pr_url="$(cat "${pr_create_output}")"
-            else
-              echo "::warning::Could not create the Homebrew update PR automatically."
-              cat "${pr_create_output}" >&2
-              pr_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/new/${update_branch}"
-              echo "::notice::Open the Homebrew update PR manually: ${pr_url}"
-            fi
-          fi
-          echo "Homebrew update PR: ${pr_url}"
-          echo "url=${pr_url}" >> "${GITHUB_OUTPUT}"
+          echo "changed=true" >> "${GITHUB_OUTPUT}"
+          echo "commit=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       - name: Generate release notes
         env:
-          HOMEBREW_PR_URL: ${{ steps.homebrew_pr.outputs.url }}
+          HOMEBREW_UPDATE_COMMIT: ${{ steps.homebrew_update.outputs.commit }}
         run: |
           set -euo pipefail
           notes="release-notes.md"
@@ -321,8 +289,8 @@ jobs:
             echo "Release tag: ${{ needs.build.outputs.tag }}"
             echo "Commit: ${GITHUB_SHA}"
             echo "Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            if [ -n "${HOMEBREW_PR_URL}" ]; then
-              echo "Homebrew update PR: ${HOMEBREW_PR_URL}"
+            if [ -n "${HOMEBREW_UPDATE_COMMIT}" ]; then
+              echo "Homebrew update commit: ${HOMEBREW_UPDATE_COMMIT}"
             fi
             echo
             echo "Assets:"
