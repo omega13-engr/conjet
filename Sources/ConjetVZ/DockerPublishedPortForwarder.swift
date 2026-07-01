@@ -419,11 +419,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
     }
 
     private var useNativeTCPPoolForPublishedPorts: Bool {
-        // The guest-native binary TCP relay currently accepts container targets but can close
-        // established published-port streams before returning target bytes. Keep Docker-published
-        // TCP ports on the stable in-guest Docker host-port path until that relay is repaired.
-        guard nativeTCPPoolAvailable else { return false }
-        return false
+        nativeTCPPoolAvailable
     }
 
     private var tcpModeName: String {

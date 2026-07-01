@@ -767,15 +767,15 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
 
         XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
         let status = forwarder.status()
-        XCTAssertEqual(status.activeTCPForwards, 1)
-        XCTAssertEqual(status.forwards.first?.state, .listening)
+        XCTAssertEqual(status.activeTCPForwards, 0)
+        XCTAssertEqual(status.forwards.first?.state, .reservedWaitingForTarget)
         XCTAssertNil(status.forwards.first?.targetIP)
         XCTAssertEqual(forwarder.pendingCreatePortsForTesting(containerID: containerID).first?.hostPort, hostPort)
         XCTAssertTrue(forwarder.status().messages.contains("prepublished Docker start port intent abcdef012345"))
     }
 
-    func testCreateIntentPrepublishesLegacyTCPListenerBeforeTargetIsResolved() throws {
-        let connector = TCPProxyEchoConnector()
+    func testCreateIntentPrepublishesNativeTCPReservationBeforeTargetIsResolved() throws {
+        let connector = BinaryTCPEchoConnector()
         let hostPort = try reserveLoopbackPort()
         let forwarder = DockerPublishedPortForwarder(
             socketPath: "/tmp/missing-\(UUID().uuidString).sock",
@@ -801,13 +801,13 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
 
         XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
         let status = forwarder.status()
-        XCTAssertEqual(status.activeTCPForwards, 1)
-        XCTAssertEqual(status.forwards.first?.state, .listening)
+        XCTAssertEqual(status.activeTCPForwards, 0)
+        XCTAssertEqual(status.forwards.first?.state, .reservedWaitingForTarget)
         XCTAssertNil(status.forwards.first?.targetIP)
     }
 
-    func testPrepublishedLegacyTCPListenerForwardsAfterTargetReconcile() throws {
-        let connector = TCPProxyEchoConnector()
+    func testPrepublishedNativeTCPListenerForwardsAfterTargetReconcile() throws {
+        let connector = BinaryTCPEchoConnector()
         let containerID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         let hostPort = try reserveLoopbackPort()
         let forwarder = DockerPublishedPortForwarder(
@@ -854,8 +854,9 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         let response = readAllTestBytes(from: fd)
 
         XCTAssertEqual(String(data: response, encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(hostPort)") })
+        XCTAssertTrue(waitUntil { connector.openTargets.contains("172.18.0.9:80") })
         XCTAssertEqual(forwarder.status().forwards.first?.targetIP, "172.18.0.9")
+        XCTAssertEqual(forwarder.status().tcpMode, "persistent-binary-tcp-pool")
     }
 
     func testLegacyTCPReconcileWithoutTargetStillPublishesGuestHostPort() throws {
@@ -864,7 +865,12 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         let forwarder = DockerPublishedPortForwarder(
             socketPath: "/tmp/missing-\(UUID().uuidString).sock",
             connector: connector,
-            capabilities: nativeTCPCapabilities()
+            capabilities: ConjetNetworkCapabilities(
+                tcpProxy: true,
+                udpProxy: true,
+                containerIPLookup: true,
+                bridgeEngine: "conjet-netd-c"
+            )
         )
         defer { forwarder.stop() }
 
@@ -1161,8 +1167,8 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertEqual(forwarder.status().tcpMode, "legacy-tcp-proxy")
     }
 
-    func testTCPPublishedPortsUseLegacyProxyWhenNativePoolIsAvailable() throws {
-        let connector = TCPProxyEchoConnector()
+    func testTCPPublishedPortsUseNativePoolWhenAvailable() throws {
+        let connector = BinaryTCPEchoConnector()
         let port = try reserveLoopbackPort()
         let forwarder = DockerPublishedPortForwarder(
             socketPath: "/tmp/missing-\(UUID().uuidString).sock",
@@ -1189,23 +1195,19 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         let response = readAllTestBytes(from: fd)
 
         XCTAssertEqual(String(data: response, encoding: .utf8), "pong")
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(port)") })
+        XCTAssertTrue(waitUntil { connector.openTargets.contains("172.17.0.2:80") })
         let status = forwarder.status()
         XCTAssertEqual(status.bridgeEngine, "conjet-netd-c")
-        XCTAssertEqual(status.tcpMode, "legacy-tcp-proxy")
+        XCTAssertEqual(status.tcpMode, "persistent-binary-tcp-pool")
         XCTAssertTrue(status.tcpBinaryFrames)
         XCTAssertTrue(status.persistentTCPVsock)
         XCTAssertTrue(status.tcpVsockPool)
         XCTAssertFalse(status.pythonFallbackActive)
     }
 
-    func testResolvedTCPContainerTargetServesCurlStyleHTTPRequest() throws {
+    func testNativeTCPContainerTargetServesCurlStyleHTTPRequest() throws {
         let hostPort = try reserveLoopbackPort()
-        let targetPort = try reserveLoopbackPort()
-        let connector = TCPProxyForwardingConnector(hostPortTargets: [hostPort: targetPort])
-        let targetServer = HTTPReadyServer(port: targetPort)
-        try targetServer.start()
-        defer { targetServer.stop() }
+        let connector = BinaryTCPEchoConnector()
 
         let forwarder = DockerPublishedPortForwarder(
             socketPath: "/tmp/missing-\(UUID().uuidString).sock",
@@ -1218,10 +1220,10 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
             DockerPublishedPort(
                 hostIP: "127.0.0.1",
                 hostPort: hostPort,
-                containerPort: targetPort,
+                containerPort: 63001,
                 protocol: .tcp,
                 containerName: "api",
-                targetIP: "127.0.0.1"
+                targetIP: "172.18.0.3"
             )
         ])
         XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
@@ -1237,12 +1239,12 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
 
         """
         XCTAssertTrue(writeAllTestBytes(Data(request.utf8), to: fd))
-        Darwin.shutdown(fd, SHUT_WR)
         let responseText = String(data: readAllTestBytes(from: fd), encoding: .utf8) ?? ""
 
         XCTAssertTrue(responseText.contains("HTTP/1.1 200 OK"), responseText)
         XCTAssertTrue(responseText.contains("\r\n\r\nready"), responseText)
-        XCTAssertTrue(waitUntil { connector.prefaces.contains("CONJET-TCP 127.0.0.1:\(hostPort)") })
+        XCTAssertTrue(waitUntil { connector.openTargets.contains("172.18.0.3:63001") })
+        XCTAssertEqual(forwarder.status().tcpMode, "persistent-binary-tcp-pool")
     }
 
     func testMixedPublishedPortsStressAcrossTCPUDPAndBindKinds() throws {
@@ -2073,15 +2075,40 @@ private final class BinaryTCPEchoConnector: GuestConnectionConnector, @unchecked
                     self.lock.lock()
                     self.payloads.append(frame.payload)
                     self.lock.unlock()
-                    let responsePayload = String(data: frame.payload, encoding: .utf8) == "ping"
-                        ? Data("pong".utf8)
-                        : frame.payload
+                    let text = String(data: frame.payload, encoding: .utf8) ?? ""
+                    let responsePayload: Data
+                    let shouldClose: Bool
+                    if text.hasPrefix("GET /ready ") {
+                        let body = "ready"
+                        responsePayload = Data("""
+                        HTTP/1.1 200 OK\r
+                        Content-Type: text/plain\r
+                        Content-Length: \(Data(body.utf8).count)\r
+                        Connection: close\r
+                        \r
+                        \(body)
+                        """.utf8)
+                        shouldClose = true
+                    } else if text == "ping" {
+                        responsePayload = Data("pong".utf8)
+                        shouldClose = false
+                    } else {
+                        responsePayload = frame.payload
+                        shouldClose = false
+                    }
                     let response = ConjetBinaryFrame(
                         type: .tcpData,
                         streamID: frame.streamID,
                         payload: responsePayload
                     )
                     _ = writeAllTestBytes((try? response.encode()) ?? Data(), to: serverFD)
+                    if shouldClose {
+                        let halfClose = ConjetBinaryFrame(type: .tcpHalfClose, streamID: frame.streamID)
+                        let close = ConjetBinaryFrame(type: .tcpClose, streamID: frame.streamID)
+                        _ = writeAllTestBytes((try? halfClose.encode()) ?? Data(), to: serverFD)
+                        _ = writeAllTestBytes((try? close.encode()) ?? Data(), to: serverFD)
+                        return
+                    }
                 case .tcpHalfClose:
                     let halfClose = ConjetBinaryFrame(type: .tcpHalfClose, streamID: frame.streamID)
                     let close = ConjetBinaryFrame(type: .tcpClose, streamID: frame.streamID)

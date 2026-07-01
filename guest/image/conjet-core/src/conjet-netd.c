@@ -2435,10 +2435,26 @@ static void handle_legacy_tcp(int client, const char *line, const uint8_t *remai
     ba->from = upstream;
     ba->to = client;
     ba->shutdown_to_on_eof = 1;
-    pthread_create(&a, NULL, pump_thread, ab);
-    pthread_create(&b, NULL, pump_thread, ba);
-    pthread_join(a, NULL);
+    if (pthread_create(&a, NULL, pump_thread, ab) != 0) {
+        free(ab);
+        free(ba);
+        close_fd(upstream);
+        close_fd(client);
+        return;
+    }
+    if (pthread_create(&b, NULL, pump_thread, ba) != 0) {
+        free(ba);
+        shutdown(client, SHUT_RDWR);
+        shutdown(upstream, SHUT_RDWR);
+        pthread_join(a, NULL);
+        close_fd(upstream);
+        close_fd(client);
+        return;
+    }
     pthread_join(b, NULL);
+    shutdown(client, SHUT_RDWR);
+    shutdown(upstream, SHUT_RDWR);
+    pthread_join(a, NULL);
     close_fd(upstream);
     close_fd(client);
 }
