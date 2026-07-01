@@ -237,13 +237,14 @@ final class ConjetAppState: ObservableObject {
     private let service: ConjetManagementService
     private var refreshTask: Task<Void, Never>?
     private var pulseSubscriptionTask: Task<Void, Never>?
-    private var transitionRefreshTask: Task<Void, Never>?
     private var deferredRefreshTask: Task<Void, Never>?
     private var managementUpdatesStarted = false
     private var initialSnapshotLoaded = false
     private var refreshInFlight = false
     private var needsRefreshAfterCurrent = false
     private var needsManualRefreshAfterCurrent = false
+    private var needsPulseRefreshAfterCurrent = false
+    private var pendingPulseRefreshScope: DashboardSnapshotRefreshScope?
     private var isQuitting = false
     private var pendingContainerSelectionName: String?
     private var hiddenStoppedContainerIDs = Set<String>()
@@ -251,7 +252,6 @@ final class ConjetAppState: ObservableObject {
     private var lastProcessesRefreshAt = Date.distantPast
     private var lastVolumeUsageRefreshAt = Date.distantPast
 
-    private static let transitionRefreshDelayNanoseconds: UInt64 = 250_000_000
     private static let deferredCommandRefreshDelayNanoseconds: UInt64 = 75_000_000
     private static let pulseForegroundReconnectDelayNanoseconds: UInt64 = 5_000_000_000
     private static let pulseBackgroundReconnectDelayNanoseconds: UInt64 = 30_000_000_000
@@ -287,7 +287,6 @@ final class ConjetAppState: ObservableObject {
     deinit {
         refreshTask?.cancel()
         pulseSubscriptionTask?.cancel()
-        transitionRefreshTask?.cancel()
         deferredRefreshTask?.cancel()
     }
 
@@ -344,6 +343,9 @@ final class ConjetAppState: ObservableObject {
             if initialTrigger == .manual {
                 needsManualRefreshAfterCurrent = true
             }
+            if initialTrigger == .pulseEvent {
+                needsPulseRefreshAfterCurrent = true
+            }
             return
         }
 
@@ -390,8 +392,15 @@ final class ConjetAppState: ObservableObject {
                 isRefreshing = false
             }
             if needsRefreshAfterCurrent {
-                trigger = needsManualRefreshAfterCurrent ? .manual : .automatic
+                if needsManualRefreshAfterCurrent {
+                    trigger = .manual
+                } else if needsPulseRefreshAfterCurrent {
+                    trigger = .pulseEvent
+                } else {
+                    trigger = .automatic
+                }
                 needsManualRefreshAfterCurrent = false
+                needsPulseRefreshAfterCurrent = false
             }
         } while needsRefreshAfterCurrent
         refreshInFlight = false
@@ -625,15 +634,6 @@ final class ConjetAppState: ObservableObject {
         profileConfigMessage = "Saved profile \(profileName)."
     }
 
-    private var selectedSectionNeedsContinuousRefresh: Bool {
-        switch selectedSection {
-        case .activity, .containers, .processes:
-            return true
-        case .overview, .profiles, .compose, .machines, .images, .volumes, .network, .commands:
-            return false
-        }
-    }
-
     func startRuntime() async {
         await runAndRefresh(label: "Start Conjet", vmTransition: .starting) {
             await service.runConjetCompatibility(
@@ -722,13 +722,24 @@ final class ConjetAppState: ObservableObject {
         }
         defer { try? FileManager.default.removeItem(at: buildDirectory) }
 
-        let buildEntry = await service.runDocker(
-            ["build", "--label", "io.conjet.source=docker-editor", "--tag", imageTag, "."],
+        var buildEntry = await service.runDocker(
+            Self.dockerEditorBuildxArguments(imageTag: imageTag),
             label: "Build Dockerfile",
             workingDirectory: buildDirectory,
-            timeoutSeconds: Self.dockerLongCommandTimeoutSeconds
+            timeoutSeconds: Self.dockerLongCommandTimeoutSeconds,
+            environmentOverrides: ["DOCKER_BUILDKIT": "1"]
         )
         recordCommand(buildEntry)
+        if !buildEntry.succeeded, Self.dockerBuildxUnavailable(buildEntry) {
+            let legacyBuildEntry = await service.runDocker(
+                Self.dockerEditorLegacyBuildArguments(imageTag: imageTag),
+                label: "Build Dockerfile (legacy)",
+                workingDirectory: buildDirectory,
+                timeoutSeconds: Self.dockerLongCommandTimeoutSeconds
+            )
+            buildEntry = legacyBuildEntry
+            recordCommand(legacyBuildEntry)
+        }
         guard buildEntry.succeeded else {
             activeCommandLabel = nil
             await refresh()
@@ -1074,6 +1085,35 @@ final class ConjetAppState: ObservableObject {
         return value.isEmpty ? "conjet-editor:latest" : value
     }
 
+    private static func dockerEditorBuildxArguments(imageTag: String) -> [String] {
+        [
+            "buildx",
+            "build",
+            "--load",
+            "--label", "io.conjet.source=docker-editor",
+            "--tag", imageTag,
+            "."
+        ]
+    }
+
+    private static func dockerEditorLegacyBuildArguments(imageTag: String) -> [String] {
+        [
+            "build",
+            "--label", "io.conjet.source=docker-editor",
+            "--tag", imageTag,
+            "."
+        ]
+    }
+
+    private static func dockerBuildxUnavailable(_ entry: CommandLogEntry) -> Bool {
+        let output = "\(entry.stdout)\n\(entry.stderr)".lowercased()
+        return output.contains("buildx component is missing")
+            || output.contains("buildx component is broken")
+            || output.contains("unknown command: buildx")
+            || output.contains("unknown docker command \"buildx\"")
+            || output.contains("docker: 'buildx' is not a docker command")
+    }
+
     private static func shortRunIdentifier() -> String {
         String(UUID().uuidString.lowercased().prefix(8))
     }
@@ -1090,6 +1130,18 @@ final class ConjetAppState: ObservableObject {
     }
 
     private func refreshScope(
+        trigger: DashboardRefreshTrigger,
+        now: Date = Date()
+    ) -> DashboardSnapshotRefreshScope {
+        let selectedScope = selectedRefreshScope(trigger: trigger, now: now)
+        guard trigger == .pulseEvent, let pulseScope = pendingPulseRefreshScope else {
+            return selectedScope
+        }
+        pendingPulseRefreshScope = nil
+        return Self.mergingRefreshScopes(selectedScope, pulseScope)
+    }
+
+    private func selectedRefreshScope(
         trigger: DashboardRefreshTrigger,
         now: Date = Date()
     ) -> DashboardSnapshotRefreshScope {
@@ -1206,33 +1258,83 @@ final class ConjetAppState: ObservableObject {
         pulseHighWatermark = max(pulseHighWatermark, frame.state.highWatermark)
 
         guard frame.kind != .heartbeat else { return }
-        guard frame.overflowed || frame.events.contains(where: Self.pulseEventShouldRefresh) else { return }
+        guard let scope = Self.pulseRefreshScope(events: frame.events, overflowed: frame.overflowed) else {
+            return
+        }
+        if let pendingPulseRefreshScope {
+            self.pendingPulseRefreshScope = Self.mergingRefreshScopes(pendingPulseRefreshScope, scope)
+        } else {
+            pendingPulseRefreshScope = scope
+        }
         scheduleDeferredRefresh(trigger: .pulseEvent)
     }
 
-    private static func pulseEventShouldRefresh(_ event: ConjetPulseEvent) -> Bool {
-        switch event.type {
-        case .daemonStarted,
-             .daemonStopping,
-             .vmStarting,
-             .vmStarted,
-             .vmStopping,
-             .vmStopped,
-             .vmErrored,
-             .containerCreated,
-             .containerStarted,
-             .containerStopped,
-             .containerRemoved,
-             .imageChanged,
-             .volumeChanged,
-             .networkChanged,
-             .clockRepaired,
-             .cachePruned,
-             .memoryReclaimed,
-             .dockerRunFinished,
-             .commandFinished:
-            true
+    private static func pulseRefreshScope(
+        events: [ConjetPulseEvent],
+        overflowed: Bool
+    ) -> DashboardSnapshotRefreshScope? {
+        if overflowed {
+            return DashboardSnapshotRefreshScope(
+                includeDockerInventory: true,
+                includeVolumeUsage: true
+            )
         }
+
+        var scope = DashboardSnapshotRefreshScope.statusOnly
+        var shouldRefresh = false
+        for event in events {
+            switch event.type {
+            case .daemonStarted,
+                 .daemonStopping,
+                 .vmStarting,
+                 .vmStarted,
+                 .vmStopping,
+                 .vmStopped,
+                 .vmErrored,
+                 .clockRepaired,
+                 .cachePruned,
+                 .memoryReclaimed,
+                 .commandFinished:
+                shouldRefresh = true
+            case .containerCreated,
+                 .containerStarted,
+                 .containerStopped,
+                 .containerRemoved:
+                shouldRefresh = true
+                scope.includeContainers = true
+            case .imageChanged:
+                shouldRefresh = true
+                scope.includeImages = true
+            case .volumeChanged:
+                shouldRefresh = true
+                scope.includeVolumes = true
+                scope.includeVolumeUsage = true
+            case .networkChanged:
+                shouldRefresh = true
+                scope.includeNetworks = true
+            case .dockerRunFinished:
+                shouldRefresh = true
+                scope.includeContainers = true
+                scope.includeImages = true
+            }
+        }
+        return shouldRefresh ? scope : nil
+    }
+
+    private static func mergingRefreshScopes(
+        _ lhs: DashboardSnapshotRefreshScope,
+        _ rhs: DashboardSnapshotRefreshScope
+    ) -> DashboardSnapshotRefreshScope {
+        DashboardSnapshotRefreshScope(
+            includeDockerInventory: lhs.includeDockerInventory || rhs.includeDockerInventory,
+            includeContainers: lhs.includeContainers || rhs.includeContainers,
+            includeImages: lhs.includeImages || rhs.includeImages,
+            includeVolumes: lhs.includeVolumes || rhs.includeVolumes,
+            includeNetworks: lhs.includeNetworks || rhs.includeNetworks,
+            includeVolumeUsage: lhs.includeVolumeUsage || rhs.includeVolumeUsage,
+            includeStats: lhs.includeStats || rhs.includeStats,
+            includeProcesses: lhs.includeProcesses || rhs.includeProcesses
+        )
     }
 
     private func applyOptimisticContainerAction(_ action: String, containerIDs: Set<String>) {
@@ -1343,33 +1445,9 @@ final class ConjetAppState: ObservableObject {
         }
     }
 
-    private func refreshTransitionVMStatus() async {
-        guard let response = await service.loadVMStatus() else { return }
-        applyDaemonResponse(response)
-    }
-
     private func setCommandVMState(_ state: VMRunState?) {
         guard commandVMState != state else { return }
         commandVMState = state
-        if state == nil {
-            transitionRefreshTask?.cancel()
-            transitionRefreshTask = nil
-        } else {
-            startTransitionRefresh()
-        }
-    }
-
-    private func startTransitionRefresh() {
-        guard !isQuitting else { return }
-        transitionRefreshTask?.cancel()
-        transitionRefreshTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                await self.refreshTransitionVMStatus()
-                guard self.commandVMState != nil else { return }
-                try? await Task.sleep(nanoseconds: Self.transitionRefreshDelayNanoseconds)
-            }
-        }
     }
 
     private func completeCommandTransitionIfNeeded(actual: VMRunState?) {
@@ -1567,16 +1645,17 @@ final class ConjetAppState: ObservableObject {
     private func stopAutoRefresh() {
         refreshTask?.cancel()
         pulseSubscriptionTask?.cancel()
-        transitionRefreshTask?.cancel()
         deferredRefreshTask?.cancel()
         refreshTask = nil
         pulseSubscriptionTask = nil
-        transitionRefreshTask = nil
         deferredRefreshTask = nil
         managementUpdatesStarted = false
         initialSnapshotLoaded = false
         pulseConnected = false
         needsRefreshAfterCurrent = false
+        needsManualRefreshAfterCurrent = false
+        needsPulseRefreshAfterCurrent = false
+        pendingPulseRefreshScope = nil
     }
 
     private static func vmTimeout(for action: String) -> Double {

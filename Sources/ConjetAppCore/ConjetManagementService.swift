@@ -298,13 +298,15 @@ public struct ConjetManagementService: Sendable {
         _ arguments: [String],
         label: String,
         workingDirectory: URL? = nil,
-        timeoutSeconds: Double? = 120
+        timeoutSeconds: Double? = 120,
+        environmentOverrides: [String: String] = [:]
     ) async -> CommandLogEntry {
         await runtime.runDocker(
             arguments,
             label: label,
             workingDirectory: workingDirectory,
-            timeoutSeconds: timeoutSeconds
+            timeoutSeconds: timeoutSeconds,
+            environmentOverrides: environmentOverrides
         )
     }
 

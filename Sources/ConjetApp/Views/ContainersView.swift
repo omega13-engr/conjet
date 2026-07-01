@@ -69,6 +69,7 @@ struct ContainersView: View {
 private struct ContainerMasterPanel: View {
     @EnvironmentObject private var app: ConjetAppState
     @AppStorage("containers.collapsedComposeGroupIDs") private var collapsedComposeGroupIDs = ""
+    private let composeChildIndent: CGFloat = 36
 
     let containers: [DockerContainer]
     let totalCount: Int
@@ -130,7 +131,8 @@ private struct ContainerMasterPanel: View {
                                 if !collapsed {
                                     ForEach(group.containers) { container in
                                         ContainerSelectableRow(container: container, selection: $selection)
-                                            .padding(.horizontal, 12)
+                                            .padding(.leading, 12 + composeChildIndent)
+                                            .padding(.trailing, 12)
                                             .padding(.vertical, 3)
                                     }
                                 }

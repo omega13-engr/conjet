@@ -448,14 +448,16 @@ public final class ConjetRuntimeManagementService: @unchecked Sendable {
         _ arguments: [String],
         label: String,
         workingDirectory: URL? = nil,
-        timeoutSeconds: Double? = 120
+        timeoutSeconds: Double? = 120,
+        environmentOverrides: [String: String] = [:]
     ) async -> CommandLogEntry {
         let context = runtimeContext()
+        let environment = context.environment.merging(environmentOverrides) { _, new in new }
         let invocation = context.dockerTool.invocation(
             arguments: Self.dockerHostArguments(paths: context.paths) + arguments,
             displayName: label,
             workingDirectory: workingDirectory,
-            environment: context.environment,
+            environment: environment,
             timeoutSeconds: timeoutSeconds
         )
         if let failure = Self.dockerSocketPreflightFailure(context: context, invocation: invocation) {
@@ -675,15 +677,6 @@ public final class ConjetRuntimeManagementService: @unchecked Sendable {
             )
         }
 
-        guard (info.st_mode & S_IFMT) == S_IFSOCK else {
-            return nil
-        }
-        guard DockerSocketReadinessProbe(socketPath: socketPath).ping(timeoutSeconds: 0.75) else {
-            return preflightFailure(
-                invocation: invocation,
-                message: "Conjet Docker API is not responding at \(socketPath). Restart Conjet or wait for Docker readiness before running this command."
-            )
-        }
         return nil
     }
 

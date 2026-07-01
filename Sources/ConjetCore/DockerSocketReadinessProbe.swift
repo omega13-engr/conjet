@@ -9,11 +9,26 @@ public struct DockerSocketReadinessProbe: Sendable {
     }
 
     public func ping(timeoutSeconds: TimeInterval = 1) -> Bool {
-        guard let response = try? pingResponse(timeoutSeconds: timeoutSeconds) else {
+        guard let response = try? httpResponse(path: "/_ping", timeoutSeconds: timeoutSeconds) else {
             return false
         }
         return response.statusCode == 200
             && response.body.trimmingCharacters(in: .whitespacesAndNewlines) == "OK"
+    }
+
+    public func isReady(timeoutSeconds: TimeInterval = 1) -> Bool {
+        guard ping(timeoutSeconds: timeoutSeconds) else {
+            return false
+        }
+        guard let version = try? httpResponse(path: "/version", timeoutSeconds: timeoutSeconds),
+              version.isSuccessfulDockerJSON(requiredFields: ["Version", "ApiVersion"]) else {
+            return false
+        }
+        guard let info = try? httpResponse(path: "/info", timeoutSeconds: timeoutSeconds),
+              info.isSuccessfulDockerJSON(requiredFields: ["Containers", "Driver"]) else {
+            return false
+        }
+        return true
     }
 
     public func waitUntilReady(
@@ -23,7 +38,7 @@ public struct DockerSocketReadinessProbe: Sendable {
         let deadline = Date().addingTimeInterval(max(0, timeoutSeconds))
         let interval = max(0.05, intervalSeconds)
         repeat {
-            if ping(timeoutSeconds: min(1, max(0.1, deadline.timeIntervalSinceNow))) {
+            if isReady(timeoutSeconds: min(1, max(0.1, deadline.timeIntervalSinceNow))) {
                 return true
             }
             let remaining = deadline.timeIntervalSinceNow
@@ -42,7 +57,7 @@ public struct DockerSocketReadinessProbe: Sendable {
         }
     }
 
-    private func pingResponse(timeoutSeconds: TimeInterval) throws -> DockerSocketPingResponse {
+    private func httpResponse(path: String, timeoutSeconds: TimeInterval) throws -> DockerSocketHTTPResponse {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw ConjetError.socket("socket() failed: \(dockerProbeLastErrno())")
@@ -57,24 +72,32 @@ public struct DockerSocketReadinessProbe: Sendable {
             }
         }
 
-        try dockerProbeWriteAll(
-            Data("GET /_ping HTTP/1.1\r\nHost: conjet\r\nConnection: close\r\n\r\n".utf8),
-            to: fd
-        )
+        try dockerProbeWriteAll(Data("GET \(path) HTTP/1.1\r\nHost: conjet\r\nConnection: close\r\n\r\n".utf8), to: fd)
         let response = try dockerProbeReadAvailable(from: fd)
-        return DockerSocketPingResponse(data: response)
+        return DockerSocketHTTPResponse(data: response)
     }
 }
 
-private struct DockerSocketPingResponse {
+private struct DockerSocketHTTPResponse {
     var statusCode: Int?
     var body: String
 
     init(data: Data) {
-        let text = String(decoding: data, as: UTF8.self)
-        let parts = text.components(separatedBy: "\r\n\r\n")
-        let headers = parts.first ?? ""
-        self.body = parts.dropFirst().joined(separator: "\r\n\r\n")
+        let separator = Data("\r\n\r\n".utf8)
+        let headersData: Data
+        let bodyData: Data
+        if let headerRange = data.range(of: separator) {
+            headersData = Data(data[..<headerRange.lowerBound])
+            bodyData = Data(data[headerRange.upperBound...])
+        } else {
+            headersData = data
+            bodyData = Data()
+        }
+        let headers = String(decoding: headersData, as: UTF8.self)
+        let decodedBody = Self.headersUseChunkedTransferEncoding(headers)
+            ? (Self.decodeChunkedBody(bodyData) ?? bodyData)
+            : bodyData
+        self.body = String(decoding: decodedBody, as: UTF8.self)
         let statusLine = headers.components(separatedBy: "\r\n").first ?? ""
         let fields = statusLine.split(separator: " ")
         if fields.count >= 2 {
@@ -82,6 +105,70 @@ private struct DockerSocketPingResponse {
         } else {
             self.statusCode = nil
         }
+    }
+
+    func isSuccessfulDockerJSON(requiredFields: [String]) -> Bool {
+        guard let statusCode, (200..<300).contains(statusCode) else {
+            return false
+        }
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{"), trimmed != "null" else {
+            return false
+        }
+        guard !trimmed.contains(#""message""#) else {
+            return false
+        }
+        return requiredFields.allSatisfy { trimmed.contains(#""\#($0)""#) }
+    }
+
+    private static func headersUseChunkedTransferEncoding(_ headers: String) -> Bool {
+        headers
+            .split(separator: "\r\n")
+            .contains { line in
+                let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts.count == 2 else { return false }
+                return parts[0].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "transfer-encoding"
+                    && parts[1].lowercased().contains("chunked")
+            }
+    }
+
+    private static func decodeChunkedBody(_ data: Data) -> Data? {
+        let crlf = Data("\r\n".utf8)
+        var offset = 0
+        var decoded = Data()
+
+        while offset < data.count {
+            guard let lineRange = data[offset..<data.count].range(of: crlf) else {
+                return nil
+            }
+            let sizeLine = String(decoding: data[offset..<lineRange.lowerBound], as: UTF8.self)
+            let sizeText = sizeLine
+                .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+                .first
+                .map(String.init)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard let size = Int(sizeText, radix: 16) else {
+                return nil
+            }
+            offset = lineRange.upperBound
+            if size == 0 {
+                return decoded
+            }
+
+            let chunkEnd = offset + size
+            guard chunkEnd <= data.count else {
+                return nil
+            }
+            decoded.append(data[offset..<chunkEnd])
+            offset = chunkEnd
+            guard offset + crlf.count <= data.count,
+                  data[offset..<(offset + crlf.count)].elementsEqual(crlf) else {
+                return nil
+            }
+            offset += crlf.count
+        }
+
+        return nil
     }
 }
 
@@ -110,25 +197,75 @@ private func dockerProbeWithUnixSocketAddress<Result>(
     }
 }
 
-private func dockerProbeReadAvailable(from fd: Int32, maxBytes: Int = 8192) throws -> Data {
+private func dockerProbeReadAvailable(from fd: Int32, maxBytes: Int = 256 * 1024) throws -> Data {
     var data = Data()
     var buffer = [UInt8](repeating: 0, count: 1024)
     while data.count < maxBytes {
         let count = Darwin.read(fd, &buffer, buffer.count)
         if count > 0 {
             data.append(buffer, count: count)
-            if data.range(of: Data("\r\n\r\nOK".utf8)) != nil || data.suffix(2) == Data("OK".utf8) {
+            if dockerProbeHasCompleteHTTPResponse(data) ||
+                data.range(of: Data("\r\n\r\nOK".utf8)) != nil ||
+                data.suffix(2) == Data("OK".utf8) {
                 break
             }
         } else if count == 0 {
             break
         } else if errno == EINTR {
             continue
+        } else if errno == EAGAIN || errno == EWOULDBLOCK, !data.isEmpty {
+            break
         } else {
             throw ConjetError.socket("read() failed: \(dockerProbeLastErrno())")
         }
     }
     return data
+}
+
+private func dockerProbeHasCompleteHTTPResponse(_ data: Data) -> Bool {
+    let separator = Data("\r\n\r\n".utf8)
+    guard let headerEnd = data.range(of: separator)?.upperBound else {
+        return false
+    }
+    let headers = String(decoding: data[..<headerEnd], as: UTF8.self)
+    if dockerProbeUsesChunkedTransferEncoding(headers: headers) {
+        return dockerProbeHasCompleteChunkedBody(Data(data[headerEnd...]))
+    }
+    guard let contentLength = dockerProbeContentLength(headers: headers) else {
+        return false
+    }
+    return data.count >= headerEnd + contentLength
+}
+
+private func dockerProbeUsesChunkedTransferEncoding(headers: String) -> Bool {
+    headers
+        .split(separator: "\r\n")
+        .contains { line in
+            let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return false }
+            return parts[0].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "transfer-encoding"
+                && parts[1].lowercased().contains("chunked")
+        }
+}
+
+private func dockerProbeHasCompleteChunkedBody(_ body: Data) -> Bool {
+    let finalChunk = Data("\r\n0\r\n\r\n".utf8)
+    if body.range(of: finalChunk) != nil {
+        return true
+    }
+    return body.starts(with: Data("0\r\n\r\n".utf8))
+}
+
+private func dockerProbeContentLength(headers: String) -> Int? {
+    for line in headers.split(separator: "\r\n") {
+        let parts = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              parts[0].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "content-length" else {
+            continue
+        }
+        return Int(parts[1].trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    return nil
 }
 
 private func dockerProbeWriteAll(_ data: Data, to fd: Int32) throws {

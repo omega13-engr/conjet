@@ -1,5 +1,6 @@
 @testable import ConjetAppCore
 import ConjetCore
+import Darwin
 import XCTest
 
 final class ConjetAppCoreTests: XCTestCase {
@@ -533,6 +534,33 @@ final class ConjetAppCoreTests: XCTestCase {
         XCTAssertTrue(invocations.isEmpty)
     }
 
+    func testRunDockerDispatchesCommandWhenSocketExistsButPingIsTransientlyUnready() async throws {
+        let paths = try Self.makeTemporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        let socket = try ListeningUnixSocketPlaceholder(socketPath: paths.dockerSocket.path)
+        defer {
+            socket.close()
+            try? FileManager.default.removeItem(at: paths.rootHome)
+        }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(invocation, stdout: "docker ps reached cli\n")
+        }
+        let service = Self.makeService(paths: paths, executor: executor)
+
+        let entry = await service.runDocker(["ps"], label: "Docker ps", timeoutSeconds: 120)
+
+        XCTAssertTrue(entry.succeeded)
+        XCTAssertEqual(entry.stdout, "docker ps reached cli\n")
+        let invocations = await executor.invocations
+        XCTAssertEqual(invocations.count, 1)
+        XCTAssertTrue(invocations[0].arguments.starts(with: [
+            "--host",
+            "unix://\(paths.dockerSocket.path)",
+            "ps"
+        ]))
+    }
+
     func testRunComposeFailsFastWhenConjetDockerSocketIsMissing() async throws {
         let paths = try Self.makeTemporaryConjetPaths()
         try paths.ensureBaseDirectories()
@@ -648,6 +676,65 @@ final class ConjetAppCoreTests: XCTestCase {
             stdout: stdout,
             stderr: stderr
         )
+    }
+}
+
+private final class ListeningUnixSocketPlaceholder {
+    let socketPath: String
+    private var fd: Int32 = -1
+
+    init(socketPath: String) throws {
+        self.socketPath = socketPath
+        fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw ConjetError.socket("socket() failed")
+        }
+        unlink(socketPath)
+        do {
+            try appCoreTestWithUnixSocketAddress(path: socketPath) { address, length in
+                guard Darwin.bind(fd, address, length) == 0 else {
+                    throw ConjetError.socket("bind(\(socketPath)) failed")
+                }
+            }
+            guard Darwin.listen(fd, 4) == 0 else {
+                throw ConjetError.socket("listen() failed")
+            }
+        } catch {
+            close()
+            throw error
+        }
+    }
+
+    deinit {
+        close()
+    }
+
+    func close() {
+        if fd >= 0 {
+            Darwin.close(fd)
+            fd = -1
+        }
+        unlink(socketPath)
+    }
+}
+
+private func appCoreTestWithUnixSocketAddress<Result>(
+    path: String,
+    _ body: (UnsafePointer<sockaddr>, socklen_t) throws -> Result
+) throws -> Result {
+    var address = sockaddr_un()
+    address.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = path.utf8CString.map { UInt8(bitPattern: $0) }
+    guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
+        throw ConjetError.socket("Unix socket path is too long: \(path)")
+    }
+    withUnsafeMutableBytes(of: &address.sun_path) { rawBuffer in
+        rawBuffer.copyBytes(from: pathBytes)
+    }
+    return try withUnsafePointer(to: &address) { pointer in
+        try pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+            try body(socketAddress, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
     }
 }
 

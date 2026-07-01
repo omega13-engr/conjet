@@ -475,6 +475,184 @@ final class ConjetAppStateTests: XCTestCase {
     }
 
     @MainActor
+    func testPulseImageEventRefreshesImagesWhileContainersTabIsVisible() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            if invocation.arguments.contains("images") {
+                return ProcessResult(
+                    executable: invocation.executable,
+                    arguments: invocation.arguments,
+                    exitCode: 0,
+                    stdout: """
+                    {"ID":"sha256:redis","Repository":"redis","Tag":"7.4-alpine","Size":"60MB","CreatedAt":"2026-06-20 09:37:34 +0800 PST","CreatedSince":"11 days ago"}
+                    """,
+                    stderr: ""
+                )
+            }
+            return Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetCoreTool: Self.tool,
+            dockerTool: Self.tool,
+            includeLaunchdEnvironment: false,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        app.selectedSection = .containers
+        app.setInteractiveSurfaceVisible(true)
+
+        app.applyPulseFrameForTesting(ConjetPulseFrame(
+            kind: .events,
+            state: ConjetPulseState(highWatermark: 11, replayAvailableFrom: 1),
+            events: [
+                ConjetPulseEvent(
+                    seq: 11,
+                    type: .imageChanged,
+                    subjectID: "redis:7.4-alpine",
+                    message: "image.pull"
+                )
+            ]
+        ))
+        try await Task.sleep(nanoseconds: 220_000_000)
+
+        XCTAssertEqual(app.snapshot.images.map(\.reference), ["redis:7.4-alpine"])
+        let invocations = await executor.invocations
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("images") })
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("ps") })
+    }
+
+    @MainActor
+    func testPulseImageEventQueuedDuringContainerRefreshStillRefreshesImages() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = SlowContainerRefreshExecutor()
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetCoreTool: Self.tool,
+            dockerTool: Self.tool,
+            includeLaunchdEnvironment: false,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        app.selectedSection = .containers
+        app.setInteractiveSurfaceVisible(true)
+
+        let refreshTask = Task { @MainActor in
+            await app.refresh()
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        app.applyPulseFrameForTesting(ConjetPulseFrame(
+            kind: .events,
+            state: ConjetPulseState(highWatermark: 13, replayAvailableFrom: 1),
+            events: [
+                ConjetPulseEvent(
+                    seq: 13,
+                    type: .imageChanged,
+                    subjectID: "redis:7.4-alpine",
+                    message: "image.pull"
+                )
+            ]
+        ))
+        await refreshTask.value
+
+        XCTAssertEqual(app.snapshot.images.map(\.reference), ["redis:7.4-alpine"])
+        let invocations = await executor.invocations
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("ps") })
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("images") })
+    }
+
+    @MainActor
+    func testPulseVolumeEventRefreshesUsageEvenWhenUsageWasRecentlyLoaded() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetCoreTool: Self.tool,
+            dockerTool: Self.tool,
+            includeLaunchdEnvironment: false,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        app.selectedSection = .volumes
+
+        await app.refresh()
+        app.applyPulseFrameForTesting(ConjetPulseFrame(
+            kind: .events,
+            state: ConjetPulseState(highWatermark: 12, replayAvailableFrom: 1),
+            events: [
+                ConjetPulseEvent(
+                    seq: 12,
+                    type: .volumeChanged,
+                    subjectID: "api-data",
+                    message: "volume.create"
+                )
+            ]
+        ))
+        try await Task.sleep(nanoseconds: 220_000_000)
+
+        let invocations = await executor.invocations
+        let usageProbeCount = invocations.filter {
+            $0.arguments.contains("system") && $0.arguments.contains("df")
+        }.count
+        XCTAssertEqual(usageProbeCount, 2)
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("volume") && $0.arguments.contains("ls") })
+    }
+
+    @MainActor
+    func testOverflowedPulseRefreshesFullDockerInventoryFromNonDockerTab() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetCoreTool: Self.tool,
+            dockerTool: Self.tool,
+            includeLaunchdEnvironment: false,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        app.selectedSection = .profiles
+        app.setInteractiveSurfaceVisible(true)
+
+        app.applyPulseFrameForTesting(ConjetPulseFrame(
+            kind: .events,
+            state: ConjetPulseState(highWatermark: 21, replayAvailableFrom: 14),
+            overflowed: true
+        ))
+        try await Task.sleep(nanoseconds: 220_000_000)
+
+        let invocations = await executor.invocations
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("ps") })
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("images") })
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("volume") && $0.arguments.contains("ls") })
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("system") && $0.arguments.contains("df") })
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("network") && $0.arguments.contains("ls") })
+    }
+
+    @MainActor
     func testManualVolumeRefreshAlwaysRunsUsageProbe() async throws {
         let paths = Self.temporaryConjetPaths()
         try paths.ensureBaseDirectories()
@@ -1374,17 +1552,28 @@ final class ConjetAppStateTests: XCTestCase {
 
         let invocations = await executor.invocations
         let buildInvocation = try XCTUnwrap(invocations.first { $0.displayName == "Build Dockerfile" })
-        XCTAssertEqual(Array(buildInvocation.arguments.suffix(6)), [
+        XCTAssertTrue(buildInvocation.arguments.starts(with: [
+            "--host",
+            "unix://\(paths.dockerSocket.path)"
+        ]))
+        XCTAssertEqual(Array(buildInvocation.arguments.suffix(8)), [
+            "buildx",
             "build",
+            "--load",
             "--label", "io.conjet.source=docker-editor",
             "--tag", "conjet-editor:test",
             "."
         ])
+        XCTAssertEqual(buildInvocation.environment["DOCKER_BUILDKIT"], "1")
         let buildDirectory = try XCTUnwrap(buildInvocation.workingDirectory)
         XCTAssertTrue(buildDirectory.path.contains("conjet-docker-editor-"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: buildDirectory.path))
 
         let runInvocation = try XCTUnwrap(invocations.first { $0.displayName?.hasPrefix("Run conjet-editor-") == true })
+        XCTAssertTrue(runInvocation.arguments.starts(with: [
+            "--host",
+            "unix://\(paths.dockerSocket.path)"
+        ]))
         XCTAssertTrue(runInvocation.arguments.contains("run"))
         XCTAssertTrue(runInvocation.arguments.contains("--detach"))
         XCTAssertTrue(runInvocation.arguments.contains("--rm"))
@@ -1401,6 +1590,108 @@ final class ConjetAppStateTests: XCTestCase {
         XCTAssertEqual(app.snapshot.containers.first?.name.hasPrefix("conjet-editor-"), true)
         XCTAssertEqual(app.snapshot.containers.first?.image, "conjet-editor:test")
         XCTAssertEqual(app.snapshot.containers.first?.state, "running")
+    }
+
+    @MainActor
+    func testDockerEditorFallsBackToLegacyBuildWhenBuildxIsUnavailable() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            if invocation.displayName == "Build Dockerfile",
+               invocation.arguments.contains("buildx") {
+                return ProcessResult(
+                    executable: invocation.executable,
+                    arguments: invocation.arguments,
+                    exitCode: 1,
+                    stdout: "",
+                    stderr: "ERROR: BuildKit is enabled but the buildx component is missing or broken."
+                )
+            }
+            return Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetCoreTool: Self.tool,
+            dockerTool: Self.tool,
+            includeLaunchdEnvironment: false,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        app.dockerEditorSource = """
+        FROM alpine:3.20
+        CMD ["sleep", "60"]
+        """
+        app.dockerEditorImageTag = "conjet-editor:fallback"
+
+        await app.runDockerEditor()
+
+        let invocations = await executor.invocations
+        let buildxInvocation = try XCTUnwrap(invocations.first { $0.displayName == "Build Dockerfile" })
+        let legacyInvocation = try XCTUnwrap(invocations.first { $0.displayName == "Build Dockerfile (legacy)" })
+        let runInvocation = try XCTUnwrap(invocations.first { $0.displayName?.hasPrefix("Run conjet-editor-") == true })
+        let dockerHost = "unix://\(paths.dockerSocket.path)"
+
+        XCTAssertEqual(Array(buildxInvocation.arguments.prefix(3)), ["--host", dockerHost, "buildx"])
+        XCTAssertEqual(Array(legacyInvocation.arguments.suffix(6)), [
+            "build",
+            "--label", "io.conjet.source=docker-editor",
+            "--tag", "conjet-editor:fallback",
+            "."
+        ])
+        XCTAssertFalse(legacyInvocation.arguments.contains("buildx"))
+        XCTAssertTrue(runInvocation.arguments.contains("run"))
+        XCTAssertEqual(runInvocation.arguments.last, "conjet-editor:fallback")
+        XCTAssertNil(app.activeCommandLabel)
+        XCTAssertEqual(app.commandLog.count, 3)
+        XCTAssertEqual(app.commandLog.first?.label, runInvocation.displayName)
+    }
+
+    @MainActor
+    func testContainerActionsDispatchStartStopRestartThroughConjetDockerSocket() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(for: invocation, paths: paths)
+        }
+        let service = ConjetManagementService(
+            environment: ["CONJET_HOME": paths.rootHome.path],
+            conjetTool: Self.tool,
+            conjetCoreTool: Self.tool,
+            dockerTool: Self.tool,
+            includeLaunchdEnvironment: false,
+            executor: executor
+        )
+        let app = ConjetAppState(service: service)
+        let container = DockerContainer(
+            id: "api-id",
+            name: "api",
+            image: "alpine:3.20",
+            state: "running",
+            status: "Up 1 minute"
+        )
+
+        await app.containerAction("start", container: container)
+        await app.containerAction("stop", container: container)
+        await app.containerAction("restart", container: container)
+
+        let invocations = await executor.invocations
+        let startInvocation = try XCTUnwrap(invocations.first { $0.displayName == "Start api" })
+        let stopInvocation = try XCTUnwrap(invocations.first { $0.displayName == "Stop api" })
+        let restartInvocation = try XCTUnwrap(invocations.first { $0.displayName == "Restart api" })
+        let dockerHost = "unix://\(paths.dockerSocket.path)"
+
+        XCTAssertEqual(Array(startInvocation.arguments.prefix(4)), ["--host", dockerHost, "start", "api-id"])
+        XCTAssertEqual(Array(stopInvocation.arguments.prefix(4)), ["--host", dockerHost, "stop", "api-id"])
+        XCTAssertEqual(Array(restartInvocation.arguments.prefix(4)), ["--host", dockerHost, "restart", "api-id"])
+        XCTAssertEqual(app.commandLog.prefix(3).map(\.label), ["Restart api", "Stop api", "Start api"])
+        XCTAssertTrue(app.commandLog.prefix(3).allSatisfy(\.succeeded))
     }
 
     @MainActor
@@ -1577,6 +1868,43 @@ private actor RecordingCommandExecutor: CommandExecuting {
     func run(_ invocation: CommandInvocation) async -> ProcessResult {
         recordedInvocations.append(invocation)
         return handler(invocation)
+    }
+}
+
+private actor SlowContainerRefreshExecutor: CommandExecuting {
+    private var recordedInvocations: [CommandInvocation] = []
+
+    var invocations: [CommandInvocation] { recordedInvocations }
+
+    func run(_ invocation: CommandInvocation) async -> ProcessResult {
+        recordedInvocations.append(invocation)
+        if invocation.arguments.contains("ps") {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            return Self.result(invocation, stdout: """
+            {"ID":"api","Names":"api","Image":"alpine:3.20","Command":"\\"sleep 60\\"","CreatedAt":"2026-06-15 10:00:00 +0800 PST","RunningFor":"2 minutes","Ports":"","State":"running","Status":"Up 2 minutes","Size":"0B","Labels":""}
+            """)
+        }
+        if invocation.arguments.contains("images") {
+            return Self.result(invocation, stdout: """
+            {"ID":"sha256:redis","Repository":"redis","Tag":"7.4-alpine","Size":"60MB","CreatedAt":"2026-06-20 09:37:34 +0800 PST","CreatedSince":"11 days ago"}
+            """)
+        }
+        return Self.result(invocation)
+    }
+
+    private static func result(
+        _ invocation: CommandInvocation,
+        exitCode: Int32 = 0,
+        stdout: String = "",
+        stderr: String = ""
+    ) -> ProcessResult {
+        ProcessResult(
+            executable: invocation.executable,
+            arguments: invocation.arguments,
+            exitCode: exitCode,
+            stdout: stdout,
+            stderr: stderr
+        )
     }
 }
 

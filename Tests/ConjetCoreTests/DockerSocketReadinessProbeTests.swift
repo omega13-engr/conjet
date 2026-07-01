@@ -21,26 +21,95 @@ final class DockerSocketReadinessProbeTests: XCTestCase {
         XCTAssertFalse(DockerSocketReadinessProbe(socketPath: server.socketPath).ping(timeoutSeconds: 1))
         XCTAssertNil(server.capturedError())
     }
+
+    func testReadinessRequiresPingVersionAndInfo() throws {
+        let server = try OneShotHTTPUnixSocketServer(responses: [
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
+            #"HTTP/1.1 200 OK\#r\#nContent-Length: 42\#r\#n\#r\#n{"Version":"29.6.1","ApiVersion":"1.52"}"#.httpFixture,
+            #"HTTP/1.1 200 OK\#r\#nContent-Length: 47\#r\#n\#r\#n{"Containers":0,"Images":0,"Driver":"overlay2"}"#.httpFixture
+        ])
+        server.start()
+        try server.waitForSocket()
+
+        XCTAssertTrue(DockerSocketReadinessProbe(socketPath: server.socketPath).isReady(timeoutSeconds: 1))
+        XCTAssertNil(server.capturedError())
+    }
+
+    func testReadinessAcceptsChunkedDockerResponses() throws {
+        let server = try OneShotHTTPUnixSocketServer(responses: [
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
+            Self.chunkedResponse(body: #"{"Version":"29.6.1","ApiVersion":"1.52"}"#),
+            Self.chunkedResponse(body: #"{"Containers":0,"Images":0,"Driver":"overlay2"}"#)
+        ])
+        server.start()
+        try server.waitForSocket()
+
+        XCTAssertTrue(DockerSocketReadinessProbe(socketPath: server.socketPath).isReady(timeoutSeconds: 1))
+        XCTAssertNil(server.capturedError())
+    }
+
+    func testReadinessRejectsContextCanceledVersionPayload() throws {
+        let server = try OneShotHTTPUnixSocketServer(responses: [
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
+            #"HTTP/1.1 500 Internal Server Error\#r\#nContent-Length: 30\#r\#n\#r\#n{"message":"context canceled"}"#.httpFixture
+        ])
+        server.start()
+        try server.waitForSocket()
+
+        XCTAssertFalse(DockerSocketReadinessProbe(socketPath: server.socketPath).isReady(timeoutSeconds: 1))
+        XCTAssertNil(server.capturedError())
+    }
+
+    func testReadinessRejectsNullInfoPayload() throws {
+        let server = try OneShotHTTPUnixSocketServer(responses: [
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
+            #"HTTP/1.1 200 OK\#r\#nContent-Length: 42\#r\#n\#r\#n{"Version":"29.6.1","ApiVersion":"1.52"}"#.httpFixture,
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nnull"
+        ])
+        server.start()
+        try server.waitForSocket()
+
+        XCTAssertFalse(DockerSocketReadinessProbe(socketPath: server.socketPath).isReady(timeoutSeconds: 1))
+        XCTAssertNil(server.capturedError())
+    }
+
+    private static func chunkedResponse(body: String) -> String {
+        let size = String(body.utf8.count, radix: 16)
+        return """
+        HTTP/1.1 200 OK\r
+        Transfer-Encoding: chunked\r
+        Content-Type: application/json\r
+        \r
+        \(size)\r
+        \(body)\r
+        0\r
+        \r
+        """
+    }
 }
 
 private final class OneShotHTTPUnixSocketServer: @unchecked Sendable {
     let socketPath: String
-    private let response: String
+    private let responses: [String]
     private let lock = NSLock()
     private var error: Error?
 
-    init(response: String) throws {
+    convenience init(response: String) throws {
+        try self.init(responses: [response])
+    }
+
+    init(responses: [String]) throws {
         let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
             .appendingPathComponent("cjdp-\(UUID().uuidString.prefix(8))", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         self.socketPath = root.appendingPathComponent("docker.sock").path
-        self.response = response
+        self.responses = responses
     }
 
     func start() {
-        Thread { [socketPath, response] in
+        Thread { [socketPath, responses] in
             do {
-                try runOneShotHTTPUnixSocketServer(socketPath: socketPath, response: response)
+                try runOneShotHTTPUnixSocketServer(socketPath: socketPath, responses: responses)
             } catch {
                 self.lock.lock()
                 self.error = error
@@ -67,7 +136,7 @@ private final class OneShotHTTPUnixSocketServer: @unchecked Sendable {
     }
 }
 
-private func runOneShotHTTPUnixSocketServer(socketPath: String, response: String) throws {
+private func runOneShotHTTPUnixSocketServer(socketPath: String, responses: [String]) throws {
     let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else {
         throw ConjetError.socket("socket() failed")
@@ -82,29 +151,38 @@ private func runOneShotHTTPUnixSocketServer(socketPath: String, response: String
             throw ConjetError.socket("bind(\(socketPath)) failed")
         }
     }
-    guard Darwin.listen(fd, 1) == 0 else {
+    guard Darwin.listen(fd, Int32(max(1, responses.count))) == 0 else {
         throw ConjetError.socket("listen() failed")
     }
-    let clientFD = Darwin.accept(fd, nil, nil)
-    guard clientFD >= 0 else {
-        throw ConjetError.socket("accept() failed")
-    }
-    defer { Darwin.close(clientFD) }
-    var buffer = [UInt8](repeating: 0, count: 1024)
-    _ = Darwin.read(clientFD, &buffer, buffer.count)
-    try Data(response.utf8).withUnsafeBytes { rawBuffer in
-        guard let baseAddress = rawBuffer.baseAddress else { return }
-        var written = 0
-        while written < rawBuffer.count {
-            let count = Darwin.write(clientFD, baseAddress.advanced(by: written), rawBuffer.count - written)
-            if count > 0 {
-                written += count
-            } else if count < 0 && errno == EINTR {
-                continue
-            } else {
-                throw ConjetError.socket("write() failed")
+    for response in responses {
+        let clientFD = Darwin.accept(fd, nil, nil)
+        guard clientFD >= 0 else {
+            throw ConjetError.socket("accept() failed")
+        }
+        defer { Darwin.close(clientFD) }
+        var buffer = [UInt8](repeating: 0, count: 1024)
+        _ = Darwin.read(clientFD, &buffer, buffer.count)
+        try Data(response.utf8).withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var written = 0
+            while written < rawBuffer.count {
+                let count = Darwin.write(clientFD, baseAddress.advanced(by: written), rawBuffer.count - written)
+                if count > 0 {
+                    written += count
+                } else if count < 0 && errno == EINTR {
+                    continue
+                } else {
+                    throw ConjetError.socket("write() failed")
+                }
             }
         }
+    }
+}
+
+private extension String {
+    var httpFixture: String {
+        replacingOccurrences(of: #"\#r"#, with: "\r")
+            .replacingOccurrences(of: #"\#n"#, with: "\n")
     }
 }
 

@@ -534,12 +534,14 @@ enum GuestDockerAPIReadinessProbe {
 
         repeat {
             do {
-                let response = try GuestControlClient(connector: connector, timeoutSeconds: 2)
-                    .requestForDockerAPI(method: "GET", path: "/_ping")
-                if response.statusCode >= 200 && response.statusCode < 300 {
-                    return
-                }
-                lastError = ConjetError.unavailable("Docker API returned HTTP \(response.statusCode) \(response.bodyText)")
+                let client = GuestControlClient(connector: connector, timeoutSeconds: 2)
+                let ping = try client.requestForDockerAPI(method: "GET", path: "/_ping")
+                try validatePing(ping)
+                let version = try client.requestForDockerAPI(method: "GET", path: "/version")
+                try validateDockerJSON(version, requiredFields: ["Version", "ApiVersion"])
+                let info = try client.requestForDockerAPI(method: "GET", path: "/info")
+                try validateDockerJSON(info, requiredFields: ["Containers", "Driver"])
+                return
             } catch {
                 lastError = error
             }
@@ -550,6 +552,29 @@ enum GuestDockerAPIReadinessProbe {
             throw ConjetError.unavailable("timed out waiting for guest Docker API readiness: \(lastError)")
         }
         throw ConjetError.unavailable("timed out waiting for guest Docker API readiness")
+    }
+
+    private static func validatePing(_ response: GuestControlHTTPResponse) throws {
+        let body = response.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard response.statusCode == 200, body == "OK" else {
+            throw ConjetError.unavailable("Docker API ping returned HTTP \(response.statusCode) \(response.bodyText)")
+        }
+    }
+
+    private static func validateDockerJSON(
+        _ response: GuestControlHTTPResponse,
+        requiredFields: [String]
+    ) throws {
+        let body = response.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (200..<300).contains(response.statusCode) else {
+            throw ConjetError.unavailable("Docker API returned HTTP \(response.statusCode) \(response.bodyText)")
+        }
+        guard body.hasPrefix("{"), body != "null", !body.contains(#""message""#) else {
+            throw ConjetError.unavailable("Docker API readiness payload is not healthy: \(body)")
+        }
+        guard requiredFields.allSatisfy({ body.contains(#""\#($0)""#) }) else {
+            throw ConjetError.unavailable("Docker API readiness payload is missing required fields: \(body)")
+        }
     }
 }
 

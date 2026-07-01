@@ -746,10 +746,6 @@ private final class DaemonDockerEventAdapter: @unchecked Sendable {
             lock.unlock()
             return
         }
-        guard FileManager.default.fileExists(atPath: socketPath) else {
-            lock.unlock()
-            return
-        }
         running = true
         let thread = Thread { [weak self] in
             self?.eventLoop()
@@ -779,11 +775,17 @@ private final class DaemonDockerEventAdapter: @unchecked Sendable {
             lock.unlock()
         }
 
-        while isRunning(), FileManager.default.fileExists(atPath: socketPath) {
+        while isRunning() {
+            guard FileManager.default.fileExists(atPath: socketPath) else {
+                Thread.sleep(forTimeInterval: reconnectDelay)
+                reconnectDelay = min(reconnectDelay * 2, maxReconnectDelaySeconds)
+                continue
+            }
+
             let connected = autoreleasepool {
                 runDockerEventStream()
             }
-            if isRunning(), FileManager.default.fileExists(atPath: socketPath) {
+            if isRunning() {
                 let delay = connected ? reconnectDelaySeconds : reconnectDelay
                 Thread.sleep(forTimeInterval: delay)
                 reconnectDelay = connected ? reconnectDelaySeconds : min(reconnectDelay * 2, maxReconnectDelaySeconds)
