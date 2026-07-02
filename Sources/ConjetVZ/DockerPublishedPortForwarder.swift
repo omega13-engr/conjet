@@ -1816,6 +1816,24 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         proto: ConjetPortProtocol,
         error: Error
     ) -> (state: ConjetPortForwardState, message: String) {
+        if let privilegedError = error as? PrivilegedHostPortBindError {
+            if privilegedError.posixCode == EADDRINUSE {
+                return (
+                    .failedAddressInUse,
+                    "Port \(port)/\(proto.rawValue) cannot be published on \(bindAddress) because it is already in use. Suggested fix: stop the process using the port or change your Compose port mapping. Detail: \(privilegedError)"
+                )
+            }
+            if privilegedError.posixCode == EADDRNOTAVAIL {
+                return (
+                    .failedAddressUnavailable,
+                    "Port \(port)/\(proto.rawValue) cannot be published because bind address \(bindAddress) is not available on this Mac. Suggested fix: use localhost, 0.0.0.0, or a configured interface address. Detail: \(privilegedError)"
+                )
+            }
+            return (
+                .requiresPrivilegedHelper,
+                "Port \(port)/\(proto.rawValue) on \(bindAddress) requires the Conjet privileged port helper. Suggested fix: approve the helper with a cached sudo session or install the packaged Conjet helper. Detail: \(privilegedError)"
+            )
+        }
         if let bindError = error as? HostPortBindError {
             switch bindError.posixCode {
             case EACCES, EPERM:
@@ -3297,7 +3315,7 @@ private func readAllForDockerAPI(from fd: Int32, maxBytes: Int) -> Data {
 }
 
 private func makeTCPListener(bindAddress: String, port: Int) throws -> Int32 {
-    try DirectHostPortBinder.shared.bind(HostPortBindRequest(
+    try DefaultHostPortBinder.shared.bind(HostPortBindRequest(
         bindAddress: bindAddress,
         port: port,
         socketType: SOCK_STREAM,
@@ -3306,7 +3324,7 @@ private func makeTCPListener(bindAddress: String, port: Int) throws -> Int32 {
 }
 
 private func makeUDPListener(bindAddress: String, port: Int) throws -> Int32 {
-    try DirectHostPortBinder.shared.bind(HostPortBindRequest(
+    try DefaultHostPortBinder.shared.bind(HostPortBindRequest(
         bindAddress: bindAddress,
         port: port,
         socketType: SOCK_DGRAM,
@@ -3327,6 +3345,30 @@ private struct BoundHostPortSocket {
 
 private protocol HostPortBinder {
     func bind(_ request: HostPortBindRequest) throws -> BoundHostPortSocket
+}
+
+private struct DefaultHostPortBinder: HostPortBinder {
+    static let shared = DefaultHostPortBinder()
+
+    func bind(_ request: HostPortBindRequest) throws -> BoundHostPortSocket {
+        do {
+            return try DirectHostPortBinder.shared.bind(request)
+        } catch {
+            guard shouldUsePrivilegedHelper(for: request, after: error) else {
+                throw error
+            }
+            return try PrivilegedHostPortBinder.shared.bind(request)
+        }
+    }
+
+    private func shouldUsePrivilegedHelper(
+        for request: HostPortBindRequest,
+        after error: Error
+    ) -> Bool {
+        guard request.port > 0, request.port < 1024 else { return false }
+        guard let bindError = error as? HostPortBindError else { return false }
+        return bindError.posixCode == EACCES || bindError.posixCode == EPERM
+    }
 }
 
 private struct DirectHostPortBinder: HostPortBinder {
@@ -3350,6 +3392,252 @@ private struct DirectHostPortBinder: HostPortBinder {
             )
         }
         return BoundHostPortSocket(fileDescriptor: fd)
+    }
+}
+
+private struct PrivilegedHostPortBindError: Error, CustomStringConvertible {
+    var address: String
+    var port: Int
+    var proto: ConjetPortProtocol
+    var posixCode: Int32?
+    var detail: String
+
+    var description: String {
+        if let posixCode, posixCode > 0 {
+            return "privileged bind helper failed for \(address):\(port)/\(proto.rawValue): \(String(cString: strerror(posixCode))) (\(detail))"
+        }
+        return "privileged bind helper failed for \(address):\(port)/\(proto.rawValue): \(detail)"
+    }
+}
+
+private struct PrivilegedHostPortBinder: HostPortBinder {
+    static let shared = PrivilegedHostPortBinder()
+    private let acceptTimeoutMilliseconds: Int32 = 3_000
+
+    func bind(_ request: HostPortBindRequest) throws -> BoundHostPortSocket {
+        guard let helperPath = helperExecutablePath() else {
+            throw PrivilegedHostPortBindError(
+                address: request.bindAddress,
+                port: request.port,
+                proto: request.proto,
+                posixCode: nil,
+                detail: "conjet-port-helper was not found; set CONJET_PORT_HELPER_PATH or use a packaged Conjet build"
+            )
+        }
+
+        let token = UUID().uuidString
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("conjet-port-helper-\(UUID().uuidString)", isDirectory: true)
+        let socketURL = directory.appendingPathComponent("helper.sock")
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer {
+            unlink(socketURL.path)
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let listenFD = try makeCallbackSocket(path: socketURL.path)
+        defer { Darwin.close(listenFD) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        process.arguments = [
+            "-n",
+            helperPath,
+            "bind",
+            "--socket", socketURL.path,
+            "--token", token,
+            "--address", request.bindAddress,
+            "--port", "\(request.port)",
+            "--proto", request.proto.rawValue
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        let stderr = Pipe()
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            throw PrivilegedHostPortBindError(
+                address: request.bindAddress,
+                port: request.port,
+                proto: request.proto,
+                posixCode: nil,
+                detail: "failed to launch sudo helper: \(error)"
+            )
+        }
+
+        do {
+            let clientFD = try acceptCallbackConnection(
+                listenFD: listenFD,
+                process: process,
+                timeoutMilliseconds: acceptTimeoutMilliseconds
+            )
+            defer { Darwin.close(clientFD) }
+
+            let received = try UnixFileDescriptorPassing.receive(from: clientFD)
+            process.waitUntilExit()
+            let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return try validateHelperResponse(
+                received,
+                expectedToken: token,
+                request: request,
+                processExitCode: process.terminationStatus,
+                stderr: stderrText
+            )
+        } catch {
+            if process.isRunning {
+                process.terminate()
+            }
+            process.waitUntilExit()
+            let stderrText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let error = error as? PrivilegedHostPortBindError {
+                throw error
+            }
+            throw PrivilegedHostPortBindError(
+                address: request.bindAddress,
+                port: request.port,
+                proto: request.proto,
+                posixCode: nil,
+                detail: "\(error)\(stderrText.isEmpty ? "" : "; \(stderrText)")"
+            )
+        }
+    }
+
+    private func validateHelperResponse(
+        _ response: (fileDescriptor: Int32?, payload: Data),
+        expectedToken: String,
+        request: HostPortBindRequest,
+        processExitCode: Int32,
+        stderr: String
+    ) throws -> BoundHostPortSocket {
+        let text = String(data: response.payload, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let parts = text.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 2, parts[1] == expectedToken else {
+            if let fileDescriptor = response.fileDescriptor {
+                Darwin.close(fileDescriptor)
+            }
+            throw PrivilegedHostPortBindError(
+                address: request.bindAddress,
+                port: request.port,
+                proto: request.proto,
+                posixCode: nil,
+                detail: "helper returned an invalid authentication token"
+            )
+        }
+
+        if parts[0] == "OK", let fd = response.fileDescriptor {
+            return BoundHostPortSocket(fileDescriptor: fd)
+        }
+
+        if let fileDescriptor = response.fileDescriptor {
+            Darwin.close(fileDescriptor)
+        }
+        let posixCode = parts.count >= 3 ? Int32(parts[2]) : nil
+        let helperMessage = parts.count >= 4 ? parts[3] : "helper exited with \(processExitCode)"
+        throw PrivilegedHostPortBindError(
+            address: request.bindAddress,
+            port: request.port,
+            proto: request.proto,
+            posixCode: posixCode == 0 ? nil : posixCode,
+            detail: "\(helperMessage)\(stderr.isEmpty ? "" : "; \(stderr)")"
+        )
+    }
+
+    private func makeCallbackSocket(path: String) throws -> Int32 {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw ConjetError.socket("socket(AF_UNIX) failed: \(lastErrnoForPortProxy())")
+        }
+        do {
+            unlink(path)
+            try withPortHelperUnixSocketAddress(path: path) { address, length in
+                guard Darwin.bind(fd, address, length) == 0 else {
+                    throw ConjetError.socket("bind(\(path)) failed: \(lastErrnoForPortProxy())")
+                }
+            }
+            guard Darwin.listen(fd, 1) == 0 else {
+                throw ConjetError.socket("listen(\(path)) failed: \(lastErrnoForPortProxy())")
+            }
+            return fd
+        } catch {
+            Darwin.close(fd)
+            unlink(path)
+            throw error
+        }
+    }
+
+    private func acceptCallbackConnection(
+        listenFD: Int32,
+        process: Process,
+        timeoutMilliseconds: Int32
+    ) throws -> Int32 {
+        let deadline = Date().addingTimeInterval(Double(timeoutMilliseconds) / 1000.0)
+        while Date() < deadline {
+            if !process.isRunning {
+                throw ConjetError.unavailable("privileged helper exited before callback")
+            }
+            var descriptor = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
+            let remainingMilliseconds = max(1, Int32(deadline.timeIntervalSinceNow * 1000))
+            let pollResult = Darwin.poll(&descriptor, 1, min(50, remainingMilliseconds))
+            if pollResult < 0, errno == EINTR {
+                continue
+            }
+            guard pollResult >= 0 else {
+                throw ConjetError.socket("poll(helper callback) failed: \(lastErrnoForPortProxy())")
+            }
+            if pollResult > 0, (descriptor.revents & Int16(POLLIN)) != 0 {
+                let clientFD = Darwin.accept(listenFD, nil, nil)
+                guard clientFD >= 0 else {
+                    throw ConjetError.socket("accept(helper callback) failed: \(lastErrnoForPortProxy())")
+                }
+                return clientFD
+            }
+        }
+        throw ConjetError.unavailable("timed out waiting for privileged helper callback")
+    }
+
+    private func helperExecutablePath() -> String? {
+        let manager = FileManager.default
+        let environment = ProcessInfo.processInfo.environment
+        var candidates: [URL] = []
+        if let override = environment["CONJET_PORT_HELPER_PATH"], !override.isEmpty {
+            let path = URL(fileURLWithPath: override).standardizedFileURL.path
+            return manager.isExecutableFile(atPath: path) ? path : nil
+        }
+        if let resourceURL = Bundle.main.resourceURL {
+            candidates.append(resourceURL.appendingPathComponent("ConjetTools/conjet-port-helper"))
+            candidates.append(resourceURL.appendingPathComponent("conjet-port-helper"))
+        }
+        if let executableURL = Bundle.main.executableURL {
+            let directory = executableURL.deletingLastPathComponent()
+            candidates.append(directory.appendingPathComponent("conjet-port-helper"))
+            candidates.append(directory.deletingLastPathComponent().appendingPathComponent("ConjetTools/conjet-port-helper"))
+        }
+        if let argument0 = ProcessInfo.processInfo.arguments.first, !argument0.isEmpty {
+            let executableURL = URL(fileURLWithPath: argument0)
+            candidates.append(executableURL.deletingLastPathComponent().appendingPathComponent("conjet-port-helper"))
+        }
+        candidates.append(URL(fileURLWithPath: "/opt/homebrew/opt/conjet/Applications/Conjet.app/Contents/Resources/ConjetTools/conjet-port-helper"))
+        candidates.append(URL(fileURLWithPath: "/usr/local/opt/conjet/Applications/Conjet.app/Contents/Resources/ConjetTools/conjet-port-helper"))
+        candidates.append(URL(fileURLWithPath: "/Applications/Conjet.app/Contents/Resources/ConjetTools/conjet-port-helper"))
+
+        var seen = Set<String>()
+        for candidate in candidates {
+            let path = candidate.standardizedFileURL.path
+            guard !seen.contains(path) else { continue }
+            seen.insert(path)
+            if manager.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        return nil
     }
 }
 
@@ -3746,6 +4034,29 @@ private extension Data {
 private extension UInt8 {
     var isASCIIWhitespace: Bool {
         self == 9 || self == 10 || self == 13 || self == 32
+    }
+}
+
+private func withPortHelperUnixSocketAddress<Result>(
+    path: String,
+    _ body: (UnsafePointer<sockaddr>, socklen_t) throws -> Result
+) throws -> Result {
+    var address = sockaddr_un()
+    address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+    address.sun_family = sa_family_t(AF_UNIX)
+    let maxPathLength = MemoryLayout.size(ofValue: address.sun_path)
+    guard path.utf8CString.count <= maxPathLength else {
+        throw ConjetError.socket("Unix socket path is too long: \(path)")
+    }
+    _ = withUnsafeMutablePointer(to: &address.sun_path) { pointer in
+        path.utf8CString.withUnsafeBufferPointer { buffer in
+            memcpy(pointer, buffer.baseAddress!, buffer.count)
+        }
+    }
+    return try withUnsafePointer(to: &address) { pointer in
+        try pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+            try body(socketAddress, socklen_t(MemoryLayout<sockaddr_un>.size))
+        }
     }
 }
 

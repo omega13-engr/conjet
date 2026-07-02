@@ -2941,7 +2941,7 @@ struct ConjetCLI {
         case .reservedWaitingForTarget, .failedNoRoutableTarget:
             return "verify the container is running on Docker bridge networking, then run conjet network repair if the target does not appear."
         case .requiresPrivilegedHelper:
-            return "approve and install the Conjet privileged port helper, or publish a non-privileged host port such as 8080."
+            return "authorize the Conjet privileged port helper with cached sudo or use a packaged helper, or publish a non-privileged host port such as 8080."
         case .failedPermission:
             return "verify macOS permissions for the bind address or publish a different host port."
         case .failedAddressInUse, .failedConflict:

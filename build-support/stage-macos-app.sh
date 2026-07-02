@@ -99,6 +99,7 @@ HELPER_VMM_TOOLS="$HELPER_TOOLS/ConjetCoreVMM"
 HELPER_BINARY="$HELPER_MACOS/$HELPER_NAME"
 HELPER_INFO_PLIST="$HELPER_CONTENTS/Info.plist"
 DAEMON_BINARY_NAME="conjetd"
+PORT_HELPER_BINARY_NAME="conjet-port-helper"
 VMM_BINARY_NAME="Conjet Core"
 
 if [ ! -f "$ENTITLEMENTS" ]; then
@@ -116,6 +117,7 @@ fi
 swift build "${swift_build_args[@]}" --product "$PRODUCT_NAME"
 swift build "${swift_build_args[@]}" --product conjet
 swift build "${swift_build_args[@]}" --product "$DAEMON_BINARY_NAME"
+swift build "${swift_build_args[@]}" --product "$PORT_HELPER_BINARY_NAME"
 BUILD_DIR="$(swift build "${swift_build_args[@]}" --show-bin-path)"
 if [ -f "$ROOT_DIR/jetstream/Cargo.toml" ]; then
   command -v cargo >/dev/null 2>&1 || {
@@ -131,9 +133,11 @@ mkdir -p "$APP_MACOS" "$APP_TOOLS" "$HELPER_MACOS" "$HELPER_TOOLS"
 /usr/bin/ditto "$BUILD_DIR/$PRODUCT_NAME" "$APP_BINARY"
 /usr/bin/ditto "$BUILD_DIR/conjet" "$APP_TOOLS/conjet"
 /usr/bin/ditto "$BUILD_DIR/$DAEMON_BINARY_NAME" "$APP_TOOLS/$DAEMON_BINARY_NAME"
+/usr/bin/ditto "$BUILD_DIR/$PORT_HELPER_BINARY_NAME" "$APP_TOOLS/$PORT_HELPER_BINARY_NAME"
 /usr/bin/ditto "$BUILD_DIR/$PRODUCT_NAME" "$HELPER_BINARY"
 /usr/bin/ditto "$BUILD_DIR/conjet" "$HELPER_TOOLS/conjet"
 /usr/bin/ditto "$BUILD_DIR/$DAEMON_BINARY_NAME" "$HELPER_TOOLS/$DAEMON_BINARY_NAME"
+/usr/bin/ditto "$BUILD_DIR/$PORT_HELPER_BINARY_NAME" "$HELPER_TOOLS/$PORT_HELPER_BINARY_NAME"
 if [ -x "$ROOT_DIR/target/release/jetstream" ]; then
   mkdir -p "$APP_VMM_TOOLS" "$HELPER_VMM_TOOLS"
   /usr/bin/ditto "$ROOT_DIR/target/release/jetstream" "$APP_VMM_TOOLS/$VMM_BINARY_NAME"
@@ -144,7 +148,7 @@ fi
 /usr/bin/ditto "$ROOT_DIR/Sources/ConjetApp/Resources/MenuBarIcon.png" "$APP_RESOURCES/MenuBarIcon.png"
 /usr/bin/ditto "$ROOT_DIR/Sources/ConjetApp/Resources/AppIcon.icns" "$HELPER_RESOURCES/AppIcon.icns"
 /usr/bin/ditto "$ROOT_DIR/Sources/ConjetApp/Resources/MenuBarIcon.png" "$HELPER_RESOURCES/MenuBarIcon.png"
-chmod +x "$APP_BINARY" "$APP_TOOLS/conjet" "$APP_TOOLS/$DAEMON_BINARY_NAME" "$HELPER_BINARY" "$HELPER_TOOLS/conjet" "$HELPER_TOOLS/$DAEMON_BINARY_NAME"
+chmod +x "$APP_BINARY" "$APP_TOOLS/conjet" "$APP_TOOLS/$DAEMON_BINARY_NAME" "$APP_TOOLS/$PORT_HELPER_BINARY_NAME" "$HELPER_BINARY" "$HELPER_TOOLS/conjet" "$HELPER_TOOLS/$DAEMON_BINARY_NAME" "$HELPER_TOOLS/$PORT_HELPER_BINARY_NAME"
 if [ -x "$APP_VMM_TOOLS/$VMM_BINARY_NAME" ]; then
   chmod +x "$APP_VMM_TOOLS/$VMM_BINARY_NAME" "$HELPER_VMM_TOOLS/$VMM_BINARY_NAME"
 fi
@@ -254,6 +258,7 @@ codesign_plain() {
 
 codesign_tool "$HELPER_TOOLS/conjet"
 codesign_tool "$HELPER_TOOLS/$DAEMON_BINARY_NAME"
+codesign_tool "$HELPER_TOOLS/$PORT_HELPER_BINARY_NAME"
 if [ -x "$HELPER_VMM_TOOLS/$VMM_BINARY_NAME" ]; then
   codesign_tool "$HELPER_VMM_TOOLS/$VMM_BINARY_NAME"
 fi
@@ -261,6 +266,7 @@ codesign_plain "$HELPER_BINARY"
 codesign_plain "$HELPER_BUNDLE"
 codesign_tool "$APP_TOOLS/conjet"
 codesign_tool "$APP_TOOLS/$DAEMON_BINARY_NAME"
+codesign_tool "$APP_TOOLS/$PORT_HELPER_BINARY_NAME"
 if [ -x "$APP_VMM_TOOLS/$VMM_BINARY_NAME" ]; then
   codesign_tool "$APP_VMM_TOOLS/$VMM_BINARY_NAME"
 fi

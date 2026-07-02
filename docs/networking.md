@@ -60,6 +60,34 @@ If the active guest image is older, Conjet does not create fake UDP listeners.
 The port state is reported as `failed_guest_capability`, and `conjet network
 status` shows the missing capability.
 
+## Privileged Ports
+
+Ports below 1024, including 80 and 443, require macOS privilege to bind. Conjet
+first attempts the normal host bind. If macOS returns `EACCES` or `EPERM`,
+Conjet invokes the bundled `conjet-port-helper` through non-interactive
+`sudo -n`, receives the already-bound socket over a private Unix socket, and
+continues proxying traffic in `conjetd`.
+
+If no cached sudo authorization or packaged helper is available, the forward is
+reported as `requires_privileged_helper`. Conjet does not block the daemon on an
+interactive password prompt, and it does not claim the low port is reachable
+until the helper returns a bound socket.
+
+## Live Published-Port QA
+
+Use the live QA harness after starting the Conjet build you want to validate:
+
+```sh
+build-support/qa-published-ports-e2e.sh \
+  --docker-host "unix://$CONJET_HOME/run/docker.sock" \
+  --conjet .build/debug/conjet
+```
+
+The harness runs Docker `run -p`, Docker Compose `ports`, localhost readiness
+checks, parallel HTTP stress, and `conjet port diagnose` evidence. Add
+`--include-low-ports` only when a cached sudo session is available and localhost
+ports 80 and 443 may be occupied briefly for helper validation.
+
 ## Proxy And Bridge Path
 
 ConjetNet can run either the measured fast-path DispatchSource listener or the

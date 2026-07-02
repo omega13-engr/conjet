@@ -890,6 +890,44 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertTrue(forwarder.listenerPortsForTesting().contains(hostPort))
     }
 
+    func testPrivilegedTCPPortReportsHelperRequiredWhenHelperIsUnavailable() throws {
+        let lowPort = 81
+        guard directLowPortBindNeedsPrivilege(port: lowPort) else {
+            throw XCTSkip("low TCP port \(lowPort) is bindable or already unavailable on this host")
+        }
+
+        let previousHelper = getenv("CONJET_PORT_HELPER_PATH").map { String(cString: $0) }
+        setenv("CONJET_PORT_HELPER_PATH", "/nonexistent/conjet-port-helper", 1)
+        defer {
+            if let previousHelper {
+                setenv("CONJET_PORT_HELPER_PATH", previousHelper, 1)
+            } else {
+                unsetenv("CONJET_PORT_HELPER_PATH")
+            }
+        }
+
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: UnavailableGuestConnectionConnector()
+        )
+        defer { forwarder.stop() }
+
+        forwarder.reconcileForTesting([
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: lowPort,
+                containerPort: 80,
+                protocol: .tcp,
+                containerName: "web"
+            )
+        ])
+
+        let status = forwarder.status()
+        XCTAssertEqual(status.activeTCPForwards, 0)
+        XCTAssertEqual(status.forwards.first?.state, .requiresPrivilegedHelper)
+        XCTAssertTrue(status.forwards.first?.error?.contains("conjet-port-helper was not found") == true)
+    }
+
     func testTargetedReconcilePrunesContainerWhenInspectReportsNoSuchContainer() throws {
         let socketURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("conjet-docker-\(UUID().uuidString).sock")
@@ -1247,6 +1285,158 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         XCTAssertEqual(forwarder.status().tcpMode, "persistent-binary-tcp-pool")
     }
 
+    func testNativeTCPContainerTargetDoesNotResetLargeHTTPResponseOnClose() throws {
+        let hostPort = try reserveLoopbackPort()
+        let connector = BinaryTCPEchoConnector()
+        let body = String(repeating: "network-ok\n", count: 16_384)
+
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: "/tmp/missing-\(UUID().uuidString).sock",
+            connector: connector,
+            capabilities: nativeTCPCapabilities()
+        )
+        defer { forwarder.stop() }
+
+        forwarder.reconcileForTesting([
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: hostPort,
+                containerPort: 63002,
+                protocol: .tcp,
+                containerName: "api",
+                targetIP: "172.18.0.4"
+            )
+        ])
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+
+        let fd = try connectLoopback(port: hostPort)
+        let request = """
+        GET /large HTTP/1.1\r
+        Host: 127.0.0.1:\(hostPort)\r
+        User-Agent: curl/8.7.1\r
+        Accept: */*\r
+        \r
+
+        """
+        XCTAssertTrue(writeAllTestBytes(Data(request.utf8), to: fd))
+        let responseText = String(data: readAllTestBytes(from: fd), encoding: .utf8) ?? ""
+        Darwin.close(fd)
+
+        XCTAssertTrue(responseText.contains("HTTP/1.1 200 OK"), String(responseText.prefix(200)))
+        XCTAssertTrue(responseText.hasSuffix(body), "response length=\(responseText.utf8.count)")
+        XCTAssertTrue(waitUntil { connector.openTargets.contains("172.18.0.4:63002") })
+        let expectedBytesOut = UInt64(Data(responseText.utf8).count)
+        XCTAssertTrue(waitUntil {
+            forwarder.status().forwards.first?.bytesOut == expectedBytesOut
+        })
+    }
+
+    func testLiveNativeTCPForwarderAgainstConjetDockerSocketWhenEnabled() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let socketPath = environment["CONJET_LIVE_DOCKER_SOCKET"], !socketPath.isEmpty else {
+            throw XCTSkip("set CONJET_LIVE_DOCKER_SOCKET to run live Conjet Docker bridge QA")
+        }
+        guard FileManager.default.fileExists(atPath: socketPath) else {
+            throw XCTSkip("CONJET_LIVE_DOCKER_SOCKET does not exist: \(socketPath)")
+        }
+
+        let connector = UnixSocketGuestConnectionConnector(socketPath: socketPath, timeoutSeconds: 3)
+        let capabilities = GuestBridgeCapabilityProbe.capabilities(connector: connector, timeoutSeconds: 2)
+        guard capabilities.tcpProxy,
+              capabilities.binaryFrames,
+              capabilities.tcpBinaryFrames,
+              capabilities.persistentTCPVsock,
+              capabilities.tcpVsockPool else {
+            throw XCTSkip("live bridge does not advertise native TCP binary pool capabilities: \(capabilities)")
+        }
+
+        let dockerHost = "unix://\(socketPath)"
+        let hostPort = try reserveLoopbackPort()
+        let containerName = "codex-live-native-\(UUID().uuidString.prefix(8))"
+        let run = try ProcessRunner.run("/usr/bin/env", [
+            "docker", "--host", dockerHost,
+            "run", "--rm", "-d",
+            "--name", containerName,
+            "python:3.12-alpine",
+            "python", "-u", "-m", "http.server", "8000"
+        ], timeoutSeconds: 90)
+        guard run.succeeded else {
+            throw XCTSkip("live Docker run failed: \(run.stderr)")
+        }
+        defer {
+            _ = try? ProcessRunner.run("/usr/bin/env", [
+                "docker", "--host", dockerHost, "rm", "-f", containerName
+            ], timeoutSeconds: 30)
+        }
+
+        XCTAssertTrue(waitUntil(timeoutSeconds: 45, intervalSeconds: 0.5) {
+            guard let exec = try? ProcessRunner.run("/usr/bin/env", [
+                "docker", "--host", dockerHost,
+                "exec", containerName,
+                "python", "-c",
+                "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/', timeout=2).status)"
+            ], timeoutSeconds: 5) else {
+                return false
+            }
+            return exec.succeeded && exec.stdout.contains("200")
+        }, "container HTTP service did not become ready")
+
+        let inspect = try ProcessRunner.run("/usr/bin/env", [
+            "docker", "--host", dockerHost,
+            "inspect", "-f", "{{.Id}} {{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            containerName
+        ], timeoutSeconds: 30)
+        XCTAssertTrue(inspect.succeeded, inspect.stderr)
+        let inspectParts = inspect.stdout.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        XCTAssertGreaterThanOrEqual(inspectParts.count, 2, inspect.stdout)
+        let containerID = String(inspectParts[0])
+        let targetIP = String(inspectParts[1])
+        XCTAssertFalse(targetIP.isEmpty)
+
+        let forwarder = DockerPublishedPortForwarder(
+            socketPath: socketPath,
+            connector: connector,
+            capabilities: capabilities.conjetNetworkCapabilities
+        )
+        defer { forwarder.stop() }
+
+        forwarder.reconcileForTesting([
+            DockerPublishedPort(
+                hostIP: "127.0.0.1",
+                hostPort: hostPort,
+                containerPort: 8000,
+                protocol: .tcp,
+                containerID: containerID,
+                containerName: containerName,
+                targetIP: targetIP
+            )
+        ])
+        XCTAssertTrue(waitUntil { forwarder.listenerPortsForTesting().contains(hostPort) })
+
+        var responseText = ""
+        XCTAssertTrue(waitUntil(timeoutSeconds: 30, intervalSeconds: 0.25) {
+            guard let response = try? requestLoopbackHTTP(port: hostPort) else {
+                return false
+            }
+            responseText = response
+            return response.contains("HTTP/1.0 200 OK") || response.contains("HTTP/1.1 200 OK")
+        }, "loopback response never succeeded; last response: \(responseText); status: \(forwarder.status())")
+        XCTAssertTrue(responseText.contains("Directory listing for /") || responseText.contains("<html"), responseText)
+
+        for attempt in 0..<20 {
+            let response = try requestLoopbackHTTP(port: hostPort)
+            XCTAssertTrue(
+                response.contains("HTTP/1.0 200 OK") || response.contains("HTTP/1.1 200 OK"),
+                "attempt \(attempt) failed: \(response)"
+            )
+        }
+
+        let status = forwarder.status()
+        XCTAssertEqual(status.tcpMode, "persistent-binary-tcp-pool")
+        XCTAssertEqual(status.forwards.first?.state, .listening)
+        XCTAssertEqual(status.forwards.first?.connectionErrors, 0)
+    }
+
     func testMixedPublishedPortsStressAcrossTCPUDPAndBindKinds() throws {
         let connector = MixedTextProxyConnector()
         let forwarder = DockerPublishedPortForwarder(
@@ -1444,6 +1634,29 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
         return Int(UInt16(bigEndian: bound.sin_port))
     }
 
+    private func directLowPortBindNeedsPrivilege(port: Int) -> Bool {
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+
+        var enabled: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(port).bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.bind(fd, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if result == 0 {
+            return false
+        }
+        return errno == EACCES || errno == EPERM
+    }
+
     private func reserveUDPPort() throws -> Int {
         let fd = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
         XCTAssertGreaterThanOrEqual(fd, 0)
@@ -1494,6 +1707,23 @@ final class DockerPublishedPortForwarderTests: XCTestCase {
             Darwin.close(fd)
             throw error
         }
+    }
+
+    private func requestLoopbackHTTP(port: Int) throws -> String {
+        let fd = try connectLoopback(port: port)
+        defer { Darwin.close(fd) }
+        let request = """
+        GET / HTTP/1.1\r
+        Host: 127.0.0.1:\(port)\r
+        User-Agent: conjet-live-forwarder-test\r
+        Accept: */*\r
+        Connection: close\r
+        \r
+
+        """
+        XCTAssertTrue(writeAllTestBytes(Data(request.utf8), to: fd))
+        Darwin.shutdown(fd, SHUT_WR)
+        return String(data: readAllTestBytes(from: fd), encoding: .utf8) ?? ""
     }
 
     private func sendUDPDatagram(_ payload: Data, to port: Int) throws -> Data {
@@ -2080,6 +2310,17 @@ private final class BinaryTCPEchoConnector: GuestConnectionConnector, @unchecked
                     let shouldClose: Bool
                     if text.hasPrefix("GET /ready ") {
                         let body = "ready"
+                        responsePayload = Data("""
+                        HTTP/1.1 200 OK\r
+                        Content-Type: text/plain\r
+                        Content-Length: \(Data(body.utf8).count)\r
+                        Connection: close\r
+                        \r
+                        \(body)
+                        """.utf8)
+                        shouldClose = true
+                    } else if text.hasPrefix("GET /large ") {
+                        let body = String(repeating: "network-ok\n", count: 16_384)
                         responsePayload = Data("""
                         HTTP/1.1 200 OK\r
                         Content-Type: text/plain\r

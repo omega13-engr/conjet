@@ -270,7 +270,7 @@ final class NativeTCPBridgeConnection: @unchecked Sendable {
                         Darwin.shutdown(clientFD, SHUT_WR)
                     case .tcpClose:
                         state.markFinished()
-                        Darwin.shutdown(clientFD, SHUT_RDWR)
+                        Darwin.shutdown(clientFD, SHUT_WR)
                         return
                     case .tcpError:
                         if !state.hasTargetBytes {

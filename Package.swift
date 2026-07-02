@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .executable(name: "conjet", targets: ["ConjetCLI"]),
         .executable(name: "conjetd", targets: ["ConjetDaemon"]),
+        .executable(name: "conjet-port-helper", targets: ["ConjetPortHelper"]),
         .executable(name: "Conjet Core", targets: ["ConjetDaemon"]),
         .executable(name: "ConjetApp", targets: ["ConjetApp"]),
         .library(name: "ConjetAppCore", targets: ["ConjetAppCore"]),
@@ -53,6 +54,10 @@ let package = Package(
         .executableTarget(
             name: "ConjetDaemon",
             dependencies: ["ConjetCore", "ConjetPower", "ConjetVZ"]
+        ),
+        .executableTarget(
+            name: "ConjetPortHelper",
+            dependencies: ["ConjetCore"]
         ),
         .target(
             name: "ConjetAppCore",

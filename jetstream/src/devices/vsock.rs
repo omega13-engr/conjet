@@ -31,6 +31,7 @@ const DEFAULT_BUF_ALLOC: u32 = 4 * 1024 * 1024;
 const DEFAULT_GUEST_BUF_ALLOC: u64 = 256 * 1024;
 const MAX_HOST_PAYLOAD: usize = 32 * 1024;
 const SHUTDOWN_SEND: u32 = 2;
+const CONJET_BINARY_FRAME_MAGIC: [u8; 4] = [0x43, 0x4a, 0x4e, 0x54];
 
 #[derive(Debug, Error)]
 pub enum VsockError {
@@ -515,12 +516,16 @@ impl HostUnixVsockBridgeState {
                 }
                 Ok(count) => {
                     buf.truncate(count);
-                    self.docker_request_bytes =
-                        self.docker_request_bytes.saturating_add(count as u64);
-                    if self.detect_docker_phases {
+                    stream.observe_host_protocol(&buf);
+                    if !stream.binary_frame_stream {
+                        self.docker_request_bytes =
+                            self.docker_request_bytes.saturating_add(count as u64);
+                    }
+                    if self.detect_docker_phases && !stream.binary_frame_stream {
                         stream.detect_docker_workload_request(&buf);
                     }
-                    let request_complete = stream.observe_host_request_bytes(&buf);
+                    let request_complete =
+                        !stream.binary_frame_stream && stream.observe_host_request_bytes(&buf);
                     stream.bytes_sent_to_guest =
                         stream.bytes_sent_to_guest.wrapping_add(count as u64);
                     let fwd_cnt = stream.forward_count();
@@ -582,10 +587,12 @@ impl HostUnixVsockBridgeState {
             OP_RW => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
                     stream.update_guest_credit(&packet);
-                    self.docker_response_bytes = self
-                        .docker_response_bytes
-                        .saturating_add(packet.payload.len() as u64);
-                    if self.detect_docker_phases {
+                    if !stream.binary_frame_stream {
+                        self.docker_response_bytes = self
+                            .docker_response_bytes
+                            .saturating_add(packet.payload.len() as u64);
+                    }
+                    if self.detect_docker_phases && !stream.binary_frame_stream {
                         let phases = stream.detect_docker_response_phase_events(&packet.payload);
                         if phases > 0 {
                             stream.docker_response_phase_detected = true;
@@ -667,6 +674,9 @@ struct HostUnixVsockStream {
     docker_response_phase_line_buffer: Vec<u8>,
     host_request_observed: Vec<u8>,
     host_request_complete: bool,
+    host_protocol_prefix: Vec<u8>,
+    host_protocol_known: bool,
+    binary_frame_stream: bool,
 }
 
 impl HostUnixVsockStream {
@@ -689,6 +699,24 @@ impl HostUnixVsockStream {
             docker_response_phase_line_buffer: Vec::new(),
             host_request_observed: Vec::new(),
             host_request_complete: false,
+            host_protocol_prefix: Vec::new(),
+            host_protocol_known: false,
+            binary_frame_stream: false,
+        }
+    }
+
+    fn observe_host_protocol(&mut self, payload: &[u8]) {
+        if self.host_protocol_known {
+            return;
+        }
+        let needed = CONJET_BINARY_FRAME_MAGIC
+            .len()
+            .saturating_sub(self.host_protocol_prefix.len());
+        self.host_protocol_prefix
+            .extend_from_slice(&payload[..payload.len().min(needed)]);
+        if self.host_protocol_prefix.len() >= CONJET_BINARY_FRAME_MAGIC.len() {
+            self.binary_frame_stream = self.host_protocol_prefix == CONJET_BINARY_FRAME_MAGIC;
+            self.host_protocol_known = true;
         }
     }
 
@@ -950,6 +978,19 @@ pub fn configuration(guest_cid: u64) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn conjet_binary_frame(frame_type: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(20 + payload.len());
+        frame.extend_from_slice(&CONJET_BINARY_FRAME_MAGIC);
+        frame.push(1);
+        frame.push(frame_type);
+        frame.extend_from_slice(&0u16.to_be_bytes());
+        frame.extend_from_slice(&stream_id.to_be_bytes());
+        frame.extend_from_slice(&0u32.to_be_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
     #[test]
     fn host_half_close_is_forwarded_without_dropping_stream() {
         let (mut client, server) = UnixStream::pair().unwrap();
@@ -982,6 +1023,31 @@ mod tests {
         }));
         bridge.poll_host_streams();
         assert!(!bridge.streams.contains_key(&49_152));
+    }
+
+    #[test]
+    fn binary_frame_payload_http_get_does_not_trigger_docker_auto_shutdown() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"GET / HTTP/1.1\r\n");
+        payload.extend_from_slice(b"Host: 172.17.0.2\r\n");
+        payload.extend_from_slice(b"Connection: close\r\n\r\n");
+        client
+            .write_all(&conjet_binary_frame(15, 1, &payload))
+            .unwrap();
+
+        let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
+        bridge.accept_stream(server);
+        bridge.poll_host_streams();
+
+        assert_eq!(bridge.pending_guest_packets.len(), 2);
+        assert_eq!(bridge.pending_guest_packets[0].op, OP_REQUEST);
+        assert_eq!(bridge.pending_guest_packets[1].op, OP_RW);
+        assert!(!bridge
+            .pending_guest_packets
+            .iter()
+            .any(|packet| packet.op == OP_SHUTDOWN));
+        assert_eq!(bridge.docker_request_bytes(), 0);
     }
 
     #[test]
