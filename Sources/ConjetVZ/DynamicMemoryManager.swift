@@ -345,7 +345,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private var reclaimGeneration = 0
     private var activeReclaimEpoch: UInt64?
     private var idleBalloonActive = false
+    private var activeServiceLowPressureSinceAt: Date?
     private var pendingReclaimWorkItems: [DispatchWorkItem] = []
+    private let activeServiceReclaimDwellSeconds: TimeInterval
     private let maxTraceEvents = 64
 
     init(
@@ -355,7 +357,8 @@ final class DynamicMemoryManager: @unchecked Sendable {
         hostFootprintBytes: (@Sendable () throws -> UInt64?)? = nil,
         hostResidentBytes: (@Sendable () throws -> UInt64?)? = nil,
         hostFootprintConvergenceDelays: [TimeInterval] = [0, 2, 5, 10, 30],
-        activeReclaimFootprintRefreshInterval: TimeInterval = 2.0
+        activeReclaimFootprintRefreshInterval: TimeInterval = 2.0,
+        activeServiceReclaimDwellSeconds: TimeInterval = 30.0
     ) {
         self.policy = policy
         self.metricsClient = metricsClient
@@ -364,6 +367,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         self.hostResidentBytes = hostResidentBytes
         self.hostFootprintConvergenceDelays = hostFootprintConvergenceDelays
         self.activeReclaimFootprintRefreshInterval = activeReclaimFootprintRefreshInterval
+        self.activeServiceReclaimDwellSeconds = max(0, activeServiceReclaimDwellSeconds)
         self.currentTargetMiB = policy.configuredMemoryMiB
     }
 
@@ -398,6 +402,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         activeReclaimEpoch = nil
         reclaimInFlight = false
         idleBalloonActive = false
+        activeServiceLowPressureSinceAt = nil
         pendingReclaimWorkItems.forEach { $0.cancel() }
         pendingReclaimWorkItems.removeAll()
         let connection = eventConnection
@@ -435,6 +440,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         var restoreIdleBalloon = false
         lock.lock()
         activeDockerStreams = max(0, activity.pressureStreams)
+        activeServiceLowPressureSinceAt = nil
         switch activity.kind {
         case .streamOpened, .workloadStarted:
             if activity.buildLike {
@@ -633,11 +639,18 @@ final class DynamicMemoryManager: @unchecked Sendable {
             metrics: metrics,
             pressure: pressure
         )
-        let shouldReclaim = shouldRequestGuestReclaimLocked(
+        let activeServiceIdleReclaimReady = activeServiceIdleReclaimReadyLocked(
             metrics: metrics,
             pressure: pressure,
             reason: reason,
             now: now
+        )
+        let shouldReclaim = shouldRequestGuestReclaimLocked(
+            metrics: metrics,
+            pressure: pressure,
+            reason: reason,
+            now: now,
+            activeServiceIdleReclaimReady: activeServiceIdleReclaimReady
         )
         let traceTargetMiB = currentTargetMiB
         recordTraceLocked(
@@ -922,7 +935,8 @@ final class DynamicMemoryManager: @unchecked Sendable {
         metrics: GuestMemoryMetrics,
         pressure: ConjetMemoryPressureState,
         reason: String,
-        now: Date
+        now: Date,
+        activeServiceIdleReclaimReady: Bool
     ) -> Bool {
         guard !reclaimInFlight,
               !idleBalloonActive,
@@ -940,10 +954,16 @@ final class DynamicMemoryManager: @unchecked Sendable {
             || reason == "docker.containerStopped"
             || reason.hasPrefix("docker.containerStopped.final.")
         let bypassRecentReclaimCooldown = strongCompletionReclaim || hostPressureReclaim
+        let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
         if !streamPhaseFinished && !strongCompletionReclaim {
-            guard activeDockerStreams == 0,
-                  !buildWorkloadActive,
-                  !Self.hasActiveGuestWorkload(metrics) else {
+            guard !buildWorkloadActive else {
+                return false
+            }
+            if activeGuestWorkload {
+                guard activeServiceIdleReclaimReady else {
+                    return false
+                }
+            } else if activeDockerStreams > 0 {
                 return false
             }
         }
@@ -958,7 +978,11 @@ final class DynamicMemoryManager: @unchecked Sendable {
             || reason.hasPrefix("docker.containerStopped.final.")
             || reason == "dynamic.reclaim.idle"
             || (hostPressureReclaim && hasIdleReclaimSurplus(metrics: metrics))
-            || (reason == "guest.event" && hasIdleReclaimSurplus(metrics: metrics))
+            || (
+                reason == "guest.event"
+                    && hasIdleReclaimSurplus(metrics: metrics)
+                    && (!activeGuestWorkload || activeServiceIdleReclaimReady)
+            )
         guard reasonAllowsReclaim else {
             return false
         }
@@ -976,6 +1000,44 @@ final class DynamicMemoryManager: @unchecked Sendable {
             return false
         }
         return true
+    }
+
+    private func activeServiceIdleReclaimReadyLocked(
+        metrics: GuestMemoryMetrics,
+        pressure: ConjetMemoryPressureState,
+        reason: String,
+        now: Date
+    ) -> Bool {
+        guard reason == "guest.event",
+              !idleBalloonActive,
+              !reclaimInFlight,
+              activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure),
+              idleBalloonTargetMiB(metrics: metrics) < currentTargetMiB else {
+            activeServiceLowPressureSinceAt = nil
+            return false
+        }
+
+        if activeServiceLowPressureSinceAt == nil {
+            activeServiceLowPressureSinceAt = now
+        }
+        guard let since = activeServiceLowPressureSinceAt else {
+            return false
+        }
+        return now.timeIntervalSince(since) >= activeServiceReclaimDwellSeconds
+    }
+
+    private func activeServiceIdleConditionsLocked(
+        metrics: GuestMemoryMetrics,
+        pressure: ConjetMemoryPressureState
+    ) -> Bool {
+        !buildWorkloadActive
+            && pressure == .low
+            && !metrics.buildWorkloadDetected
+            && Self.hasActiveGuestWorkload(metrics)
+            && metrics.diskSwapUsedBytes <= Self.reclaimSwapNoiseFloorBytes
+            && metrics.containerSwapCurrentBytes <= Self.reclaimSwapNoiseFloorBytes
+            && metrics.containerOOMKillEvents == 0
+            && hasIdleReclaimSurplus(metrics: metrics)
     }
 
     private static func guestReclaimStateIsTerminal(_ state: String) -> Bool {
@@ -1023,19 +1085,20 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let buildMiB = Self.bytesToMiB(metrics.buildCgroupMemoryCurrentBytes)
         let serviceMiB = Self.bytesToMiB(metrics.serviceCgroupMemoryCurrentBytes)
         let daemonMiB = Self.bytesToMiB(metrics.daemonCgroupMemoryCurrentBytes)
+        let runtimeServiceMiB = max(containerMiB, serviceMiB)
 
         guard !Self.hasActiveGuestWorkload(metrics),
               !metrics.buildWorkloadDetected,
               activeDockerStreams == 0,
               !buildWorkloadActive else {
             return Self.saturatingAddMiB(
-                Self.saturatingAddMiB(containerMiB, buildMiB),
-                Self.saturatingAddMiB(daemonMiB, serviceMiB)
+                Self.saturatingAddMiB(runtimeServiceMiB, buildMiB),
+                daemonMiB
             )
         }
 
         return Self.saturatingAddMiB(
-            Self.saturatingAddMiB(
+            max(
                 max(0, containerMiB - Self.quietIdleContainerNoiseFloorMiB),
                 max(0, serviceMiB - Self.quietIdleServiceNoiseFloorMiB)
             ),
@@ -1061,7 +1124,8 @@ final class DynamicMemoryManager: @unchecked Sendable {
         metrics: GuestMemoryMetrics,
         pressure: ConjetMemoryPressureState
     ) -> Bool {
-        activeDockerStreams > 0
+        let activeServiceIdle = activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure)
+        return (activeDockerStreams > 0 && !activeServiceIdle)
             || buildWorkloadActive
             || metrics.buildWorkloadDetected
             || idleBalloonTargetMiB(metrics: metrics) > currentTargetMiB
@@ -1076,13 +1140,19 @@ final class DynamicMemoryManager: @unchecked Sendable {
         pressure: ConjetMemoryPressureState
     ) -> Int? {
         guard idleBalloonActive,
-              activeDockerStreams == 0,
               !buildWorkloadActive,
               activeReclaimEpoch == nil,
               !reclaimInFlight,
               pressure == .low,
-              !metrics.buildWorkloadDetected,
-              !Self.hasActiveGuestWorkload(metrics) else {
+              !metrics.buildWorkloadDetected else {
+            return nil
+        }
+        let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
+        if activeGuestWorkload,
+           !activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure) {
+            return nil
+        }
+        if !activeGuestWorkload, activeDockerStreams > 0 {
             return nil
         }
         let targetMiB = idleBalloonTargetMiB(metrics: metrics)
@@ -1092,7 +1162,6 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private func shouldAttemptIdleBalloonDropLocked() -> Bool {
         guard policy.automaticIdleMemoryReclaim,
               !idleBalloonActive,
-              activeDockerStreams == 0,
               !buildWorkloadActive,
               activeReclaimEpoch == nil,
               !reclaimInFlight,
@@ -1100,6 +1169,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
               Self.pressureState(metrics) == .low,
               !metrics.buildWorkloadDetected,
               hasIdleReclaimSurplus(metrics: metrics) else {
+            return false
+        }
+        if !Self.hasActiveGuestWorkload(metrics), activeDockerStreams > 0 {
             return false
         }
         return true
@@ -1113,13 +1185,15 @@ final class DynamicMemoryManager: @unchecked Sendable {
             lock.lock()
             if let latestMetrics = lastMetrics,
                idleBalloonActive,
-               activeDockerStreams == 0,
                !buildWorkloadActive,
                activeReclaimEpoch == nil,
                !reclaimInFlight,
                Self.pressureState(latestMetrics) == .low,
                !latestMetrics.buildWorkloadDetected,
-               !Self.hasActiveGuestWorkload(latestMetrics),
+               (
+                   (!Self.hasActiveGuestWorkload(latestMetrics) && activeDockerStreams == 0)
+                       || activeServiceIdleConditionsLocked(metrics: latestMetrics, pressure: .low)
+               ),
                targetMiB < currentTargetMiB {
                 currentTargetMiB = targetMiB
                 lastTargetChangeAt = Date()
@@ -1161,11 +1235,14 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private func attemptIdleBalloonDrop(epoch: UInt64, footprintAfter: UInt64?, footprintDrop: UInt64?) {
         lock.lock()
         guard !idleBalloonActive,
-              activeDockerStreams == 0,
               !buildWorkloadActive,
               let metrics = lastMetrics,
               Self.pressureState(metrics) == .low,
               !metrics.buildWorkloadDetected else {
+            lock.unlock()
+            return
+        }
+        if !Self.hasActiveGuestWorkload(metrics), activeDockerStreams > 0 {
             lock.unlock()
             return
         }
@@ -1181,12 +1258,15 @@ final class DynamicMemoryManager: @unchecked Sendable {
             var restoreAfterRace = false
             var appliedIdleAutodrop = false
             lock.lock()
-            if activeDockerStreams == 0,
-               !buildWorkloadActive,
+            if !buildWorkloadActive,
                activeReclaimEpoch == nil,
                let latestMetrics = lastMetrics,
                Self.pressureState(latestMetrics) == .low,
-               !latestMetrics.buildWorkloadDetected {
+               !latestMetrics.buildWorkloadDetected,
+               (
+                   Self.hasActiveGuestWorkload(latestMetrics)
+                       || activeDockerStreams == 0
+               ) {
                 currentTargetMiB = targetMiB
                 idleBalloonActive = true
                 lastTargetChangeAt = Date()
@@ -1253,6 +1333,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let target = policy.configuredMemoryMiB
         currentTargetMiB = target
         idleBalloonActive = false
+        activeServiceLowPressureSinceAt = nil
         lastTargetChangeAt = Date()
         lastAdjustmentReason = reason
         message = "dynamic memory restored to configured maximum"

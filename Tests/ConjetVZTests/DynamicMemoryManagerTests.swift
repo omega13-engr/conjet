@@ -698,6 +698,94 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
+    func testGuestEventActiveServiceIdleDropsToLiveCgroupDemandTarget() throws {
+        let policy = Self.policy()
+        let serviceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: serviceMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            activeServiceReclaimDwellSeconds: 0
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(appliedTargets.values, [4096])
+        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
+        XCTAssertEqual(manager.status().guestWorkloadDetected, true)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+    }
+
+    func testGuestEventActiveServiceIdleDropsWithPersistentNonBuildDockerStream() throws {
+        let policy = Self.policy()
+        let serviceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: serviceMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            activeServiceReclaimDwellSeconds: 0
+        )
+
+        manager.handleDockerActivity(DockerMemoryActivity(
+            kind: .streamOpened,
+            workload: .start,
+            activeStreams: 1,
+            pressureStreams: 1,
+            buildLike: false
+        ))
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(appliedTargets.values, [4096])
+        XCTAssertEqual(manager.status().activeDockerStreams, 1)
+        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+    }
+
+    func testActiveServiceIdleRefinesDownAsLiveCgroupUsageFalls() throws {
+        let policy = Self.policy()
+        let serviceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let lowerServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":1073741824,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":1073741824,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: serviceMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            activeServiceReclaimDwellSeconds: 0
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+        connector.setBody(lowerServiceMetricsBody)
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(appliedTargets.values, [4096, 1792])
+        XCTAssertEqual(manager.status().currentTargetMiB, 1792)
+        XCTAssertEqual(manager.status().guestWorkloadDetected, true)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-refine")
+    }
+
     func testHostFootprintDropStillAppliesDemandTarget() throws {
         let policy = Self.policy()
         let idleMetricsBody = """
