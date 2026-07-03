@@ -253,6 +253,7 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var currentTargetMiB: Int
     public var balloonedMiB: Int
     public var hostFootprintMiB: Int?
+    public var hostResidentMiB: Int?
     public var balloonActualMiB: Int?
     public var hostReclaimedMiB: Int?
     public var balloonInflatePages: UInt64?
@@ -287,6 +288,7 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         currentTargetMiB: Int,
         balloonedMiB: Int,
         hostFootprintMiB: Int? = nil,
+        hostResidentMiB: Int? = nil,
         balloonActualMiB: Int? = nil,
         hostReclaimedMiB: Int? = nil,
         balloonInflatePages: UInt64? = nil,
@@ -320,6 +322,7 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         self.currentTargetMiB = currentTargetMiB
         self.balloonedMiB = balloonedMiB
         self.hostFootprintMiB = hostFootprintMiB
+        self.hostResidentMiB = hostResidentMiB
         self.balloonActualMiB = balloonActualMiB
         self.hostReclaimedMiB = hostReclaimedMiB
         self.balloonInflatePages = balloonInflatePages

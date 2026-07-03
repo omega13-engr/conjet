@@ -99,12 +99,12 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "manual.test")
 
-        XCTAssertEqual(manager.status().currentTargetMiB, 640)
-        XCTAssertEqual(manager.status().balloonedMiB, 7552)
+        XCTAssertEqual(manager.status().currentTargetMiB, 512)
+        XCTAssertEqual(manager.status().balloonedMiB, 7680)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
         XCTAssertEqual(connector.reclaimRequests, 1)
         XCTAssertTrue(connector.lastRequest.contains("POST /conjet-memory-reclaim?reason=manual.test"))
-        XCTAssertEqual(appliedTargets.values, [640])
+        XCTAssertEqual(appliedTargets.values, [512])
     }
 
     func testManualAndDockerFinishedReclaimBypassRecentReclaimCooldown() throws {
@@ -131,7 +131,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         XCTAssertEqual(connector.reclaimRequests, 1)
         XCTAssertTrue(manager.status().trace?.contains { $0.action == "idle-autodrop" } == true)
-        XCTAssertEqual(appliedTargets.values, [640])
+        XCTAssertEqual(appliedTargets.values, [512])
     }
 
     func testDockerWorkloadFinishedDropsToContainerDemandTarget() throws {
@@ -497,9 +497,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [1024])
-        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
-        XCTAssertEqual(manager.status().balloonedMiB, 7168)
+        XCTAssertEqual(appliedTargets.values, [640])
+        XCTAssertEqual(manager.status().currentTargetMiB, 640)
+        XCTAssertEqual(manager.status().balloonedMiB, 7552)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
         XCTAssertTrue(manager.status().message?.contains("demand memory reclaim lowered guest target") == true)
     }
@@ -529,9 +529,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "host.pressure.high")
 
         XCTAssertEqual(connector.reclaimRequests, 1)
-        XCTAssertEqual(appliedTargets.values, [1024])
+        XCTAssertEqual(appliedTargets.values, [640])
         XCTAssertEqual(manager.status().hostFootprintMiB, 700)
-        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
+        XCTAssertEqual(manager.status().currentTargetMiB, 640)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
@@ -559,7 +559,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().trace?.last?.action, "observe")
     }
 
-    func testIdleAutodropIgnoresBalloonInducedLowAvailablePressure() throws {
+    func testIdleAutodropRestoresOnHighGuestPressure() throws {
         let policy = Self.policy()
         let idleMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":268435456,"service_cgroup_memory_current":67108864,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
@@ -585,18 +585,18 @@ final class DynamicMemoryManagerTests: XCTestCase {
         )
 
         try manager.forceRecompute(reason: "guest.event")
-        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
+        XCTAssertEqual(manager.status().currentTargetMiB, 640)
 
         connector.setBody(balloonPressureMetricsBody)
         try manager.forceRecompute(reason: "guest.event")
 
         let status = manager.status()
-        XCTAssertEqual(appliedTargets.values, [1024])
-        XCTAssertEqual(status.currentTargetMiB, 1024)
-        XCTAssertEqual(status.balloonedMiB, 7168)
+        XCTAssertEqual(appliedTargets.values, [640, 8192])
+        XCTAssertEqual(status.currentTargetMiB, 8192)
+        XCTAssertEqual(status.balloonedMiB, 0)
         XCTAssertEqual(status.pressure, .high)
-        XCTAssertEqual(status.trace?.last?.action, "observe")
-        XCTAssertTrue(status.message?.contains("demand memory target active") == true)
+        XCTAssertEqual(status.trace?.last?.action, "restore")
+        XCTAssertTrue(status.message?.contains("restored to configured maximum") == true)
     }
 
     func testEcoIdleAutodropFallsTowardLinuxFloorPlusRuntimeUsage() throws {
@@ -642,9 +642,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [896])
-        XCTAssertEqual(manager.status().currentTargetMiB, 896)
-        XCTAssertEqual(manager.status().balloonedMiB, 3200)
+        XCTAssertEqual(appliedTargets.values, [512])
+        XCTAssertEqual(manager.status().currentTargetMiB, 512)
+        XCTAssertEqual(manager.status().balloonedMiB, 3584)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
@@ -722,9 +722,84 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [640])
-        XCTAssertEqual(manager.status().currentTargetMiB, 640)
+        XCTAssertEqual(appliedTargets.values, [512])
+        XCTAssertEqual(manager.status().currentTargetMiB, 512)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+    }
+
+    func testHostResidentMemoryIsReportedSeparatelyFromPhysicalFootprint() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: idleMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { _ in },
+            hostFootprintBytes: { UInt64(1_280 * 1024 * 1024) },
+            hostResidentBytes: { UInt64(300 * 1024 * 1024) },
+            hostFootprintConvergenceDelays: [0]
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(manager.status().hostFootprintMiB, 1280)
+        XCTAssertEqual(manager.status().hostResidentMiB, 300)
+    }
+
+    func testBalloonedIdleGuestUsesRelativeAvailableMemoryPressureFloor() throws {
+        let policy = Self.policy()
+        let balloonedIdleMetricsBody = """
+        {"mem_total":576811008,"mem_available":350695424,"mem_free":333193216,"page_cache_bytes":90800128,"sreclaimable_bytes":8278016,"swap_total":4180717568,"swap_free":4159995904,"disk_swap_total":0,"disk_swap_free":0,"zram_orig_data_size":18624512,"zram_compr_data_size":5005956,"zram_mem_used_total":6283264,"container_memory_current":1925120,"container_memory_peak":11755520,"container_swap_current":888832,"build_cgroup_memory_current":0,"daemon_cgroup_memory_current":124407808,"service_cgroup_memory_current":2207744,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
+        """
+        let metricsClient = GuestMemoryMetricsClient(
+            connector: StaticHTTPGuestConnectionConnector(body: balloonedIdleMetricsBody)
+        )
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { _ in }
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(manager.status().pressure, .low)
+        XCTAssertEqual(manager.status().trace?.last?.action, "observe")
+    }
+
+    func testStaleIdleTargetRefinesDownForStoppedContainerResidue() throws {
+        let policy = Self.policy()
+        let staleIdleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":398458880,"service_cgroup_memory_current":0,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let stoppedContainerResidueMetricsBody = """
+        {"mem_total":576811008,"mem_available":350695424,"mem_free":333193216,"page_cache_bytes":90800128,"sreclaimable_bytes":8278016,"swap_total":4180717568,"swap_free":4159995904,"disk_swap_total":0,"disk_swap_free":0,"zram_orig_data_size":18624512,"zram_compr_data_size":5005956,"zram_mem_used_total":6283264,"container_memory_current":1925120,"container_memory_peak":11755520,"container_swap_current":888832,"build_cgroup_memory_current":0,"daemon_cgroup_memory_current":124407808,"service_cgroup_memory_current":2207744,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: staleIdleMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "manual.test")
+        XCTAssertEqual(manager.status().currentTargetMiB, 768)
+
+        connector.setBody(stoppedContainerResidueMetricsBody)
+        try manager.forceRecompute(reason: "guest.event")
+
+        let status = manager.status()
+        XCTAssertEqual(appliedTargets.values, [768, 512])
+        XCTAssertEqual(status.currentTargetMiB, 512)
+        XCTAssertEqual(status.balloonedMiB, 7680)
+        XCTAssertEqual(status.pressure, .low)
+        XCTAssertEqual(status.trace?.last?.action, "idle-refine")
     }
 
     func testDockerStartRestoresIdleAutodropBalloonTarget() throws {
@@ -750,7 +825,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         )
 
         try manager.forceRecompute(reason: "guest.event")
-        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
+        XCTAssertEqual(manager.status().currentTargetMiB, 640)
 
         manager.handleDockerActivity(DockerMemoryActivity(
             kind: .streamOpened,
@@ -760,7 +835,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
             buildLike: true
         ))
 
-        XCTAssertTrue(waitUntil { appliedTargets.values == [1024, 8192] })
+        XCTAssertTrue(waitUntil { appliedTargets.values == [640, 8192] })
         XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertEqual(manager.status().balloonedMiB, 0)
         XCTAssertEqual(manager.status().trace?.last?.action, "restore")

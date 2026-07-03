@@ -2798,7 +2798,10 @@ struct ConjetCLI {
         print("  current target: \(runtime.currentTargetMiB) MiB")
         print("  ballooned: \(runtime.balloonedMiB) MiB")
         if let hostFootprintMiB = runtime.hostFootprintMiB {
-            print("  host footprint: \(hostFootprintMiB) MiB")
+            print("  host physical footprint: \(hostFootprintMiB) MiB")
+        }
+        if let hostResidentMiB = runtime.hostResidentMiB {
+            print("  host resident: \(hostResidentMiB) MiB")
         }
         if let hostReclaimedMiB = runtime.hostReclaimedMiB {
             print("  last host footprint drop: \(hostReclaimedMiB) MiB")

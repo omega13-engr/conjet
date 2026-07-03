@@ -1038,6 +1038,9 @@ public final class VirtualMachineController {
             },
             hostFootprintBytes: {
                 try controlClient.metrics().hostMemory.physicalFootprintBytes
+            },
+            hostResidentBytes: {
+                try controlClient.metrics().hostMemory.residentBytes
             }
         )
         dynamicMemoryManager = manager
