@@ -1,9 +1,9 @@
 class Conjet < Formula
   desc "Super Sonic Speed containers for macOS developers"
   homepage "https://github.com/omega13-engr/conjet"
-  url "https://github.com/omega13-engr/conjet/releases/download/conjet-v1.1.7/conjet-1.1.7-macos-arm64.dmg"
-  version "1.1.7"
-  sha256 "a07e695e0ef5dd1e1582c309e19e5b2e9808f88bfc7f81aed74b1f3f6c8f2a3b"
+  url "https://github.com/omega13-engr/conjet/releases/download/conjet-v1.1.8/conjet-1.1.8-macos-arm64.dmg"
+  version "1.1.8"
+  sha256 "ddf0dcc2416464e62b11e0d8a31cda92a2fcc2acc9bb3e337503d7a358880d84"
   head "https://github.com/omega13-engr/conjet.git", branch: "main"
 
   livecheck do
