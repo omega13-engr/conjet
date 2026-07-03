@@ -500,10 +500,10 @@ final class DynamicMemoryManager: @unchecked Sendable {
         lock.unlock()
 
         let guestAvailableMiB = metrics.map { Self.bytesToMiB($0.memAvailableBytes) }
-        let containerMiB = metrics.map { Self.bytesToMiB($0.containerMemoryCurrentBytes) }
+        let containerMiB = metrics.map { Self.bytesToMiB($0.containerWorkingSetBytes) }
         let buildCgroupMiB = metrics.map { Self.bytesToMiB($0.buildCgroupMemoryCurrentBytes) }
         let daemonCgroupMiB = metrics.map { Self.bytesToMiB($0.daemonCgroupMemoryCurrentBytes) }
-        let serviceCgroupMiB = metrics.map { Self.bytesToMiB($0.serviceCgroupMemoryCurrentBytes) }
+        let serviceCgroupMiB = metrics.map { Self.bytesToMiB($0.serviceCgroupWorkingSetBytes) }
         let zramUsedMiB = metrics.map { Self.bytesToMiB($0.zramMemUsedTotalBytes) }
         let diskSwapUsedMiB = metrics.map { Self.bytesToMiB($0.diskSwapUsedBytes) }
         let pressure = metrics.map(Self.pressureState) ?? .unknown
@@ -633,7 +633,18 @@ final class DynamicMemoryManager: @unchecked Sendable {
         lastMetrics = metrics
         lastMetricsAt = now
         let pressure = Self.pressureState(metrics)
+        let idleExpansionTargetMiB = idleBalloonExpansionTargetLocked(
+            metrics: metrics,
+            pressure: pressure
+        )
+        let shouldHoldPressuredServiceTarget = idleBalloonActive
+            && idleExpansionTargetMiB == nil
+            && pressure != .low
+            && activeServiceDemandCanResizeLocked(metrics: metrics)
+            && currentTargetMiB >= idleBalloonTargetMiB(metrics: metrics)
         let shouldRestoreIdleBalloon = idleBalloonActive
+            && idleExpansionTargetMiB == nil
+            && !shouldHoldPressuredServiceTarget
             && shouldRestoreIdleBalloonLocked(metrics: metrics, pressure: pressure)
         let idleRefinementTargetMiB = idleBalloonRefinementTargetLocked(
             metrics: metrics,
@@ -645,13 +656,14 @@ final class DynamicMemoryManager: @unchecked Sendable {
             reason: reason,
             now: now
         )
-        let shouldReclaim = shouldRequestGuestReclaimLocked(
-            metrics: metrics,
-            pressure: pressure,
-            reason: reason,
-            now: now,
-            activeServiceIdleReclaimReady: activeServiceIdleReclaimReady
-        )
+        let shouldReclaim = idleExpansionTargetMiB == nil
+            && shouldRequestGuestReclaimLocked(
+                metrics: metrics,
+                pressure: pressure,
+                reason: reason,
+                now: now,
+                activeServiceIdleReclaimReady: activeServiceIdleReclaimReady
+            )
         let traceTargetMiB = currentTargetMiB
         recordTraceLocked(
             ConjetMemoryTraceEvent(
@@ -666,6 +678,10 @@ final class DynamicMemoryManager: @unchecked Sendable {
         lastAdjustmentReason = reason
         if shouldRestoreIdleBalloon {
             message = "dynamic memory restoring configured memory before new work"
+        } else if let idleExpansionTargetMiB {
+            message = "demand memory target active; expanding idle target to \(idleExpansionTargetMiB) MiB"
+        } else if shouldHoldPressuredServiceTarget {
+            message = "demand memory target active; holding service target under pressure"
         } else if let idleRefinementTargetMiB {
             message = "demand memory target active; refining idle target to \(idleRefinementTargetMiB) MiB"
         } else if idleBalloonActive {
@@ -679,6 +695,10 @@ final class DynamicMemoryManager: @unchecked Sendable {
         }
         lock.unlock()
 
+        if let idleExpansionTargetMiB {
+            expandIdleBalloonTarget(targetMiB: idleExpansionTargetMiB, reason: "\(reason).expand")
+            return
+        }
         if shouldRestoreIdleBalloon {
             restoreConfiguredTarget(reason: "\(reason).restore")
             return
@@ -1052,9 +1072,13 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private func hasIdleReclaimSurplus(metrics: GuestMemoryMetrics) -> Bool {
         let availableMiB = Self.bytesToMiB(metrics.memAvailableBytes)
         let workingSetMiB = idleWorkingSetMiB(metrics: metrics)
-        let surplusMiB = max(0, availableMiB - workingSetMiB)
+        let desiredTargetMiB = idleBalloonTargetMiB(metrics: metrics)
+        let shrinkMiB = max(0, currentTargetMiB - desiredTargetMiB)
         let cacheAllowanceMiB = max(128, policy.dynamicMemoryCacheAllowanceMiB)
-        return surplusMiB >= cacheAllowanceMiB
+        let idleSurplusMiB = max(0, availableMiB - workingSetMiB)
+        let postShrinkSurplusMiB = max(0, availableMiB - shrinkMiB)
+        return idleSurplusMiB >= cacheAllowanceMiB
+            || postShrinkSurplusMiB >= cacheAllowanceMiB
     }
 
     private func idleWorkingSetMiB(metrics: GuestMemoryMetrics) -> Int {
@@ -1081,9 +1105,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
     }
 
     private func effectiveIdleWorkloadMiB(metrics: GuestMemoryMetrics) -> Int {
-        let containerMiB = Self.bytesToMiB(metrics.containerMemoryCurrentBytes)
+        let containerMiB = Self.bytesToMiB(metrics.containerWorkingSetBytes)
         let buildMiB = Self.bytesToMiB(metrics.buildCgroupMemoryCurrentBytes)
-        let serviceMiB = Self.bytesToMiB(metrics.serviceCgroupMemoryCurrentBytes)
+        let serviceMiB = Self.bytesToMiB(metrics.serviceCgroupWorkingSetBytes)
         let daemonMiB = Self.bytesToMiB(metrics.daemonCgroupMemoryCurrentBytes)
         let runtimeServiceMiB = max(containerMiB, serviceMiB)
 
@@ -1159,6 +1183,89 @@ final class DynamicMemoryManager: @unchecked Sendable {
         return targetMiB < currentTargetMiB ? targetMiB : nil
     }
 
+    private func idleBalloonExpansionTargetLocked(
+        metrics: GuestMemoryMetrics,
+        pressure: ConjetMemoryPressureState
+    ) -> Int? {
+        guard idleBalloonActive,
+              !buildWorkloadActive,
+              activeReclaimEpoch == nil,
+              !reclaimInFlight,
+              !metrics.buildWorkloadDetected,
+              metrics.diskSwapUsedBytes <= Self.reclaimSwapNoiseFloorBytes,
+              metrics.containerSwapCurrentBytes <= Self.reclaimSwapNoiseFloorBytes,
+              metrics.containerOOMKillEvents == 0 else {
+            return nil
+        }
+        let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
+        if activeGuestWorkload {
+            if pressure == .low {
+                guard activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure) else {
+                    return nil
+                }
+            } else {
+                guard activeServiceDemandCanResizeLocked(metrics: metrics) else {
+                    return nil
+                }
+            }
+        } else if activeDockerStreams > 0 || pressure == .high {
+            return nil
+        }
+
+        let demandTargetMiB = idleBalloonTargetMiB(metrics: metrics)
+        var targetMiB = demandTargetMiB
+        switch pressure {
+        case .high:
+            targetMiB = max(
+                demandTargetMiB,
+                min(
+                    Self.saturatingAddMiB(currentTargetMiB, Self.highPressureExpansionStepMiB),
+                    Self.saturatingAddMiB(demandTargetMiB, Self.highPressureExpansionStepMiB)
+                )
+            )
+        case .elevated:
+            targetMiB = max(
+                demandTargetMiB,
+                min(
+                    Self.saturatingAddMiB(currentTargetMiB, Self.elevatedPressureExpansionStepMiB),
+                    Self.saturatingAddMiB(demandTargetMiB, Self.elevatedPressureExpansionStepMiB)
+                )
+            )
+        case .low, .unknown, .stale:
+            break
+        }
+        targetMiB = min(policy.configuredMemoryMiB, Self.roundUpMiB(targetMiB, quantum: 128))
+        return targetMiB > currentTargetMiB ? targetMiB : nil
+    }
+
+    private func activeServiceDemandCanResizeLocked(metrics: GuestMemoryMetrics) -> Bool {
+        !buildWorkloadActive
+            && !metrics.buildWorkloadDetected
+            && Self.hasActiveGuestWorkload(metrics)
+            && metrics.diskSwapUsedBytes <= Self.reclaimSwapNoiseFloorBytes
+            && metrics.containerSwapCurrentBytes <= Self.reclaimSwapNoiseFloorBytes
+            && metrics.containerOOMKillEvents == 0
+    }
+
+    private func canApplyIdleExpansionLocked(metrics: GuestMemoryMetrics) -> Bool {
+        let pressure = Self.pressureState(metrics)
+        let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
+        if activeGuestWorkload {
+            if pressure == .low {
+                return activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure)
+            }
+            return activeServiceDemandCanResizeLocked(metrics: metrics)
+        }
+        if activeDockerStreams > 0 || pressure == .high {
+            return false
+        }
+        return !buildWorkloadActive
+            && !metrics.buildWorkloadDetected
+            && metrics.diskSwapUsedBytes <= Self.reclaimSwapNoiseFloorBytes
+            && metrics.containerSwapCurrentBytes <= Self.reclaimSwapNoiseFloorBytes
+            && metrics.containerOOMKillEvents == 0
+    }
+
     private func shouldAttemptIdleBalloonDropLocked() -> Bool {
         guard policy.automaticIdleMemoryReclaim,
               !idleBalloonActive,
@@ -1228,6 +1335,56 @@ final class DynamicMemoryManager: @unchecked Sendable {
         } catch {
             lock.lock()
             message = "idle memory refinement target update failed: \(error)"
+            lock.unlock()
+        }
+    }
+
+    private func expandIdleBalloonTarget(targetMiB: Int, reason: String) {
+        do {
+            try setTargetBytes(UInt64(targetMiB) * Self.bytesPerMiB)
+            var restoreAfterRace = false
+            var appliedExpansion = false
+            lock.lock()
+            if let latestMetrics = lastMetrics,
+               idleBalloonActive,
+               !buildWorkloadActive,
+               activeReclaimEpoch == nil,
+               !reclaimInFlight,
+               canApplyIdleExpansionLocked(metrics: latestMetrics),
+               targetMiB > currentTargetMiB {
+                currentTargetMiB = targetMiB
+                lastTargetChangeAt = Date()
+                lastAdjustmentReason = reason
+                message = "demand memory expanded idle target to \(targetMiB) MiB"
+                recordTraceLocked(ConjetMemoryTraceEvent(
+                    timestamp: Date(),
+                    targetMiB: targetMiB,
+                    desiredMiB: targetMiB,
+                    action: "idle-expand",
+                    reason: reason,
+                    pressure: .low
+                ))
+                appliedExpansion = true
+            } else {
+                restoreAfterRace = true
+            }
+            lock.unlock()
+            if appliedExpansion {
+                _ = sampleHostFootprintBytes()
+                scheduleHostFootprintRefreshes(reason: reason)
+            }
+            if restoreAfterRace {
+                do {
+                    try setTargetBytes(UInt64(policy.configuredMemoryMiB) * Self.bytesPerMiB)
+                } catch {
+                    lock.lock()
+                    message = "idle memory expansion race restore failed: \(error)"
+                    lock.unlock()
+                }
+            }
+        } catch {
+            lock.lock()
+            message = "idle memory expansion target update failed: \(error)"
             lock.unlock()
         }
     }
@@ -1307,12 +1464,14 @@ final class DynamicMemoryManager: @unchecked Sendable {
         }
     }
 
-    private static let reclaimSwapNoiseFloorBytes: UInt64 = 64 * 1024 * 1024
+    private static let reclaimSwapNoiseFloorBytes: UInt64 = 256 * 1024 * 1024
     private static let bytesPerMiB: UInt64 = 1024 * 1024
     private static let quietIdleContainerNoiseFloorMiB = 16
     private static let quietIdleServiceNoiseFloorMiB = 32
     private static let quietIdleDaemonAllowanceMiB = 256
     private static let quietIdleHeadroomMiB = 64
+    private static let elevatedPressureExpansionStepMiB = 512
+    private static let highPressureExpansionStepMiB = 1024
 
     private func restoreConfiguredTarget(reason: String) {
         lock.lock()
@@ -1413,7 +1572,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
 
     private static func hasActiveGuestWorkload(_ metrics: GuestMemoryMetrics) -> Bool {
         metrics.buildWorkloadDetected
-            || (metrics.activeWorkloads > 0 && bytesToMiB(metrics.containerMemoryCurrentBytes) >= 64)
+            || (metrics.activeWorkloads > 0 && bytesToMiB(metrics.containerWorkingSetBytes) >= 64)
     }
 
     private static func bytesToMiB(_ bytes: UInt64) -> Int {

@@ -19,8 +19,10 @@
 
 #define RECLAIM_CHUNK_BYTES (64ULL * 1024ULL * 1024ULL)
 #define BUILD_CAP_BYTES (4ULL * 1024ULL * 1024ULL * 1024ULL)
+#define SERVICE_CAP_BYTES (4ULL * 1024ULL * 1024ULL * 1024ULL)
 #define DAEMON_CAP_BYTES (512ULL * 1024ULL * 1024ULL)
 #define BUILD_RESERVE_BYTES (64ULL * 1024ULL * 1024ULL)
+#define SERVICE_RESERVE_BYTES (128ULL * 1024ULL * 1024ULL)
 #define DAEMON_RESERVE_BYTES (128ULL * 1024ULL * 1024ULL)
 #define SLAB_CAP_BYTES (256ULL * 1024ULL * 1024ULL)
 #define LOW_PROGRESS_BYTES (4ULL * 1024ULL * 1024ULL)
@@ -247,18 +249,18 @@ static int cgroup_name_has_prefixed_scope(const char *name, const char *prefix) 
     return strncmp(name, prefix, prefix_len) == 0 && name[prefix_len] == ':';
 }
 
-static int reclaim_build_cgroups(const char *build_cgroup,
-                                 uint64_t cap,
-                                 uint64_t reserve,
-                                 struct reclaim_summary *summary) {
-    int first_error = reclaim_one_cgroup(build_cgroup, cap, reserve, summary);
+static int reclaim_cgroup_with_prefixed_siblings(const char *cgroup,
+                                                 uint64_t cap,
+                                                 uint64_t reserve,
+                                                 struct reclaim_summary *summary) {
+    int first_error = reclaim_one_cgroup(cgroup, cap, reserve, summary);
     if (first_error != 0) {
         return first_error;
     }
 
     char parent[4096];
     const char *basename = NULL;
-    if (split_parent_basename(build_cgroup, parent, sizeof(parent), &basename) != 0) {
+    if (split_parent_basename(cgroup, parent, sizeof(parent), &basename) != 0) {
         return 0;
     }
     DIR *dir = opendir(parent);
@@ -301,15 +303,15 @@ static int aggregate_one_cgroup_stat(const char *cgroup, struct memcg_stat *tota
     return 0;
 }
 
-static int aggregate_build_cgroups_stat(const char *build_cgroup, struct memcg_stat *total) {
-    int rc = aggregate_one_cgroup_stat(build_cgroup, total);
+static int aggregate_cgroup_with_prefixed_siblings_stat(const char *cgroup, struct memcg_stat *total) {
+    int rc = aggregate_one_cgroup_stat(cgroup, total);
     if (rc != 0) {
         return rc;
     }
 
     char parent[4096];
     const char *basename = NULL;
-    if (split_parent_basename(build_cgroup, parent, sizeof(parent), &basename) != 0) {
+    if (split_parent_basename(cgroup, parent, sizeof(parent), &basename) != 0) {
         return 0;
     }
     DIR *dir = opendir(parent);
@@ -344,9 +346,14 @@ static int aggregate_build_cgroups_stat(const char *build_cgroup, struct memcg_s
 
 static int aggregate_reclaim_targets_stat(const char *build_cgroup,
                                           const char *daemon_cgroup,
+                                          const char *service_cgroup,
                                           struct memcg_stat *total) {
     memset(total, 0, sizeof(*total));
-    int rc = aggregate_build_cgroups_stat(build_cgroup, total);
+    int rc = aggregate_cgroup_with_prefixed_siblings_stat(build_cgroup, total);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = aggregate_cgroup_with_prefixed_siblings_stat(service_cgroup, total);
     if (rc != 0) {
         return rc;
     }
@@ -355,11 +362,21 @@ static int aggregate_reclaim_targets_stat(const char *build_cgroup,
 
 static int reclaim_all_targets(const char *build_cgroup,
                                const char *daemon_cgroup,
+                               const char *service_cgroup,
                                struct reclaim_summary *summary) {
-    int rc = reclaim_build_cgroups(
+    int rc = reclaim_cgroup_with_prefixed_siblings(
         build_cgroup,
         BUILD_CAP_BYTES,
         BUILD_RESERVE_BYTES,
+        summary
+    );
+    if (rc != 0) {
+        return rc;
+    }
+    rc = reclaim_cgroup_with_prefixed_siblings(
+        service_cgroup,
+        SERVICE_CAP_BYTES,
+        SERVICE_RESERVE_BYTES,
         summary
     );
     if (rc != 0) {
@@ -556,11 +573,18 @@ int main(int argc, char **argv) {
     setpriority(PRIO_PROCESS, 0, 19);
     const char *build_cgroup = getenv("CONJET_RECLAIM_BUILD_CGROUP");
     const char *daemon_cgroup = getenv("CONJET_RECLAIM_DAEMON_CGROUP");
+    const char *service_cgroup = getenv("CONJET_RECLAIM_SERVICE_CGROUP");
     if (build_cgroup == NULL || build_cgroup[0] == '\0') {
         build_cgroup = "/sys/fs/cgroup/conjet.slice/conjet-build.slice";
     }
     if (daemon_cgroup == NULL || daemon_cgroup[0] == '\0') {
         daemon_cgroup = "/sys/fs/cgroup/conjet.slice/conjet-daemons.slice";
+    }
+    if (service_cgroup == NULL || service_cgroup[0] == '\0') {
+        service_cgroup = getenv("CONJET_SERVICE_CGROUP");
+    }
+    if (service_cgroup == NULL || service_cgroup[0] == '\0') {
+        service_cgroup = "/sys/fs/cgroup/conjet.slice/conjet-services.slice";
     }
     struct reclaim_summary summary;
     memset(&summary, 0, sizeof(summary));
@@ -568,7 +592,7 @@ int main(int argc, char **argv) {
     summary.state = "running";
 
     struct memcg_stat before;
-    int rc = aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, &before);
+    int rc = aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, service_cgroup, &before);
     if (rc != 0) {
         summary.error_number = rc;
         summary.state = "error";
@@ -578,10 +602,10 @@ int main(int argc, char **argv) {
     set_summary_before_stat(&summary, &before);
     write_status_file(&summary);
 
-    rc = reclaim_all_targets(build_cgroup, daemon_cgroup, &summary);
+    rc = reclaim_all_targets(build_cgroup, daemon_cgroup, service_cgroup, &summary);
 
     struct memcg_stat after;
-    int stat_rc = aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, &after);
+    int stat_rc = aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, service_cgroup, &after);
     if (stat_rc == 0) {
         set_summary_after_stat(&summary, &after);
     } else if (rc == 0) {
@@ -603,12 +627,12 @@ int main(int argc, char **argv) {
             } else {
                 summary.state = "running";
                 write_status_file(&summary);
-                rc = reclaim_all_targets(build_cgroup, daemon_cgroup, &summary);
+                rc = reclaim_all_targets(build_cgroup, daemon_cgroup, service_cgroup, &summary);
             }
         }
     }
 
-    stat_rc = aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, &after);
+    stat_rc = aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, service_cgroup, &after);
     if (stat_rc == 0) {
         set_summary_after_stat(&summary, &after);
     } else if (rc == 0) {

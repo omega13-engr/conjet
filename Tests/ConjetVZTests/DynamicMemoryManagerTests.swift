@@ -336,6 +336,29 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(status.serviceCgroupMemoryMiB, 300)
     }
 
+    func testStatusUsesServiceCgroupWorkingSetWhenServiceCacheIsInactive() throws {
+        let policy = Self.policy()
+        let serviceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":1083179008,"sreclaimable_bytes":67108864,"container_memory_current":3670016,"container_memory_peak":11755520,"container_inactive_file":0,"build_cgroup_memory_current":0,"daemon_cgroup_memory_current":145752064,"service_cgroup_memory_current":945815552,"service_cgroup_anon":106954752,"service_cgroup_file":838860800,"service_cgroup_inactive_file":734003200,"service_cgroup_active_file":104857600,"service_cgroup_slab":134217728,"service_cgroup_slab_reclaimable":67108864,"service_cgroup_slab_unreclaimable":67108864,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
+        """
+        let metricsClient = GuestMemoryMetricsClient(
+            connector: StaticHTTPGuestConnectionConnector(body: serviceMetricsBody)
+        )
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { _ in }
+        )
+
+        try manager.forceRecompute(reason: "test.service-cache-status")
+
+        let status = manager.status()
+        XCTAssertEqual(status.containerMemoryMiB, 3)
+        XCTAssertEqual(status.daemonCgroupMemoryMiB, 139)
+        XCTAssertEqual(status.serviceCgroupMemoryMiB, 138)
+        XCTAssertEqual(status.guestWorkloadDetected, false)
+    }
+
     func testGuestReclaimUnavailableDoesNotTriggerClassicBalloonPulse() throws {
         let policy = Self.policy()
         let idleMetricsBody = """
@@ -756,6 +779,41 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
+    func testActiveServiceIdleUsesDockerWorkingSetForCachedContainers() throws {
+        let policy = Self.policy()
+        let serviceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":4514119680,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":5952765952,"container_memory_peak":6442450944,"container_anon":4383047680,"container_file":1569718272,"container_inactive_file":1569718272,"daemon_cgroup_memory_current":178257920,"service_cgroup_memory_current":5945425920,"service_cgroup_file":1569718272,"service_cgroup_inactive_file":1569718272,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":4,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: serviceMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            activeServiceReclaimDwellSeconds: 0
+        )
+
+        manager.handleDockerActivity(DockerMemoryActivity(
+            kind: .streamOpened,
+            workload: .start,
+            activeStreams: 1,
+            pressureStreams: 1,
+            buildLike: false
+        ))
+        try manager.forceRecompute(reason: "guest.event")
+
+        let status = manager.status()
+        XCTAssertEqual(status.containerMemoryMiB, 4180)
+        XCTAssertEqual(status.serviceCgroupMemoryMiB, 4173)
+        XCTAssertEqual(appliedTargets.values, [5376])
+        XCTAssertEqual(status.currentTargetMiB, 5376)
+        XCTAssertEqual(status.activeDockerStreams, 1)
+        XCTAssertEqual(status.trace?.last?.action, "idle-autodrop")
+    }
+
     func testActiveServiceIdleRefinesDownAsLiveCgroupUsageFalls() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
@@ -784,6 +842,99 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().currentTargetMiB, 1792)
         XCTAssertEqual(manager.status().guestWorkloadDetected, true)
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-refine")
+    }
+
+    func testActiveServiceIdleExpandsToLiveCgroupDemandTargetInsteadOfConfiguredMaximum() throws {
+        let policy = Self.policy()
+        let smallServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":1073741824,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":1073741824,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let largerServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: smallServiceMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            activeServiceReclaimDwellSeconds: 0
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+        connector.setBody(largerServiceMetricsBody)
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(appliedTargets.values, [1792, 4096])
+        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
+        XCTAssertEqual(manager.status().balloonedMiB, 4096)
+        XCTAssertEqual(manager.status().guestWorkloadDetected, true)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-expand")
+    }
+
+    func testActiveServicePressureExpandsDemandTargetInsteadOfRestoringConfiguredMaximum() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":0,"service_cgroup_memory_current":0,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let pressuredServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":1967128576,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":173015040,"service_cgroup_memory_current":1967128576,"psi_some_avg10":0.0,"psi_full_avg10":0.1,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: idleMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            activeServiceReclaimDwellSeconds: 0
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+        connector.setBody(pressuredServiceMetricsBody)
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(appliedTargets.values, [512, 2816])
+        XCTAssertEqual(manager.status().currentTargetMiB, 2816)
+        XCTAssertEqual(manager.status().balloonedMiB, 5376)
+        XCTAssertEqual(manager.status().pressure, .high)
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-expand")
+    }
+
+    func testActiveServicePressureExpansionCapsAtDemandTargetPlusBurstHeadroom() throws {
+        let policy = Self.policy()
+        let largeServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":5575278592,"container_memory_peak":6442450944,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":5575278592,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let pressuredLargeServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":5575278592,"container_memory_peak":6442450944,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":5575278592,"psi_some_avg10":0.0,"psi_full_avg10":0.1,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: largeServiceMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            activeServiceReclaimDwellSeconds: 0
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+        connector.setBody(pressuredLargeServiceMetricsBody)
+        try manager.forceRecompute(reason: "guest.event")
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(appliedTargets.values, [6656, 7680])
+        XCTAssertEqual(manager.status().currentTargetMiB, 7680)
+        XCTAssertLessThan(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().pressure, .high)
     }
 
     func testHostFootprintDropStillAppliesDemandTarget() throws {

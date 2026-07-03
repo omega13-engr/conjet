@@ -99,6 +99,13 @@ struct memory_metrics {
     uint64_t build_cgroup_memory_current;
     uint64_t daemon_cgroup_memory_current;
     uint64_t service_cgroup_memory_current;
+    uint64_t service_cgroup_anon;
+    uint64_t service_cgroup_file;
+    uint64_t service_cgroup_inactive_file;
+    uint64_t service_cgroup_active_file;
+    uint64_t service_cgroup_slab;
+    uint64_t service_cgroup_slab_reclaimable;
+    uint64_t service_cgroup_slab_unreclaimable;
     double psi_some_avg10;
     double psi_full_avg10;
     int active_workloads;
@@ -327,6 +334,44 @@ static uint64_t read_cgroup_current(const char *cgroup) {
     return read_uint_file(path);
 }
 
+static void add_service_cgroup_memory_stat(const char *cgroup, struct memory_metrics *metrics) {
+    char path[4096];
+    int written = snprintf(path, sizeof(path), "%s/memory.stat", cgroup);
+    if (written <= 0 || (size_t)written >= sizeof(path)) {
+        return;
+    }
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return;
+    }
+    char key[128];
+    unsigned long long value = 0;
+    while (fscanf(f, "%127s %llu", key, &value) == 2) {
+        uint64_t bytes = (uint64_t)value;
+        if (strcmp(key, "anon") == 0) {
+            metrics->service_cgroup_anon += bytes;
+        } else if (strcmp(key, "file") == 0) {
+            metrics->service_cgroup_file += bytes;
+        } else if (strcmp(key, "inactive_file") == 0) {
+            metrics->service_cgroup_inactive_file += bytes;
+        } else if (strcmp(key, "active_file") == 0) {
+            metrics->service_cgroup_active_file += bytes;
+        } else if (strcmp(key, "slab") == 0) {
+            metrics->service_cgroup_slab += bytes;
+        } else if (strcmp(key, "slab_reclaimable") == 0) {
+            metrics->service_cgroup_slab_reclaimable += bytes;
+        } else if (strcmp(key, "slab_unreclaimable") == 0) {
+            metrics->service_cgroup_slab_unreclaimable += bytes;
+        }
+    }
+    fclose(f);
+    if (metrics->service_cgroup_slab == 0) {
+        metrics->service_cgroup_slab =
+            metrics->service_cgroup_slab_reclaimable +
+            metrics->service_cgroup_slab_unreclaimable;
+    }
+}
+
 static bool read_cgroup_populated(const char *cgroup) {
     char path[4096];
     int written = snprintf(path, sizeof(path), "%s/cgroup.events", cgroup);
@@ -430,6 +475,7 @@ static void read_configured_cgroup_metrics(struct memory_metrics *metrics) {
     metrics->build_workload_detected = build_snapshot.populated;
     metrics->daemon_cgroup_memory_current = read_cgroup_current(daemon_cgroup);
     metrics->service_cgroup_memory_current = read_cgroup_current(service_cgroup);
+    add_service_cgroup_memory_stat(service_cgroup, metrics);
 }
 
 static void read_meminfo(struct memory_metrics *metrics) {
@@ -577,6 +623,11 @@ static void metrics_json(const struct memory_metrics *metrics, char *body, size_
         "\"build_cgroup_memory_current\":%llu,"
         "\"daemon_cgroup_memory_current\":%llu,"
         "\"service_cgroup_memory_current\":%llu,"
+        "\"service_cgroup_anon\":%llu,\"service_cgroup_file\":%llu,"
+        "\"service_cgroup_inactive_file\":%llu,\"service_cgroup_active_file\":%llu,"
+        "\"service_cgroup_slab\":%llu,"
+        "\"service_cgroup_slab_reclaimable\":%llu,"
+        "\"service_cgroup_slab_unreclaimable\":%llu,"
         "\"psi_some_avg10\":%.2f,\"psi_full_avg10\":%.2f,"
         "\"active_workloads\":%d,\"build_workload_detected\":%s,"
         "\"source\":\"conjet-memd\"}\n",
@@ -607,6 +658,13 @@ static void metrics_json(const struct memory_metrics *metrics, char *body, size_
         (unsigned long long)metrics->build_cgroup_memory_current,
         (unsigned long long)metrics->daemon_cgroup_memory_current,
         (unsigned long long)metrics->service_cgroup_memory_current,
+        (unsigned long long)metrics->service_cgroup_anon,
+        (unsigned long long)metrics->service_cgroup_file,
+        (unsigned long long)metrics->service_cgroup_inactive_file,
+        (unsigned long long)metrics->service_cgroup_active_file,
+        (unsigned long long)metrics->service_cgroup_slab,
+        (unsigned long long)metrics->service_cgroup_slab_reclaimable,
+        (unsigned long long)metrics->service_cgroup_slab_unreclaimable,
         metrics->psi_some_avg10,
         metrics->psi_full_avg10,
         metrics->active_workloads,

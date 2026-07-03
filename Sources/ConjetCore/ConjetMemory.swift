@@ -36,6 +36,13 @@ public struct GuestMemoryMetrics: Codable, Equatable, Sendable {
     public var buildCgroupMemoryCurrentBytes: UInt64
     public var daemonCgroupMemoryCurrentBytes: UInt64
     public var serviceCgroupMemoryCurrentBytes: UInt64
+    public var serviceCgroupAnonBytes: UInt64
+    public var serviceCgroupFileBytes: UInt64
+    public var serviceCgroupInactiveFileBytes: UInt64
+    public var serviceCgroupActiveFileBytes: UInt64
+    public var serviceCgroupSlabBytes: UInt64
+    public var serviceCgroupSlabReclaimableBytes: UInt64
+    public var serviceCgroupSlabUnreclaimableBytes: UInt64
     public var psiSomeAvg10: Double
     public var psiFullAvg10: Double
     public var activeWorkloads: Int
@@ -70,6 +77,13 @@ public struct GuestMemoryMetrics: Codable, Equatable, Sendable {
         case buildCgroupMemoryCurrentBytes = "build_cgroup_memory_current"
         case daemonCgroupMemoryCurrentBytes = "daemon_cgroup_memory_current"
         case serviceCgroupMemoryCurrentBytes = "service_cgroup_memory_current"
+        case serviceCgroupAnonBytes = "service_cgroup_anon"
+        case serviceCgroupFileBytes = "service_cgroup_file"
+        case serviceCgroupInactiveFileBytes = "service_cgroup_inactive_file"
+        case serviceCgroupActiveFileBytes = "service_cgroup_active_file"
+        case serviceCgroupSlabBytes = "service_cgroup_slab"
+        case serviceCgroupSlabReclaimableBytes = "service_cgroup_slab_reclaimable"
+        case serviceCgroupSlabUnreclaimableBytes = "service_cgroup_slab_unreclaimable"
         case psiSomeAvg10 = "psi_some_avg10"
         case psiFullAvg10 = "psi_full_avg10"
         case activeWorkloads = "active_workloads"
@@ -105,6 +119,13 @@ public struct GuestMemoryMetrics: Codable, Equatable, Sendable {
         buildCgroupMemoryCurrentBytes: UInt64 = 0,
         daemonCgroupMemoryCurrentBytes: UInt64 = 0,
         serviceCgroupMemoryCurrentBytes: UInt64 = 0,
+        serviceCgroupAnonBytes: UInt64 = 0,
+        serviceCgroupFileBytes: UInt64 = 0,
+        serviceCgroupInactiveFileBytes: UInt64 = 0,
+        serviceCgroupActiveFileBytes: UInt64 = 0,
+        serviceCgroupSlabBytes: UInt64 = 0,
+        serviceCgroupSlabReclaimableBytes: UInt64 = 0,
+        serviceCgroupSlabUnreclaimableBytes: UInt64 = 0,
         psiSomeAvg10: Double = 0,
         psiFullAvg10: Double = 0,
         activeWorkloads: Int = 0,
@@ -138,6 +159,13 @@ public struct GuestMemoryMetrics: Codable, Equatable, Sendable {
         self.buildCgroupMemoryCurrentBytes = buildCgroupMemoryCurrentBytes
         self.daemonCgroupMemoryCurrentBytes = daemonCgroupMemoryCurrentBytes
         self.serviceCgroupMemoryCurrentBytes = serviceCgroupMemoryCurrentBytes
+        self.serviceCgroupAnonBytes = serviceCgroupAnonBytes
+        self.serviceCgroupFileBytes = serviceCgroupFileBytes
+        self.serviceCgroupInactiveFileBytes = serviceCgroupInactiveFileBytes
+        self.serviceCgroupActiveFileBytes = serviceCgroupActiveFileBytes
+        self.serviceCgroupSlabBytes = serviceCgroupSlabBytes
+        self.serviceCgroupSlabReclaimableBytes = serviceCgroupSlabReclaimableBytes
+        self.serviceCgroupSlabUnreclaimableBytes = serviceCgroupSlabUnreclaimableBytes
         self.psiSomeAvg10 = psiSomeAvg10
         self.psiFullAvg10 = psiFullAvg10
         self.activeWorkloads = activeWorkloads
@@ -174,6 +202,13 @@ public struct GuestMemoryMetrics: Codable, Equatable, Sendable {
         self.buildCgroupMemoryCurrentBytes = try container.decodeIfPresent(UInt64.self, forKey: .buildCgroupMemoryCurrentBytes) ?? 0
         self.daemonCgroupMemoryCurrentBytes = try container.decodeIfPresent(UInt64.self, forKey: .daemonCgroupMemoryCurrentBytes) ?? 0
         self.serviceCgroupMemoryCurrentBytes = try container.decodeIfPresent(UInt64.self, forKey: .serviceCgroupMemoryCurrentBytes) ?? 0
+        self.serviceCgroupAnonBytes = try container.decodeIfPresent(UInt64.self, forKey: .serviceCgroupAnonBytes) ?? 0
+        self.serviceCgroupFileBytes = try container.decodeIfPresent(UInt64.self, forKey: .serviceCgroupFileBytes) ?? 0
+        self.serviceCgroupInactiveFileBytes = try container.decodeIfPresent(UInt64.self, forKey: .serviceCgroupInactiveFileBytes) ?? 0
+        self.serviceCgroupActiveFileBytes = try container.decodeIfPresent(UInt64.self, forKey: .serviceCgroupActiveFileBytes) ?? 0
+        self.serviceCgroupSlabBytes = try container.decodeIfPresent(UInt64.self, forKey: .serviceCgroupSlabBytes) ?? 0
+        self.serviceCgroupSlabReclaimableBytes = try container.decodeIfPresent(UInt64.self, forKey: .serviceCgroupSlabReclaimableBytes) ?? 0
+        self.serviceCgroupSlabUnreclaimableBytes = try container.decodeIfPresent(UInt64.self, forKey: .serviceCgroupSlabUnreclaimableBytes) ?? 0
         self.psiSomeAvg10 = try container.decodeIfPresent(Double.self, forKey: .psiSomeAvg10) ?? 0
         self.psiFullAvg10 = try container.decodeIfPresent(Double.self, forKey: .psiFullAvg10) ?? 0
         self.activeWorkloads = try container.decodeIfPresent(Int.self, forKey: .activeWorkloads) ?? 0
@@ -183,6 +218,32 @@ public struct GuestMemoryMetrics: Codable, Equatable, Sendable {
 
     public var diskSwapUsedBytes: UInt64 {
         diskSwapTotalBytes > diskSwapFreeBytes ? diskSwapTotalBytes - diskSwapFreeBytes : 0
+    }
+
+    public var containerWorkingSetBytes: UInt64 {
+        containerMemoryCurrentBytes > containerInactiveFileBytes
+            ? containerMemoryCurrentBytes - containerInactiveFileBytes
+            : 0
+    }
+
+    public var serviceCgroupWorkingSetBytes: UInt64 {
+        let inactiveFileBytes = serviceCgroupFileBytes > 0
+            ? min(serviceCgroupInactiveFileBytes, serviceCgroupFileBytes)
+            : serviceCgroupInactiveFileBytes
+        let slabReclaimableBytes = serviceCgroupSlabBytes > 0
+            ? min(serviceCgroupSlabReclaimableBytes, serviceCgroupSlabBytes)
+            : serviceCgroupSlabReclaimableBytes
+        let reclaimableBytes = min(
+            serviceCgroupMemoryCurrentBytes,
+            Self.saturatingAdd(inactiveFileBytes, slabReclaimableBytes)
+        )
+        return serviceCgroupMemoryCurrentBytes > reclaimableBytes
+            ? serviceCgroupMemoryCurrentBytes - reclaimableBytes
+            : 0
+    }
+
+    private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
+        UInt64.max - lhs < rhs ? UInt64.max : lhs + rhs
     }
 }
 

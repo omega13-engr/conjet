@@ -105,36 +105,44 @@ static void make_test_root(char *root, size_t root_len, const char *prefix) {
     }
 }
 
-static void test_reclaim_target_stats_include_prefixed_build_siblings(void) {
+static void test_reclaim_target_stats_include_prefixed_build_and_service_siblings(void) {
     char root[4096];
     make_test_root(root, sizeof(root), "conjet-reclaimd-cgroup");
 
     char build[4096];
     char sibling[4096];
+    char service[4096];
+    char service_sibling[4096];
     char unrelated[4096];
     char daemon[4096];
     test_join_path(build, sizeof(build), root, "conjet-build.slice");
     test_join_path(sibling, sizeof(sibling), root, "conjet-build.slice:docker:abc");
-    test_join_path(unrelated, sizeof(unrelated), root, "conjet-services.slice:docker:def");
+    test_join_path(service, sizeof(service), root, "conjet-services.slice");
+    test_join_path(service_sibling, sizeof(service_sibling), root, "conjet-services.slice:docker:def");
+    test_join_path(unrelated, sizeof(unrelated), root, "other.slice:docker:ignored");
     test_join_path(daemon, sizeof(daemon), root, "conjet-daemons.slice");
     test_make_dir(build);
     test_make_dir(sibling);
+    test_make_dir(service);
+    test_make_dir(service_sibling);
     test_make_dir(unrelated);
     test_make_dir(daemon);
 
     write_memcg_files(build, 10, 20, 30, 40, 50);
     write_memcg_files(sibling, 100, 200, 300, 400, 500);
-    write_memcg_files(unrelated, 1000, 2000, 3000, 4000, 5000);
+    write_memcg_files(service, 1000, 2000, 3000, 4000, 5000);
+    write_memcg_files(service_sibling, 2000, 4000, 6000, 8000, 10000);
+    write_memcg_files(unrelated, 100000, 200000, 300000, 400000, 500000);
     write_memcg_files(daemon, 10000, 20000, 30000, 40000, 50000);
 
     struct memcg_stat total;
-    int rc = aggregate_reclaim_targets_stat(build, daemon, &total);
+    int rc = aggregate_reclaim_targets_stat(build, daemon, service, &total);
     require_int("aggregate_reclaim_targets_stat", rc, 0);
-    require_u64("memory_current", total.memory_current, 10110);
-    require_u64("inactive_file", total.inactive_file, 20220);
-    require_u64("slab_reclaimable", total.slab_reclaimable, 30330);
-    require_u64("file_dirty", total.file_dirty, 40440);
-    require_u64("file_writeback", total.file_writeback, 50550);
+    require_u64("memory_current", total.memory_current, 13110);
+    require_u64("inactive_file", total.inactive_file, 26220);
+    require_u64("slab_reclaimable", total.slab_reclaimable, 39330);
+    require_u64("file_dirty", total.file_dirty, 52440);
+    require_u64("file_writeback", total.file_writeback, 65550);
 }
 
 static void test_syncfs_gate_uses_dirty_writeback_threshold_and_path(void) {
@@ -187,7 +195,7 @@ static void test_drop_caches_gate_defaults_on_and_accepts_disable_values(void) {
 }
 
 int main(void) {
-    test_reclaim_target_stats_include_prefixed_build_siblings();
+    test_reclaim_target_stats_include_prefixed_build_and_service_siblings();
     test_syncfs_gate_uses_dirty_writeback_threshold_and_path();
     test_drop_caches_gate_defaults_on_and_accepts_disable_values();
     puts("conjet-reclaimd regression tests passed");
