@@ -218,7 +218,7 @@ struct DockerServiceQuiescer {
       if [ "$total" -le 0 ] 2>/dev/null; then
         echo 1073741824
       else
-        echo $((total * 3 / 4))
+        echo "$total"
       fi
     }
 

@@ -33,6 +33,13 @@ static void require_contains(const char *name, const char *haystack, const char 
     }
 }
 
+static void require_string(const char *name, const char *actual, const char *expected) {
+    if (strcmp(actual, expected) != 0) {
+        fprintf(stderr, "%s: expected %s, got %s\n", name, expected, actual);
+        exit(1);
+    }
+}
+
 static void write_file(const char *dir, const char *name, const char *body) {
     char path[4096];
     int written = snprintf(path, sizeof(path), "%s/%s", dir, name);
@@ -175,9 +182,80 @@ static void test_service_cgroup_memory_stat_is_exported(void) {
     unsetenv("CONJET_SERVICE_CGROUP");
 }
 
+static void test_service_slice_scanner_aggregates_working_set_by_service_key(void) {
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL || tmpdir[0] == '\0') {
+        tmpdir = "/tmp";
+    }
+    char root[4096];
+    int written = snprintf(root, sizeof(root), "%s/conjet-memd-service-slices.XXXXXX", tmpdir);
+    if (written <= 0 || (size_t)written >= sizeof(root)) {
+        fprintf(stderr, "test root path too long for %s\n", tmpdir);
+        exit(1);
+    }
+    if (mkdtemp(root) == NULL) {
+        fprintf(stderr, "mkdtemp: %s\n", strerror(errno));
+        exit(1);
+    }
+
+    char services[4096];
+    char worker[4096];
+    char worker_child[4096];
+    char unrelated[4096];
+    join_path(services, sizeof(services), root, "conjet-services.slice");
+    join_path(worker, sizeof(worker), services, "conjet-service-chum_mem_worker.slice");
+    join_path(worker_child, sizeof(worker_child), services, "conjet-service-chum_mem_worker.slice:docker:abc");
+    join_path(unrelated, sizeof(unrelated), services, "docker-ignored.scope");
+    make_dir(services);
+    make_dir(worker);
+    make_dir(worker_child);
+    make_dir(unrelated);
+
+    write_file(worker, "memory.current", "4096\n");
+    write_file(worker, "cgroup.events", "populated 1\nfrozen 0\n");
+    write_file(
+        worker,
+        "memory.stat",
+        "anon 2048\nfile 1536\ninactive_file 1024\nactive_file 512\n"
+        "slab_reclaimable 256\nslab_unreclaimable 128\n"
+    );
+    write_file(worker_child, "memory.current", "8192\n");
+    write_file(worker_child, "cgroup.events", "populated 0\nfrozen 0\n");
+    write_file(
+        worker_child,
+        "memory.stat",
+        "anon 4096\nfile 3072\ninactive_file 512\nactive_file 2560\n"
+        "slab_reclaimable 128\nslab_unreclaimable 64\n"
+    );
+    write_file(unrelated, "memory.current", "1048576\n");
+    write_file(unrelated, "cgroup.events", "populated 1\nfrozen 0\n");
+
+    struct service_slice_set set;
+    memset(&set, 0, sizeof(set));
+    scan_service_slice_cgroups(root, 0, &set);
+
+    require_u64("service slice count", (uint64_t)set.count, 1);
+    require_string("service slice key", set.slices[0].key, "chum_mem_worker");
+    require_u64("service slice current", set.slices[0].memory_current, 12288);
+    require_u64("service slice anon", set.slices[0].anon, 6144);
+    require_u64("service slice inactive_file", set.slices[0].inactive_file, 1536);
+    require_u64("service slice slab reclaimable", set.slices[0].slab_reclaimable, 384);
+    require_int("service slice populated", set.slices[0].populated ? 1 : 0, 1);
+    require_u64("service slice reclaimable", service_slice_reclaimable(&set.slices[0]), 1920);
+    require_u64("service slice working set", service_slice_working_set(&set.slices[0]), 10368);
+
+    char body[8192];
+    service_slices_json(&set, body, sizeof(body));
+    require_contains("service slice key JSON", body, "\"key\":\"chum_mem_worker\"");
+    require_contains("service slice current JSON", body, "\"memory_current\":12288");
+    require_contains("service slice working set JSON", body, "\"working_set\":10368");
+    require_contains("service slice reclaimable JSON", body, "\"reclaimable\":1920");
+}
+
 int main(void) {
     test_build_snapshot_aggregates_prefixed_sibling_memory_without_false_activity();
     test_service_cgroup_memory_stat_is_exported();
+    test_service_slice_scanner_aggregates_working_set_by_service_key();
     puts("conjet-memd cgroup regression tests passed");
     return 0;
 }

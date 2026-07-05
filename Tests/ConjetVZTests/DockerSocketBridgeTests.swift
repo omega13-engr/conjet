@@ -234,6 +234,70 @@ final class DockerSocketBridgeTests: XCTestCase {
         XCTAssertFalse(rewritten.contains("/conjet.slice/conjet-build.slice"))
     }
 
+    func testContainerCreateRewriteAddsPerServiceCgroupParent() throws {
+        let body = """
+        {"Image":"postgres:16","Labels":{"com.docker.compose.project":"chum-mem","com.docker.compose.service":"postgres"},"HostConfig":{}}
+        """
+        let request = Data("""
+        POST /v1.52/containers/create?name=chum-mem-postgres-1 HTTP/1.1\r
+        Host: docker\r
+        Content-Length: \(Data(body.utf8).count)\r
+        \r
+        \(body)
+        """.utf8)
+
+        let result = try XCTUnwrap(DockerSocketBridge.addServiceCgroupParentForContainerCreateRequest(request))
+        let rewritten = String(data: result.requestData, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(result.slice.serviceKey, "chum_mem_postgres")
+        XCTAssertEqual(
+            result.slice.cgroupParent,
+            "conjet-services-conjet-service-chum_mem_postgres.slice"
+        )
+        XCTAssertTrue(
+            rewritten.contains(#""CgroupParent":"conjet-services-conjet-service-chum_mem_postgres.slice""#),
+            rewritten
+        )
+    }
+
+    func testContainerCreateRewriteOverridesBroadConjetServiceCgroupParent() throws {
+        let body = """
+        {"Image":"postgres:16","Labels":{"com.docker.compose.project":"chum-mem","com.docker.compose.service":"postgres"},"HostConfig":{"CgroupParent":"conjet-services.slice"}}
+        """
+        let request = Data("""
+        POST /v1.52/containers/create?name=chum-mem-postgres-1 HTTP/1.1\r
+        Host: docker\r
+        Content-Length: \(Data(body.utf8).count)\r
+        \r
+        \(body)
+        """.utf8)
+
+        let result = try XCTUnwrap(DockerSocketBridge.addServiceCgroupParentForContainerCreateRequest(request))
+        let rewritten = String(data: result.requestData, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(result.slice.serviceKey, "chum_mem_postgres")
+        XCTAssertEqual(result.slice.cgroupParent, "conjet-services-conjet-service-chum_mem_postgres.slice")
+        XCTAssertTrue(
+            rewritten.contains(#""CgroupParent":"conjet-services-conjet-service-chum_mem_postgres.slice""#),
+            rewritten
+        )
+    }
+
+    func testContainerCreateRewritePreservesExistingCgroupParent() throws {
+        let body = #"{"Image":"postgres:16","HostConfig":{"CgroupParent":"custom.slice"}}"#
+        let request = Data("""
+        POST /v1.52/containers/create?name=db HTTP/1.1\r
+        Host: docker\r
+        Content-Length: \(Data(body.utf8).count)\r
+        \r
+        \(body)
+        """.utf8)
+
+        let result = try DockerSocketBridge.addServiceCgroupParentForContainerCreateRequest(request)
+
+        XCTAssertNil(result)
+    }
+
     func testStreamingDockerRequestStillNeedsClientPump() {
         let request = """
         GET /v1.52/events?filters=%7B%7D HTTP/1.1\r
@@ -878,6 +942,35 @@ final class DockerSocketBridgeTests: XCTestCase {
             DockerContainerRemoveRequestParser.containerID(from: Data(request.utf8)),
             "abcdef012345"
         )
+    }
+
+    func testContainerRemoveEmitsStopMemoryActivity() throws {
+        let root = URL(fileURLWithPath: "/tmp/cjbr-\(shortID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let request = "DELETE /v1.52/containers/abcdef012345?v=true&force=false HTTP/1.1\r\nHost: docker\r\n\r\n"
+        let connector = DockerStartResponseGuestConnectionConnector(statusCode: 204)
+        let observed = ObservedMemoryActivityCallbacks()
+        let socket = root.appendingPathComponent("docker.sock")
+        let bridge = DockerSocketBridge(
+            socketPath: socket.path,
+            connector: connector,
+            activityHandler: { activity in
+                observed.append(activity)
+            }
+        )
+        try bridge.start()
+        defer { bridge.stop() }
+
+        let response = try sendRawRequest(socketPath: socket.path, request: request)
+
+        XCTAssertTrue(response.contains("204 No Content"))
+        XCTAssertTrue(waitUntil { observed.events.contains(where: { $0.kind == .containerStopped }) })
+        let stopped = observed.events.first { $0.kind == .containerStopped }
+        XCTAssertEqual(stopped?.workload, .stop)
+        XCTAssertEqual(stopped?.activeStreams, 0)
+        XCTAssertEqual(stopped?.pressureStreams, 0)
     }
 
     func testContainerWaitParserExtractsVersionedContainerID() {

@@ -87,6 +87,7 @@ final class DockerServiceQuiescerTests: XCTestCase {
         XCTAssertTrue(calls[0].contains("missing"))
         XCTAssertTrue(calls[0].contains("nsenter"))
         XCTAssertTrue(calls[0].joined(separator: " ").contains("modprobe zram"))
+        XCTAssertTrue(calls[0].joined(separator: " ").contains("echo \"$total\""))
         XCTAssertTrue(calls[0].joined(separator: " ").contains("virtio-conjet-swap"))
         XCTAssertTrue(calls[0].joined(separator: " ").contains("swapon -p 1"))
     }

@@ -634,6 +634,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
     public typealias ContainerStartIntentHandler = @Sendable (DockerContainerStartRequest) -> Void
     public typealias ContainerStartHandler = @Sendable (DockerContainerStartRequest) -> Void
     public typealias ActivityHandler = @Sendable (DockerMemoryActivity) -> Void
+    public typealias ServiceMemorySliceActivityHandler = @Sendable (DockerServiceMemorySliceActivity) -> Void
     public typealias ManagedHostMountEventHandler = @Sendable (String) -> Void
 
     public let socketPath: String
@@ -645,6 +646,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
     private let containerStartIntentHandler: ContainerStartIntentHandler?
     private let containerStartHandler: ContainerStartHandler?
     private let activityHandler: ActivityHandler?
+    private let serviceMemorySliceActivityHandler: ServiceMemorySliceActivityHandler?
     private let managedHostMounts: (any DockerManagedHostMounting)?
     private let managedHostMountEventHandler: ManagedHostMountEventHandler?
     private let lock = NSLock()
@@ -652,6 +654,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
     private var running = false
     private var activeStreams = 0
     private var activePressureStreams = 0
+    private var serviceMemorySlicesByContainerID: [String: DockerServiceMemorySlice] = [:]
     private var acceptThread: Thread?
 
     public init(
@@ -663,6 +666,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
         containerStartIntentHandler: ContainerStartIntentHandler? = nil,
         containerStartHandler: ContainerStartHandler? = nil,
         activityHandler: ActivityHandler? = nil,
+        serviceMemorySliceActivityHandler: ServiceMemorySliceActivityHandler? = nil,
         managedHostMounts: (any DockerManagedHostMounting)? = nil,
         managedHostMountEventHandler: ManagedHostMountEventHandler? = nil
     ) {
@@ -674,6 +678,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
         self.containerStartIntentHandler = containerStartIntentHandler
         self.containerStartHandler = containerStartHandler
         self.activityHandler = activityHandler
+        self.serviceMemorySliceActivityHandler = serviceMemorySliceActivityHandler
         self.managedHostMounts = managedHostMounts
         self.managedHostMountEventHandler = managedHostMountEventHandler
     }
@@ -795,9 +800,25 @@ public final class DockerSocketBridge: @unchecked Sendable {
             } else if observedCreateRequest {
                 managedHostMountEventHandler?("managed Docker host mount rewrite skipped: no eligible host bind mount")
             }
+            let observedServiceSliceCreateRequest = Self.looksLikeContainerCreate(initialClientData)
+            let serviceMemorySliceRewrite = try Self.addServiceCgroupParentForContainerCreateRequest(initialClientData)
+            if let serviceMemorySliceRewrite {
+                initialClientData = serviceMemorySliceRewrite.requestData
+                managedHostMountEventHandler?(
+                    "service memory slice rewrite applied key=\(serviceMemorySliceRewrite.slice.serviceKey) parent=\(serviceMemorySliceRewrite.slice.cgroupParent)"
+                )
+            } else if observedServiceSliceCreateRequest {
+                managedHostMountEventHandler?("service memory slice rewrite skipped")
+            }
             initialClientData = Self.addBuildCgroupParentForDockerBuildRequest(initialClientData)
             let activity = beginActivity(initialClientData: initialClientData)
-            defer { endActivity(activity) }
+            let stopContainerID = DockerContainerLifecycleRequestParser.containerID(from: initialClientData)
+            defer {
+                endActivity(activity)
+                if let stopContainerID, activity.workload == .stop {
+                    emitServiceMemorySliceActivity(kind: .stopped, containerID: stopContainerID)
+                }
+            }
             let createIntent = DockerCreateRequestParser.intent(from: initialClientData)
             if let intent = createIntent {
                 createPublicationIntentHandler?(intent)
@@ -823,7 +844,8 @@ public final class DockerSocketBridge: @unchecked Sendable {
                 startRequest: startRequest,
                 waitCopyBackRequestData: waitCopyBackRequestData,
                 streamCopyBackContainerID: streamCopyBackContainerID,
-                managedHostMountRewrite: managedHostMountRewrite
+                managedHostMountRewrite: managedHostMountRewrite,
+                serviceMemorySlice: serviceMemorySliceRewrite?.slice
             )
         } catch {
             let message = "Conjet guest Docker bridge on VSOCK port \(guestPort) is not ready: \(error)\n"
@@ -841,7 +863,8 @@ public final class DockerSocketBridge: @unchecked Sendable {
         startRequest: DockerContainerStartRequest?,
         waitCopyBackRequestData: Data?,
         streamCopyBackContainerID: String?,
-        managedHostMountRewrite: DockerManagedHostMountRewriteResult?
+        managedHostMountRewrite: DockerManagedHostMountRewriteResult?,
+        serviceMemorySlice: DockerServiceMemorySlice?
     ) {
         guard writeAll(initialClientData, to: guest.fileDescriptor) else {
             guest.close()
@@ -849,7 +872,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
             return
         }
 
-        if createIntent != nil || managedHostMountRewrite != nil {
+        if createIntent != nil || managedHostMountRewrite != nil || serviceMemorySlice != nil {
             guard let initialGuestData = readInitialDockerCreateResponseData(from: guest.fileDescriptor) else {
                 guest.close()
                 Darwin.close(clientFD)
@@ -863,6 +886,14 @@ public final class DockerSocketBridge: @unchecked Sendable {
                     createPublicationResolutionHandler?(DockerCreatePublicationResolution(
                         intent: createIntent,
                         containerID: containerID
+                    ))
+                }
+                if let serviceMemorySlice {
+                    rememberServiceMemorySlice(serviceMemorySlice, containerID: containerID)
+                    serviceMemorySliceActivityHandler?(DockerServiceMemorySliceActivity(
+                        kind: .created,
+                        containerID: containerID,
+                        slice: serviceMemorySlice
                     ))
                 }
             }
@@ -886,6 +917,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
             }
             if DockerStartResponseParser.succeeded(from: initialGuestData) {
                 containerStartHandler?(startRequest)
+                emitServiceMemorySliceActivity(kind: .started, containerID: startRequest.containerID)
                 emitActivity(kind: .containerStarted, workload: .start, buildLike: false)
             }
         }
@@ -1073,6 +1105,42 @@ public final class DockerSocketBridge: @unchecked Sendable {
         ))
     }
 
+    private func rememberServiceMemorySlice(_ slice: DockerServiceMemorySlice, containerID: String) {
+        lock.lock()
+        serviceMemorySlicesByContainerID[containerID] = slice
+        lock.unlock()
+    }
+
+    private func serviceMemorySlice(for containerID: String) -> DockerServiceMemorySlice? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let slice = serviceMemorySlicesByContainerID[containerID] {
+            return slice
+        }
+        return serviceMemorySlicesByContainerID.first { entry in
+            entry.key.hasPrefix(containerID) || containerID.hasPrefix(entry.key)
+        }?.value
+    }
+
+    private func emitServiceMemorySliceActivity(kind: DockerServiceMemorySliceActivity.Kind, containerID: String) {
+        let slice = serviceMemorySlice(for: containerID)
+        if kind == .stopped || kind == .removed {
+            lock.lock()
+            serviceMemorySlicesByContainerID.removeValue(forKey: containerID)
+            if let key = serviceMemorySlicesByContainerID.first(where: { entry in
+                entry.key.hasPrefix(containerID) || containerID.hasPrefix(entry.key)
+            })?.key {
+                serviceMemorySlicesByContainerID.removeValue(forKey: key)
+            }
+            lock.unlock()
+        }
+        serviceMemorySliceActivityHandler?(DockerServiceMemorySliceActivity(
+            kind: kind,
+            containerID: containerID,
+            slice: slice
+        ))
+    }
+
     private static func classifyWorkload(_ data: Data) -> DockerMemoryActivity.Workload {
         let prefix = data.prefix(2048)
         guard let text = String(data: prefix, encoding: .utf8) else {
@@ -1090,13 +1158,36 @@ public final class DockerSocketBridge: @unchecked Sendable {
         if text.contains("/start") {
             return .start
         }
-        if text.contains("/stop") || text.contains("/kill") || text.contains("/wait") || text.contains("/delete") {
+        if text.contains("/stop")
+            || text.contains("/kill")
+            || text.contains("/wait")
+            || text.contains("/delete")
+            || Self.looksLikeDockerContainerDeleteRequest(text) {
             return .stop
         }
         if text.contains("/events") {
             return .events
         }
+        if text.contains("/stats") {
+            return .stats
+        }
         return .unknown
+    }
+
+    private static func looksLikeDockerContainerDeleteRequest(_ text: String) -> Bool {
+        guard text.hasPrefix("DELETE ") else {
+            return false
+        }
+        let requestTarget = text
+            .split(separator: "\r\n", maxSplits: 1, omittingEmptySubsequences: false)
+            .first?
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .dropFirst()
+            .first ?? ""
+        guard requestTarget.contains("/containers/") else {
+            return false
+        }
+        return !requestTarget.contains("/containers/prune")
     }
 
     private static func looksLikeContainerCreate(_ data: Data) -> Bool {
@@ -1199,6 +1290,123 @@ public final class DockerSocketBridge: @unchecked Sendable {
         return !version.isEmpty && version.allSatisfy { character in
             character.isNumber || character == "."
         }
+    }
+
+    struct ServiceCgroupParentRewriteResult: Equatable {
+        var requestData: Data
+        var slice: DockerServiceMemorySlice
+    }
+
+    static func addServiceCgroupParentForContainerCreateRequest(_ data: Data) throws -> ServiceCgroupParentRewriteResult? {
+        guard let request = try DockerHTTPMessage.parseRequest(data),
+              request.method == "POST",
+              request.isContainerCreate,
+              !containerCreateBodyIsBuildRelated(request.body),
+              let json = try JSONSerialization.jsonObject(with: request.body) as? [String: Any] else {
+            return nil
+        }
+
+        var root = json
+        var hostConfig = root["HostConfig"] as? [String: Any] ?? [:]
+        if let existing = stringValue(hostConfig["CgroupParent"]),
+           !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !isConjetDefaultServiceCgroupParent(existing) {
+            return nil
+        }
+
+        let labels = root["Labels"] as? [String: Any] ?? [:]
+        let composeProject = stringValue(labels["com.docker.compose.project"])
+        let composeService = stringValue(labels["com.docker.compose.service"])
+        let containerName = containerName(from: request.path)
+        let serviceKey = serviceMemorySliceKey(
+            composeProject: composeProject,
+            composeService: composeService,
+            containerName: containerName
+        )
+        let cgroupParent = "conjet-services-conjet-service-\(serviceKey).slice"
+        hostConfig["CgroupParent"] = cgroupParent
+        root["HostConfig"] = hostConfig
+
+        let body = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        return ServiceCgroupParentRewriteResult(
+            requestData: request.replacingBody(body),
+            slice: DockerServiceMemorySlice(
+                serviceKey: serviceKey,
+                cgroupParent: cgroupParent,
+                composeProject: composeProject,
+                composeService: composeService,
+                containerName: containerName
+            )
+        )
+    }
+
+    private static func isConjetDefaultServiceCgroupParent(_ value: String) -> Bool {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return normalized == "conjet-services.slice"
+            || normalized == "conjet.slice/conjet-services.slice"
+    }
+
+    private static func containerCreateBodyIsBuildRelated(_ body: Data) -> Bool {
+        guard let text = String(data: body.prefix(8192), encoding: .utf8) else {
+            return false
+        }
+        return text.contains("moby.buildkit")
+            || text.contains("moby/buildkit")
+            || text.contains("moby\\/buildkit")
+            || text.contains("buildx_buildkit")
+            || text.contains("buildkitd")
+    }
+
+    private static func serviceMemorySliceKey(
+        composeProject: String?,
+        composeService: String?,
+        containerName: String?
+    ) -> String {
+        let raw: String
+        if let composeProject, let composeService,
+           !composeProject.isEmpty, !composeService.isEmpty {
+            raw = "\(composeProject)_\(composeService)"
+        } else if let composeService, !composeService.isEmpty {
+            raw = composeService
+        } else if let containerName, !containerName.isEmpty {
+            raw = containerName
+        } else {
+            raw = "container"
+        }
+        let sanitized = raw.unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) || scalar.value == 95 {
+                return Character(scalar)
+            }
+            return "_"
+        }
+        let compact = String(sanitized)
+            .split(separator: "_", omittingEmptySubsequences: true)
+            .joined(separator: "_")
+            .lowercased()
+        return String((compact.isEmpty ? "container" : compact).prefix(80))
+    }
+
+    private static func containerName(from path: String) -> String? {
+        guard let queryStart = path.firstIndex(of: "?") else {
+            return nil
+        }
+        let query = path[path.index(after: queryStart)...]
+        for item in query.split(separator: "&", omittingEmptySubsequences: false) {
+            let parts = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.first.map(String.init) == "name", parts.count == 2 else {
+                continue
+            }
+            return String(parts[1]).removingPercentEncoding
+        }
+        return nil
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        if let value = value as? String { return value }
+        if let value = value as? NSNumber { return value.stringValue }
+        return nil
     }
 
     private static func dockerRequestPathHasQueryParameter(_ path: String, name: String) -> Bool {
@@ -1563,7 +1771,7 @@ private final class DockerStreamPhaseDetector: @unchecked Sendable {
             return text.contains("\"status\":\"Pull complete\"")
                 || text.contains("\"status\":\"Download complete\"")
                 || text.contains("\"stream\":\"")
-        case .unknown, .start, .stop, .events:
+        case .unknown, .start, .stop, .events, .stats:
             return false
         }
     }

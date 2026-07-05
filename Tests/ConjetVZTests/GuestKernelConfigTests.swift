@@ -591,6 +591,21 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(imageScript.contains("sha512sum \"$(basename \"${OUT_IMAGE}\")\""))
     }
 
+    func testConjetMemorySetupDefaultsZramToGuestCapacityWithDiskFallback() throws {
+        let scriptURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("guest/image/conjet-core/scripts/conjet-memory-setup.sh")
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+
+        let syntax = try ProcessRunner.run("/bin/bash", ["-n", scriptURL.path])
+        XCTAssertTrue(syntax.succeeded, syntax.stderr)
+        XCTAssertTrue(script.contains("CONJET_ZRAM_SIZE_BYTES:-$(default_zram_bytes)"))
+        XCTAssertTrue(script.contains("echo \"${total}\""))
+        XCTAssertFalse(script.contains("total / 2"))
+        XCTAssertFalse(script.contains("total * 3 / 4"))
+        XCTAssertTrue(script.contains("swapon -p 32767"))
+        XCTAssertTrue(script.contains("swapon -p 1"))
+    }
+
     func testConjetCoreReleaseWorkflowPublishesJetstreamKernelAndRootfsAssets() throws {
         let workflowURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".github/workflows/conjet-core-image.yml")

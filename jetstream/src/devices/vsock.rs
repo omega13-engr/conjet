@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::devices::virtio::{VirtioMmioDevice, VirtioQueueState};
@@ -524,10 +525,12 @@ impl HostUnixVsockBridgeState {
                     if self.detect_docker_phases && !stream.binary_frame_stream {
                         stream.detect_docker_workload_request(&buf);
                     }
-                    let request_complete =
-                        !stream.binary_frame_stream && stream.observe_host_request_bytes(&buf);
+                    let host_payload = stream.prepare_host_payload_for_guest(buf);
+                    let Some((buf, request_complete)) = host_payload.into_forwarded() else {
+                        continue;
+                    };
                     stream.bytes_sent_to_guest =
-                        stream.bytes_sent_to_guest.wrapping_add(count as u64);
+                        stream.bytes_sent_to_guest.wrapping_add(buf.len() as u64);
                     let fwd_cnt = stream.forward_count();
                     self.pending_guest_packets
                         .push_back(VsockPacket::rw_with_credit(
@@ -674,6 +677,8 @@ struct HostUnixVsockStream {
     docker_response_phase_line_buffer: Vec<u8>,
     host_request_observed: Vec<u8>,
     host_request_complete: bool,
+    host_request_forwarding_started: bool,
+    host_request_streaming_upgrade: bool,
     host_protocol_prefix: Vec<u8>,
     host_protocol_known: bool,
     binary_frame_stream: bool,
@@ -699,6 +704,8 @@ impl HostUnixVsockStream {
             docker_response_phase_line_buffer: Vec::new(),
             host_request_observed: Vec::new(),
             host_request_complete: false,
+            host_request_forwarding_started: false,
+            host_request_streaming_upgrade: false,
             host_protocol_prefix: Vec::new(),
             host_protocol_known: false,
             binary_frame_stream: false,
@@ -736,6 +743,84 @@ impl HostUnixVsockStream {
             self.host_request_complete = self.host_request_observed.len() >= required;
         }
         self.host_request_complete
+    }
+
+    fn prepare_host_payload_for_guest(&mut self, payload: Vec<u8>) -> HostRequestPayload {
+        if self.binary_frame_stream {
+            return HostRequestPayload::Forward {
+                payload,
+                request_complete: false,
+            };
+        }
+
+        if self.host_request_forwarding_started {
+            if self.host_request_streaming_upgrade {
+                return HostRequestPayload::Forward {
+                    payload,
+                    request_complete: false,
+                };
+            }
+            let request_complete = self.observe_host_request_bytes(&payload);
+            return HostRequestPayload::Forward {
+                payload,
+                request_complete,
+            };
+        }
+
+        const MAX_OBSERVED_REQUEST: usize = 1024 * 1024;
+        if self.host_request_observed.len() < MAX_OBSERVED_REQUEST {
+            let remaining = MAX_OBSERVED_REQUEST - self.host_request_observed.len();
+            self.host_request_observed
+                .extend_from_slice(&payload[..payload.len().min(remaining)]);
+        }
+
+        let Some(header_end) = http_header_end(&self.host_request_observed) else {
+            if self.host_request_observed.len() >= MAX_OBSERVED_REQUEST {
+                self.host_request_forwarding_started = true;
+                let buffered = std::mem::take(&mut self.host_request_observed);
+                return HostRequestPayload::Forward {
+                    payload: buffered,
+                    request_complete: false,
+                };
+            }
+            return HostRequestPayload::Pending;
+        };
+
+        let is_container_create = http_request_path(&self.host_request_observed[..header_end])
+            .is_some_and(docker_path_is_container_create);
+        let required = http_request_bytes_required_for_guest_shutdown(&self.host_request_observed);
+        let streaming_upgrade =
+            http_request_is_streaming_upgrade(&self.host_request_observed[..header_end]);
+
+        if is_container_create
+            && !required.is_some_and(|bytes| self.host_request_observed.len() >= bytes)
+        {
+            return HostRequestPayload::Pending;
+        }
+
+        self.host_request_forwarding_started = true;
+        if streaming_upgrade {
+            self.host_request_streaming_upgrade = true;
+        }
+        let request_complete =
+            required.is_some_and(|bytes| self.host_request_observed.len() >= bytes);
+        if request_complete {
+            self.host_request_complete = true;
+        }
+        let buffered = if is_container_create || request_complete || streaming_upgrade {
+            std::mem::take(&mut self.host_request_observed)
+        } else {
+            self.host_request_observed.clone()
+        };
+        let payload = if is_container_create {
+            rewrite_docker_create_service_cgroup_parent(&buffered).unwrap_or(buffered)
+        } else {
+            buffered
+        };
+        HostRequestPayload::Forward {
+            payload,
+            request_complete,
+        }
     }
 
     fn detect_docker_workload_request(&mut self, payload: &[u8]) {
@@ -856,11 +941,28 @@ impl HostUnixVsockStream {
     }
 }
 
+enum HostRequestPayload {
+    Pending,
+    Forward {
+        payload: Vec<u8>,
+        request_complete: bool,
+    },
+}
+
+impl HostRequestPayload {
+    fn into_forwarded(self) -> Option<(Vec<u8>, bool)> {
+        match self {
+            HostRequestPayload::Pending => None,
+            HostRequestPayload::Forward {
+                payload,
+                request_complete,
+            } => Some((payload, request_complete)),
+        }
+    }
+}
+
 fn http_request_bytes_required_for_guest_shutdown(buffer: &[u8]) -> Option<usize> {
-    let header_end = buffer
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 4)?;
+    let header_end = http_header_end(buffer)?;
     let headers = String::from_utf8_lossy(&buffer[..header_end]).to_ascii_lowercase();
     if headers.contains(" /grpc ")
         || headers.contains("connection: upgrade")
@@ -881,6 +983,220 @@ fn http_request_bytes_required_for_guest_shutdown(buffer: &[u8]) -> Option<usize
         }
     }
     Some(header_end)
+}
+
+fn http_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+}
+
+fn http_request_path(header: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(header).ok()?;
+    let request_line = text.lines().next()?;
+    let mut parts = request_line.split_whitespace();
+    let _method = parts.next()?;
+    parts.next()
+}
+
+fn http_request_is_streaming_upgrade(header: &[u8]) -> bool {
+    let headers = String::from_utf8_lossy(header).to_ascii_lowercase();
+    headers.contains(" /grpc ")
+        || headers.contains("connection: upgrade")
+        || headers.contains("upgrade: h2c")
+}
+
+fn docker_path_is_container_create(path: &str) -> bool {
+    let path_only = path.split_once('?').map_or(path, |(path, _)| path);
+    let components = path_only
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    if components.len() >= 2 && components[0] == "containers" && components[1] == "create" {
+        return true;
+    }
+    components.len() >= 3
+        && components[0].starts_with('v')
+        && components[1] == "containers"
+        && components[2] == "create"
+}
+
+fn rewrite_docker_create_service_cgroup_parent(request: &[u8]) -> Option<Vec<u8>> {
+    let header_end = http_header_end(request)?;
+    let header = std::str::from_utf8(&request[..header_end]).ok()?;
+    let mut lines = header.split("\r\n").filter(|line| !line.is_empty());
+    let request_line = lines.next()?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next()?;
+    let path = request_parts.next()?;
+    let version = request_parts.next().unwrap_or("HTTP/1.1");
+    if method != "POST" || !docker_path_is_container_create(path) {
+        return None;
+    }
+
+    let mut headers = Vec::new();
+    let mut saw_host = false;
+    let mut transfer_encoding = String::new();
+    let mut content_length = None;
+    for line in lines {
+        let (name, value) = line.split_once(':')?;
+        let lower = name.trim().to_ascii_lowercase();
+        if lower == "host" {
+            saw_host = true;
+        }
+        if lower == "transfer-encoding" {
+            transfer_encoding = value.trim().to_ascii_lowercase();
+        }
+        if lower == "content-length" {
+            content_length = value.trim().parse::<usize>().ok();
+        }
+        headers.push((name.to_string(), value.trim().to_string()));
+    }
+    if transfer_encoding
+        .split(',')
+        .any(|encoding| encoding.trim() == "chunked")
+    {
+        return None;
+    }
+    let body_length = content_length?;
+    let body_start = header_end;
+    let body_end = body_start.checked_add(body_length)?;
+    let body = request.get(body_start..body_end)?;
+    if docker_create_body_is_build_related(body) {
+        return None;
+    }
+
+    let mut root = serde_json::from_slice::<Value>(body).ok()?;
+    let root_object = root.as_object_mut()?;
+    let labels = root_object
+        .get("Labels")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let compose_project = labels
+        .get("com.docker.compose.project")
+        .and_then(Value::as_str);
+    let compose_service = labels
+        .get("com.docker.compose.service")
+        .and_then(Value::as_str);
+    let container_name = docker_container_name_from_path(path);
+    let service_key =
+        service_memory_slice_key(compose_project, compose_service, container_name.as_deref());
+    let cgroup_parent = format!("conjet-services-conjet-service-{service_key}.slice");
+
+    let host_config = root_object
+        .entry("HostConfig")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !host_config.is_object() {
+        *host_config = Value::Object(Map::new());
+    }
+    let host_config = host_config.as_object_mut()?;
+    if let Some(existing) = host_config.get("CgroupParent").and_then(Value::as_str) {
+        if !existing.trim().is_empty() && !is_conjet_default_service_cgroup_parent(existing) {
+            return None;
+        }
+    }
+    host_config.insert("CgroupParent".to_string(), Value::String(cgroup_parent));
+
+    let new_body = serde_json::to_vec(&root).ok()?;
+    let mut rewritten = Vec::new();
+    rewritten.extend_from_slice(format!("{method} {path} {version}\r\n").as_bytes());
+    for (name, value) in headers {
+        let lower = name.trim().to_ascii_lowercase();
+        if lower == "content-length" || lower == "transfer-encoding" {
+            continue;
+        }
+        rewritten.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+    }
+    if !saw_host {
+        rewritten.extend_from_slice(b"Host: docker\r\n");
+    }
+    rewritten.extend_from_slice(format!("Content-Length: {}\r\n\r\n", new_body.len()).as_bytes());
+    rewritten.extend_from_slice(&new_body);
+    Some(rewritten)
+}
+
+fn docker_create_body_is_build_related(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(&body[..body.len().min(8192)]);
+    text.contains("moby.buildkit")
+        || text.contains("moby/buildkit")
+        || text.contains("moby\\/buildkit")
+        || text.contains("buildx_buildkit")
+        || text.contains("buildkitd")
+}
+
+fn is_conjet_default_service_cgroup_parent(value: &str) -> bool {
+    let normalized = value.trim().trim_matches('/');
+    normalized == "conjet-services.slice" || normalized == "conjet.slice/conjet-services.slice"
+}
+
+fn docker_container_name_from_path(path: &str) -> Option<String> {
+    let query = path.split_once('?')?.1;
+    for item in query.split('&') {
+        let (name, value) = item.split_once('=')?;
+        if name == "name" {
+            return Some(percent_decode(value));
+        }
+    }
+    None
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    output.push(byte);
+                    index += 3;
+                    continue;
+                }
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn service_memory_slice_key(
+    compose_project: Option<&str>,
+    compose_service: Option<&str>,
+    container_name: Option<&str>,
+) -> String {
+    let raw = match (compose_project, compose_service, container_name) {
+        (Some(project), Some(service), _) if !project.is_empty() && !service.is_empty() => {
+            format!("{project}_{service}")
+        }
+        (_, Some(service), _) if !service.is_empty() => service.to_string(),
+        (_, _, Some(name)) if !name.is_empty() => name.to_string(),
+        _ => "container".to_string(),
+    };
+    let sanitized = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let compact = sanitized
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+        .to_ascii_lowercase();
+    let key = if compact.is_empty() {
+        "container".to_string()
+    } else {
+        compact
+    };
+    key.chars().take(80).collect()
 }
 
 fn chunked_http_request_bytes_required(buffer: &[u8], mut offset: usize) -> Option<usize> {
@@ -1202,15 +1518,57 @@ mod tests {
         bridge.accept_stream(server);
         bridge.poll_host_streams();
 
-        assert_eq!(bridge.pending_guest_packets.len(), 2);
+        assert_eq!(bridge.pending_guest_packets.len(), 1);
         assert_eq!(bridge.pending_guest_packets[0].op, OP_REQUEST);
-        assert_eq!(bridge.pending_guest_packets[1].op, OP_RW);
 
         client.write_all(b"cd").unwrap();
         bridge.poll_host_streams();
-        assert_eq!(bridge.pending_guest_packets.len(), 4);
-        assert_eq!(bridge.pending_guest_packets[2].op, OP_RW);
-        assert_eq!(bridge.pending_guest_packets[3].op, OP_SHUTDOWN);
+        assert_eq!(bridge.pending_guest_packets.len(), 3);
+        assert_eq!(bridge.pending_guest_packets[1].op, OP_RW);
+        assert_eq!(bridge.pending_guest_packets[2].op, OP_SHUTDOWN);
+    }
+
+    #[test]
+    fn docker_container_create_rewrites_broad_conjet_cgroup_parent() {
+        let body = br#"{"Image":"postgres:16","Labels":{"com.docker.compose.project":"chum-mem","com.docker.compose.service":"postgres"},"HostConfig":{"CgroupParent":"conjet-services.slice"}}"#;
+        let request = format!(
+            "POST /v1.52/containers/create?name=chum-mem-postgres-1 HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        let rewritten = rewrite_docker_create_service_cgroup_parent(request.as_bytes()).unwrap();
+        let rewritten_text = String::from_utf8(rewritten).unwrap();
+
+        assert!(rewritten_text.contains(
+            r#""CgroupParent":"conjet-services-conjet-service-chum_mem_postgres.slice""#
+        ));
+        assert!(!rewritten_text.contains(r#""CgroupParent":"conjet-services.slice""#));
+    }
+
+    #[test]
+    fn docker_container_create_stream_rewrites_before_guest_payload() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let body =
+            br#"{"Image":"alpine:3.20","HostConfig":{"CgroupParent":"conjet-services.slice"}}"#;
+        let request = format!(
+            "POST /v1.52/containers/create?name=conjet-slice-probe HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        );
+        client.write_all(request.as_bytes()).unwrap();
+
+        let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
+        bridge.accept_stream(server);
+        bridge.poll_host_streams();
+
+        assert_eq!(bridge.pending_guest_packets.len(), 3);
+        assert_eq!(bridge.pending_guest_packets[0].op, OP_REQUEST);
+        assert_eq!(bridge.pending_guest_packets[1].op, OP_RW);
+        assert_eq!(bridge.pending_guest_packets[2].op, OP_SHUTDOWN);
+        let payload = String::from_utf8_lossy(&bridge.pending_guest_packets[1].payload);
+        assert!(payload.contains(
+            r#""CgroupParent":"conjet-services-conjet-service-conjet_slice_probe.slice""#
+        ));
     }
 
     #[test]

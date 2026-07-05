@@ -1216,7 +1216,7 @@ struct ConjetCLI {
             try ensureDaemon()
             let paths = ConjetPaths.default()
             let response = try UnixSocketClient(socketPath: try socketPath(paths: paths))
-                .send(DaemonRequest(command: .memoryReclaim), timeoutSeconds: 30)
+                .send(DaemonRequest(command: .memoryReclaim), timeoutSeconds: 135)
             try printDaemonResponse(response, json: json, failOnError: true)
         case "trace":
             try ensureDaemon()
@@ -2817,6 +2817,14 @@ struct ConjetCLI {
         }
         if let serviceCgroupMemoryMiB = runtime.serviceCgroupMemoryMiB {
             print("  service cgroup: \(serviceCgroupMemoryMiB) MiB")
+        }
+        if let serviceSlices = runtime.serviceSlices, !serviceSlices.isEmpty {
+            print("  service slices: \(serviceSlices.count)")
+            for slice in serviceSlices.sorted(by: { $0.memoryCurrentBytes > $1.memoryCurrentBytes }).prefix(8) {
+                print(
+                    "    \(slice.key): current \(slice.memoryCurrentBytes / 1_048_576) MiB, working \(slice.workingSetBytes / 1_048_576) MiB, reclaimable \(slice.reclaimableBytes / 1_048_576) MiB"
+                )
+            }
         }
         if let zramUsedMiB = runtime.zramUsedMiB {
             print("  zram used: \(zramUsedMiB) MiB")

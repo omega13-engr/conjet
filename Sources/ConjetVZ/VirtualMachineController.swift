@@ -840,6 +840,10 @@ public final class VirtualMachineController {
                 self?.recordMemoryActivity()
                 self?.dynamicMemoryManager?.handleDockerActivity(activity)
             },
+            serviceMemorySliceActivityHandler: { [weak self] activity in
+                self?.recordMemoryActivity()
+                self?.dynamicMemoryManager?.handleDockerServiceMemorySliceActivity(activity)
+            },
             managedHostMounts: managedHostMounts,
             managedHostMountEventHandler: { [weak self] message in
                 self?.setProgress(state: .running, phase: "file-sharing", message: message)

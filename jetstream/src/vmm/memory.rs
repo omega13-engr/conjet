@@ -304,6 +304,23 @@ fn free_advice() -> libc::c_int {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    fn resident_pages_at(
+        memory: &GuestMemory,
+        guest_base: u64,
+        guest_address: u64,
+        size: usize,
+    ) -> usize {
+        let address = memory
+            .host_address_at(guest_base, guest_address, size)
+            .unwrap();
+        let page_count = size.div_ceil(page_size());
+        let mut residency = vec![0i8; page_count];
+        let rc = unsafe { libc::mincore(address, size, residency.as_mut_ptr()) };
+        assert_eq!(rc, 0, "mincore failed: {}", std::io::Error::last_os_error());
+        residency.iter().filter(|entry| **entry & 1 != 0).count()
+    }
+
     #[test]
     fn decommit_zero_at_preserves_mapping_address_and_zeroes_range() {
         let guest_base = 0x4000_0000;
@@ -325,6 +342,46 @@ mod tests {
         assert_eq!(
             memory.read_at(guest_base, guest_address, 64).unwrap(),
             vec![0; 64]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn decommit_zero_at_drops_host_residency_until_refaulted() {
+        let guest_base = 0x4000_0000;
+        let page_size = page_size();
+        let page_count = 4;
+        let size = page_size * page_count;
+        let memory = GuestMemory::anonymous(size).unwrap();
+        let guest_address = guest_base;
+
+        for page in 0..page_count {
+            memory
+                .write_at(
+                    guest_base,
+                    guest_address + (page * page_size) as u64,
+                    &[0x5a],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            resident_pages_at(&memory, guest_base, guest_address, size),
+            page_count
+        );
+
+        memory
+            .decommit_zero_at(guest_base, guest_address, size)
+            .unwrap();
+
+        assert_eq!(
+            resident_pages_at(&memory, guest_base, guest_address, size),
+            0
+        );
+        assert_eq!(
+            memory
+                .read_at(guest_base, guest_address, page_size)
+                .unwrap(),
+            vec![0; page_size]
         );
     }
 

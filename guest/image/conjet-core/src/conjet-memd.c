@@ -112,6 +112,26 @@ struct memory_metrics {
     bool build_workload_detected;
 };
 
+#define MAX_SERVICE_SLICES 128
+
+struct service_slice_stat {
+    char key[96];
+    char path[4096];
+    uint64_t memory_current;
+    uint64_t anon;
+    uint64_t file;
+    uint64_t inactive_file;
+    uint64_t active_file;
+    uint64_t slab_reclaimable;
+    uint64_t slab_unreclaimable;
+    bool populated;
+};
+
+struct service_slice_set {
+    struct service_slice_stat slices[MAX_SERVICE_SLICES];
+    size_t count;
+};
+
 enum reclaim_state {
     RECLAIM_IDLE,
     RECLAIM_QUEUED,
@@ -395,6 +415,151 @@ static bool read_cgroup_populated(const char *cgroup) {
     return populated;
 }
 
+static uint64_t saturating_add_u64(uint64_t lhs, uint64_t rhs);
+
+static bool extract_service_slice_key(const char *path, char *key, size_t key_len) {
+    const char marker[] = "conjet-service-";
+    const char *start = strstr(path, marker);
+    if (start == NULL || key_len == 0) {
+        return false;
+    }
+    start += sizeof(marker) - 1;
+    const char *end = strstr(start, ".slice");
+    if (end == NULL || end <= start) {
+        return false;
+    }
+    size_t raw_len = (size_t)(end - start);
+    size_t out = 0;
+    for (size_t i = 0; i < raw_len && out + 1 < key_len; i++) {
+        char ch = start[i];
+        if ((ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '_') {
+            key[out++] = ch;
+        } else {
+            key[out++] = '_';
+        }
+    }
+    while (out > 0 && key[out - 1] == '_') {
+        out--;
+    }
+    key[out] = '\0';
+    return out > 0;
+}
+
+static void add_service_slice_stat_file(const char *cgroup, struct service_slice_stat *slice) {
+    char path[4096];
+    int written = snprintf(path, sizeof(path), "%s/memory.stat", cgroup);
+    if (written <= 0 || (size_t)written >= sizeof(path)) {
+        return;
+    }
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return;
+    }
+    char key[128];
+    unsigned long long value = 0;
+    while (fscanf(f, "%127s %llu", key, &value) == 2) {
+        uint64_t bytes = (uint64_t)value;
+        if (strcmp(key, "anon") == 0) {
+            slice->anon += bytes;
+        } else if (strcmp(key, "file") == 0) {
+            slice->file += bytes;
+        } else if (strcmp(key, "inactive_file") == 0) {
+            slice->inactive_file += bytes;
+        } else if (strcmp(key, "active_file") == 0) {
+            slice->active_file += bytes;
+        } else if (strcmp(key, "slab_reclaimable") == 0) {
+            slice->slab_reclaimable += bytes;
+        } else if (strcmp(key, "slab_unreclaimable") == 0) {
+            slice->slab_unreclaimable += bytes;
+        }
+    }
+    fclose(f);
+}
+
+static uint64_t service_slice_reclaimable(const struct service_slice_stat *slice) {
+    uint64_t reclaimable = saturating_add_u64(slice->inactive_file, slice->slab_reclaimable);
+    return reclaimable > slice->memory_current ? slice->memory_current : reclaimable;
+}
+
+static uint64_t service_slice_working_set(const struct service_slice_stat *slice) {
+    uint64_t reclaimable = service_slice_reclaimable(slice);
+    return slice->memory_current > reclaimable ? slice->memory_current - reclaimable : 0;
+}
+
+static struct service_slice_stat *find_or_add_service_slice(
+    struct service_slice_set *set,
+    const char *key,
+    const char *path
+) {
+    for (size_t i = 0; i < set->count; i++) {
+        if (strcmp(set->slices[i].key, key) == 0) {
+            return &set->slices[i];
+        }
+    }
+    if (set->count >= MAX_SERVICE_SLICES) {
+        return NULL;
+    }
+    struct service_slice_stat *slice = &set->slices[set->count++];
+    memset(slice, 0, sizeof(*slice));
+    snprintf(slice->key, sizeof(slice->key), "%s", key);
+    snprintf(slice->path, sizeof(slice->path), "%s", path);
+    return slice;
+}
+
+static bool add_service_slice_cgroup(const char *cgroup, struct service_slice_set *set) {
+    char key[96];
+    if (!extract_service_slice_key(cgroup, key, sizeof(key))) {
+        return false;
+    }
+    uint64_t current = read_cgroup_current(cgroup);
+    if (current == 0) {
+        return false;
+    }
+    struct service_slice_stat *slice = find_or_add_service_slice(set, key, cgroup);
+    if (slice == NULL) {
+        return true;
+    }
+    slice->memory_current = saturating_add_u64(slice->memory_current, current);
+    slice->populated = slice->populated || read_cgroup_populated(cgroup);
+    if (slice->path[0] == '\0' || strstr(cgroup, ":docker:") == NULL) {
+        snprintf(slice->path, sizeof(slice->path), "%s", cgroup);
+    }
+    add_service_slice_stat_file(cgroup, slice);
+    return true;
+}
+
+static void scan_service_slice_cgroups(const char *dir, int depth, struct service_slice_set *set) {
+    if (depth > MAX_CGROUP_DEPTH || set->count >= MAX_SERVICE_SLICES) {
+        return;
+    }
+    if (add_service_slice_cgroup(dir, set)) {
+        return;
+    }
+    DIR *d = opendir(dir);
+    if (d == NULL) {
+        return;
+    }
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        char child[4096];
+        int written = snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name);
+        if (written <= 0 || (size_t)written >= sizeof(child)) {
+            continue;
+        }
+        struct stat st;
+        if (stat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+            scan_service_slice_cgroups(child, depth + 1, set);
+        }
+    }
+    closedir(d);
+}
+
 static uint64_t saturating_add_u64(uint64_t lhs, uint64_t rhs) {
     return UINT64_MAX - lhs < rhs ? UINT64_MAX : lhs + rhs;
 }
@@ -669,6 +834,108 @@ static void metrics_json(const struct memory_metrics *metrics, char *body, size_
         metrics->psi_full_avg10,
         metrics->active_workloads,
         metrics->build_workload_detected ? "true" : "false");
+}
+
+static void write_http_response(int fd, const char *status, const char *content_type, const char *body);
+
+static size_t append_json_escaped(char *body, size_t body_len, size_t offset, const char *value) {
+    if (offset >= body_len) {
+        return offset;
+    }
+    int n = snprintf(body + offset, body_len - offset, "\"");
+    if (n < 0) {
+        return offset;
+    }
+    offset += (size_t)n;
+    for (const char *cursor = value; *cursor != '\0' && offset + 8 < body_len; cursor++) {
+        unsigned char ch = (unsigned char)*cursor;
+        if (ch == '"' || ch == '\\') {
+            n = snprintf(body + offset, body_len - offset, "\\%c", ch);
+        } else if (ch < 0x20) {
+            n = snprintf(body + offset, body_len - offset, "\\u%04x", ch);
+        } else {
+            body[offset++] = (char)ch;
+            body[offset] = '\0';
+            continue;
+        }
+        if (n < 0) {
+            return offset;
+        }
+        offset += (size_t)n;
+    }
+    if (offset + 2 < body_len) {
+        body[offset++] = '"';
+        body[offset] = '\0';
+    }
+    return offset;
+}
+
+static void service_slices_json(const struct service_slice_set *set, char *body, size_t body_len) {
+    size_t offset = 0;
+    int n = snprintf(body, body_len, "{\"version\":1,\"slices\":[");
+    if (n < 0) {
+        return;
+    }
+    offset = (size_t)n;
+    for (size_t i = 0; i < set->count && offset + 256 < body_len; i++) {
+        const struct service_slice_stat *slice = &set->slices[i];
+        uint64_t reclaimable = service_slice_reclaimable(slice);
+        uint64_t working_set = service_slice_working_set(slice);
+        n = snprintf(body + offset, body_len - offset, "%s{\"key\":", i == 0 ? "" : ",");
+        if (n < 0) {
+            break;
+        }
+        offset += (size_t)n;
+        offset = append_json_escaped(body, body_len, offset, slice->key);
+        n = snprintf(body + offset, body_len - offset, ",\"path\":");
+        if (n < 0) {
+            break;
+        }
+        offset += (size_t)n;
+        offset = append_json_escaped(body, body_len, offset, slice->path);
+        n = snprintf(body + offset, body_len - offset,
+            ",\"memory_current\":%llu,\"anon\":%llu,\"file\":%llu,"
+            "\"inactive_file\":%llu,\"active_file\":%llu,"
+            "\"slab_reclaimable\":%llu,\"slab_unreclaimable\":%llu,"
+            "\"working_set\":%llu,\"reclaimable\":%llu,\"populated\":%s}",
+            (unsigned long long)slice->memory_current,
+            (unsigned long long)slice->anon,
+            (unsigned long long)slice->file,
+            (unsigned long long)slice->inactive_file,
+            (unsigned long long)slice->active_file,
+            (unsigned long long)slice->slab_reclaimable,
+            (unsigned long long)slice->slab_unreclaimable,
+            (unsigned long long)working_set,
+            (unsigned long long)reclaimable,
+            slice->populated ? "true" : "false");
+        if (n < 0) {
+            break;
+        }
+        offset += (size_t)n;
+    }
+    if (offset + 64 < body_len) {
+        snprintf(body + offset, body_len - offset, "],\"source\":\"conjet-memd\"}\n");
+    } else if (body_len > 0) {
+        body[body_len - 1] = '\0';
+    }
+}
+
+static void write_service_slices_response(int client) {
+    struct service_slice_set set;
+    memset(&set, 0, sizeof(set));
+    const char *root = configured_cgroup_path(
+        "CONJET_SERVICE_SLICE_SCAN_ROOT",
+        "/sys/fs/cgroup/conjet.slice"
+    );
+    scan_service_slice_cgroups(root, 0, &set);
+    char *body = calloc(1, 128 * 1024);
+    if (body == NULL) {
+        write_http_response(client, "503 Service Unavailable", "text/plain", "out of memory\n");
+        return;
+    }
+    service_slices_json(&set, body, 128 * 1024);
+    write_http_response(client, "200 OK", "application/json", body);
+    free(body);
 }
 
 static const char *reclaim_state_name(enum reclaim_state state) {
@@ -1096,6 +1363,7 @@ static void handle_client(int client) {
         return;
     }
     const char metrics_path[] = "GET /conjet-memory-metrics ";
+    const char service_slices_path[] = "GET /conjet-memory-service-slices ";
     const char events_path[] = "GET /conjet-memory-events ";
     const char capabilities_path[] = "GET /conjet-memory-capabilities ";
     const char reclaim_get_path[] = "GET /conjet-memory-reclaim";
@@ -1108,6 +1376,9 @@ static void handle_client(int client) {
         struct memory_metrics metrics = collect_metrics();
         metrics_json(&metrics, body, sizeof(body));
         write_http_response(client, "200 OK", "application/json", body);
+    } else if ((size_t)n >= sizeof(service_slices_path) - 1 &&
+               memcmp(first, service_slices_path, sizeof(service_slices_path) - 1) == 0) {
+        write_service_slices_response(client);
     } else if ((size_t)n >= sizeof(reclaim_status_path) - 1 &&
                memcmp(first, reclaim_status_path, sizeof(reclaim_status_path) - 1) == 0) {
         write_reclaim_status_response(client, first);
@@ -1126,7 +1397,7 @@ static void handle_client(int client) {
     } else if ((size_t)n >= sizeof(capabilities_path) - 1 &&
                memcmp(first, capabilities_path, sizeof(capabilities_path) - 1) == 0) {
         write_http_response(client, "200 OK", "application/json",
-            "{\"version\":2,\"dynamic_memory_events\":true,\"cache_reclaim\":true,\"source\":\"conjet-memd\"}\n");
+            "{\"version\":3,\"dynamic_memory_events\":true,\"cache_reclaim\":true,\"service_slices\":true,\"source\":\"conjet-memd\"}\n");
     } else {
         write_http_response(client, "404 Not Found", "text/plain", "not found\n");
     }

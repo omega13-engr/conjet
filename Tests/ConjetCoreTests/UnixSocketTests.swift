@@ -108,7 +108,11 @@ final class UnixSocketTests: XCTestCase {
         XCTAssertThrowsError(try UnixSocketClient(socketPath: socket.path).send(
             DaemonRequest(command: .status),
             timeoutSeconds: 0.1
-        ))
+        )) { error in
+            let description = String(describing: error)
+            XCTAssertTrue(description.contains("timed out after 0.1s"), description)
+            XCTAssertFalse(description.contains("Resource temporarily unavailable"), description)
+        }
         XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1)
 
         Thread.sleep(forTimeInterval: 1)

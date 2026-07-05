@@ -41,6 +41,89 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(appliedTargets.values, [])
     }
 
+    func testForceRecomputeUsesServiceSliceWorkingSetTarget() throws {
+        let policy = Self.policy()
+        let metricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":4294967296,"container_memory_peak":4294967296,"container_inactive_file":3221225472,"service_cgroup_memory_current":4294967296,"service_cgroup_anon":805306368,"service_cgroup_file":3221225472,"service_cgroup_inactive_file":3221225472,"service_cgroup_slab_reclaimable":268435456,"daemon_cgroup_memory_current":239075328,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
+        """
+        let serviceSlicesBody = """
+        {"version":1,"slices":[{"key":"chum_mem_worker","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_worker.slice","memory_current":4294967296,"anon":805306368,"file":3221225472,"inactive_file":3221225472,"active_file":0,"slab_reclaimable":268435456,"slab_unreclaimable":0,"working_set":805306368,"reclaimable":3489660928,"populated":true}],"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: metricsBody,
+            reclaimBody: #"{"accepted":false,"epoch":1,"state":"ignored","source":"test"}"#,
+            serviceSlicesBody: serviceSlicesBody
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "manual.reclaim")
+
+        XCTAssertEqual(appliedTargets.values, [1536])
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(manager.status().currentTargetMiB, 1536)
+        XCTAssertEqual(manager.status().trace?.last?.action, "service-slice-shrink")
+        XCTAssertTrue(manager.status().message?.contains("service memory slices 1") == true)
+        XCTAssertEqual(manager.status().serviceSlices?.first?.key, "chum_mem_worker")
+        XCTAssertEqual(manager.status().serviceSlices?.first?.workingSetBytes, 805306368)
+
+        try manager.forceRecompute(reason: "manual.reclaim")
+
+        XCTAssertEqual(connector.reclaimRequests, 2)
+        XCTAssertEqual(appliedTargets.values, [1536])
+        XCTAssertEqual(manager.status().currentTargetMiB, 1536)
+        XCTAssertFalse(manager.status().message?.contains("restored to configured maximum") == true)
+    }
+
+    func testActiveServicePressureDoesNotRestoreConfiguredMaximumAfterBoundedExpansion() throws {
+        let policy = Self.policy()
+        let lowPressureServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":536870912,"sreclaimable_bytes":0,"container_memory_current":3355443200,"container_memory_peak":3355443200,"service_cgroup_memory_current":3355443200,"service_cgroup_anon":3355443200,"service_cgroup_file":0,"service_cgroup_inactive_file":0,"service_cgroup_slab_reclaimable":0,"daemon_cgroup_memory_current":268435456,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
+        """
+        let highPressureServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":536870912,"sreclaimable_bytes":0,"container_memory_current":3355443200,"container_memory_peak":3355443200,"service_cgroup_memory_current":3355443200,"service_cgroup_anon":3355443200,"service_cgroup_file":0,"service_cgroup_inactive_file":0,"service_cgroup_slab_reclaimable":0,"daemon_cgroup_memory_current":268435456,"psi_some_avg10":0.0,"psi_full_avg10":0.1,"active_workloads":1,"build_workload_detected":false,"source":"test"}
+        """
+        let serviceSlicesBody = """
+        {"version":1,"slices":[{"key":"chum_mem_postgres","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_postgres.slice","memory_current":3355443200,"anon":3355443200,"file":0,"inactive_file":0,"active_file":0,"slab_reclaimable":0,"slab_unreclaimable":0,"working_set":3355443200,"reclaimable":0,"populated":true}],"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: lowPressureServiceMetricsBody,
+            reclaimBody: #"{"accepted":false,"epoch":1,"state":"ignored","source":"test"}"#,
+            serviceSlicesBody: serviceSlicesBody
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "manual.reclaim")
+        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
+
+        connector.setBody(highPressureServiceMetricsBody)
+        connector.setServiceSlicesBody(#"{"version":1,"slices":[],"source":"test"}"#)
+
+        try manager.forceRecompute(reason: "guest.event")
+        try manager.forceRecompute(reason: "guest.event")
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertFalse(appliedTargets.values.contains(8192), "\(appliedTargets.values)")
+        XCTAssertLessThan(manager.status().currentTargetMiB, 8192)
+        XCTAssertLessThanOrEqual(manager.status().currentTargetMiB, 6144)
+        XCTAssertFalse(manager.status().trace?.contains { $0.action == "restore" } == true)
+    }
+
     func testSwapPressureDoesNotIssueBalloonShrink() throws {
         let policy = Self.policy()
         let initialMetricsBody = """
@@ -129,7 +212,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "manual.second")
         try manager.forceRecompute(reason: "docker.workloadFinished")
 
-        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(connector.reclaimRequests, 2)
         XCTAssertTrue(manager.status().trace?.contains { $0.action == "idle-autodrop" } == true)
         XCTAssertEqual(appliedTargets.values, [512])
     }
@@ -186,6 +269,132 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(connector.reclaimRequests, 1)
         XCTAssertEqual(appliedTargets.values, [])
         XCTAssertTrue(manager.status().message?.contains("guest memory reclaim unavailable") == true)
+    }
+
+    func testMissingGuestReclaimEndpointFallsBackToIdleBalloonDrop() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: idleMetricsBody,
+            reclaimStatusCode: 404
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "docker.containerStopped")
+
+        let status = manager.status()
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(appliedTargets.values, [512])
+        XCTAssertEqual(status.currentTargetMiB, 512)
+        XCTAssertEqual(status.balloonedMiB, 7680)
+        XCTAssertEqual(status.trace?.last?.action, "idle-autodrop")
+        XCTAssertEqual(status.trace?.last?.reason, "docker.containerStopped.guest-reclaim-unavailable.autodrop")
+        XCTAssertTrue(status.message?.contains("guest reclaim endpoint unavailable") == true)
+    }
+
+    func testMissingGuestReclaimEndpointFallsBackForActiveServiceTelemetry() throws {
+        let policy = Self.policy()
+        let serviceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: serviceMetricsBody,
+            reclaimStatusCode: 404
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        let status = manager.status()
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(appliedTargets.values, [4096])
+        XCTAssertEqual(status.currentTargetMiB, 4096)
+        XCTAssertEqual(status.guestWorkloadDetected, true)
+        XCTAssertEqual(status.trace?.last?.action, "idle-autodrop")
+        XCTAssertEqual(status.trace?.last?.reason, "guest.event.guest-reclaim-unavailable.autodrop")
+    }
+
+    func testMissingGuestReclaimEndpointFallsBackWhenStopStreamIsStillOpen() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":1073741824,"mem_free":536870912,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: idleMetricsBody,
+            reclaimStatusCode: 404
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        manager.handleDockerActivity(DockerMemoryActivity(
+            kind: .streamOpened,
+            workload: .stop,
+            activeStreams: 1,
+            pressureStreams: 1,
+            buildLike: false
+        ))
+        try manager.forceRecompute(reason: "docker.containerStopped")
+
+        let status = manager.status()
+        XCTAssertEqual(status.activeDockerStreams, 1)
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(appliedTargets.values, [640])
+        XCTAssertEqual(status.currentTargetMiB, 640)
+        XCTAssertEqual(status.trace?.last?.reason, "docker.containerStopped.guest-reclaim-unavailable.autodrop")
+    }
+
+    func testMissingGuestReclaimEndpointFallsBackForStoppedWorkloadUnderPSIPressure() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":4294967296,"mem_free":536870912,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"psi_some_avg10":2.0,"psi_full_avg10":0.1,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: idleMetricsBody,
+            reclaimStatusCode: 404
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "docker.containerStopped")
+
+        let status = manager.status()
+        XCTAssertEqual(status.pressure, .high)
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(appliedTargets.values, [512])
+        XCTAssertEqual(status.currentTargetMiB, 512)
+        XCTAssertEqual(status.trace?.last?.reason, "docker.containerStopped.guest-reclaim-unavailable.autodrop")
     }
 
     func testBuildStartAndStreamPhaseFinishedDoNotPulseClassicBalloon() throws {
@@ -366,8 +575,8 @@ final class DynamicMemoryManagerTests: XCTestCase {
         """
         let connector = StaticHTTPGuestConnectionConnector(
             body: idleMetricsBody,
-            reclaimBody: "not found\n",
-            reclaimStatusCode: 404
+            reclaimBody: "temporarily unavailable\n",
+            reclaimStatusCode: 503
         )
         let metricsClient = GuestMemoryMetricsClient(connector: connector)
         let appliedTargets = AppliedMemoryTargets()
@@ -734,8 +943,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
             metricsClient: metricsClient,
             setTargetBytes: { bytes in
                 appliedTargets.append(Int(bytes / 1024 / 1024))
-            },
-            activeServiceReclaimDwellSeconds: 0
+            }
         )
 
         try manager.forceRecompute(reason: "guest.event")
@@ -1158,10 +1366,12 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
     private var body: String
     private var reclaimBody: String
     private var reclaimStatusBody: String
+    private var serviceSlicesBody: String
     private var reclaimStatusCode: Int
     private var capturedReclaimRequests = 0
     private var capturedReclaimCancelRequests = 0
     private var capturedReclaimStatusRequests = 0
+    private var capturedServiceSlicesRequests = 0
     private var capturedLastRequest = ""
 
     var reclaimRequests: Int {
@@ -1192,15 +1402,24 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
         return value
     }
 
+    var serviceSlicesRequests: Int {
+        lock.lock()
+        let value = capturedServiceSlicesRequests
+        lock.unlock()
+        return value
+    }
+
     init(
         body: String,
         reclaimBody: String? = nil,
         reclaimStatusBody: String? = nil,
+        serviceSlicesBody: String? = nil,
         reclaimStatusCode: Int = 202
     ) {
         self.body = body
         self.reclaimBody = reclaimBody ?? #"{"accepted":true,"epoch":1,"state":"queued","source":"test"}"#
         self.reclaimStatusBody = reclaimStatusBody ?? #"{"epoch":1,"state":"done","requested_bytes":67108864,"observed_current_drop_bytes":67108864,"source":"test"}"#
+        self.serviceSlicesBody = serviceSlicesBody ?? #"{"version":1,"slices":[],"source":"test"}"#
         self.reclaimStatusCode = reclaimStatusCode
     }
 
@@ -1213,6 +1432,12 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
     func setReclaimStatusBody(_ body: String) {
         lock.lock()
         self.reclaimStatusBody = body
+        lock.unlock()
+    }
+
+    func setServiceSlicesBody(_ body: String) {
+        lock.lock()
+        self.serviceSlicesBody = body
         lock.unlock()
     }
 
@@ -1258,7 +1483,11 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
         lock.lock()
         let snapshot: String
         let statusCode: Int
-        if request.contains("/conjet-memory-reclaim/cancel-before") {
+        if request.contains("/conjet-memory-service-slices") {
+            capturedServiceSlicesRequests += 1
+            snapshot = serviceSlicesBody
+            statusCode = 200
+        } else if request.contains("/conjet-memory-reclaim/cancel-before") {
             capturedLastRequest = request
             capturedReclaimCancelRequests += 1
             snapshot = #"{"epoch":2,"state":"cancelled","requested_bytes":0,"observed_current_drop_bytes":0,"source":"test"}"#

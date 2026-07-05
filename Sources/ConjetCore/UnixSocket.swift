@@ -30,7 +30,7 @@ public final class UnixSocketClient {
         data.append(0x0a)
         try writeAll(data, to: fd)
 
-        let responseData = try readLine(from: fd)
+        let responseData = try readLine(from: fd, timeoutSeconds: timeoutSeconds)
         do {
             return try ConjetJSON.decoder().decode(DaemonResponse.self, from: responseData)
         } catch {
@@ -67,7 +67,7 @@ public final class UnixSocketClient {
         try writeAll(data, to: fd)
 
         while true {
-            let frameData = try readLine(from: fd)
+            let frameData = try readLine(from: fd, timeoutSeconds: timeoutSeconds)
             let frame: ConjetPulseFrame
             do {
                 frame = try ConjetJSON.decoder().decode(ConjetPulseFrame.self, from: frameData)
@@ -204,10 +204,16 @@ private func withUnixSocketAddress<Result>(
     }
 }
 
-private func readLine(from fd: Int32, maxBytes: Int = 1_048_576) throws -> Data {
+private func readLine(
+    from fd: Int32,
+    maxBytes: Int = 1_048_576,
+    timeoutSeconds: Double? = nil
+) throws -> Data {
     var bytes: [UInt8] = []
     bytes.reserveCapacity(4096)
     var receivedTerminator = false
+    let timeout = timeoutSeconds.map { max(0.1, $0) }
+    let deadline = timeout.map { Date().addingTimeInterval($0) }
 
     while bytes.count < maxBytes {
         var byte: UInt8 = 0
@@ -221,6 +227,16 @@ private func readLine(from fd: Int32, maxBytes: Int = 1_048_576) throws -> Data 
         } else if count == 0 {
             break
         } else if errno == EINTR {
+            continue
+        } else if errno == EAGAIN || errno == EWOULDBLOCK {
+            if let deadline, Date() >= deadline {
+                throw ConjetError.socket("read() timed out after \(formatTimeout(timeout ?? 0))s")
+            }
+            if let deadline {
+                Thread.sleep(forTimeInterval: min(0.01, max(0.001, deadline.timeIntervalSinceNow)))
+            } else {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
             continue
         } else {
             throw ConjetError.socket("read() failed: \(lastErrno())")
@@ -244,6 +260,14 @@ private func setSocketTimeout(_ fd: Int32, timeoutSeconds: Double) {
     )
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &value, socklen_t(MemoryLayout<timeval>.size))
+}
+
+private func formatTimeout(_ seconds: Double) -> String {
+    let rounded = (seconds * 10).rounded() / 10
+    if rounded == floor(rounded) {
+        return String(Int(rounded))
+    }
+    return String(format: "%.1f", rounded)
 }
 
 private func writeAll(_ data: Data, to fd: Int32) throws {

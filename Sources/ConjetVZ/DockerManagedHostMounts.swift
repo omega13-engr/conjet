@@ -695,7 +695,7 @@ private struct DockerManagedHostMountTar {
     }
 }
 
-private struct DockerHTTPMessage {
+struct DockerHTTPMessage {
     var method: String
     var path: String
     var version: String

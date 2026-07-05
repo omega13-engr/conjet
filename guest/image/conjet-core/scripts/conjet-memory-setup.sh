@@ -18,10 +18,10 @@ mem_total_bytes() {
 default_zram_bytes() {
     total="$(mem_total_bytes)"
     if [ "${total}" -le 0 ] 2>/dev/null; then
-        echo 536870912
+        echo 1073741824
         return
     fi
-    echo $((total / 2))
+    echo "${total}"
 }
 
 wait_for_block() {

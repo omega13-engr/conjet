@@ -306,6 +306,43 @@ public struct ConjetQueueRuntimeMetrics: Codable, Equatable, Sendable {
     }
 }
 
+public struct ConjetMemoryServiceSliceStatus: Codable, Equatable, Sendable {
+    public var key: String
+    public var path: String
+    public var memoryCurrentBytes: UInt64
+    public var workingSetBytes: UInt64
+    public var reclaimableBytes: UInt64
+    public var anonBytes: UInt64
+    public var fileBytes: UInt64
+    public var inactiveFileBytes: UInt64
+    public var slabReclaimableBytes: UInt64
+    public var populated: Bool
+
+    public init(
+        key: String,
+        path: String,
+        memoryCurrentBytes: UInt64,
+        workingSetBytes: UInt64,
+        reclaimableBytes: UInt64,
+        anonBytes: UInt64,
+        fileBytes: UInt64,
+        inactiveFileBytes: UInt64,
+        slabReclaimableBytes: UInt64,
+        populated: Bool
+    ) {
+        self.key = key
+        self.path = path
+        self.memoryCurrentBytes = memoryCurrentBytes
+        self.workingSetBytes = workingSetBytes
+        self.reclaimableBytes = reclaimableBytes
+        self.anonBytes = anonBytes
+        self.fileBytes = fileBytes
+        self.inactiveFileBytes = inactiveFileBytes
+        self.slabReclaimableBytes = slabReclaimableBytes
+        self.populated = populated
+    }
+}
+
 public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var dynamicEnabled: Bool
     public var mode: ConjetMemoryProfile
@@ -331,6 +368,7 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var serviceCgroupMemoryMiB: Int?
     public var zramUsedMiB: Int?
     public var diskSwapUsedMiB: Int?
+    public var serviceSlices: [ConjetMemoryServiceSliceStatus]?
     public var pressure: ConjetMemoryPressureState
     public var activeDockerStreams: Int
     public var buildWorkloadDetected: Bool
@@ -366,6 +404,7 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         serviceCgroupMemoryMiB: Int? = nil,
         zramUsedMiB: Int? = nil,
         diskSwapUsedMiB: Int? = nil,
+        serviceSlices: [ConjetMemoryServiceSliceStatus]? = nil,
         pressure: ConjetMemoryPressureState = .unknown,
         activeDockerStreams: Int = 0,
         buildWorkloadDetected: Bool = false,
@@ -400,6 +439,7 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         self.serviceCgroupMemoryMiB = serviceCgroupMemoryMiB
         self.zramUsedMiB = zramUsedMiB
         self.diskSwapUsedMiB = diskSwapUsedMiB
+        self.serviceSlices = serviceSlices
         self.pressure = pressure
         self.activeDockerStreams = activeDockerStreams
         self.buildWorkloadDetected = buildWorkloadDetected

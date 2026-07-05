@@ -33,6 +33,47 @@ public struct DockerContainerStartRequest: Equatable, Sendable {
     }
 }
 
+public struct DockerServiceMemorySlice: Equatable, Sendable {
+    public var serviceKey: String
+    public var cgroupParent: String
+    public var composeProject: String?
+    public var composeService: String?
+    public var containerName: String?
+
+    public init(
+        serviceKey: String,
+        cgroupParent: String,
+        composeProject: String? = nil,
+        composeService: String? = nil,
+        containerName: String? = nil
+    ) {
+        self.serviceKey = serviceKey
+        self.cgroupParent = cgroupParent
+        self.composeProject = composeProject
+        self.composeService = composeService
+        self.containerName = containerName
+    }
+}
+
+public struct DockerServiceMemorySliceActivity: Equatable, Sendable {
+    public enum Kind: String, Equatable, Sendable {
+        case created
+        case started
+        case stopped
+        case removed
+    }
+
+    public var kind: Kind
+    public var containerID: String
+    public var slice: DockerServiceMemorySlice?
+
+    public init(kind: Kind, containerID: String, slice: DockerServiceMemorySlice? = nil) {
+        self.kind = kind
+        self.containerID = containerID
+        self.slice = slice
+    }
+}
+
 struct DockerCreateRequestParser {
     private static let headerDelimiter = Data([13, 10, 13, 10])
 
@@ -236,6 +277,47 @@ struct DockerStartRequestParser {
         }
         let id = components[startIndex + 1].removingPercentEncoding ?? components[startIndex + 1]
         return id.isEmpty ? nil : id
+    }
+}
+
+struct DockerContainerLifecycleRequestParser {
+    private static let headerDelimiter = Data([13, 10, 13, 10])
+
+    static func containerID(from data: Data) -> String? {
+        guard let headerRange = data.range(of: headerDelimiter),
+              let headerText = String(data: data[..<headerRange.lowerBound], encoding: .utf8),
+              let requestLine = headerText.split(separator: "\r\n", maxSplits: 1).first else {
+            return nil
+        }
+        let parts = requestLine.split(separator: " ", maxSplits: 2).map(String.init)
+        guard parts.count >= 2 else { return nil }
+        let method = parts[0]
+        let path = parts[1]
+        let pathOnly = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        let components = pathOnly.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        let containerIndex: Int
+        if components.count >= 2, components[0] == "containers" {
+            containerIndex = 1
+        } else if components.count >= 3, components[0].first == "v", components[1] == "containers" {
+            containerIndex = 2
+        } else {
+            return nil
+        }
+        guard components.indices.contains(containerIndex) else { return nil }
+        if method == "DELETE" {
+            return decodedContainerID(components[containerIndex])
+        }
+        guard method == "POST",
+              components.count > containerIndex + 1,
+              ["stop", "kill", "wait"].contains(components[containerIndex + 1]) else {
+            return nil
+        }
+        return decodedContainerID(components[containerIndex])
+    }
+
+    private static func decodedContainerID(_ value: String) -> String? {
+        let decoded = value.removingPercentEncoding ?? value
+        return decoded.isEmpty ? nil : decoded
     }
 }
 
