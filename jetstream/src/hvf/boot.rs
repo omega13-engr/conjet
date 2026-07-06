@@ -35,6 +35,8 @@ use crate::vmm::docker_probe::{DockerProbeReport, DockerSocketReadinessProbe};
 use crate::vmm::memory::GuestMemory;
 use crate::vmm::vstate::VmState;
 
+const HOST_RECLAIM_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HvfBootReport {
     pub ok: bool,
@@ -149,56 +151,75 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
     ) -> ReclaimReport {
         let mut report = ReclaimReport::default();
         for range in ranges {
-            let Ok(size) = usize::try_from(range.size) else {
-                report.discard_skipped_bytes += range.size;
-                continue;
-            };
-            if memory
-                .validate_host_page_aligned(guest_base, range.start, size)
-                .is_err()
-            {
-                report.discard_skipped_bytes += range.size;
-                continue;
-            }
-            let host_address = match memory.host_address_at(guest_base, range.start, size) {
-                Ok(address) => address,
-                Err(_) => {
-                    report.discard_skipped_bytes += range.size;
+            for chunk in host_reclaim_chunks(*range) {
+                let Ok(size) = usize::try_from(chunk.size) else {
+                    report.discard_skipped_bytes += chunk.size;
+                    continue;
+                };
+                if memory
+                    .validate_host_page_aligned(guest_base, chunk.start, size)
+                    .is_err()
+                {
+                    report.discard_skipped_bytes += chunk.size;
                     continue;
                 }
-            };
-            if self.vm.unmap_memory(range.start, size).is_err() {
-                report.discard_skipped_bytes += range.size;
-                continue;
-            }
-
-            let decommit_result = memory.decommit_zero_at(guest_base, range.start, size);
-            let (map_address, decommit_ok) = match decommit_result {
-                Ok(address) => (address, true),
-                Err(_) => (host_address, false),
-            };
-            let remap_result = self
-                .vm
-                .map_memory(map_address, range.start, size, self.flags);
-            match remap_result {
-                Ok(()) => {
-                    if decommit_ok {
-                        report.discard_advised_bytes += range.size;
-                    } else {
-                        report.discard_failed_bytes += range.size;
+                let host_address = match memory.host_address_at(guest_base, chunk.start, size) {
+                    Ok(address) => address,
+                    Err(_) => {
+                        report.discard_skipped_bytes += chunk.size;
+                        continue;
                     }
+                };
+                if self.vm.unmap_memory(chunk.start, size).is_err() {
+                    report.discard_skipped_bytes += chunk.size;
+                    continue;
                 }
-                Err(error) => {
-                    eprintln!(
-                        "fatal HVF remap failure after memory reclaim at 0x{:x}+{}: {}",
-                        range.start, size, error
-                    );
-                    std::process::abort();
+
+                let decommit_result = memory.decommit_zero_at(guest_base, chunk.start, size);
+                let (map_address, decommit_ok) = match decommit_result {
+                    Ok(address) => (address, true),
+                    Err(_) => (host_address, false),
+                };
+                let remap_result = self
+                    .vm
+                    .map_memory(map_address, chunk.start, size, self.flags);
+                match remap_result {
+                    Ok(()) => {
+                        if decommit_ok {
+                            report.discard_advised_bytes += chunk.size;
+                        } else {
+                            report.discard_failed_bytes += chunk.size;
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "fatal HVF remap failure after memory reclaim at 0x{:x}+{}: {}",
+                            chunk.start, size, error
+                        );
+                        std::process::abort();
+                    }
                 }
             }
         }
         report
     }
+}
+
+fn host_reclaim_chunks(range: PageRange) -> Vec<PageRange> {
+    let mut chunks = Vec::new();
+    let Some(end) = range.start.checked_add(range.size) else {
+        return chunks;
+    };
+    let mut start = range.start;
+    while start < end {
+        let size = (end - start).min(HOST_RECLAIM_CHUNK_BYTES);
+        if size == 0 {
+            break;
+        }
+        chunks.push(PageRange { start, size });
+        start = start.saturating_add(size);
+    }
+    chunks
 }
 
 pub struct HvfBootRunner {
@@ -2729,6 +2750,25 @@ mod tests {
 
         assert!(http_response_body_complete(complete));
         assert!(!http_response_body_complete(partial));
+    }
+
+    #[test]
+    fn host_reclaim_chunks_bound_large_free_page_reports() {
+        let chunks = host_reclaim_chunks(PageRange {
+            start: 0x4000_0000,
+            size: HOST_RECLAIM_CHUNK_BYTES * 2 + 4096,
+        });
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].start, 0x4000_0000);
+        assert_eq!(chunks[0].size, HOST_RECLAIM_CHUNK_BYTES);
+        assert_eq!(chunks[1].start, 0x4000_0000 + HOST_RECLAIM_CHUNK_BYTES);
+        assert_eq!(chunks[1].size, HOST_RECLAIM_CHUNK_BYTES);
+        assert_eq!(
+            chunks[2].start,
+            0x4000_0000 + HOST_RECLAIM_CHUNK_BYTES * 2
+        );
+        assert_eq!(chunks[2].size, 4096);
     }
 
     #[test]

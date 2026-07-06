@@ -403,6 +403,9 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var activeDockerStreams: Int
     public var buildWorkloadDetected: Bool
     public var guestWorkloadDetected: Bool?
+    public var guestEventStreamState: String?
+    public var guestEventStreamReconnects: Int?
+    public var guestEventStreamFailures: Int?
     public var lastAdjustmentReason: String?
     public var lastMetricsAt: Date?
     public var lastTargetChangeAt: Date?
@@ -445,6 +448,9 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         activeDockerStreams: Int = 0,
         buildWorkloadDetected: Bool = false,
         guestWorkloadDetected: Bool? = nil,
+        guestEventStreamState: String? = nil,
+        guestEventStreamReconnects: Int? = nil,
+        guestEventStreamFailures: Int? = nil,
         lastAdjustmentReason: String? = nil,
         lastMetricsAt: Date? = nil,
         lastTargetChangeAt: Date? = nil,
@@ -486,6 +492,9 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         self.activeDockerStreams = activeDockerStreams
         self.buildWorkloadDetected = buildWorkloadDetected
         self.guestWorkloadDetected = guestWorkloadDetected
+        self.guestEventStreamState = guestEventStreamState
+        self.guestEventStreamReconnects = guestEventStreamReconnects
+        self.guestEventStreamFailures = guestEventStreamFailures
         self.lastAdjustmentReason = lastAdjustmentReason
         self.lastMetricsAt = lastMetricsAt
         self.lastTargetChangeAt = lastTargetChangeAt

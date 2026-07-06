@@ -1623,6 +1623,72 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().trace?.last?.action, "restore")
     }
 
+    func testGuestEventStreamReconnectsAfterUnavailableResponse() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":268435456,"service_cgroup_memory_current":0,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: idleMetricsBody,
+            eventResponses: [
+                StaticHTTPGuestResponse(statusCode: 503, body: #"{"error":"unavailable"}"#),
+                StaticHTTPGuestResponse(statusCode: 200, body: idleMetricsBody)
+            ]
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { _ in },
+            eventStreamReconnectBaseDelay: 0.01,
+            eventStreamReconnectMaxDelay: 0.02
+        )
+
+        manager.start(initialMetrics: GuestMemoryMetrics(
+            memTotalBytes: 8 * 1024 * 1024 * 1024,
+            memAvailableBytes: 6 * 1024 * 1024 * 1024
+        ))
+        defer { manager.stop() }
+
+        XCTAssertTrue(waitUntil(timeoutSeconds: 2) {
+            connector.eventStreamRequests >= 2
+                && (manager.status().guestEventStreamFailures ?? 0) >= 1
+        })
+        let status = manager.status()
+        XCTAssertGreaterThanOrEqual(status.guestEventStreamReconnects ?? 0, 1)
+        XCTAssertNotEqual(status.guestEventStreamState, "disabled")
+    }
+
+    func testHostPressureActiveServiceAggregateReclaimsInactiveMemoryWithoutTargetDrop() throws {
+        let policy = Self.policy()
+        let serviceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":4294967296,"container_memory_peak":6442450944,"container_inactive_file":2147483648,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":4294967296,"service_cgroup_anon":1879048192,"service_cgroup_file":2415919104,"service_cgroup_inactive_file":2147483648,"service_cgroup_slab_reclaimable":268435456,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":3,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: serviceMetricsBody,
+            reclaimBody: #"{"accepted":false,"epoch":1,"state":"ignored","source":"test"}"#,
+            serviceSlicesBody: #"{"version":1,"slices":[],"source":"test"}"#
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "host.pressure.elevated")
+
+        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(connector.serviceReclaimRequests, 0)
+        XCTAssertTrue(connector.lastRequest.contains("reason=host.pressure.elevated"))
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertTrue(manager.status().trace?.contains { $0.action == "reclaim" && $0.reason == "host.pressure.elevated" } == true)
+    }
+
     private static func policy(dynamicMemoryShrinkCooldownSeconds: Int = 0) -> ConjetMemoryPolicy {
         ConjetMemoryPolicy(
             profile: .noPolicy,
@@ -1696,13 +1762,20 @@ private final class HostFootprintSamples: @unchecked Sendable {
     }
 }
 
+private struct StaticHTTPGuestResponse {
+    var statusCode: Int
+    var body: String
+}
+
 private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector, @unchecked Sendable {
     private let lock = NSLock()
     private var body: String
     private var reclaimBody: String
     private var reclaimStatusBody: String
     private var serviceSlicesBody: String
+    private var eventResponses: [StaticHTTPGuestResponse]
     private var reclaimStatusCode: Int
+    private var capturedEventStreamRequests = 0
     private var capturedReclaimRequests = 0
     private var capturedServiceReclaimRequests = 0
     private var capturedReclaimCancelRequests = 0
@@ -1752,17 +1825,26 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
         return value
     }
 
+    var eventStreamRequests: Int {
+        lock.lock()
+        let value = capturedEventStreamRequests
+        lock.unlock()
+        return value
+    }
+
     init(
         body: String,
         reclaimBody: String? = nil,
         reclaimStatusBody: String? = nil,
         serviceSlicesBody: String? = nil,
+        eventResponses: [StaticHTTPGuestResponse] = [],
         reclaimStatusCode: Int = 202
     ) {
         self.body = body
         self.reclaimBody = reclaimBody ?? #"{"accepted":true,"epoch":1,"state":"queued","source":"test"}"#
         self.reclaimStatusBody = reclaimStatusBody ?? #"{"epoch":1,"state":"done","requested_bytes":67108864,"observed_current_drop_bytes":67108864,"source":"test"}"#
         self.serviceSlicesBody = serviceSlicesBody ?? #"{"version":1,"slices":[],"source":"test"}"#
+        self.eventResponses = eventResponses
         self.reclaimStatusCode = reclaimStatusCode
     }
 
@@ -1826,7 +1908,17 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
         lock.lock()
         let snapshot: String
         let statusCode: Int
-        if request.contains("/conjet-memory-service-slices") {
+        if request.contains("/conjet-memory-events") {
+            capturedEventStreamRequests += 1
+            if eventResponses.isEmpty {
+                snapshot = body
+                statusCode = 200
+            } else {
+                let response = eventResponses.removeFirst()
+                snapshot = response.body
+                statusCode = response.statusCode
+            }
+        } else if request.contains("/conjet-memory-service-slices") {
             capturedServiceSlicesRequests += 1
             snapshot = serviceSlicesBody
             statusCode = 200

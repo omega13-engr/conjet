@@ -424,11 +424,16 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private let vmmRuntimeMetrics: (@Sendable () throws -> DynamicMemoryVMMRuntimeMetrics?)?
     private let hostFootprintConvergenceDelays: [TimeInterval]
     private let activeReclaimFootprintRefreshInterval: TimeInterval
+    private let eventStreamReconnectBaseDelay: TimeInterval
+    private let eventStreamReconnectMaxDelay: TimeInterval
     private var hostPressureSource: DispatchSourceMemoryPressure?
     private let lock = NSLock()
     private var running = false
     private var eventThread: Thread?
     private var eventConnection: GuestConnection?
+    private var guestEventStreamState = "disabled"
+    private var guestEventStreamReconnects = 0
+    private var guestEventStreamFailures = 0
     private var currentTargetMiB: Int
     private var activeDockerStreams = 0
     private var buildWorkloadActive = false
@@ -467,7 +472,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
         vmmRuntimeMetrics: (@Sendable () throws -> DynamicMemoryVMMRuntimeMetrics?)? = nil,
         hostFootprintConvergenceDelays: [TimeInterval] = [0, 2, 5, 10, 30],
         activeReclaimFootprintRefreshInterval: TimeInterval = 2.0,
-        activeServiceReclaimDwellSeconds: TimeInterval = 0
+        activeServiceReclaimDwellSeconds: TimeInterval = 0,
+        eventStreamReconnectBaseDelay: TimeInterval = 0.25,
+        eventStreamReconnectMaxDelay: TimeInterval = 5.0
     ) {
         self.policy = policy
         self.metricsClient = metricsClient
@@ -477,6 +484,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
         self.vmmRuntimeMetrics = vmmRuntimeMetrics
         self.hostFootprintConvergenceDelays = hostFootprintConvergenceDelays
         self.activeReclaimFootprintRefreshInterval = activeReclaimFootprintRefreshInterval
+        let reconnectBaseDelay = max(0.01, eventStreamReconnectBaseDelay)
+        self.eventStreamReconnectBaseDelay = reconnectBaseDelay
+        self.eventStreamReconnectMaxDelay = max(reconnectBaseDelay, eventStreamReconnectMaxDelay)
         self.activeServiceReclaimDwellSeconds = max(0, activeServiceReclaimDwellSeconds)
         self.currentTargetMiB = policy.configuredMemoryMiB
     }
@@ -487,6 +497,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         }
         lock.lock()
         running = true
+        guestEventStreamState = "reconnecting"
         message = "dynamic memory enabled"
         lock.unlock()
         startHostMemoryPressureSource()
@@ -512,6 +523,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         running = false
         activeReclaimEpoch = nil
         reclaimInFlight = false
+        guestEventStreamState = "disabled"
         idleBalloonActive = false
         activeServiceLowPressureSinceAt = nil
         lastServiceSliceRecomputeAt = nil
@@ -651,6 +663,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let targetChange = lastTargetChangeAt
         let statusMessage = message
         let traceSnapshot = trace
+        let eventStreamState = guestEventStreamState
+        let eventStreamReconnects = guestEventStreamReconnects
+        let eventStreamFailures = guestEventStreamFailures
         let hostFootprintMiB = lastHostFootprintBytes.map(Self.bytesToMiB)
         let hostResidentMiB = lastHostResidentBytes.map(Self.bytesToMiB)
         let hostReclaimedMiB = lastReclaimFootprintDropBytes.map(Self.bytesToMiB)
@@ -702,6 +717,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
             activeDockerStreams: streams,
             buildWorkloadDetected: build,
             guestWorkloadDetected: guestWorkload,
+            guestEventStreamState: eventStreamState,
+            guestEventStreamReconnects: eventStreamReconnects,
+            guestEventStreamFailures: eventStreamFailures,
             lastAdjustmentReason: reason,
             lastMetricsAt: metricsAt,
             lastTargetChangeAt: targetChange,
@@ -711,7 +729,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
     }
 
     private func eventLoop() {
+        var reconnectDelay = eventStreamReconnectBaseDelay
         while isRunning() {
+            let streamStartedAt = Date()
             do {
                 try metricsClient.streamEvents(
                     shouldContinue: { [weak self] in self?.isRunning() ?? false },
@@ -723,14 +743,24 @@ final class DynamicMemoryManager: @unchecked Sendable {
                     }
                 )
                 clearEventConnection()
+                guard isRunning() else { break }
+                markEventStreamReconnecting(
+                    message: "guest memory event stream closed; reconnecting"
+                )
             } catch {
                 clearEventConnection()
-                lock.lock()
-                message = "guest memory event stream unavailable: \(error)"
-                lock.unlock()
-                restoreConfiguredTarget(reason: "guest.events.unavailable")
-                return
+                guard isRunning() else { break }
+                markEventStreamReconnecting(
+                    error: error,
+                    message: "guest memory event stream unavailable: \(error); reconnecting"
+                )
+                requestSnapshot(reason: "guest.events.reconnecting")
             }
+            if Date().timeIntervalSince(streamStartedAt) >= Self.eventStreamStableSeconds {
+                reconnectDelay = eventStreamReconnectBaseDelay
+            }
+            guard sleepWhileRunning(seconds: reconnectDelay) else { break }
+            reconnectDelay = min(eventStreamReconnectMaxDelay, reconnectDelay * 2)
         }
     }
 
@@ -1266,7 +1296,14 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let strongCompletionReclaim = Self.isStrongCompletionReclaimReason(reason)
         let bypassRecentReclaimCooldown = manualReclaim || strongCompletionReclaim || hostPressureReclaim
         let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
-        if activeGuestWorkload && activeServiceMemoryTelemetryAvailable(metrics: metrics) {
+        let activeServiceAggregateReclaim = activeServiceAggregateReclaimAllowedLocked(
+            metrics: metrics,
+            pressure: pressure,
+            reason: reason
+        )
+        if activeGuestWorkload
+            && activeServiceMemoryTelemetryAvailable(metrics: metrics)
+            && !activeServiceAggregateReclaim {
             return false
         }
         if pressure != .low {
@@ -1281,7 +1318,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
                 return false
             }
             if activeGuestWorkload {
-                guard activeServiceIdleReclaimReady else {
+                guard activeServiceIdleReclaimReady || activeServiceAggregateReclaim else {
                     return false
                 }
             } else if activeDockerStreams > 0 {
@@ -1344,7 +1381,14 @@ final class DynamicMemoryManager: @unchecked Sendable {
             return "idle-balloon.active"
         }
         let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
-        if activeGuestWorkload && activeServiceMemoryTelemetryAvailable(metrics: metrics) {
+        let activeServiceAggregateReclaim = activeServiceAggregateReclaimAllowedLocked(
+            metrics: metrics,
+            pressure: pressure,
+            reason: reason
+        )
+        if activeGuestWorkload
+            && activeServiceMemoryTelemetryAvailable(metrics: metrics)
+            && !activeServiceAggregateReclaim {
             return serviceSliceCoverage.isComplete
                 ? "active-service.telemetry-complete"
                 : "active-service.telemetry-incomplete"
@@ -1359,7 +1403,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         if buildWorkloadActive || metrics.buildWorkloadDetected {
             return "build-workload.active"
         }
-        if activeGuestWorkload && !activeServiceIdleReclaimReady {
+        if activeGuestWorkload && !activeServiceIdleReclaimReady && !activeServiceAggregateReclaim {
             return "active-workload.not-idle"
         }
         if activeDockerStreams > 0 && !activeGuestWorkload {
@@ -1417,6 +1461,27 @@ final class DynamicMemoryManager: @unchecked Sendable {
 
     private func activeServiceMemoryTelemetryAvailable(metrics: GuestMemoryMetrics) -> Bool {
         metrics.serviceCgroupMemoryCurrentBytes > 0
+    }
+
+    private func activeServiceAggregateReclaimAllowedLocked(
+        metrics: GuestMemoryMetrics,
+        pressure: ConjetMemoryPressureState,
+        reason: String
+    ) -> Bool {
+        guard reason.hasPrefix("host.pressure."),
+              pressure == .low,
+              Self.serviceAggregateReclaimableBytes(metrics) >= Self.serviceSliceMinimumReclaimBytes,
+              hasIdleReclaimSurplus(metrics: metrics) else {
+            return false
+        }
+        let targetedSliceAvailable = lastServiceSliceCoverage?.isComplete == true
+            && lastServiceSlices.contains { slice in
+                slice.populated
+                    && slice.reclaimableBytes >= Self.serviceSliceMinimumReclaimBytes
+                    && !slice.key.isEmpty
+                    && !slice.path.isEmpty
+            }
+        return !targetedSliceAvailable
     }
 
     private static func guestReclaimStateIsTerminal(_ state: String) -> Bool {
@@ -2507,6 +2572,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private static let pageSizeBytes: UInt64 = 4096
     private static let elevatedPressureExpansionStepMiB = 512
     private static let highPressureExpansionStepMiB = 1024
+    private static let eventStreamStableSeconds: TimeInterval = 10.0
 
     private func restoreConfiguredTarget(reason: String) {
         lock.lock()
@@ -2569,6 +2635,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         lock.lock()
         if running {
             eventConnection = connection
+            guestEventStreamState = "healthy"
             lock.unlock()
         } else {
             lock.unlock()
@@ -2580,6 +2647,26 @@ final class DynamicMemoryManager: @unchecked Sendable {
         lock.lock()
         eventConnection = nil
         lock.unlock()
+    }
+
+    private func markEventStreamReconnecting(error: Error? = nil, message: String) {
+        lock.lock()
+        guestEventStreamState = "reconnecting"
+        guestEventStreamReconnects += 1
+        if error != nil {
+            guestEventStreamFailures += 1
+        }
+        self.message = message
+        lock.unlock()
+    }
+
+    private func sleepWhileRunning(seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            guard isRunning() else { return false }
+            Thread.sleep(forTimeInterval: min(0.1, max(0.01, deadline.timeIntervalSinceNow)))
+        }
+        return isRunning()
     }
 
     private static func pressureState(_ metrics: GuestMemoryMetrics) -> ConjetMemoryPressureState {
