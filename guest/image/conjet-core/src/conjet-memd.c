@@ -71,6 +71,9 @@ static int inotify_add_watch(int fd, const char *path, uint32_t mask) {
 #define MAX_CGROUP_DEPTH 8
 #define MIN_EVENT_INTERVAL_MS 1000
 
+#define SERVICE_ROOT_RESIDUAL_KEY "conjet_services_residual"
+#define SERVICE_SLICE_RESIDUAL_MIN_BYTES (64ULL * 1024ULL * 1024ULL)
+
 struct memory_metrics {
     uint64_t mem_total;
     uint64_t mem_available;
@@ -426,6 +429,7 @@ static bool read_cgroup_populated(const char *cgroup) {
 }
 
 static uint64_t saturating_add_u64(uint64_t lhs, uint64_t rhs);
+static uint64_t saturating_sub_u64(uint64_t lhs, uint64_t rhs);
 
 static bool extract_service_slice_key(const char *path, char *key, size_t key_len) {
     const char marker[] = "conjet-service-";
@@ -570,8 +574,64 @@ static void scan_service_slice_cgroups(const char *dir, int depth, struct servic
     closedir(d);
 }
 
+static void accumulate_service_slice_totals(
+    const struct service_slice_set *set,
+    struct service_slice_stat *totals
+) {
+    memset(totals, 0, sizeof(*totals));
+    for (size_t i = 0; i < set->count; i++) {
+        totals->memory_current = saturating_add_u64(totals->memory_current, set->slices[i].memory_current);
+        totals->anon = saturating_add_u64(totals->anon, set->slices[i].anon);
+        totals->file = saturating_add_u64(totals->file, set->slices[i].file);
+        totals->inactive_file = saturating_add_u64(totals->inactive_file, set->slices[i].inactive_file);
+        totals->active_file = saturating_add_u64(totals->active_file, set->slices[i].active_file);
+        totals->slab_reclaimable = saturating_add_u64(totals->slab_reclaimable, set->slices[i].slab_reclaimable);
+        totals->slab_unreclaimable = saturating_add_u64(totals->slab_unreclaimable, set->slices[i].slab_unreclaimable);
+        totals->populated = totals->populated || set->slices[i].populated;
+    }
+}
+
+static void add_residual_service_root_slice(const char *service_cgroup, struct service_slice_set *set) {
+    if (service_cgroup == NULL || service_cgroup[0] == '\0') {
+        return;
+    }
+    struct service_slice_stat covered;
+    accumulate_service_slice_totals(set, &covered);
+
+    struct service_slice_stat aggregate;
+    memset(&aggregate, 0, sizeof(aggregate));
+    aggregate.memory_current = read_cgroup_current(service_cgroup);
+    if (aggregate.memory_current == 0 ||
+        aggregate.memory_current <= covered.memory_current ||
+        aggregate.memory_current - covered.memory_current < SERVICE_SLICE_RESIDUAL_MIN_BYTES) {
+        return;
+    }
+    snprintf(aggregate.key, sizeof(aggregate.key), "%s", SERVICE_ROOT_RESIDUAL_KEY);
+    snprintf(aggregate.path, sizeof(aggregate.path), "%s", service_cgroup);
+    aggregate.populated = read_cgroup_populated(service_cgroup);
+    add_service_slice_stat_file(service_cgroup, &aggregate);
+
+    struct service_slice_stat *residual =
+        find_or_add_service_slice(set, SERVICE_ROOT_RESIDUAL_KEY, service_cgroup);
+    if (residual == NULL) {
+        return;
+    }
+    residual->memory_current = saturating_sub_u64(aggregate.memory_current, covered.memory_current);
+    residual->anon = saturating_sub_u64(aggregate.anon, covered.anon);
+    residual->file = saturating_sub_u64(aggregate.file, covered.file);
+    residual->inactive_file = saturating_sub_u64(aggregate.inactive_file, covered.inactive_file);
+    residual->active_file = saturating_sub_u64(aggregate.active_file, covered.active_file);
+    residual->slab_reclaimable = saturating_sub_u64(aggregate.slab_reclaimable, covered.slab_reclaimable);
+    residual->slab_unreclaimable = saturating_sub_u64(aggregate.slab_unreclaimable, covered.slab_unreclaimable);
+    residual->populated = aggregate.populated;
+}
+
 static uint64_t saturating_add_u64(uint64_t lhs, uint64_t rhs) {
     return UINT64_MAX - lhs < rhs ? UINT64_MAX : lhs + rhs;
+}
+
+static uint64_t saturating_sub_u64(uint64_t lhs, uint64_t rhs) {
+    return lhs > rhs ? lhs - rhs : 0;
 }
 
 struct build_cgroup_snapshot {
@@ -938,6 +998,11 @@ static void write_service_slices_response(int client) {
         "/sys/fs/cgroup/conjet.slice"
     );
     scan_service_slice_cgroups(root, 0, &set);
+    const char *service_cgroup = configured_cgroup_path(
+        "CONJET_SERVICE_CGROUP",
+        "/sys/fs/cgroup/conjet.slice/conjet-services.slice"
+    );
+    add_residual_service_root_slice(service_cgroup, &set);
     char *body = calloc(1, 128 * 1024);
     if (body == NULL) {
         write_http_response(client, "503 Service Unavailable", "text/plain", "out of memory\n");
@@ -1043,6 +1108,17 @@ static bool string_contains_control_or_parent_ref(const char *value) {
            strstr(value, "../") != NULL;
 }
 
+static bool residual_service_reclaim_request_is_valid(const struct reclaim_request *request) {
+    if (strcmp(request->service_key, SERVICE_ROOT_RESIDUAL_KEY) != 0) {
+        return false;
+    }
+    const char *service_cgroup = configured_cgroup_path(
+        "CONJET_SERVICE_CGROUP",
+        "/sys/fs/cgroup/conjet.slice/conjet-services.slice"
+    );
+    return strcmp(request->cgroup_path, service_cgroup) == 0;
+}
+
 static bool service_reclaim_request_is_valid(const struct reclaim_request *request) {
     if (!request->service_scoped ||
         request->bytes == 0 ||
@@ -1056,6 +1132,9 @@ static bool service_reclaim_request_is_valid(const struct reclaim_request *reque
     if (string_contains_control_or_parent_ref(request->service_key) ||
         string_contains_control_or_parent_ref(request->cgroup_path)) {
         return false;
+    }
+    if (strcmp(request->service_key, SERVICE_ROOT_RESIDUAL_KEY) == 0) {
+        return residual_service_reclaim_request_is_valid(request);
     }
     char extracted_key[96];
     if (!extract_service_slice_key(request->cgroup_path, extracted_key, sizeof(extracted_key))) {

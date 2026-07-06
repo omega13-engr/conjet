@@ -267,20 +267,30 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
     }
 
     struct Balloon: Decodable, Equatable, Sendable {
+        var pageReportingNegotiated: Bool?
+        var reportingQueueReady: Bool?
+        var freePageHintNegotiated: Bool?
+        var freePageHintQueueReady: Bool?
         var actualPages: UInt64
         var inflatePages: UInt64
         var deflatePages: UInt64
         var reportedFreePages: UInt64
+        var reportedFreeBytes: UInt64?
         var reclaimedBytes: UInt64
         var reportedFreeReclaimedBytes: UInt64
         var reclaimFailures: UInt64
         var malformedReports: UInt64
 
         enum CodingKeys: String, CodingKey {
+            case pageReportingNegotiated = "page_reporting_negotiated"
+            case reportingQueueReady = "reporting_queue_ready"
+            case freePageHintNegotiated = "free_page_hint_negotiated"
+            case freePageHintQueueReady = "free_page_hint_queue_ready"
             case actualPages = "actual_pages"
             case inflatePages = "inflate_pages"
             case deflatePages = "deflate_pages"
             case reportedFreePages = "reported_free_pages"
+            case reportedFreeBytes = "reported_free_bytes"
             case reclaimedBytes = "reclaimed_bytes"
             case reportedFreeReclaimedBytes = "reported_free_reclaimed_bytes"
             case reclaimFailures = "reclaim_failures"
@@ -296,6 +306,25 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
             case residentBytes = "resident_bytes"
             case physicalFootprintBytes = "physical_footprint_bytes"
         }
+    }
+}
+
+extension DynamicMemoryVMMRuntimeMetrics {
+    init(_ response: ConjetCoreRustMemoryControlClient.Response) {
+        self.init(
+            hostResidentBytes: response.hostMemory.residentBytes,
+            hostPhysicalFootprintBytes: response.hostMemory.physicalFootprintBytes,
+            balloonActualPages: response.balloon.actualPages,
+            balloonInflatePages: response.balloon.inflatePages,
+            balloonDeflatePages: response.balloon.deflatePages,
+            balloonReportedFreePages: response.balloon.reportedFreePages,
+            balloonReclaimedBytes: response.balloon.reclaimedBytes,
+            balloonReportedFreeReclaimedBytes: response.balloon.reportedFreeReclaimedBytes,
+            balloonReclaimFailures: response.balloon.reclaimFailures,
+            balloonMalformedReports: response.balloon.malformedReports,
+            balloonPageReportingReady: response.balloon.reportingQueueReady,
+            balloonFreePageHintReady: response.balloon.freePageHintQueueReady
+        )
     }
 }
 

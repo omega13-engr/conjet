@@ -1040,11 +1040,8 @@ public final class VirtualMachineController {
             setTargetBytes: { targetBytes in
                 try controlClient.setTargetBytes(targetBytes)
             },
-            hostFootprintBytes: {
-                try controlClient.metrics().hostMemory.physicalFootprintBytes
-            },
-            hostResidentBytes: {
-                try controlClient.metrics().hostMemory.residentBytes
+            vmmRuntimeMetrics: {
+                try DynamicMemoryVMMRuntimeMetrics(controlClient.metrics())
             }
         )
         dynamicMemoryManager = manager

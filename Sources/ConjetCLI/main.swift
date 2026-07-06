@@ -2803,6 +2803,30 @@ struct ConjetCLI {
         if let hostResidentMiB = runtime.hostResidentMiB {
             print("  host resident: \(hostResidentMiB) MiB")
         }
+        if let balloonActualMiB = runtime.balloonActualMiB {
+            print("  VMM balloon actual: \(balloonActualMiB) MiB")
+        }
+        if let balloonReclaimedMiB = runtime.balloonReclaimedMiB {
+            print("  VMM reclaimed: \(balloonReclaimedMiB) MiB")
+        }
+        if let balloonReportedFreePages = runtime.balloonReportedFreePages {
+            print("  VMM reported free pages: \(balloonReportedFreePages)")
+        }
+        if let reportedFreeReclaimedMiB = runtime.balloonReportedFreeReclaimedMiB {
+            print("  VMM reported free reclaimed: \(reportedFreeReclaimedMiB) MiB")
+        }
+        if let pageReportingReady = runtime.balloonPageReportingReady {
+            print("  VMM page reporting queue: \(pageReportingReady ? "ready" : "not ready")")
+        }
+        if let freePageHintReady = runtime.balloonFreePageHintReady {
+            print("  VMM free-page hint queue: \(freePageHintReady ? "ready" : "not ready")")
+        }
+        if let failures = runtime.balloonReclaimFailures, failures > 0 {
+            print("  VMM reclaim failures: \(failures)")
+        }
+        if let malformedReports = runtime.balloonMalformedReports, malformedReports > 0 {
+            print("  VMM malformed reports: \(malformedReports)")
+        }
         if let hostReclaimedMiB = runtime.hostReclaimedMiB {
             print("  last host footprint drop: \(hostReclaimedMiB) MiB")
         }
@@ -2817,6 +2841,11 @@ struct ConjetCLI {
         }
         if let serviceCgroupMemoryMiB = runtime.serviceCgroupMemoryMiB {
             print("  service cgroup: \(serviceCgroupMemoryMiB) MiB")
+        }
+        if let coveredMiB = runtime.serviceSliceCoveredMiB,
+           let uncoveredMiB = runtime.serviceSliceUncoveredMiB,
+           let complete = runtime.serviceSliceTelemetryComplete {
+            print("  service slice coverage: \(coveredMiB) MiB covered, \(uncoveredMiB) MiB uncovered, \(complete ? "complete" : "incomplete")")
         }
         if let serviceSlices = runtime.serviceSlices, !serviceSlices.isEmpty {
             print("  service slices: \(serviceSlices.count)")
@@ -2858,6 +2887,27 @@ struct ConjetCLI {
         print("Conjet memory trace")
         for event in trace.suffix(20) {
             var line = "  \(event.timestamp) action=\(event.action) target=\(event.targetMiB)MiB desired=\(event.desiredMiB)MiB pressure=\(event.pressure.rawValue) reason=\(event.reason)"
+            if let suppressionReason = event.suppressionReason {
+                line += " suppressed=\(suppressionReason)"
+            }
+            if let aggregate = event.serviceAggregateBytes,
+               let covered = event.serviceSliceCoveredBytes,
+               let uncovered = event.serviceSliceUncoveredBytes,
+               aggregate > 0 {
+                line += " service=\(covered / 1_048_576)/\(aggregate / 1_048_576)MiB uncovered=\(uncovered / 1_048_576)MiB"
+            }
+            if let activeStreams = event.activeDockerStreams {
+                line += " streams=\(activeStreams)"
+            }
+            if let footprint = event.hostFootprintBytes {
+                line += " host_footprint=\(footprint / 1_048_576)MiB"
+                if let resident = event.hostResidentBytes {
+                    line += " resident=\(resident / 1_048_576)MiB"
+                }
+                if let delta = event.hostFootprintResidentDeltaBytes {
+                    line += " footprint_resident_delta=\(delta / 1_048_576)MiB"
+                }
+            }
             if let before = event.hostFootprintBeforeBytes,
                let after = event.hostFootprintAfterBytes {
                 line += " host_footprint=\(before / 1_048_576)->\(after / 1_048_576)MiB"

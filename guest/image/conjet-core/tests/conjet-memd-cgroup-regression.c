@@ -40,6 +40,18 @@ static void require_string(const char *name, const char *actual, const char *exp
     }
 }
 
+static const struct service_slice_stat *find_slice(
+    const struct service_slice_set *set,
+    const char *key
+) {
+    for (size_t i = 0; i < set->count; i++) {
+        if (strcmp(set->slices[i].key, key) == 0) {
+            return &set->slices[i];
+        }
+    }
+    return NULL;
+}
+
 static void write_file(const char *dir, const char *name, const char *body) {
     char path[4096];
     int written = snprintf(path, sizeof(path), "%s/%s", dir, name);
@@ -252,6 +264,75 @@ static void test_service_slice_scanner_aggregates_working_set_by_service_key(voi
     require_contains("service slice reclaimable JSON", body, "\"reclaimable\":1920");
 }
 
+static void test_service_slice_scanner_adds_root_residual_for_uncovered_service_charge(void) {
+    const char *tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL || tmpdir[0] == '\0') {
+        tmpdir = "/tmp";
+    }
+    char root[4096];
+    int written = snprintf(root, sizeof(root), "%s/conjet-memd-service-residual.XXXXXX", tmpdir);
+    if (written <= 0 || (size_t)written >= sizeof(root)) {
+        fprintf(stderr, "test root path too long for %s\n", tmpdir);
+        exit(1);
+    }
+    if (mkdtemp(root) == NULL) {
+        fprintf(stderr, "mkdtemp: %s\n", strerror(errno));
+        exit(1);
+    }
+
+    char services[4096];
+    char worker[4096];
+    char docker_child[4096];
+    join_path(services, sizeof(services), root, "conjet-services.slice");
+    join_path(worker, sizeof(worker), services, "conjet-service-chum_mem_worker.slice");
+    join_path(docker_child, sizeof(docker_child), services, "docker-uncovered.scope");
+    make_dir(services);
+    make_dir(worker);
+    make_dir(docker_child);
+
+    write_file(services, "memory.current", "268435456\n");
+    write_file(services, "cgroup.events", "populated 1\nfrozen 0\n");
+    write_file(
+        services,
+        "memory.stat",
+        "anon 33554432\nfile 234881024\ninactive_file 201326592\nactive_file 33554432\n"
+        "slab_reclaimable 16777216\nslab_unreclaimable 8388608\n"
+    );
+    write_file(worker, "memory.current", "67108864\n");
+    write_file(worker, "cgroup.events", "populated 1\nfrozen 0\n");
+    write_file(
+        worker,
+        "memory.stat",
+        "anon 16777216\nfile 50331648\ninactive_file 33554432\nactive_file 16777216\n"
+        "slab_reclaimable 4194304\nslab_unreclaimable 2097152\n"
+    );
+    write_file(docker_child, "memory.current", "201326592\n");
+    write_file(docker_child, "cgroup.events", "populated 1\nfrozen 0\n");
+
+    struct service_slice_set set;
+    memset(&set, 0, sizeof(set));
+    scan_service_slice_cgroups(root, 0, &set);
+    add_residual_service_root_slice(services, &set);
+
+    require_u64("service residual slice count", (uint64_t)set.count, 2);
+    const struct service_slice_stat *residual = find_slice(&set, SERVICE_ROOT_RESIDUAL_KEY);
+    if (residual == NULL) {
+        fprintf(stderr, "expected residual service root slice\n");
+        exit(1);
+    }
+    require_string("residual path", residual->path, services);
+    require_u64("residual current", residual->memory_current, 201326592);
+    require_u64("residual inactive_file", residual->inactive_file, 167772160);
+    require_u64("residual slab reclaimable", residual->slab_reclaimable, 12582912);
+    require_u64("residual reclaimable", service_slice_reclaimable(residual), 180355072);
+    require_int("residual populated", residual->populated ? 1 : 0, 1);
+
+    char body[8192];
+    service_slices_json(&set, body, sizeof(body));
+    require_contains("residual key JSON", body, "\"key\":\"conjet_services_residual\"");
+    require_contains("residual current JSON", body, "\"memory_current\":201326592");
+}
+
 static void test_service_reclaim_request_validation_matches_slice_key(void) {
     struct reclaim_request request;
     memset(&request, 0, sizeof(request));
@@ -284,11 +365,50 @@ static void test_service_reclaim_request_validation_matches_slice_key(void) {
     require_int("reject service path traversal", service_reclaim_request_is_valid(&request) ? 1 : 0, 0);
 }
 
+static void test_residual_service_reclaim_request_validation_is_root_scoped(void) {
+    struct reclaim_request request;
+    memset(&request, 0, sizeof(request));
+    request.service_scoped = true;
+    request.bytes = 67108864;
+    snprintf(request.service_key, sizeof(request.service_key), "%s", SERVICE_ROOT_RESIDUAL_KEY);
+    snprintf(
+        request.cgroup_path,
+        sizeof(request.cgroup_path),
+        "/sys/fs/cgroup/conjet.slice/conjet-services.slice"
+    );
+    unsetenv("CONJET_SERVICE_CGROUP");
+    require_int("valid residual service root reclaim", service_reclaim_request_is_valid(&request) ? 1 : 0, 1);
+
+    snprintf(
+        request.cgroup_path,
+        sizeof(request.cgroup_path),
+        "/sys/fs/cgroup/conjet.slice/conjet-services.slice/docker-uncovered.scope"
+    );
+    require_int("reject residual non-root path", service_reclaim_request_is_valid(&request) ? 1 : 0, 0);
+
+    snprintf(
+        request.cgroup_path,
+        sizeof(request.cgroup_path),
+        "/sys/fs/cgroup/conjet.slice/conjet-services.slice/../conjet-services.slice"
+    );
+    require_int("reject residual path traversal", service_reclaim_request_is_valid(&request) ? 1 : 0, 0);
+
+    snprintf(request.service_key, sizeof(request.service_key), "%s/../bad", SERVICE_ROOT_RESIDUAL_KEY);
+    snprintf(
+        request.cgroup_path,
+        sizeof(request.cgroup_path),
+        "/sys/fs/cgroup/conjet.slice/conjet-services.slice"
+    );
+    require_int("reject unsafe residual key", service_reclaim_request_is_valid(&request) ? 1 : 0, 0);
+}
+
 int main(void) {
     test_build_snapshot_aggregates_prefixed_sibling_memory_without_false_activity();
     test_service_cgroup_memory_stat_is_exported();
     test_service_slice_scanner_aggregates_working_set_by_service_key();
+    test_service_slice_scanner_adds_root_residual_for_uncovered_service_charge();
     test_service_reclaim_request_validation_matches_slice_key();
+    test_residual_service_reclaim_request_validation_is_root_scoped();
     puts("conjet-memd cgroup regression tests passed");
     return 0;
 }

@@ -388,12 +388,40 @@ struct GuestServiceMemorySlice: Codable, Equatable, Sendable {
     }
 }
 
+struct DynamicMemoryVMMRuntimeMetrics: Equatable, Sendable {
+    var hostResidentBytes: UInt64?
+    var hostPhysicalFootprintBytes: UInt64?
+    var balloonActualPages: UInt64
+    var balloonInflatePages: UInt64
+    var balloonDeflatePages: UInt64
+    var balloonReportedFreePages: UInt64
+    var balloonReclaimedBytes: UInt64
+    var balloonReportedFreeReclaimedBytes: UInt64
+    var balloonReclaimFailures: UInt64
+    var balloonMalformedReports: UInt64
+    var balloonPageReportingReady: Bool?
+    var balloonFreePageHintReady: Bool?
+}
+
+private struct ServiceSliceCoverage: Equatable {
+    var aggregateBytes: UInt64
+    var coveredBytes: UInt64
+    var uncoveredBytes: UInt64
+
+    var isComplete: Bool {
+        uncoveredBytes < DynamicMemoryManager.serviceSliceCoverageIncompleteThresholdBytes(
+            aggregateBytes: aggregateBytes
+        )
+    }
+}
+
 final class DynamicMemoryManager: @unchecked Sendable {
     private let policy: ConjetMemoryPolicy
     private let metricsClient: GuestMemoryMetricsClient
     private let setTargetBytes: @Sendable (UInt64) throws -> Void
     private let hostFootprintBytes: (@Sendable () throws -> UInt64?)?
     private let hostResidentBytes: (@Sendable () throws -> UInt64?)?
+    private let vmmRuntimeMetrics: (@Sendable () throws -> DynamicMemoryVMMRuntimeMetrics?)?
     private let hostFootprintConvergenceDelays: [TimeInterval]
     private let activeReclaimFootprintRefreshInterval: TimeInterval
     private var hostPressureSource: DispatchSourceMemoryPressure?
@@ -417,6 +445,8 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private var lastReclaimFootprintBeforeBytes: UInt64?
     private var lastReclaimFootprintAfterBytes: UInt64?
     private var lastReclaimFootprintDropBytes: UInt64?
+    private var lastVMMRuntimeMetrics: DynamicMemoryVMMRuntimeMetrics?
+    private var lastServiceSliceCoverage: ServiceSliceCoverage?
     private var reclaimGeneration = 0
     private var activeReclaimEpoch: UInt64?
     private var idleBalloonActive = false
@@ -434,6 +464,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         setTargetBytes: @escaping @Sendable (UInt64) throws -> Void,
         hostFootprintBytes: (@Sendable () throws -> UInt64?)? = nil,
         hostResidentBytes: (@Sendable () throws -> UInt64?)? = nil,
+        vmmRuntimeMetrics: (@Sendable () throws -> DynamicMemoryVMMRuntimeMetrics?)? = nil,
         hostFootprintConvergenceDelays: [TimeInterval] = [0, 2, 5, 10, 30],
         activeReclaimFootprintRefreshInterval: TimeInterval = 2.0,
         activeServiceReclaimDwellSeconds: TimeInterval = 0
@@ -443,6 +474,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         self.setTargetBytes = setTargetBytes
         self.hostFootprintBytes = hostFootprintBytes
         self.hostResidentBytes = hostResidentBytes
+        self.vmmRuntimeMetrics = vmmRuntimeMetrics
         self.hostFootprintConvergenceDelays = hostFootprintConvergenceDelays
         self.activeReclaimFootprintRefreshInterval = activeReclaimFootprintRefreshInterval
         self.activeServiceReclaimDwellSeconds = max(0, activeServiceReclaimDwellSeconds)
@@ -464,6 +496,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         } else {
             requestSnapshot(reason: "vm.started")
         }
+        _ = sampleHostFootprintBytes()
         let thread = Thread { [weak self] in
             self?.eventLoop()
         }
@@ -483,6 +516,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         activeServiceLowPressureSinceAt = nil
         lastServiceSliceRecomputeAt = nil
         lastServiceSlices.removeAll()
+        lastServiceSliceCoverage = nil
         serviceMemorySlicesByContainerID.removeAll()
         pendingReclaimWorkItems.forEach { $0.cancel() }
         pendingReclaimWorkItems.removeAll()
@@ -621,6 +655,8 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let hostResidentMiB = lastHostResidentBytes.map(Self.bytesToMiB)
         let hostReclaimedMiB = lastReclaimFootprintDropBytes.map(Self.bytesToMiB)
         let serviceSlices = lastServiceSlices.map(Self.serviceSliceStatus)
+        let serviceSliceCoverage = lastServiceSliceCoverage
+        let vmmMetrics = lastVMMRuntimeMetrics
         lock.unlock()
 
         let guestAvailableMiB = metrics.map { Self.bytesToMiB($0.memAvailableBytes) }
@@ -640,7 +676,17 @@ final class DynamicMemoryManager: @unchecked Sendable {
             balloonedMiB: max(0, policy.configuredMemoryMiB - target),
             hostFootprintMiB: hostFootprintMiB,
             hostResidentMiB: hostResidentMiB,
+            balloonActualMiB: vmmMetrics.map { Self.bytesToMiB(Self.pageBytes(forPages: $0.balloonActualPages)) },
+            balloonReclaimedMiB: vmmMetrics.map { Self.bytesToMiB($0.balloonReclaimedBytes) },
             hostReclaimedMiB: hostReclaimedMiB,
+            balloonInflatePages: vmmMetrics?.balloonInflatePages,
+            balloonDeflatePages: vmmMetrics?.balloonDeflatePages,
+            balloonReportedFreePages: vmmMetrics?.balloonReportedFreePages,
+            balloonReportedFreeReclaimedMiB: vmmMetrics.map { Self.bytesToMiB($0.balloonReportedFreeReclaimedBytes) },
+            balloonReclaimFailures: vmmMetrics?.balloonReclaimFailures,
+            balloonMalformedReports: vmmMetrics?.balloonMalformedReports,
+            balloonPageReportingReady: vmmMetrics?.balloonPageReportingReady,
+            balloonFreePageHintReady: vmmMetrics?.balloonFreePageHintReady,
             guestAvailableMiB: guestAvailableMiB,
             containerMemoryMiB: containerMiB,
             buildCgroupMemoryMiB: buildCgroupMiB,
@@ -649,6 +695,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
             zramUsedMiB: zramUsedMiB,
             diskSwapUsedMiB: diskSwapUsedMiB,
             serviceSlices: serviceSlices,
+            serviceSliceCoveredMiB: serviceSliceCoverage.map { Self.bytesToMiB($0.coveredBytes) },
+            serviceSliceUncoveredMiB: serviceSliceCoverage.map { Self.bytesToMiB($0.uncoveredBytes) },
+            serviceSliceTelemetryComplete: serviceSliceCoverage?.isComplete,
             pressure: pressure,
             activeDockerStreams: streams,
             buildWorkloadDetected: build,
@@ -841,14 +890,37 @@ final class DynamicMemoryManager: @unchecked Sendable {
                 activeServiceIdleReclaimReady: activeServiceIdleReclaimReady
             )
         let traceTargetMiB = currentTargetMiB
+        let traceCoverage = serviceSliceCoverageLocked(metrics: metrics)
+        let traceHostFootprint = lastHostFootprintBytes
+        let traceHostResident = lastHostResidentBytes
+        let traceFootprintResidentDelta = Self.hostFootprintResidentDelta(
+            footprint: traceHostFootprint,
+            resident: traceHostResident
+        )
+        let traceDesiredMiB = idleBalloonTargetMiB(metrics: metrics)
         recordTraceLocked(
             ConjetMemoryTraceEvent(
                 timestamp: now,
                 targetMiB: traceTargetMiB,
-                desiredMiB: traceTargetMiB,
+                desiredMiB: traceDesiredMiB,
                 action: shouldReclaim ? "reclaim" : "observe",
                 reason: reason,
-                pressure: pressure
+                pressure: pressure,
+                suppressionReason: shouldReclaim ? nil : guestReclaimSuppressionReasonLocked(
+                    metrics: metrics,
+                    pressure: pressure,
+                    reason: reason,
+                    now: now,
+                    activeServiceIdleReclaimReady: activeServiceIdleReclaimReady,
+                    serviceSliceCoverage: traceCoverage
+                ),
+                serviceAggregateBytes: traceCoverage.aggregateBytes,
+                serviceSliceCoveredBytes: traceCoverage.coveredBytes,
+                serviceSliceUncoveredBytes: traceCoverage.uncoveredBytes,
+                activeDockerStreams: activeDockerStreams,
+                hostFootprintBytes: traceHostFootprint,
+                hostResidentBytes: traceHostResident,
+                hostFootprintResidentDeltaBytes: traceFootprintResidentDelta
             )
         )
         lastAdjustmentReason = reason
@@ -1030,6 +1102,28 @@ final class DynamicMemoryManager: @unchecked Sendable {
     }
 
     private func sampleHostFootprintBytes() -> UInt64? {
+        if let vmmRuntimeMetrics {
+            do {
+                if let metrics = try vmmRuntimeMetrics() {
+                    lock.lock()
+                    lastVMMRuntimeMetrics = metrics
+                    if let resident = metrics.hostResidentBytes {
+                        lastHostResidentBytes = resident
+                    }
+                    if let footprint = metrics.hostPhysicalFootprintBytes {
+                        lastHostFootprintBytes = footprint
+                    }
+                    lock.unlock()
+                    if let footprint = metrics.hostPhysicalFootprintBytes {
+                        return footprint
+                    }
+                }
+            } catch {
+                lock.lock()
+                message = "VMM memory metrics sample unavailable: \(error)"
+                lock.unlock()
+            }
+        }
         if let hostResidentBytes {
             do {
                 let resident = try hostResidentBytes()
@@ -1229,6 +1323,59 @@ final class DynamicMemoryManager: @unchecked Sendable {
         return true
     }
 
+    private func guestReclaimSuppressionReasonLocked(
+        metrics: GuestMemoryMetrics,
+        pressure: ConjetMemoryPressureState,
+        reason: String,
+        now: Date,
+        activeServiceIdleReclaimReady: Bool,
+        serviceSliceCoverage: ServiceSliceCoverage
+    ) -> String {
+        if reclaimInFlight {
+            return "reclaim.in-flight"
+        }
+        if metrics.diskSwapUsedBytes > Self.reclaimSwapNoiseFloorBytes ||
+            metrics.containerSwapCurrentBytes > Self.reclaimSwapNoiseFloorBytes ||
+            metrics.containerOOMKillEvents > 0 {
+            return "guest.swap-or-oom"
+        }
+        let manualReclaim = reason.hasPrefix("manual.")
+        if idleBalloonActive && !manualReclaim {
+            return "idle-balloon.active"
+        }
+        let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
+        if activeGuestWorkload && activeServiceMemoryTelemetryAvailable(metrics: metrics) {
+            return serviceSliceCoverage.isComplete
+                ? "active-service.telemetry-complete"
+                : "active-service.telemetry-incomplete"
+        }
+        let hostPressureReclaim = reason.hasPrefix("host.pressure.")
+        let strongCompletionReclaim = Self.isStrongCompletionReclaimReason(reason)
+        if pressure != .low,
+           !(manualReclaim || strongCompletionReclaim),
+           !(!activeGuestWorkload && hostPressureReclaim && hasIdleReclaimSurplus(metrics: metrics)) {
+            return "guest.pressure.\(pressure.rawValue)"
+        }
+        if buildWorkloadActive || metrics.buildWorkloadDetected {
+            return "build-workload.active"
+        }
+        if activeGuestWorkload && !activeServiceIdleReclaimReady {
+            return "active-workload.not-idle"
+        }
+        if activeDockerStreams > 0 && !activeGuestWorkload {
+            return "docker-stream.active"
+        }
+        if !hasIdleReclaimSurplus(metrics: metrics) {
+            return "idle-surplus.insufficient"
+        }
+        if let lastGuestReclaimAt,
+           now.timeIntervalSince(lastGuestReclaimAt) < TimeInterval(policy.dynamicMemoryShrinkCooldownSeconds),
+           !(manualReclaim || strongCompletionReclaim || hostPressureReclaim) {
+            return "cooldown.active"
+        }
+        return "reason.not-eligible"
+    }
+
     private func activeServiceIdleReclaimReadyLocked(
         metrics: GuestMemoryMetrics,
         pressure: ConjetMemoryPressureState,
@@ -1369,7 +1516,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         }
         let activeServiceIdle = activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure)
         return (activeDockerStreams > 0 && !activeServiceIdle)
-            || Self.hasActiveGuestWorkload(metrics)
+            || (Self.hasActiveGuestWorkload(metrics) && !activeServiceIdle)
             || idleBalloonTargetMiB(metrics: metrics) > currentTargetMiB
             || pressure == .high
     }
@@ -1397,7 +1544,8 @@ final class DynamicMemoryManager: @unchecked Sendable {
             return nil
         }
         let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
-        if activeGuestWorkload {
+        if activeGuestWorkload,
+           !activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure) {
             return nil
         }
         if !activeGuestWorkload, activeDockerStreams > 0 {
@@ -1423,7 +1571,9 @@ final class DynamicMemoryManager: @unchecked Sendable {
         }
         let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
         if activeGuestWorkload {
-            return nil
+            guard activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure) else {
+                return nil
+            }
         } else if activeDockerStreams > 0 || pressure == .high {
             return nil
         }
@@ -1458,7 +1608,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let pressure = Self.pressureState(metrics)
         let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
         if activeGuestWorkload {
-            return false
+            return activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure)
         }
         if activeDockerStreams > 0 || pressure == .high {
             return false
@@ -1630,11 +1780,14 @@ final class DynamicMemoryManager: @unchecked Sendable {
             lock.unlock()
             return
         }
-        if !Self.hasActiveGuestWorkload(metrics), activeDockerStreams > 0 {
+        let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
+        let activeServiceIdle = activeServiceIdleConditionsLocked(metrics: metrics, pressure: .low)
+        if activeGuestWorkload,
+           !(activeServiceIdle && activeServiceDemandTargetDropAllowedLocked()) {
             lock.unlock()
             return
         }
-        if Self.hasActiveGuestWorkload(metrics) {
+        if !activeGuestWorkload, activeDockerStreams > 0 {
             lock.unlock()
             return
         }
@@ -1655,8 +1808,13 @@ final class DynamicMemoryManager: @unchecked Sendable {
                let latestMetrics = lastMetrics,
                Self.pressureState(latestMetrics) == .low,
                !latestMetrics.buildWorkloadDetected,
-               !Self.hasActiveGuestWorkload(latestMetrics),
-               activeDockerStreams == 0 {
+               (
+                   (!Self.hasActiveGuestWorkload(latestMetrics) && activeDockerStreams == 0)
+                       || (
+                           activeServiceIdleConditionsLocked(metrics: latestMetrics, pressure: .low)
+                               && activeServiceDemandTargetDropAllowedLocked()
+                       )
+               ) {
                 currentTargetMiB = targetMiB
                 idleBalloonActive = true
                 lastTargetChangeAt = Date()
@@ -1791,6 +1949,17 @@ final class DynamicMemoryManager: @unchecked Sendable {
             || reason.hasPrefix("docker.containerStopped.final.")
     }
 
+    private func activeServiceDemandTargetDropAllowedLocked() -> Bool {
+        guard let footprint = lastHostFootprintBytes else {
+            return false
+        }
+        let currentTargetBytes = UInt64(currentTargetMiB) * Self.bytesPerMiB
+        return footprint > Self.saturatingAdd(
+            currentTargetBytes,
+            Self.serviceSliceHostFootprintHeadroomBytes
+        )
+    }
+
     private static func isMissingGuestReclaimEndpoint(_ error: Error) -> Bool {
         guard case let ConjetError.unavailable(message) = error else {
             return false
@@ -1800,6 +1969,24 @@ final class DynamicMemoryManager: @unchecked Sendable {
             || message.contains("guest memory reclaim endpoint returned HTTP 501")
     }
 
+    private enum ServiceAggregateFallbackKind: String {
+        case incompleteTelemetry = "incomplete-telemetry"
+        case unreclaimableSlices = "unreclaimable-slices"
+
+        var traceReasonSuffix: String {
+            "aggregate-\(rawValue)"
+        }
+
+        var message: String {
+            switch self {
+            case .incompleteTelemetry:
+                return "service slice telemetry incomplete"
+            case .unreclaimableSlices:
+                return "service slices have no reclaimable cache"
+            }
+        }
+    }
+
     private func applyServiceSliceReclaim(
         metrics: GuestMemoryMetrics,
         slices: GuestServiceMemorySlices,
@@ -1807,6 +1994,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         at now: Date,
         allowStoppedManager: Bool = false
     ) {
+        let coverage = Self.serviceSliceCoverage(metrics: metrics, slices: slices.slices)
         let activeSlices = slices.slices.filter { slice in
             slice.populated && slice.memoryCurrentBytes > 0
         }
@@ -1821,8 +2009,32 @@ final class DynamicMemoryManager: @unchecked Sendable {
             slice.populated && slice.memoryCurrentBytes > 0
         }
         lastServiceSlices = slices.slices
+        lastServiceSliceCoverage = coverage
         lastServiceSliceRecomputeAt = now
         lock.unlock()
+
+        let pressure = Self.pressureState(metrics)
+        if !coverage.isComplete,
+           shouldRequestAggregateServiceFallback(
+               metrics: metrics,
+               coverage: coverage,
+               reason: reason,
+               pressure: pressure,
+               now: now,
+               allowStoppedManager: allowStoppedManager,
+               fallbackKind: .incompleteTelemetry
+           ) {
+            submitAggregateServiceFallbackReclaim(
+                metrics: metrics,
+                coverage: coverage,
+                reason: reason,
+                pressure: pressure,
+                now: now,
+                allowStoppedManager: allowStoppedManager,
+                fallbackKind: .incompleteTelemetry
+            )
+            return
+        }
 
         let serviceWorkingSetBytes = reclaimCandidateSlices.reduce(UInt64(0)) { total, slice in
             Self.saturatingAdd(total, slice.workingSetBytes)
@@ -1835,13 +2047,32 @@ final class DynamicMemoryManager: @unchecked Sendable {
         else {
             return
         }
-        let pressure = Self.pressureState(metrics)
         let requests = serviceSliceReclaimRequests(
             slices: reclaimCandidateSlices,
             reason: reason,
             pressure: pressure
         )
         guard !requests.isEmpty else {
+            if shouldRequestAggregateServiceFallback(
+                metrics: metrics,
+                coverage: coverage,
+                reason: reason,
+                pressure: pressure,
+                now: now,
+                allowStoppedManager: allowStoppedManager,
+                fallbackKind: .unreclaimableSlices
+            ) {
+                submitAggregateServiceFallbackReclaim(
+                    metrics: metrics,
+                    coverage: coverage,
+                    reason: reason,
+                    pressure: pressure,
+                    now: now,
+                    allowStoppedManager: allowStoppedManager,
+                    fallbackKind: .unreclaimableSlices
+                )
+                return
+            }
             lock.lock()
             if running || allowStoppedManager {
                 message = reclaimCandidateSlices.isEmpty
@@ -1942,6 +2173,86 @@ final class DynamicMemoryManager: @unchecked Sendable {
             return false
         }
         return true
+    }
+
+    private func shouldRequestAggregateServiceFallback(
+        metrics: GuestMemoryMetrics,
+        coverage: ServiceSliceCoverage,
+        reason: String,
+        pressure: ConjetMemoryPressureState,
+        now: Date,
+        allowStoppedManager: Bool,
+        fallbackKind: ServiceAggregateFallbackKind
+    ) -> Bool {
+        let footprint = sampleHostFootprintBytes()
+        lock.lock()
+        defer { lock.unlock() }
+        return shouldRequestAggregateServiceFallbackLocked(
+            metrics: metrics,
+            coverage: coverage,
+            reason: reason,
+            pressure: pressure,
+            now: now,
+            hostFootprintBytes: footprint ?? lastHostFootprintBytes,
+            allowStoppedManager: allowStoppedManager,
+            fallbackKind: fallbackKind
+        )
+    }
+
+    private func shouldRequestAggregateServiceFallbackLocked(
+        metrics: GuestMemoryMetrics,
+        coverage: ServiceSliceCoverage,
+        reason: String,
+        pressure: ConjetMemoryPressureState,
+        now: Date,
+        hostFootprintBytes: UInt64?,
+        allowStoppedManager: Bool,
+        fallbackKind: ServiceAggregateFallbackKind
+    ) -> Bool {
+        guard (running || allowStoppedManager),
+              policy.automaticIdleMemoryReclaim,
+              !buildWorkloadActive,
+              activeReclaimEpoch == nil,
+              !reclaimInFlight,
+              !metrics.buildWorkloadDetected,
+              metrics.serviceCgroupMemoryCurrentBytes > 0,
+              metrics.diskSwapUsedBytes <= Self.reclaimSwapNoiseFloorBytes,
+              metrics.containerSwapCurrentBytes <= Self.reclaimSwapNoiseFloorBytes,
+              metrics.containerOOMKillEvents == 0 else {
+            return false
+        }
+
+        if let lastGuestReclaimAt,
+           now.timeIntervalSince(lastGuestReclaimAt) < TimeInterval(policy.dynamicMemoryShrinkCooldownSeconds),
+           !reason.hasPrefix("manual."),
+           !reason.hasPrefix("host.pressure."),
+           !reason.hasPrefix("host.footprint.") {
+            return false
+        }
+
+        let hostFootprintOverTarget = hostFootprintBytes.map { footprint in
+            let targetBytes = UInt64(currentTargetMiB) * Self.bytesPerMiB
+            return footprint > Self.saturatingAdd(targetBytes, Self.serviceSliceHostFootprintHeadroomBytes)
+        } ?? false
+        let aggregateReclaimableBytes = Self.serviceAggregateReclaimableBytes(metrics)
+
+        switch fallbackKind {
+        case .incompleteTelemetry:
+            guard !coverage.isComplete else { return false }
+            let hasPartialSliceCoverage = coverage.coveredBytes > 0
+            let largeEmptyCoverageUnderFootprintPressure = coverage.coveredBytes == 0
+                && hostFootprintOverTarget
+                && coverage.aggregateBytes >= Self.serviceSliceAggregateFallbackFloorBytes
+            guard hasPartialSliceCoverage || largeEmptyCoverageUnderFootprintPressure else {
+                return false
+            }
+            return hostFootprintOverTarget
+                || pressure == .elevated
+                || pressure == .high
+        case .unreclaimableSlices:
+            return hostFootprintOverTarget
+                && aggregateReclaimableBytes >= Self.serviceSliceMinimumReclaimBytes
+        }
     }
 
     private func serviceSliceReclaimRequests(
@@ -2081,7 +2392,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
                 pollGuestReclaimUntilTerminal(
                     epoch: submission.epoch,
                     hostFootprintBefore: hostFootprintBefore,
-                    allowIdleBalloonDrop: false
+                    allowIdleBalloonDrop: true
                 )
             }
         } catch {
@@ -2089,6 +2400,89 @@ final class DynamicMemoryManager: @unchecked Sendable {
             reclaimInFlight = false
             activeReclaimEpoch = nil
             message = "service memory slice \(request.key) reclaim unavailable: \(error); guest capacity unchanged"
+            lock.unlock()
+        }
+    }
+
+    private func submitAggregateServiceFallbackReclaim(
+        metrics: GuestMemoryMetrics,
+        coverage: ServiceSliceCoverage,
+        reason: String,
+        pressure: ConjetMemoryPressureState,
+        now: Date,
+        allowStoppedManager: Bool,
+        fallbackKind: ServiceAggregateFallbackKind
+    ) {
+        lock.lock()
+        guard (running || allowStoppedManager),
+              !buildWorkloadActive,
+              activeReclaimEpoch == nil,
+              !reclaimInFlight,
+              shouldRequestAggregateServiceFallbackLocked(
+                  metrics: metrics,
+                  coverage: coverage,
+                  reason: reason,
+                  pressure: pressure,
+                  now: now,
+                  hostFootprintBytes: lastHostFootprintBytes,
+                  allowStoppedManager: allowStoppedManager,
+                  fallbackKind: fallbackKind
+              ) else {
+            lock.unlock()
+            return
+        }
+        let targetMiB = currentTargetMiB
+        let fallbackReason = "\(reason).\(fallbackKind.traceReasonSuffix)"
+        reclaimInFlight = true
+        lastGuestReclaimAt = now
+        lastAdjustmentReason = fallbackReason
+        message = "\(fallbackKind.message); aggregate guest reclaim requested with \(Self.bytesToMiB(coverage.uncoveredBytes)) MiB uncovered service charge; guest capacity unchanged"
+        recordTraceLocked(ConjetMemoryTraceEvent(
+            timestamp: now,
+            targetMiB: targetMiB,
+            desiredMiB: targetMiB,
+            action: "aggregate-reclaim",
+            reason: fallbackReason,
+            pressure: pressure,
+            suppressionReason: fallbackKind.rawValue,
+            serviceAggregateBytes: coverage.aggregateBytes,
+            serviceSliceCoveredBytes: coverage.coveredBytes,
+            serviceSliceUncoveredBytes: coverage.uncoveredBytes,
+            activeDockerStreams: activeDockerStreams,
+            hostFootprintBytes: lastHostFootprintBytes,
+            hostResidentBytes: lastHostResidentBytes,
+            hostFootprintResidentDeltaBytes: Self.hostFootprintResidentDelta(
+                footprint: lastHostFootprintBytes,
+                resident: lastHostResidentBytes
+            )
+        ))
+        lock.unlock()
+
+        let hostFootprintBefore = sampleHostFootprintBytes()
+        do {
+            let submission = try metricsClient.reclaim(reason: fallbackReason)
+            lock.lock()
+            if submission.accepted {
+                activeReclaimEpoch = submission.epoch
+                message = "aggregate guest reclaim queued epoch \(submission.epoch) after \(fallbackKind.message); guest capacity unchanged"
+            } else {
+                reclaimInFlight = false
+                activeReclaimEpoch = nil
+                message = "aggregate guest reclaim was not accepted after \(fallbackKind.message); guest capacity unchanged"
+            }
+            lock.unlock()
+            if submission.accepted {
+                pollGuestReclaimUntilTerminal(
+                    epoch: submission.epoch,
+                    hostFootprintBefore: hostFootprintBefore,
+                    allowIdleBalloonDrop: true
+                )
+            }
+        } catch {
+            lock.lock()
+            reclaimInFlight = false
+            activeReclaimEpoch = nil
+            message = "aggregate guest reclaim unavailable after \(fallbackKind.message): \(error); guest capacity unchanged"
             lock.unlock()
         }
     }
@@ -2107,6 +2501,10 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private static let serviceSliceElevatedPressureRequestCapBytes: UInt64 = 512 * 1024 * 1024
     private static let serviceSliceHighPressureRequestCapBytes: UInt64 = 1024 * 1024 * 1024
     private static let serviceSliceHostFootprintHeadroomBytes: UInt64 = 512 * 1024 * 1024
+    private static let serviceSliceCoverageNoiseFloorBytes: UInt64 = 64 * 1024 * 1024
+    private static let serviceSliceCoverageIncompleteRatio = 0.50
+    private static let serviceSliceAggregateFallbackFloorBytes: UInt64 = 512 * 1024 * 1024
+    private static let pageSizeBytes: UInt64 = 4096
     private static let elevatedPressureExpansionStepMiB = 512
     private static let highPressureExpansionStepMiB = 1024
 
@@ -2229,6 +2627,53 @@ final class DynamicMemoryManager: @unchecked Sendable {
             slabReclaimableBytes: slice.slabReclaimableBytes,
             populated: slice.populated
         )
+    }
+
+    private func serviceSliceCoverageLocked(metrics: GuestMemoryMetrics) -> ServiceSliceCoverage {
+        Self.serviceSliceCoverage(metrics: metrics, slices: lastServiceSlices)
+    }
+
+    private static func serviceSliceCoverage(
+        metrics: GuestMemoryMetrics,
+        slices: [GuestServiceMemorySlice]
+    ) -> ServiceSliceCoverage {
+        let covered = slices.reduce(UInt64(0)) { total, slice in
+            saturatingAdd(total, slice.memoryCurrentBytes)
+        }
+        let aggregate = metrics.serviceCgroupMemoryCurrentBytes
+        return ServiceSliceCoverage(
+            aggregateBytes: aggregate,
+            coveredBytes: covered,
+            uncoveredBytes: aggregate > covered ? aggregate - covered : 0
+        )
+    }
+
+    private static func serviceAggregateReclaimableBytes(_ metrics: GuestMemoryMetrics) -> UInt64 {
+        let inactiveFileBytes = metrics.serviceCgroupFileBytes > 0
+            ? min(metrics.serviceCgroupInactiveFileBytes, metrics.serviceCgroupFileBytes)
+            : metrics.serviceCgroupInactiveFileBytes
+        let slabReclaimableBytes = metrics.serviceCgroupSlabBytes > 0
+            ? min(metrics.serviceCgroupSlabReclaimableBytes, metrics.serviceCgroupSlabBytes)
+            : metrics.serviceCgroupSlabReclaimableBytes
+        return min(
+            metrics.serviceCgroupMemoryCurrentBytes,
+            saturatingAdd(inactiveFileBytes, slabReclaimableBytes)
+        )
+    }
+
+    fileprivate static func serviceSliceCoverageIncompleteThresholdBytes(aggregateBytes: UInt64) -> UInt64 {
+        guard aggregateBytes > 0 else { return UInt64.max }
+        let ratioBytes = UInt64((Double(aggregateBytes) * serviceSliceCoverageIncompleteRatio).rounded(.up))
+        return max(serviceSliceCoverageNoiseFloorBytes, ratioBytes)
+    }
+
+    private static func hostFootprintResidentDelta(footprint: UInt64?, resident: UInt64?) -> UInt64? {
+        guard let footprint, let resident else { return nil }
+        return footprint > resident ? footprint - resident : 0
+    }
+
+    private static func pageBytes(forPages pages: UInt64) -> UInt64 {
+        UInt64.max / pageSizeBytes < pages ? UInt64.max : pages * pageSizeBytes
     }
 
     private static func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {

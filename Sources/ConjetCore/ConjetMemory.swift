@@ -254,6 +254,14 @@ public struct ConjetMemoryTraceEvent: Codable, Equatable, Sendable {
     public var action: String
     public var reason: String
     public var pressure: ConjetMemoryPressureState
+    public var suppressionReason: String?
+    public var serviceAggregateBytes: UInt64?
+    public var serviceSliceCoveredBytes: UInt64?
+    public var serviceSliceUncoveredBytes: UInt64?
+    public var activeDockerStreams: Int?
+    public var hostFootprintBytes: UInt64?
+    public var hostResidentBytes: UInt64?
+    public var hostFootprintResidentDeltaBytes: UInt64?
     public var hostFootprintBeforeBytes: UInt64?
     public var hostFootprintAfterBytes: UInt64?
     public var hostFootprintDropBytes: UInt64?
@@ -265,6 +273,14 @@ public struct ConjetMemoryTraceEvent: Codable, Equatable, Sendable {
         action: String,
         reason: String,
         pressure: ConjetMemoryPressureState,
+        suppressionReason: String? = nil,
+        serviceAggregateBytes: UInt64? = nil,
+        serviceSliceCoveredBytes: UInt64? = nil,
+        serviceSliceUncoveredBytes: UInt64? = nil,
+        activeDockerStreams: Int? = nil,
+        hostFootprintBytes: UInt64? = nil,
+        hostResidentBytes: UInt64? = nil,
+        hostFootprintResidentDeltaBytes: UInt64? = nil,
         hostFootprintBeforeBytes: UInt64? = nil,
         hostFootprintAfterBytes: UInt64? = nil,
         hostFootprintDropBytes: UInt64? = nil
@@ -275,6 +291,14 @@ public struct ConjetMemoryTraceEvent: Codable, Equatable, Sendable {
         self.action = action
         self.reason = reason
         self.pressure = pressure
+        self.suppressionReason = suppressionReason
+        self.serviceAggregateBytes = serviceAggregateBytes
+        self.serviceSliceCoveredBytes = serviceSliceCoveredBytes
+        self.serviceSliceUncoveredBytes = serviceSliceUncoveredBytes
+        self.activeDockerStreams = activeDockerStreams
+        self.hostFootprintBytes = hostFootprintBytes
+        self.hostResidentBytes = hostResidentBytes
+        self.hostFootprintResidentDeltaBytes = hostFootprintResidentDeltaBytes
         self.hostFootprintBeforeBytes = hostFootprintBeforeBytes
         self.hostFootprintAfterBytes = hostFootprintAfterBytes
         self.hostFootprintDropBytes = hostFootprintDropBytes
@@ -353,6 +377,7 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var hostFootprintMiB: Int?
     public var hostResidentMiB: Int?
     public var balloonActualMiB: Int?
+    public var balloonReclaimedMiB: Int?
     public var hostReclaimedMiB: Int?
     public var balloonInflatePages: UInt64?
     public var balloonDeflatePages: UInt64?
@@ -360,6 +385,8 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var balloonReportedFreeReclaimedMiB: Int?
     public var balloonReclaimFailures: UInt64?
     public var balloonMalformedReports: UInt64?
+    public var balloonPageReportingReady: Bool?
+    public var balloonFreePageHintReady: Bool?
     public var queueMetrics: [String: ConjetQueueRuntimeMetrics]?
     public var guestAvailableMiB: Int?
     public var containerMemoryMiB: Int?
@@ -369,6 +396,9 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var zramUsedMiB: Int?
     public var diskSwapUsedMiB: Int?
     public var serviceSlices: [ConjetMemoryServiceSliceStatus]?
+    public var serviceSliceCoveredMiB: Int?
+    public var serviceSliceUncoveredMiB: Int?
+    public var serviceSliceTelemetryComplete: Bool?
     public var pressure: ConjetMemoryPressureState
     public var activeDockerStreams: Int
     public var buildWorkloadDetected: Bool
@@ -389,6 +419,7 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         hostFootprintMiB: Int? = nil,
         hostResidentMiB: Int? = nil,
         balloonActualMiB: Int? = nil,
+        balloonReclaimedMiB: Int? = nil,
         hostReclaimedMiB: Int? = nil,
         balloonInflatePages: UInt64? = nil,
         balloonDeflatePages: UInt64? = nil,
@@ -396,6 +427,8 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         balloonReportedFreeReclaimedMiB: Int? = nil,
         balloonReclaimFailures: UInt64? = nil,
         balloonMalformedReports: UInt64? = nil,
+        balloonPageReportingReady: Bool? = nil,
+        balloonFreePageHintReady: Bool? = nil,
         queueMetrics: [String: ConjetQueueRuntimeMetrics]? = nil,
         guestAvailableMiB: Int? = nil,
         containerMemoryMiB: Int? = nil,
@@ -405,6 +438,9 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         zramUsedMiB: Int? = nil,
         diskSwapUsedMiB: Int? = nil,
         serviceSlices: [ConjetMemoryServiceSliceStatus]? = nil,
+        serviceSliceCoveredMiB: Int? = nil,
+        serviceSliceUncoveredMiB: Int? = nil,
+        serviceSliceTelemetryComplete: Bool? = nil,
         pressure: ConjetMemoryPressureState = .unknown,
         activeDockerStreams: Int = 0,
         buildWorkloadDetected: Bool = false,
@@ -424,6 +460,7 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         self.hostFootprintMiB = hostFootprintMiB
         self.hostResidentMiB = hostResidentMiB
         self.balloonActualMiB = balloonActualMiB
+        self.balloonReclaimedMiB = balloonReclaimedMiB
         self.hostReclaimedMiB = hostReclaimedMiB
         self.balloonInflatePages = balloonInflatePages
         self.balloonDeflatePages = balloonDeflatePages
@@ -431,6 +468,8 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         self.balloonReportedFreeReclaimedMiB = balloonReportedFreeReclaimedMiB
         self.balloonReclaimFailures = balloonReclaimFailures
         self.balloonMalformedReports = balloonMalformedReports
+        self.balloonPageReportingReady = balloonPageReportingReady
+        self.balloonFreePageHintReady = balloonFreePageHintReady
         self.queueMetrics = queueMetrics
         self.guestAvailableMiB = guestAvailableMiB
         self.containerMemoryMiB = containerMemoryMiB
@@ -440,6 +479,9 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         self.zramUsedMiB = zramUsedMiB
         self.diskSwapUsedMiB = diskSwapUsedMiB
         self.serviceSlices = serviceSlices
+        self.serviceSliceCoveredMiB = serviceSliceCoveredMiB
+        self.serviceSliceUncoveredMiB = serviceSliceUncoveredMiB
+        self.serviceSliceTelemetryComplete = serviceSliceTelemetryComplete
         self.pressure = pressure
         self.activeDockerStreams = activeDockerStreams
         self.buildWorkloadDetected = buildWorkloadDetected
