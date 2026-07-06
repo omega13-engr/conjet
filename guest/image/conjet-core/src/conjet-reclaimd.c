@@ -61,6 +61,17 @@ struct reclaim_summary {
     int32_t drop_caches_error_number;
     int32_t error_number;
     const char *state;
+    const char *scope;
+    const char *service_key;
+    const char *cgroup_path;
+};
+
+struct reclaim_config {
+    uint64_t epoch;
+    bool service_scoped;
+    uint64_t bytes;
+    char service_key[96];
+    char cgroup_path[4096];
 };
 
 static uint64_t min_u64(uint64_t lhs, uint64_t rhs) {
@@ -293,6 +304,65 @@ static int reclaim_cgroup_with_prefixed_siblings(const char *cgroup,
     return 0;
 }
 
+static uint64_t reclaim_requested_delta(uint64_t before, const struct reclaim_summary *summary) {
+    return summary->requested_bytes > before ? summary->requested_bytes - before : 0;
+}
+
+static int reclaim_cgroup_with_prefixed_siblings_budget(const char *cgroup,
+                                                        uint64_t budget,
+                                                        struct reclaim_summary *summary) {
+    if (budget == 0) {
+        return 0;
+    }
+    uint64_t before_requested = summary->requested_bytes;
+    int first_error = reclaim_one_cgroup(cgroup, budget, 0, summary);
+    if (first_error != 0) {
+        return first_error;
+    }
+    uint64_t used = reclaim_requested_delta(before_requested, summary);
+    uint64_t remaining = saturating_sub_u64(budget, used);
+    if (remaining == 0) {
+        return 0;
+    }
+
+    char parent[4096];
+    const char *basename = NULL;
+    if (split_parent_basename(cgroup, parent, sizeof(parent), &basename) != 0) {
+        return 0;
+    }
+    DIR *dir = opendir(parent);
+    if (dir == NULL) {
+        return errno == ENOENT ? 0 : errno;
+    }
+
+    struct dirent *entry;
+    while (remaining != 0 && (entry = readdir(dir)) != NULL) {
+        if (!cgroup_name_has_prefixed_scope(entry->d_name, basename)) {
+            continue;
+        }
+        char child[4096];
+        int written = snprintf(child, sizeof(child), "%s/%s", parent, entry->d_name);
+        if (written <= 0 || (size_t)written >= sizeof(child)) {
+            closedir(dir);
+            return ENAMETOOLONG;
+        }
+        struct stat st;
+        if (stat(child, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            continue;
+        }
+        before_requested = summary->requested_bytes;
+        int rc = reclaim_one_cgroup(child, remaining, 0, summary);
+        if (rc != 0) {
+            closedir(dir);
+            return rc;
+        }
+        used = reclaim_requested_delta(before_requested, summary);
+        remaining = saturating_sub_u64(remaining, used);
+    }
+    closedir(dir);
+    return 0;
+}
+
 static int aggregate_one_cgroup_stat(const char *cgroup, struct memcg_stat *total) {
     struct memcg_stat stat;
     int rc = read_memcg_stat(cgroup, &stat);
@@ -470,12 +540,20 @@ static bool string_value_is_disabled(const char *raw) {
             || strcmp(raw, "-") == 0);
 }
 
+static bool string_value_is_enabled(const char *raw) {
+    return raw != NULL
+        && (strcmp(raw, "1") == 0
+            || strcmp(raw, "true") == 0
+            || strcmp(raw, "yes") == 0
+            || strcmp(raw, "on") == 0);
+}
+
 static bool configured_drop_caches_enabled(void) {
     const char *raw = getenv("CONJET_RECLAIM_DROP_CACHES");
     if (raw == NULL || raw[0] == '\0') {
-        return true;
+        return false;
     }
-    return !string_value_is_disabled(raw);
+    return string_value_is_enabled(raw) && !string_value_is_disabled(raw);
 }
 
 static const char *configured_drop_caches_path(void) {
@@ -528,6 +606,7 @@ static void write_status_file(const struct reclaim_summary *summary) {
         "\"syncfs_attempted\":%s,\"syncfs_error_number\":%d,"
         "\"drop_caches_attempted\":%s,\"drop_caches_error_number\":%d,"
         "\"error_number\":%d,"
+        "\"scope\":\"%s\",\"service_key\":\"%s\",\"cgroup_path\":\"%s\","
         "\"source\":\"conjet-reclaimd\"}\n",
         (unsigned long long)summary->epoch,
         summary->state,
@@ -549,7 +628,10 @@ static void write_status_file(const struct reclaim_summary *summary) {
         summary->syncfs_error_number,
         summary->drop_caches_attempted ? "true" : "false",
         summary->drop_caches_error_number,
-        summary->error_number);
+        summary->error_number,
+        summary->scope != NULL ? summary->scope : "global",
+        summary->service_key != NULL ? summary->service_key : "",
+        summary->cgroup_path != NULL ? summary->cgroup_path : "");
     fclose(f);
     rename(tmp, path);
 }
@@ -563,6 +645,31 @@ static uint64_t parse_epoch(int argc, char **argv) {
     return 0;
 }
 
+static void parse_reclaim_config(int argc, char **argv, struct reclaim_config *config) {
+    memset(config, 0, sizeof(*config));
+    config->epoch = parse_epoch(argc, argv);
+    for (int i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "--service-key") == 0) {
+            snprintf(config->service_key, sizeof(config->service_key), "%s", argv[i + 1]);
+            config->service_scoped = true;
+        } else if (strcmp(argv[i], "--cgroup") == 0) {
+            snprintf(config->cgroup_path, sizeof(config->cgroup_path), "%s", argv[i + 1]);
+            config->service_scoped = true;
+        } else if (strcmp(argv[i], "--bytes") == 0) {
+            config->bytes = strtoull(argv[i + 1], NULL, 10);
+            config->service_scoped = true;
+        }
+    }
+}
+
+static bool scoped_reclaim_config_is_valid(const struct reclaim_config *config) {
+    return !config->service_scoped ||
+        (config->bytes > 0 &&
+         config->service_key[0] != '\0' &&
+         config->cgroup_path[0] != '\0' &&
+         strncmp(config->cgroup_path, "/sys/fs/cgroup/", strlen("/sys/fs/cgroup/")) == 0);
+}
+
 int main(int argc, char **argv) {
     struct sigaction action;
     memset(&action, 0, sizeof(action));
@@ -571,6 +678,21 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &action, NULL);
 
     setpriority(PRIO_PROCESS, 0, 19);
+    struct reclaim_config config;
+    parse_reclaim_config(argc, argv, &config);
+    if (!scoped_reclaim_config_is_valid(&config)) {
+        struct reclaim_summary summary;
+        memset(&summary, 0, sizeof(summary));
+        summary.epoch = config.epoch;
+        summary.state = "error";
+        summary.scope = config.service_scoped ? "service" : "global";
+        summary.service_key = config.service_key;
+        summary.cgroup_path = config.cgroup_path;
+        summary.error_number = EINVAL;
+        write_status_file(&summary);
+        return 1;
+    }
+
     const char *build_cgroup = getenv("CONJET_RECLAIM_BUILD_CGROUP");
     const char *daemon_cgroup = getenv("CONJET_RECLAIM_DAEMON_CGROUP");
     const char *service_cgroup = getenv("CONJET_RECLAIM_SERVICE_CGROUP");
@@ -588,11 +710,16 @@ int main(int argc, char **argv) {
     }
     struct reclaim_summary summary;
     memset(&summary, 0, sizeof(summary));
-    summary.epoch = parse_epoch(argc, argv);
+    summary.epoch = config.epoch;
     summary.state = "running";
+    summary.scope = config.service_scoped ? "service" : "global";
+    summary.service_key = config.service_scoped ? config.service_key : "";
+    summary.cgroup_path = config.service_scoped ? config.cgroup_path : "";
 
     struct memcg_stat before;
-    int rc = aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, service_cgroup, &before);
+    int rc = config.service_scoped
+        ? aggregate_cgroup_with_prefixed_siblings_stat(config.cgroup_path, &before)
+        : aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, service_cgroup, &before);
     if (rc != 0) {
         summary.error_number = rc;
         summary.state = "error";
@@ -602,10 +729,14 @@ int main(int argc, char **argv) {
     set_summary_before_stat(&summary, &before);
     write_status_file(&summary);
 
-    rc = reclaim_all_targets(build_cgroup, daemon_cgroup, service_cgroup, &summary);
+    rc = config.service_scoped
+        ? reclaim_cgroup_with_prefixed_siblings_budget(config.cgroup_path, config.bytes, &summary)
+        : reclaim_all_targets(build_cgroup, daemon_cgroup, service_cgroup, &summary);
 
     struct memcg_stat after;
-    int stat_rc = aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, service_cgroup, &after);
+    int stat_rc = config.service_scoped
+        ? aggregate_cgroup_with_prefixed_siblings_stat(config.cgroup_path, &after)
+        : aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, service_cgroup, &after);
     if (stat_rc == 0) {
         set_summary_after_stat(&summary, &after);
     } else if (rc == 0) {
@@ -627,12 +758,16 @@ int main(int argc, char **argv) {
             } else {
                 summary.state = "running";
                 write_status_file(&summary);
-                rc = reclaim_all_targets(build_cgroup, daemon_cgroup, service_cgroup, &summary);
+                rc = config.service_scoped
+                    ? reclaim_cgroup_with_prefixed_siblings_budget(config.cgroup_path, config.bytes, &summary)
+                    : reclaim_all_targets(build_cgroup, daemon_cgroup, service_cgroup, &summary);
             }
         }
     }
 
-    stat_rc = aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, service_cgroup, &after);
+    stat_rc = config.service_scoped
+        ? aggregate_cgroup_with_prefixed_siblings_stat(config.cgroup_path, &after)
+        : aggregate_reclaim_targets_stat(build_cgroup, daemon_cgroup, service_cgroup, &after);
     if (stat_rc == 0) {
         set_summary_after_stat(&summary, &after);
     } else if (rc == 0) {

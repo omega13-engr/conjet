@@ -149,10 +149,20 @@ struct reclaim_status {
     char reason[64];
 };
 
+struct reclaim_request {
+    uint64_t epoch;
+    uint64_t bytes;
+    bool service_scoped;
+    char reason[64];
+    char service_key[96];
+    char cgroup_path[4096];
+};
+
 static pthread_mutex_t reclaim_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t reclaim_cond = PTHREAD_COND_INITIALIZER;
 static pid_t reclaim_worker_pid = -1;
-static uint64_t reclaim_pending_epoch = 0;
+static struct reclaim_request reclaim_pending_request;
+static bool reclaim_pending_request_available = false;
 static pthread_t reclaim_monitor_thread;
 static bool reclaim_monitor_started = false;
 static struct reclaim_status reclaim_status_state = {
@@ -968,6 +978,48 @@ static void extract_reclaim_reason(const char *request, char *reason, size_t rea
     reason[offset] = '\0';
 }
 
+static int hex_value(char ch) {
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static void extract_query_string(const char *request, const char *name, char *out, size_t out_len) {
+    if (out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    char needle[128];
+    snprintf(needle, sizeof(needle), "%s=", name);
+    const char *cursor = strstr(request, needle);
+    if (cursor == NULL) {
+        return;
+    }
+    cursor += strlen(needle);
+    size_t offset = 0;
+    while (*cursor != '\0' && *cursor != ' ' && *cursor != '&' && offset + 1 < out_len) {
+        if (*cursor == '%' && cursor[1] != '\0' && cursor[2] != '\0') {
+            int high = hex_value(cursor[1]);
+            int low = hex_value(cursor[2]);
+            if (high >= 0 && low >= 0) {
+                out[offset++] = (char)((high << 4) | low);
+                cursor += 3;
+                continue;
+            }
+        }
+        out[offset++] = *cursor == '+' ? ' ' : *cursor;
+        cursor++;
+    }
+    out[offset] = '\0';
+}
+
 static uint64_t extract_query_u64(const char *request, const char *name) {
     char needle[64];
     snprintf(needle, sizeof(needle), "%s=", name);
@@ -977,6 +1029,39 @@ static uint64_t extract_query_u64(const char *request, const char *name) {
     }
     cursor += strlen(needle);
     return strtoull(cursor, NULL, 10);
+}
+
+static bool string_contains_control_or_parent_ref(const char *value) {
+    for (const char *cursor = value; *cursor != '\0'; cursor++) {
+        unsigned char ch = (unsigned char)*cursor;
+        if (ch < 0x20 || ch == 0x7f) {
+            return true;
+        }
+    }
+    return strstr(value, "/../") != NULL ||
+           strstr(value, "/..") != NULL ||
+           strstr(value, "../") != NULL;
+}
+
+static bool service_reclaim_request_is_valid(const struct reclaim_request *request) {
+    if (!request->service_scoped ||
+        request->bytes == 0 ||
+        request->service_key[0] == '\0' ||
+        request->cgroup_path[0] == '\0') {
+        return false;
+    }
+    if (strncmp(request->cgroup_path, "/sys/fs/cgroup/", strlen("/sys/fs/cgroup/")) != 0) {
+        return false;
+    }
+    if (string_contains_control_or_parent_ref(request->service_key) ||
+        string_contains_control_or_parent_ref(request->cgroup_path)) {
+        return false;
+    }
+    char extracted_key[96];
+    if (!extract_service_slice_key(request->cgroup_path, extracted_key, sizeof(extracted_key))) {
+        return false;
+    }
+    return strcmp(extracted_key, request->service_key) == 0;
 }
 
 static void reclaim_submission_json(char *body, size_t body_len, const struct reclaim_status *status, bool accepted) {
@@ -1001,19 +1086,29 @@ static void reclaim_status_json(char *body, size_t body_len, const struct reclai
         status->error_number);
 }
 
-static int spawn_reclaim_worker(uint64_t epoch, pid_t *pid_out) {
+static int spawn_reclaim_worker(const struct reclaim_request *request, pid_t *pid_out) {
     char epoch_arg[32];
+    char bytes_arg[32];
     const char *worker_path = getenv("CONJET_RECLAIMD_PATH");
     if (worker_path == NULL || worker_path[0] == '\0') {
         worker_path = "/usr/local/sbin/conjet-reclaimd";
     }
-    snprintf(epoch_arg, sizeof(epoch_arg), "%llu", (unsigned long long)epoch);
-    char *const argv[] = {
-        "conjet-reclaimd",
-        "--epoch",
-        epoch_arg,
-        NULL
-    };
+    snprintf(epoch_arg, sizeof(epoch_arg), "%llu", (unsigned long long)request->epoch);
+    snprintf(bytes_arg, sizeof(bytes_arg), "%llu", (unsigned long long)request->bytes);
+    char *argv[12];
+    size_t argc = 0;
+    argv[argc++] = "conjet-reclaimd";
+    argv[argc++] = "--epoch";
+    argv[argc++] = epoch_arg;
+    if (request->service_scoped) {
+        argv[argc++] = "--service-key";
+        argv[argc++] = (char *)request->service_key;
+        argv[argc++] = "--cgroup";
+        argv[argc++] = (char *)request->cgroup_path;
+        argv[argc++] = "--bytes";
+        argv[argc++] = bytes_arg;
+    }
+    argv[argc] = NULL;
     pid_t pid = -1;
     int rc = posix_spawn(&pid, worker_path, NULL, NULL, argv, environ);
     if (rc != 0) {
@@ -1047,15 +1142,18 @@ static void *reclaim_monitor_main(void *arg) {
         if (reclaim_worker_pid == pid) {
             reclaim_worker_pid = -1;
         }
-        if (reclaim_pending_epoch != 0) {
-            uint64_t epoch = reclaim_pending_epoch;
-            reclaim_pending_epoch = 0;
+        if (reclaim_pending_request_available) {
+            struct reclaim_request request = reclaim_pending_request;
+            reclaim_pending_request_available = false;
             pid_t next = -1;
-            int spawn_rc = spawn_reclaim_worker(epoch, &next);
+            int spawn_rc = spawn_reclaim_worker(&request, &next);
             if (spawn_rc == 0) {
                 reclaim_worker_pid = next;
+                reclaim_status_state.epoch = request.epoch;
+                reclaim_status_state.requested_bytes = request.bytes;
                 reclaim_status_state.state = RECLAIM_QUEUED;
                 reclaim_status_state.error_number = 0;
+                snprintf(reclaim_status_state.reason, sizeof(reclaim_status_state.reason), "%s", request.reason);
                 pthread_cond_signal(&reclaim_cond);
             } else {
                 reclaim_status_state.state = RECLAIM_ERROR;
@@ -1090,18 +1188,19 @@ static int start_reclaim_monitor_locked(void) {
     return 0;
 }
 
-static int submit_reclaim_worker_locked(uint64_t epoch) {
+static int submit_reclaim_worker_locked(const struct reclaim_request *request) {
     int rc = start_reclaim_monitor_locked();
     if (rc != 0) {
         return rc;
     }
     if (reclaim_worker_pid > 0) {
-        reclaim_pending_epoch = epoch;
+        reclaim_pending_request = *request;
+        reclaim_pending_request_available = true;
         pthread_cond_signal(&reclaim_cond);
         return 0;
     }
     pid_t pid = -1;
-    rc = spawn_reclaim_worker(epoch, &pid);
+    rc = spawn_reclaim_worker(request, &pid);
     if (rc != 0) {
         return rc;
     }
@@ -1116,12 +1215,57 @@ static void write_reclaim_submission_response(int client, const char *request) {
     extract_reclaim_reason(request, reason, sizeof(reason));
     pthread_mutex_lock(&reclaim_lock);
     reclaim_status_state.epoch++;
+    struct reclaim_request reclaim_request;
+    memset(&reclaim_request, 0, sizeof(reclaim_request));
+    reclaim_request.epoch = reclaim_status_state.epoch;
+    snprintf(reclaim_request.reason, sizeof(reclaim_request.reason), "%s", reason);
     reclaim_status_state.requested_bytes = 0;
     reclaim_status_state.observed_current_drop_bytes = 0;
     reclaim_status_state.error_number = 0;
     reclaim_status_state.state = RECLAIM_QUEUED;
     snprintf(reclaim_status_state.reason, sizeof(reclaim_status_state.reason), "%s", reason);
-    int submit_rc = submit_reclaim_worker_locked(reclaim_status_state.epoch);
+    int submit_rc = submit_reclaim_worker_locked(&reclaim_request);
+    if (submit_rc != 0) {
+        reclaim_status_state.state = RECLAIM_ERROR;
+        reclaim_status_state.error_number = submit_rc;
+    }
+    snapshot = reclaim_status_state;
+    pthread_mutex_unlock(&reclaim_lock);
+
+    char body[512];
+    bool accepted = submit_rc == 0;
+    reclaim_submission_json(body, sizeof(body), &snapshot, accepted);
+    write_http_response(client, accepted ? "202 Accepted" : "503 Service Unavailable", "application/json", body);
+}
+
+static void write_service_reclaim_submission_response(int client, const char *request) {
+    struct reclaim_status snapshot;
+    char reason[64];
+    extract_reclaim_reason(request, reason, sizeof(reason));
+
+    struct reclaim_request reclaim_request;
+    memset(&reclaim_request, 0, sizeof(reclaim_request));
+    reclaim_request.service_scoped = true;
+    reclaim_request.bytes = extract_query_u64(request, "bytes");
+    snprintf(reclaim_request.reason, sizeof(reclaim_request.reason), "%s", reason);
+    extract_query_string(request, "key", reclaim_request.service_key, sizeof(reclaim_request.service_key));
+    extract_query_string(request, "path", reclaim_request.cgroup_path, sizeof(reclaim_request.cgroup_path));
+
+    if (!service_reclaim_request_is_valid(&reclaim_request)) {
+        write_http_response(client, "400 Bad Request", "application/json",
+            "{\"accepted\":false,\"epoch\":0,\"state\":\"error\",\"error_number\":22,\"source\":\"conjet-memd\"}\n");
+        return;
+    }
+
+    pthread_mutex_lock(&reclaim_lock);
+    reclaim_status_state.epoch++;
+    reclaim_request.epoch = reclaim_status_state.epoch;
+    reclaim_status_state.requested_bytes = reclaim_request.bytes;
+    reclaim_status_state.observed_current_drop_bytes = 0;
+    reclaim_status_state.error_number = 0;
+    reclaim_status_state.state = RECLAIM_QUEUED;
+    snprintf(reclaim_status_state.reason, sizeof(reclaim_status_state.reason), "%s", reason);
+    int submit_rc = submit_reclaim_worker_locked(&reclaim_request);
     if (submit_rc != 0) {
         reclaim_status_state.state = RECLAIM_ERROR;
         reclaim_status_state.error_number = submit_rc;
@@ -1141,7 +1285,8 @@ static void write_reclaim_cancel_response(int client, const char *request) {
 
     pthread_mutex_lock(&reclaim_lock);
     if (cancel_before == 0 || reclaim_status_state.epoch < cancel_before) {
-        reclaim_pending_epoch = 0;
+        reclaim_pending_request_available = false;
+        memset(&reclaim_pending_request, 0, sizeof(reclaim_pending_request));
         if (reclaim_worker_pid > 0) {
             kill(reclaim_worker_pid, SIGTERM);
         }
@@ -1368,6 +1513,7 @@ static void handle_client(int client) {
     const char capabilities_path[] = "GET /conjet-memory-capabilities ";
     const char reclaim_get_path[] = "GET /conjet-memory-reclaim";
     const char reclaim_post_path[] = "POST /conjet-memory-reclaim";
+    const char service_reclaim_post_path[] = "POST /conjet-memory-reclaim/service";
     const char reclaim_cancel_path[] = "POST /conjet-memory-reclaim/cancel-before";
     const char reclaim_status_path[] = "GET /conjet-memory-reclaim/status";
     if ((size_t)n >= sizeof(metrics_path) - 1 &&
@@ -1385,6 +1531,9 @@ static void handle_client(int client) {
     } else if ((size_t)n >= sizeof(reclaim_cancel_path) - 1 &&
                memcmp(first, reclaim_cancel_path, sizeof(reclaim_cancel_path) - 1) == 0) {
         write_reclaim_cancel_response(client, first);
+    } else if ((size_t)n >= sizeof(service_reclaim_post_path) - 1 &&
+               memcmp(first, service_reclaim_post_path, sizeof(service_reclaim_post_path) - 1) == 0) {
+        write_service_reclaim_submission_response(client, first);
     } else if ((size_t)n >= sizeof(reclaim_post_path) - 1 &&
                memcmp(first, reclaim_post_path, sizeof(reclaim_post_path) - 1) == 0) {
         write_reclaim_submission_response(client, first);
@@ -1397,7 +1546,7 @@ static void handle_client(int client) {
     } else if ((size_t)n >= sizeof(capabilities_path) - 1 &&
                memcmp(first, capabilities_path, sizeof(capabilities_path) - 1) == 0) {
         write_http_response(client, "200 OK", "application/json",
-            "{\"version\":3,\"dynamic_memory_events\":true,\"cache_reclaim\":true,\"service_slices\":true,\"source\":\"conjet-memd\"}\n");
+            "{\"version\":4,\"dynamic_memory_events\":true,\"cache_reclaim\":true,\"service_slices\":true,\"service_reclaim\":true,\"source\":\"conjet-memd\"}\n");
     } else {
         write_http_response(client, "404 Not Found", "text/plain", "not found\n");
     }
@@ -1422,8 +1571,12 @@ int main(int argc, char **argv) {
         struct reclaim_status snapshot;
         pthread_mutex_lock(&reclaim_lock);
         reclaim_status_state.epoch++;
+        struct reclaim_request reclaim_request;
+        memset(&reclaim_request, 0, sizeof(reclaim_request));
+        reclaim_request.epoch = reclaim_status_state.epoch;
+        snprintf(reclaim_request.reason, sizeof(reclaim_request.reason), "cli");
         reclaim_status_state.state = RECLAIM_QUEUED;
-        reclaim_status_state.error_number = submit_reclaim_worker_locked(reclaim_status_state.epoch);
+        reclaim_status_state.error_number = submit_reclaim_worker_locked(&reclaim_request);
         if (reclaim_status_state.error_number != 0) {
             reclaim_status_state.state = RECLAIM_ERROR;
         }

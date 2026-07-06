@@ -168,15 +168,24 @@ static void test_syncfs_gate_uses_dirty_writeback_threshold_and_path(void) {
     require_true("at configured syncfs threshold", should_run_syncfs(&stat));
 }
 
-static void test_drop_caches_gate_defaults_on_and_accepts_disable_values(void) {
+static void test_drop_caches_gate_defaults_off_and_accepts_enable_values(void) {
     unsetenv("CONJET_RECLAIM_DROP_CACHES");
-    require_true("drop caches defaults enabled", configured_drop_caches_enabled());
+    require_false("drop caches defaults disabled", configured_drop_caches_enabled());
 
     setenv("CONJET_RECLAIM_DROP_CACHES", "", 1);
-    require_true("empty drop caches setting stays enabled", configured_drop_caches_enabled());
+    require_false("empty drop caches setting stays disabled", configured_drop_caches_enabled());
 
     setenv("CONJET_RECLAIM_DROP_CACHES", "1", 1);
     require_true("explicit enabled drop caches setting", configured_drop_caches_enabled());
+
+    setenv("CONJET_RECLAIM_DROP_CACHES", "true", 1);
+    require_true("true enables drop caches setting", configured_drop_caches_enabled());
+
+    setenv("CONJET_RECLAIM_DROP_CACHES", "yes", 1);
+    require_true("yes enables drop caches setting", configured_drop_caches_enabled());
+
+    setenv("CONJET_RECLAIM_DROP_CACHES", "on", 1);
+    require_true("on enables drop caches setting", configured_drop_caches_enabled());
 
     setenv("CONJET_RECLAIM_DROP_CACHES", "0", 1);
     require_false("zero disables drop caches", configured_drop_caches_enabled());
@@ -194,10 +203,48 @@ static void test_drop_caches_gate_defaults_on_and_accepts_disable_values(void) {
     require_false("dash disables drop caches", configured_drop_caches_enabled());
 }
 
+static void test_scoped_reclaim_config_requires_service_path_and_bytes(void) {
+    char *valid[] = {
+        "conjet-reclaimd",
+        "--epoch", "7",
+        "--service-key", "chum_mem_worker",
+        "--cgroup", "/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_worker.slice",
+        "--bytes", "67108864",
+        NULL
+    };
+    struct reclaim_config config;
+    parse_reclaim_config(9, valid, &config);
+    require_true("valid scoped reclaim config", scoped_reclaim_config_is_valid(&config));
+    require_true("valid scoped reclaim is scoped", config.service_scoped);
+    require_u64("valid scoped reclaim bytes", config.bytes, 67108864);
+
+    char *missing_bytes[] = {
+        "conjet-reclaimd",
+        "--epoch", "7",
+        "--service-key", "chum_mem_worker",
+        "--cgroup", "/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_worker.slice",
+        NULL
+    };
+    parse_reclaim_config(7, missing_bytes, &config);
+    require_false("scoped reclaim rejects missing bytes", scoped_reclaim_config_is_valid(&config));
+
+    char *outside_cgroup[] = {
+        "conjet-reclaimd",
+        "--epoch", "7",
+        "--service-key", "chum_mem_worker",
+        "--cgroup", "/tmp/conjet-service-chum_mem_worker.slice",
+        "--bytes", "67108864",
+        NULL
+    };
+    parse_reclaim_config(9, outside_cgroup, &config);
+    require_false("scoped reclaim rejects non-cgroup path", scoped_reclaim_config_is_valid(&config));
+}
+
 int main(void) {
     test_reclaim_target_stats_include_prefixed_build_and_service_siblings();
     test_syncfs_gate_uses_dirty_writeback_threshold_and_path();
-    test_drop_caches_gate_defaults_on_and_accepts_disable_values();
+    test_drop_caches_gate_defaults_off_and_accepts_enable_values();
+    test_scoped_reclaim_config_requires_service_path_and_bytes();
     puts("conjet-reclaimd regression tests passed");
     return 0;
 }

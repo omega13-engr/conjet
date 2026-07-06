@@ -41,7 +41,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(appliedTargets.values, [])
     }
 
-    func testForceRecomputeUsesServiceSliceWorkingSetTarget() throws {
+    func testForceRecomputeRequestsServiceSliceReclaimWithoutChangingGuestCapacity() throws {
         let policy = Self.policy()
         let metricsBody = """
         {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":4294967296,"container_memory_peak":4294967296,"container_inactive_file":3221225472,"service_cgroup_memory_current":4294967296,"service_cgroup_anon":805306368,"service_cgroup_file":3221225472,"service_cgroup_inactive_file":3221225472,"service_cgroup_slab_reclaimable":268435456,"daemon_cgroup_memory_current":239075328,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
@@ -66,23 +66,28 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "manual.reclaim")
 
-        XCTAssertEqual(appliedTargets.values, [1536])
-        XCTAssertEqual(connector.reclaimRequests, 1)
-        XCTAssertEqual(manager.status().currentTargetMiB, 1536)
-        XCTAssertEqual(manager.status().trace?.last?.action, "service-slice-shrink")
-        XCTAssertTrue(manager.status().message?.contains("service memory slices 1") == true)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.serviceReclaimRequests, 1)
+        XCTAssertTrue(connector.lastRequest.contains("/conjet-memory-reclaim/service"))
+        XCTAssertTrue(connector.lastRequest.contains("key=chum_mem_worker"))
+        XCTAssertTrue(connector.lastRequest.contains("bytes=3489660928"))
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().trace?.first { $0.action == "service-slice-reclaim" }?.targetMiB, 8192)
+        XCTAssertTrue(manager.status().message?.contains("guest capacity unchanged") == true)
         XCTAssertEqual(manager.status().serviceSlices?.first?.key, "chum_mem_worker")
         XCTAssertEqual(manager.status().serviceSlices?.first?.workingSetBytes, 805306368)
 
         try manager.forceRecompute(reason: "manual.reclaim")
 
-        XCTAssertEqual(connector.reclaimRequests, 2)
-        XCTAssertEqual(appliedTargets.values, [1536])
-        XCTAssertEqual(manager.status().currentTargetMiB, 1536)
+        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.serviceReclaimRequests, 2)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertFalse(manager.status().message?.contains("restored to configured maximum") == true)
     }
 
-    func testActiveServicePressureDoesNotRestoreConfiguredMaximumAfterBoundedExpansion() throws {
+    func testActiveServicePressureKeepsConfiguredGuestCapacity() throws {
         let policy = Self.policy()
         let lowPressureServiceMetricsBody = """
         {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":536870912,"sreclaimable_bytes":0,"container_memory_current":3355443200,"container_memory_peak":3355443200,"service_cgroup_memory_current":3355443200,"service_cgroup_anon":3355443200,"service_cgroup_file":0,"service_cgroup_inactive_file":0,"service_cgroup_slab_reclaimable":0,"daemon_cgroup_memory_current":268435456,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":1,"build_workload_detected":false,"source":"test"}
@@ -109,7 +114,8 @@ final class DynamicMemoryManagerTests: XCTestCase {
         )
 
         try manager.forceRecompute(reason: "manual.reclaim")
-        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(appliedTargets.values, [])
 
         connector.setBody(highPressureServiceMetricsBody)
         connector.setServiceSlicesBody(#"{"version":1,"slices":[],"source":"test"}"#)
@@ -119,8 +125,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "guest.event")
 
         XCTAssertFalse(appliedTargets.values.contains(8192), "\(appliedTargets.values)")
-        XCTAssertLessThan(manager.status().currentTargetMiB, 8192)
-        XCTAssertLessThanOrEqual(manager.status().currentTargetMiB, 6144)
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertFalse(manager.status().trace?.contains { $0.action == "restore" } == true)
     }
 
@@ -302,7 +307,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertTrue(status.message?.contains("guest reclaim endpoint unavailable") == true)
     }
 
-    func testMissingGuestReclaimEndpointFallsBackForActiveServiceTelemetry() throws {
+    func testMissingGuestReclaimEndpointDoesNotShrinkActiveServiceCapacity() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -324,12 +329,12 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "guest.event")
 
         let status = manager.status()
-        XCTAssertEqual(connector.reclaimRequests, 1)
-        XCTAssertEqual(appliedTargets.values, [4096])
-        XCTAssertEqual(status.currentTargetMiB, 4096)
+        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.serviceReclaimRequests, 0)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(status.currentTargetMiB, 8192)
         XCTAssertEqual(status.guestWorkloadDetected, true)
-        XCTAssertEqual(status.trace?.last?.action, "idle-autodrop")
-        XCTAssertEqual(status.trace?.last?.reason, "guest.event.guest-reclaim-unavailable.autodrop")
+        XCTAssertEqual(status.trace?.last?.action, "observe")
     }
 
     func testMissingGuestReclaimEndpointFallsBackWhenStopStreamIsStillOpen() throws {
@@ -880,7 +885,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
     }
 
-    func testIdleAutodropDoesNotCapBelowRunningContainerWorkingSet() throws {
+    func testActiveContainerKeepsConfiguredCapacityInsteadOfWorkingSetTarget() throws {
         let policy = ConjetMemoryPolicy(
             profile: .eco,
             configuredMemoryMiB: 4096,
@@ -923,19 +928,25 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "docker.workloadFinished")
 
-        XCTAssertEqual(appliedTargets.values, [2816])
-        XCTAssertEqual(manager.status().currentTargetMiB, 2816)
-        XCTAssertEqual(manager.status().balloonedMiB, 1280)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
+        XCTAssertEqual(manager.status().balloonedMiB, 0)
         XCTAssertEqual(manager.status().guestWorkloadDetected, true)
-        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+        XCTAssertEqual(manager.status().trace?.last?.action, "reclaim-footprint")
     }
 
-    func testGuestEventActiveServiceIdleDropsToLiveCgroupDemandTarget() throws {
+    func testGuestEventActiveServiceIdleRequestsServiceReclaimWithoutTargetDrop() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
         """
-        let connector = StaticHTTPGuestConnectionConnector(body: serviceMetricsBody)
+        let serviceSlicesBody = """
+        {"version":1,"slices":[{"key":"chum_mem_worker","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_worker.slice","memory_current":3221225472,"anon":1073741824,"file":2147483648,"inactive_file":2147483648,"active_file":0,"slab_reclaimable":134217728,"slab_unreclaimable":0,"working_set":1073741824,"reclaimable":2281701376,"populated":true}],"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: serviceMetricsBody,
+            serviceSlicesBody: serviceSlicesBody
+        )
         let metricsClient = GuestMemoryMetricsClient(connector: connector)
         let appliedTargets = AppliedMemoryTargets()
         let manager = DynamicMemoryManager(
@@ -948,19 +959,26 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(connector.reclaimRequests, 1)
-        XCTAssertEqual(appliedTargets.values, [4096])
-        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
+        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.serviceReclaimRequests, 1)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertEqual(manager.status().guestWorkloadDetected, true)
-        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+        XCTAssertTrue(manager.status().trace?.contains { $0.action == "service-slice-reclaim" } == true)
     }
 
-    func testGuestEventActiveServiceIdleDropsWithPersistentNonBuildDockerStream() throws {
+    func testGuestEventActiveServiceIdleWithPersistentNonBuildDockerStreamKeepsTarget() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
         """
-        let connector = StaticHTTPGuestConnectionConnector(body: serviceMetricsBody)
+        let serviceSlicesBody = """
+        {"version":1,"slices":[{"key":"chum_mem_api","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_api.slice","memory_current":3221225472,"anon":1073741824,"file":2147483648,"inactive_file":2147483648,"active_file":0,"slab_reclaimable":134217728,"slab_unreclaimable":0,"working_set":1073741824,"reclaimable":2281701376,"populated":true}],"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: serviceMetricsBody,
+            serviceSlicesBody: serviceSlicesBody
+        )
         let metricsClient = GuestMemoryMetricsClient(connector: connector)
         let appliedTargets = AppliedMemoryTargets()
         let manager = DynamicMemoryManager(
@@ -981,13 +999,14 @@ final class DynamicMemoryManagerTests: XCTestCase {
         ))
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [4096])
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(connector.serviceReclaimRequests, 1)
         XCTAssertEqual(manager.status().activeDockerStreams, 1)
-        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
-        XCTAssertEqual(manager.status().trace?.last?.action, "idle-autodrop")
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertTrue(manager.status().trace?.contains { $0.action == "service-slice-reclaim" } == true)
     }
 
-    func testActiveServiceIdleUsesDockerWorkingSetForCachedContainers() throws {
+    func testActiveServiceIdleReportsDockerWorkingSetWithoutTargetResize() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":4514119680,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":5952765952,"container_memory_peak":6442450944,"container_anon":4383047680,"container_file":1569718272,"container_inactive_file":1569718272,"daemon_cgroup_memory_current":178257920,"service_cgroup_memory_current":5945425920,"service_cgroup_file":1569718272,"service_cgroup_inactive_file":1569718272,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":4,"build_workload_detected":false,"source":"test"}
@@ -1016,13 +1035,13 @@ final class DynamicMemoryManagerTests: XCTestCase {
         let status = manager.status()
         XCTAssertEqual(status.containerMemoryMiB, 4180)
         XCTAssertEqual(status.serviceCgroupMemoryMiB, 4173)
-        XCTAssertEqual(appliedTargets.values, [5376])
-        XCTAssertEqual(status.currentTargetMiB, 5376)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(status.currentTargetMiB, 8192)
         XCTAssertEqual(status.activeDockerStreams, 1)
-        XCTAssertEqual(status.trace?.last?.action, "idle-autodrop")
+        XCTAssertEqual(status.trace?.last?.action, "observe")
     }
 
-    func testActiveServiceIdleRefinesDownAsLiveCgroupUsageFalls() throws {
+    func testActiveServiceIdleDoesNotRefineGuestCapacityAsLiveCgroupUsageFalls() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -1046,13 +1065,13 @@ final class DynamicMemoryManagerTests: XCTestCase {
         connector.setBody(lowerServiceMetricsBody)
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [4096, 1792])
-        XCTAssertEqual(manager.status().currentTargetMiB, 1792)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertEqual(manager.status().guestWorkloadDetected, true)
-        XCTAssertEqual(manager.status().trace?.last?.action, "idle-refine")
+        XCTAssertEqual(manager.status().trace?.last?.action, "observe")
     }
 
-    func testActiveServiceIdleExpandsToLiveCgroupDemandTargetInsteadOfConfiguredMaximum() throws {
+    func testActiveServiceIdleDoesNotExpandFromLiveCgroupDemandTarget() throws {
         let policy = Self.policy()
         let smallServiceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":1073741824,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":1073741824,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -1076,14 +1095,14 @@ final class DynamicMemoryManagerTests: XCTestCase {
         connector.setBody(largerServiceMetricsBody)
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [1792, 4096])
-        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
-        XCTAssertEqual(manager.status().balloonedMiB, 4096)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().balloonedMiB, 0)
         XCTAssertEqual(manager.status().guestWorkloadDetected, true)
-        XCTAssertEqual(manager.status().trace?.last?.action, "idle-expand")
+        XCTAssertEqual(manager.status().trace?.last?.action, "observe")
     }
 
-    func testActiveServicePressureExpandsDemandTargetInsteadOfRestoringConfiguredMaximum() throws {
+    func testActiveServicePressureKeepsConfiguredCapacityAfterIdleDrop() throws {
         let policy = Self.policy()
         let idleMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":0,"service_cgroup_memory_current":0,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
@@ -1107,14 +1126,14 @@ final class DynamicMemoryManagerTests: XCTestCase {
         connector.setBody(pressuredServiceMetricsBody)
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [512, 2816])
-        XCTAssertEqual(manager.status().currentTargetMiB, 2816)
-        XCTAssertEqual(manager.status().balloonedMiB, 5376)
+        XCTAssertEqual(appliedTargets.values, [512, 8192])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().balloonedMiB, 0)
         XCTAssertEqual(manager.status().pressure, .high)
-        XCTAssertEqual(manager.status().trace?.last?.action, "idle-expand")
+        XCTAssertEqual(manager.status().trace?.last?.action, "restore")
     }
 
-    func testActiveServicePressureExpansionCapsAtDemandTargetPlusBurstHeadroom() throws {
+    func testActiveServicePressureDoesNotResizeConfiguredCapacity() throws {
         let policy = Self.policy()
         let largeServiceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":5575278592,"container_memory_peak":6442450944,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":5575278592,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -1139,9 +1158,187 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "guest.event")
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [6656, 7680])
-        XCTAssertEqual(manager.status().currentTargetMiB, 7680)
-        XCTAssertLessThan(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().pressure, .high)
+    }
+
+    func testActiveServicePressureRequestsBoundedServiceSliceReclaim() throws {
+        let policy = Self.policy()
+        let pressuredServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":2684354560,"sreclaimable_bytes":268435456,"container_memory_current":6442450944,"container_memory_peak":6442450944,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":6442450944,"service_cgroup_anon":3758096384,"service_cgroup_file":2684354560,"service_cgroup_inactive_file":2147483648,"service_cgroup_slab_reclaimable":268435456,"psi_some_avg10":1.0,"psi_full_avg10":0.1,"active_workloads":3,"build_workload_detected":false,"source":"test"}
+        """
+        let serviceSlicesBody = """
+        {"version":1,"slices":[{"key":"chum_mem_api","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_api.slice","memory_current":2147483648,"anon":2130706432,"file":16777216,"inactive_file":16777216,"active_file":0,"slab_reclaimable":0,"slab_unreclaimable":0,"working_set":2130706432,"reclaimable":16777216,"populated":true},{"key":"chum_mem_postgres","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_postgres.slice","memory_current":4294967296,"anon":1610612736,"file":2415919104,"inactive_file":2147483648,"active_file":268435456,"slab_reclaimable":268435456,"slab_unreclaimable":0,"working_set":1879048192,"reclaimable":2415919104,"populated":true}],"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: pressuredServiceMetricsBody,
+            reclaimBody: #"{"accepted":false,"epoch":1,"state":"ignored","source":"test"}"#,
+            serviceSlicesBody: serviceSlicesBody
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.serviceReclaimRequests, 1)
+        XCTAssertTrue(connector.lastRequest.contains("/conjet-memory-reclaim/service"))
+        XCTAssertTrue(connector.lastRequest.contains("key=chum_mem_postgres"))
+        XCTAssertTrue(connector.lastRequest.contains("bytes=1073741824"))
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().pressure, .high)
+        XCTAssertTrue(manager.status().trace?.contains { $0.action == "service-slice-reclaim" } == true)
+    }
+
+    func testActiveServiceFootprintOverTargetRequestsBoundedServiceSliceReclaim() throws {
+        let policy = Self.policy()
+        let serviceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":2684354560,"sreclaimable_bytes":268435456,"container_memory_current":6442450944,"container_memory_peak":6442450944,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":6442450944,"service_cgroup_anon":3758096384,"service_cgroup_file":2684354560,"service_cgroup_inactive_file":2147483648,"service_cgroup_slab_reclaimable":268435456,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":3,"build_workload_detected":false,"source":"test"}
+        """
+        let serviceSlicesBody = """
+        {"version":1,"slices":[{"key":"chum_mem_postgres","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_postgres.slice","memory_current":4294967296,"anon":1610612736,"file":2415919104,"inactive_file":2147483648,"active_file":268435456,"slab_reclaimable":268435456,"slab_unreclaimable":0,"working_set":1879048192,"reclaimable":2415919104,"populated":true}],"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: serviceMetricsBody,
+            reclaimBody: #"{"accepted":false,"epoch":1,"state":"ignored","source":"test"}"#,
+            serviceSlicesBody: serviceSlicesBody
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let footprintSamples = HostFootprintSamples([
+            UInt64(11 * 1024 * 1024 * 1024)
+        ])
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            hostFootprintBytes: { footprintSamples.next() }
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.serviceReclaimRequests, 1)
+        XCTAssertTrue(connector.lastRequest.contains("reason=host.footprint.slices"))
+        XCTAssertTrue(connector.lastRequest.contains("key=chum_mem_postgres"))
+        XCTAssertTrue(connector.lastRequest.contains("bytes=1073741824"))
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().hostFootprintMiB, 11264)
+        XCTAssertEqual(manager.status().pressure, .low)
+    }
+
+    func testStoppedServiceResidualSliceRequestsServiceReclaim() throws {
+        let policy = Self.policy()
+        let stoppedServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":7516192768,"mem_free":1073741824,"page_cache_bytes":1073741824,"sreclaimable_bytes":67108864,"container_memory_current":3145728,"container_memory_peak":6442450944,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":1073741824,"service_cgroup_anon":0,"service_cgroup_file":1073741824,"service_cgroup_inactive_file":805306368,"service_cgroup_slab_reclaimable":67108864,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let serviceSlicesBody = """
+        {"version":1,"slices":[{"key":"chum_mem_postgres","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_postgres.slice","memory_current":1073741824,"anon":0,"file":1073741824,"inactive_file":805306368,"active_file":268435456,"slab_reclaimable":67108864,"slab_unreclaimable":0,"working_set":201326592,"reclaimable":872415232,"populated":false}],"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: stoppedServiceMetricsBody,
+            reclaimBody: #"{"accepted":false,"epoch":1,"state":"ignored","source":"test"}"#,
+            serviceSlicesBody: serviceSlicesBody
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "docker.containerStopped")
+
+        XCTAssertEqual(connector.serviceReclaimRequests, 1)
+        XCTAssertTrue(connector.lastRequest.contains("/conjet-memory-reclaim/service"))
+        XCTAssertTrue(connector.lastRequest.contains("reason=docker.containerStopped.slices"))
+        XCTAssertTrue(connector.lastRequest.contains("key=chum_mem_postgres"))
+        XCTAssertTrue(connector.lastRequest.contains("bytes=872415232"))
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().guestWorkloadDetected, false)
+        XCTAssertTrue(manager.status().trace?.contains { $0.action == "service-slice-reclaim" } == true)
+    }
+
+    func testGuestEventReclaimsStoppedServiceResidualSlice() throws {
+        let policy = Self.policy()
+        let stoppedServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":7516192768,"mem_free":1073741824,"page_cache_bytes":1073741824,"sreclaimable_bytes":67108864,"container_memory_current":3145728,"container_memory_peak":6442450944,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":1073741824,"service_cgroup_anon":0,"service_cgroup_file":1073741824,"service_cgroup_inactive_file":805306368,"service_cgroup_slab_reclaimable":67108864,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let serviceSlicesBody = """
+        {"version":1,"slices":[{"key":"chum_mem_postgres","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_postgres.slice","memory_current":1073741824,"anon":0,"file":1073741824,"inactive_file":805306368,"active_file":268435456,"slab_reclaimable":67108864,"slab_unreclaimable":0,"working_set":201326592,"reclaimable":872415232,"populated":false}],"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: stoppedServiceMetricsBody,
+            reclaimBody: #"{"accepted":false,"epoch":1,"state":"ignored","source":"test"}"#,
+            serviceSlicesBody: serviceSlicesBody
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(connector.serviceReclaimRequests, 1)
+        XCTAssertTrue(connector.lastRequest.contains("/conjet-memory-reclaim/service"))
+        XCTAssertTrue(connector.lastRequest.contains("reason=guest.event.slices"))
+        XCTAssertTrue(connector.lastRequest.contains("key=chum_mem_postgres"))
+        XCTAssertTrue(connector.lastRequest.contains("bytes=872415232"))
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().guestWorkloadDetected, false)
+        XCTAssertTrue(manager.status().trace?.contains { $0.action == "service-slice-reclaim" } == true)
+    }
+
+    func testActiveServicePressureDoesNotReclaimAnonymousOnlySlice() throws {
+        let policy = Self.policy()
+        let pressuredServiceMetricsBody = """
+        {"mem_total":8589934592,"mem_available":5368709120,"mem_free":1073741824,"page_cache_bytes":67108864,"sreclaimable_bytes":0,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":3221225472,"service_cgroup_anon":3221225472,"service_cgroup_file":0,"service_cgroup_inactive_file":0,"service_cgroup_slab_reclaimable":0,"psi_some_avg10":1.0,"psi_full_avg10":0.1,"active_workloads":2,"build_workload_detected":false,"source":"test"}
+        """
+        let serviceSlicesBody = """
+        {"version":1,"slices":[{"key":"chum_mem_api","path":"/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_api.slice","memory_current":3221225472,"anon":3221225472,"file":0,"inactive_file":0,"active_file":0,"slab_reclaimable":0,"slab_unreclaimable":0,"working_set":3221225472,"reclaimable":0,"populated":true}],"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(
+            body: pressuredServiceMetricsBody,
+            serviceSlicesBody: serviceSlicesBody
+        )
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            }
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.serviceReclaimRequests, 0)
+        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertEqual(manager.status().pressure, .high)
     }
 
@@ -1369,6 +1566,7 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
     private var serviceSlicesBody: String
     private var reclaimStatusCode: Int
     private var capturedReclaimRequests = 0
+    private var capturedServiceReclaimRequests = 0
     private var capturedReclaimCancelRequests = 0
     private var capturedReclaimStatusRequests = 0
     private var capturedServiceSlicesRequests = 0
@@ -1377,6 +1575,13 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
     var reclaimRequests: Int {
         lock.lock()
         let value = capturedReclaimRequests
+        lock.unlock()
+        return value
+    }
+
+    var serviceReclaimRequests: Int {
+        lock.lock()
+        let value = capturedServiceReclaimRequests
         lock.unlock()
         return value
     }
@@ -1496,6 +1701,11 @@ private final class StaticHTTPGuestConnectionConnector: GuestConnectionConnector
             capturedReclaimStatusRequests += 1
             snapshot = reclaimStatusBody
             statusCode = 200
+        } else if request.contains("/conjet-memory-reclaim/service") {
+            capturedLastRequest = request
+            capturedServiceReclaimRequests += 1
+            snapshot = reclaimBody
+            statusCode = reclaimStatusCode
         } else if request.contains("/conjet-memory-reclaim") {
             capturedLastRequest = request
             capturedReclaimRequests += 1

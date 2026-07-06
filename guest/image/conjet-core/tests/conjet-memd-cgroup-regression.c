@@ -252,10 +252,43 @@ static void test_service_slice_scanner_aggregates_working_set_by_service_key(voi
     require_contains("service slice reclaimable JSON", body, "\"reclaimable\":1920");
 }
 
+static void test_service_reclaim_request_validation_matches_slice_key(void) {
+    struct reclaim_request request;
+    memset(&request, 0, sizeof(request));
+    request.service_scoped = true;
+    request.bytes = 67108864;
+    snprintf(request.service_key, sizeof(request.service_key), "chum_mem_worker");
+    snprintf(
+        request.cgroup_path,
+        sizeof(request.cgroup_path),
+        "/sys/fs/cgroup/conjet.slice/conjet-services.slice/conjet-service-chum_mem_worker.slice"
+    );
+    require_int("valid service reclaim request", service_reclaim_request_is_valid(&request) ? 1 : 0, 1);
+
+    snprintf(request.service_key, sizeof(request.service_key), "chum_mem_api");
+    require_int("reject mismatched service key", service_reclaim_request_is_valid(&request) ? 1 : 0, 0);
+
+    snprintf(request.service_key, sizeof(request.service_key), "chum_mem_worker");
+    snprintf(
+        request.cgroup_path,
+        sizeof(request.cgroup_path),
+        "/tmp/conjet-service-chum_mem_worker.slice"
+    );
+    require_int("reject service path outside cgroup fs", service_reclaim_request_is_valid(&request) ? 1 : 0, 0);
+
+    snprintf(
+        request.cgroup_path,
+        sizeof(request.cgroup_path),
+        "/sys/fs/cgroup/conjet.slice/../conjet-service-chum_mem_worker.slice"
+    );
+    require_int("reject service path traversal", service_reclaim_request_is_valid(&request) ? 1 : 0, 0);
+}
+
 int main(void) {
     test_build_snapshot_aggregates_prefixed_sibling_memory_without_false_activity();
     test_service_cgroup_memory_stat_is_exported();
     test_service_slice_scanner_aggregates_working_set_by_service_key();
+    test_service_reclaim_request_validation_matches_slice_key();
     puts("conjet-memd cgroup regression tests passed");
     return 0;
 }
