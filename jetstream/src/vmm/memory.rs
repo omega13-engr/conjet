@@ -181,9 +181,6 @@ impl GuestMemory {
     ) -> Result<*mut libc::c_void, GuestMemoryError> {
         self.validate_host_page_aligned(guest_base, guest_address, size)?;
         let address = self.host_address_at(guest_base, guest_address, size)?;
-        if unsafe { libc::munmap(address, size) } != 0 {
-            return Err(GuestMemoryError::MapFailed(std::io::Error::last_os_error()));
-        }
         let result = unsafe {
             libc::mmap(
                 address,
@@ -195,11 +192,7 @@ impl GuestMemory {
             )
         };
         if result == libc::MAP_FAILED {
-            eprintln!(
-                "fatal guest memory fixed remap failure after decommit at {address:p}+{size}: {}",
-                std::io::Error::last_os_error()
-            );
-            std::process::abort();
+            return Err(GuestMemoryError::MapFailed(std::io::Error::last_os_error()));
         }
         if result != address {
             unsafe {
@@ -342,6 +335,43 @@ mod tests {
         assert_eq!(
             memory.read_at(guest_base, guest_address, 64).unwrap(),
             vec![0; 64]
+        );
+    }
+
+    #[test]
+    fn decommit_zero_at_preserves_neighboring_pages() {
+        let guest_base = 0x4000_0000;
+        let page_size = page_size();
+        let memory = GuestMemory::anonymous(page_size * 3).unwrap();
+        let reclaim_address = guest_base + page_size as u64;
+
+        memory
+            .write_at(guest_base, guest_base, &[0x11; 64])
+            .unwrap();
+        memory
+            .write_at(guest_base, reclaim_address, &[0x22; 64])
+            .unwrap();
+        memory
+            .write_at(guest_base, guest_base + (page_size * 2) as u64, &[0x33; 64])
+            .unwrap();
+
+        memory
+            .decommit_zero_at(guest_base, reclaim_address, page_size)
+            .unwrap();
+
+        assert_eq!(
+            memory.read_at(guest_base, guest_base, 64).unwrap(),
+            vec![0x11; 64]
+        );
+        assert_eq!(
+            memory.read_at(guest_base, reclaim_address, 64).unwrap(),
+            vec![0; 64]
+        );
+        assert_eq!(
+            memory
+                .read_at(guest_base, guest_base + (page_size * 2) as u64, 64)
+                .unwrap(),
+            vec![0x33; 64]
         );
     }
 
