@@ -31,7 +31,9 @@ The output is intentionally Conjet-specific:
 - `conjet-memd`, a separate guest memory telemetry service on VSOCK port `2376`
   that reports cgroup v2 memory, `/proc/meminfo`, and PSI pressure for dynamic
   host-side balloon control, plus `conjet-reclaimd` for scoped cgroup-v2
-  `memory.reclaim` jobs after Docker/build activity.
+  `memory.reclaim` jobs after Docker/build activity. These signals are policy
+  inputs only; Jetstream may reclaim host backing only for virtio-balloon-owned
+  pages or in-flight virtio-balloon page-reporting ranges.
 - DHCP networkd/netplan fallback for the VZ NAT interface.
 - Cloud-init disabled by default to avoid first-boot datasource waits.
 - `vsock`, `virtio_balloon`, `virtiofs`, and `zram` modules requested on boot.

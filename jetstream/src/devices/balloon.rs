@@ -104,6 +104,10 @@ pub struct BalloonMetrics {
     pub discard_failed_bytes: u64,
     pub discard_skipped_bytes: u64,
     pub partial_host_granule_bytes: u64,
+    pub soft_reclaimed_bytes: u64,
+    pub hard_decommitted_bytes: u64,
+    pub balloon_owned_reclaimed_bytes: u64,
+    pub report_inflight_reclaimed_bytes: u64,
     pub reclaimed_bytes: u64,
     pub reported_free_reclaimed_bytes: u64,
     pub current_balloon_owned_bytes: u64,
@@ -112,6 +116,41 @@ pub struct BalloonMetrics {
     pub current_balloon_decommitted_bytes: u64,
     pub reclaim_failures: u64,
     pub malformed_reports: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct MemoryLedgerSummary {
+    pub guest_visible_bytes: u64,
+    pub host_granule_bytes: u64,
+    pub host_granules: u64,
+    pub resident_bytes: u64,
+    pub guest_owned_bytes: u64,
+    pub pinned_bytes: u64,
+    pub balloon_owned_bytes: u64,
+    pub report_inflight_bytes: u64,
+    pub discarded_soft_bytes: u64,
+    pub discarded_hard_zero_bytes: u64,
+    pub cumulative_soft_discarded_bytes: u64,
+    pub cumulative_hard_decommitted_bytes: u64,
+    pub cumulative_balloon_authorized_bytes: u64,
+    pub cumulative_report_authorized_bytes: u64,
+    pub guest_owned_reclaimed_bytes: u64,
+    pub pinned_reclaimed_bytes: u64,
+    pub reclaim_without_authority_bytes: u64,
+    pub report_acked_before_reclaim_bytes: u64,
+    pub state_sum_mismatch_bytes: u64,
+    pub ok: bool,
+}
+
+impl MemoryLedgerSummary {
+    fn with_ok(mut self) -> Self {
+        self.ok = self.guest_owned_reclaimed_bytes == 0
+            && self.pinned_reclaimed_bytes == 0
+            && self.reclaim_without_authority_bytes == 0
+            && self.report_acked_before_reclaim_bytes == 0
+            && self.state_sum_mismatch_bytes == 0;
+        self
+    }
 }
 
 #[derive(Debug, Error)]
@@ -144,9 +183,296 @@ impl PageRange {
 pub struct ReclaimReport {
     pub host_granule_eligible_bytes: u64,
     pub discard_advised_bytes: u64,
+    pub soft_reclaimed_bytes: u64,
+    pub hard_decommitted_bytes: u64,
     pub discard_failed_bytes: u64,
     pub discard_skipped_bytes: u64,
     pub partial_host_granule_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReclaimAuthority {
+    BalloonOwned,
+    ReportInFlight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LedgerAuthority {
+    GuestOwned,
+    #[allow(dead_code)]
+    Pinned,
+    BalloonOwned,
+    ReportInFlight,
+}
+
+impl From<ReclaimAuthority> for LedgerAuthority {
+    fn from(authority: ReclaimAuthority) -> Self {
+        match authority {
+            ReclaimAuthority::BalloonOwned => Self::BalloonOwned,
+            ReclaimAuthority::ReportInFlight => Self::ReportInFlight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackingState {
+    Resident,
+    SoftDiscarded,
+    HardDecommittedZero,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HostPageLedgerEntry {
+    authority: LedgerAuthority,
+    backing: BackingState,
+    last_reclaim_authority: LedgerAuthority,
+}
+
+impl Default for HostPageLedgerEntry {
+    fn default() -> Self {
+        Self {
+            authority: LedgerAuthority::GuestOwned,
+            backing: BackingState::Resident,
+            last_reclaim_authority: LedgerAuthority::GuestOwned,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct MemoryLedger {
+    guest_base: u64,
+    guest_size: u64,
+    host_page_size: u64,
+    entries: Vec<HostPageLedgerEntry>,
+    cumulative_soft_discarded_bytes: u64,
+    cumulative_hard_decommitted_bytes: u64,
+    cumulative_balloon_authorized_bytes: u64,
+    cumulative_report_authorized_bytes: u64,
+    guest_owned_reclaimed_bytes: u64,
+    pinned_reclaimed_bytes: u64,
+    reclaim_without_authority_bytes: u64,
+    report_acked_before_reclaim_bytes: u64,
+}
+
+impl MemoryLedger {
+    fn ensure(&mut self, memory: &GuestMemory, guest_base: u64) {
+        let guest_size = memory.len() as u64;
+        let host_page_size = memory.host_page_size() as u64;
+        if self.guest_base == guest_base
+            && self.guest_size == guest_size
+            && self.host_page_size == host_page_size
+            && !self.entries.is_empty()
+        {
+            return;
+        }
+        let entry_count = guest_size.div_ceil(host_page_size) as usize;
+        self.guest_base = guest_base;
+        self.guest_size = guest_size;
+        self.host_page_size = host_page_size;
+        self.entries = vec![HostPageLedgerEntry::default(); entry_count];
+        self.cumulative_soft_discarded_bytes = 0;
+        self.cumulative_hard_decommitted_bytes = 0;
+        self.cumulative_balloon_authorized_bytes = 0;
+        self.cumulative_report_authorized_bytes = 0;
+        self.guest_owned_reclaimed_bytes = 0;
+        self.pinned_reclaimed_bytes = 0;
+        self.reclaim_without_authority_bytes = 0;
+        self.report_acked_before_reclaim_bytes = 0;
+    }
+
+    fn mark_authority(&mut self, ranges: &[PageRange], authority: LedgerAuthority) {
+        for index in self.indices_for_ranges(ranges) {
+            self.entries[index].authority = authority;
+        }
+    }
+
+    fn clear_report_inflight(&mut self, ranges: &[PageRange]) {
+        for index in self.indices_for_ranges(ranges) {
+            let entry = &mut self.entries[index];
+            if entry.authority == LedgerAuthority::ReportInFlight {
+                if entry.backing == BackingState::Resident {
+                    self.report_acked_before_reclaim_bytes = self
+                        .report_acked_before_reclaim_bytes
+                        .saturating_add(self.host_page_size);
+                }
+                entry.authority = LedgerAuthority::GuestOwned;
+            }
+        }
+    }
+
+    fn mark_guest_owned(&mut self, ranges: &[PageRange]) {
+        for index in self.indices_for_ranges(ranges) {
+            self.entries[index].authority = LedgerAuthority::GuestOwned;
+        }
+    }
+
+    fn apply_reclaim(
+        &mut self,
+        ranges: &[PageRange],
+        report: &ReclaimReport,
+        authority: ReclaimAuthority,
+    ) {
+        let ledger_authority = LedgerAuthority::from(authority);
+        let mut soft_remaining = report.soft_reclaimed_bytes;
+        let mut hard_remaining = report.hard_decommitted_bytes;
+        for index in self.indices_for_ranges(ranges) {
+            if hard_remaining < self.host_page_size && soft_remaining < self.host_page_size {
+                break;
+            }
+            let entry = &mut self.entries[index];
+            if entry.authority != ledger_authority {
+                self.reclaim_without_authority_bytes = self
+                    .reclaim_without_authority_bytes
+                    .saturating_add(self.host_page_size);
+                match entry.authority {
+                    LedgerAuthority::GuestOwned => {
+                        self.guest_owned_reclaimed_bytes = self
+                            .guest_owned_reclaimed_bytes
+                            .saturating_add(self.host_page_size);
+                    }
+                    LedgerAuthority::Pinned => {
+                        self.pinned_reclaimed_bytes = self
+                            .pinned_reclaimed_bytes
+                            .saturating_add(self.host_page_size);
+                    }
+                    LedgerAuthority::BalloonOwned | LedgerAuthority::ReportInFlight => {}
+                }
+            }
+            if hard_remaining >= self.host_page_size {
+                entry.backing = BackingState::HardDecommittedZero;
+                entry.last_reclaim_authority = ledger_authority;
+                self.cumulative_hard_decommitted_bytes = self
+                    .cumulative_hard_decommitted_bytes
+                    .saturating_add(self.host_page_size);
+                match authority {
+                    ReclaimAuthority::BalloonOwned => {
+                        self.cumulative_balloon_authorized_bytes = self
+                            .cumulative_balloon_authorized_bytes
+                            .saturating_add(self.host_page_size);
+                    }
+                    ReclaimAuthority::ReportInFlight => {
+                        self.cumulative_report_authorized_bytes = self
+                            .cumulative_report_authorized_bytes
+                            .saturating_add(self.host_page_size);
+                    }
+                }
+                hard_remaining -= self.host_page_size;
+            } else if soft_remaining >= self.host_page_size {
+                entry.backing = BackingState::SoftDiscarded;
+                entry.last_reclaim_authority = ledger_authority;
+                self.cumulative_soft_discarded_bytes = self
+                    .cumulative_soft_discarded_bytes
+                    .saturating_add(self.host_page_size);
+                match authority {
+                    ReclaimAuthority::BalloonOwned => {
+                        self.cumulative_balloon_authorized_bytes = self
+                            .cumulative_balloon_authorized_bytes
+                            .saturating_add(self.host_page_size);
+                    }
+                    ReclaimAuthority::ReportInFlight => {
+                        self.cumulative_report_authorized_bytes = self
+                            .cumulative_report_authorized_bytes
+                            .saturating_add(self.host_page_size);
+                    }
+                }
+                soft_remaining -= self.host_page_size;
+            }
+        }
+    }
+
+    fn summary(&self, guest_size: u64, host_page_size: u64) -> MemoryLedgerSummary {
+        let guest_visible_bytes = if self.guest_size == 0 {
+            guest_size
+        } else {
+            self.guest_size
+        };
+        let host_granule_bytes = if self.host_page_size == 0 {
+            host_page_size
+        } else {
+            self.host_page_size
+        };
+        if self.entries.is_empty() {
+            return MemoryLedgerSummary {
+                guest_visible_bytes,
+                host_granule_bytes,
+                host_granules: guest_visible_bytes.div_ceil(host_granule_bytes),
+                resident_bytes: guest_visible_bytes,
+                guest_owned_bytes: guest_visible_bytes,
+                ..MemoryLedgerSummary::default()
+            }
+            .with_ok();
+        }
+
+        let mut summary = MemoryLedgerSummary {
+            guest_visible_bytes,
+            host_granule_bytes,
+            host_granules: self.entries.len() as u64,
+            cumulative_soft_discarded_bytes: self.cumulative_soft_discarded_bytes,
+            cumulative_hard_decommitted_bytes: self.cumulative_hard_decommitted_bytes,
+            cumulative_balloon_authorized_bytes: self.cumulative_balloon_authorized_bytes,
+            cumulative_report_authorized_bytes: self.cumulative_report_authorized_bytes,
+            guest_owned_reclaimed_bytes: self.guest_owned_reclaimed_bytes,
+            pinned_reclaimed_bytes: self.pinned_reclaimed_bytes,
+            reclaim_without_authority_bytes: self.reclaim_without_authority_bytes,
+            report_acked_before_reclaim_bytes: self.report_acked_before_reclaim_bytes,
+            ..MemoryLedgerSummary::default()
+        };
+        for entry in &self.entries {
+            match entry.authority {
+                LedgerAuthority::GuestOwned => summary.guest_owned_bytes += host_granule_bytes,
+                LedgerAuthority::Pinned => summary.pinned_bytes += host_granule_bytes,
+                LedgerAuthority::BalloonOwned => summary.balloon_owned_bytes += host_granule_bytes,
+                LedgerAuthority::ReportInFlight => {
+                    summary.report_inflight_bytes += host_granule_bytes;
+                }
+            }
+            match entry.backing {
+                BackingState::Resident => summary.resident_bytes += host_granule_bytes,
+                BackingState::SoftDiscarded => {
+                    summary.discarded_soft_bytes += host_granule_bytes;
+                }
+                BackingState::HardDecommittedZero => {
+                    summary.discarded_hard_zero_bytes += host_granule_bytes;
+                }
+            }
+        }
+        let state_sum = summary
+            .resident_bytes
+            .saturating_add(summary.discarded_soft_bytes)
+            .saturating_add(summary.discarded_hard_zero_bytes);
+        summary.state_sum_mismatch_bytes = state_sum.abs_diff(guest_visible_bytes);
+        summary.with_ok()
+    }
+
+    fn indices_for_ranges(&self, ranges: &[PageRange]) -> Vec<usize> {
+        let mut indices = Vec::new();
+        if self.host_page_size == 0 {
+            return indices;
+        }
+        for range in ranges {
+            let Some(end) = range.end() else {
+                continue;
+            };
+            let Some(start_offset) = range.start.checked_sub(self.guest_base) else {
+                continue;
+            };
+            let Some(end_offset) = end.checked_sub(self.guest_base) else {
+                continue;
+            };
+            let start_index = start_offset / self.host_page_size;
+            let end_index = end_offset.div_ceil(self.host_page_size);
+            for index in start_index..end_index {
+                if let Ok(index) = usize::try_from(index) {
+                    if index < self.entries.len() {
+                        indices.push(index);
+                    }
+                }
+            }
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
 }
 
 pub trait GuestMemoryReclaimer: std::fmt::Debug + Send + Sync {
@@ -155,6 +481,7 @@ pub trait GuestMemoryReclaimer: std::fmt::Debug + Send + Sync {
         memory: &GuestMemory,
         guest_base: u64,
         ranges: &[PageRange],
+        authority: ReclaimAuthority,
     ) -> ReclaimReport;
 }
 
@@ -200,6 +527,7 @@ pub struct BalloonQueueHandler {
     ballooned_pfns: HashSet<u64>,
     balloon_host_granules: HashMap<u64, HostGranuleOwnership>,
     free_page_hint_active_cmd_id: Option<u32>,
+    memory_ledger: MemoryLedger,
     metrics: BalloonMetrics,
     reclaimer: Option<Arc<dyn GuestMemoryReclaimer>>,
 }
@@ -237,6 +565,14 @@ impl BalloonQueueHandler {
             .map(|ownership| ownership.host_granule_bytes())
             .sum();
         metrics
+    }
+
+    pub fn memory_ledger_summary(
+        &self,
+        guest_size: u64,
+        host_page_size: u64,
+    ) -> MemoryLedgerSummary {
+        self.memory_ledger.summary(guest_size, host_page_size)
     }
 
     pub fn refresh_transport_metrics(&mut self, transport: &VirtioMmioDevice) {
@@ -342,6 +678,7 @@ impl BalloonQueueHandler {
         pfns: &[u64],
     ) -> Vec<PageRange> {
         let mut candidates = Vec::new();
+        self.memory_ledger.ensure(memory, guest_base);
         for &pfn in pfns {
             let Some((granule_start, subpage_mask, required_subpages)) =
                 host_granule_for_pfn(memory, guest_base, pfn)
@@ -372,9 +709,24 @@ impl BalloonQueueHandler {
         ranges: Vec<PageRange>,
     ) {
         for range in ranges {
-            let report = reclaim_ranges(memory, guest_base, vec![range], self.reclaimer.as_deref());
+            let eligible_ranges =
+                eligible_reclaim_ranges(memory, guest_base, std::slice::from_ref(&range));
+            self.memory_ledger
+                .mark_authority(&eligible_ranges, LedgerAuthority::BalloonOwned);
+            let report = reclaim_ranges(
+                memory,
+                guest_base,
+                vec![range],
+                self.reclaimer.as_deref(),
+                ReclaimAuthority::BalloonOwned,
+            );
             let reclaimed = report.discard_advised_bytes == range.size;
-            self.record_reclaim_report(report, false);
+            self.memory_ledger.apply_reclaim(
+                &eligible_ranges,
+                &report,
+                ReclaimAuthority::BalloonOwned,
+            );
+            self.record_reclaim_report(report, ReclaimAuthority::BalloonOwned, false);
             if reclaimed {
                 self.mark_balloon_range_decommitted(range);
             }
@@ -401,6 +753,8 @@ impl BalloonQueueHandler {
     }
 
     fn record_balloon_deflate(&mut self, memory: &GuestMemory, guest_base: u64, pfns: &[u64]) {
+        self.memory_ledger.ensure(memory, guest_base);
+        let mut guest_owned_ranges = Vec::new();
         for &pfn in pfns {
             if !self.ballooned_pfns.remove(&pfn) {
                 continue;
@@ -419,7 +773,13 @@ impl BalloonQueueHandler {
             if remove_granule {
                 self.balloon_host_granules.remove(&granule_start);
             }
+            guest_owned_ranges.push(PageRange {
+                start: pfn.saturating_mul(PAGE_SIZE),
+                size: PAGE_SIZE,
+            });
         }
+        let guest_owned_ranges = eligible_reclaim_ranges(memory, guest_base, &guest_owned_ranges);
+        self.memory_ledger.mark_guest_owned(&guest_owned_ranges);
     }
 
     fn handle_reporting_queue(
@@ -475,11 +835,7 @@ impl BalloonQueueHandler {
             });
         }
         if !batch_ranges.is_empty() {
-            let report =
-                reclaim_ranges(memory, guest_base, batch_ranges, self.reclaimer.as_deref());
-            self.metrics.reported_free_pages += batch_reported / PAGE_SIZE;
-            self.metrics.reported_free_bytes += batch_reported;
-            self.record_reclaim_report(report, true);
+            self.reclaim_report_inflight_ranges(memory, guest_base, batch_ranges, batch_reported);
         }
 
         self.reporting_executor
@@ -490,6 +846,35 @@ impl BalloonQueueHandler {
             transport.mark_queue_used();
         }
         Ok(used)
+    }
+
+    fn reclaim_report_inflight_ranges(
+        &mut self,
+        memory: &GuestMemory,
+        guest_base: u64,
+        batch_ranges: Vec<PageRange>,
+        batch_reported: u64,
+    ) {
+        self.memory_ledger.ensure(memory, guest_base);
+        let eligible_ranges = eligible_reclaim_ranges(memory, guest_base, &batch_ranges);
+        self.memory_ledger
+            .mark_authority(&eligible_ranges, LedgerAuthority::ReportInFlight);
+        let report = reclaim_ranges(
+            memory,
+            guest_base,
+            batch_ranges,
+            self.reclaimer.as_deref(),
+            ReclaimAuthority::ReportInFlight,
+        );
+        self.memory_ledger.apply_reclaim(
+            &eligible_ranges,
+            &report,
+            ReclaimAuthority::ReportInFlight,
+        );
+        self.memory_ledger.clear_report_inflight(&eligible_ranges);
+        self.metrics.reported_free_pages += batch_reported / PAGE_SIZE;
+        self.metrics.reported_free_bytes += batch_reported;
+        self.record_reclaim_report(report, ReclaimAuthority::ReportInFlight, true);
     }
 
     fn handle_free_page_hint_queue(
@@ -578,20 +963,51 @@ impl BalloonQueueHandler {
         batch_ranges: Vec<PageRange>,
         batch_reported: u64,
     ) {
-        let report = reclaim_ranges(memory, guest_base, batch_ranges, self.reclaimer.as_deref());
+        self.memory_ledger.ensure(memory, guest_base);
+        let eligible_ranges = eligible_reclaim_ranges(memory, guest_base, &batch_ranges);
+        self.memory_ledger
+            .mark_authority(&eligible_ranges, LedgerAuthority::ReportInFlight);
+        let report = reclaim_ranges(
+            memory,
+            guest_base,
+            batch_ranges,
+            self.reclaimer.as_deref(),
+            ReclaimAuthority::ReportInFlight,
+        );
+        self.memory_ledger.apply_reclaim(
+            &eligible_ranges,
+            &report,
+            ReclaimAuthority::ReportInFlight,
+        );
+        self.memory_ledger.clear_report_inflight(&eligible_ranges);
         self.metrics.free_page_hint_reported_bytes += batch_reported;
         self.metrics.free_page_hint_reclaimed_bytes += report.discard_advised_bytes;
-        self.record_reclaim_report(report, false);
+        self.record_reclaim_report(report, ReclaimAuthority::ReportInFlight, false);
     }
 
-    fn record_reclaim_report(&mut self, report: ReclaimReport, free_page_report: bool) {
+    fn record_reclaim_report(
+        &mut self,
+        report: ReclaimReport,
+        authority: ReclaimAuthority,
+        page_reporting: bool,
+    ) {
         self.metrics.host_granule_eligible_bytes += report.host_granule_eligible_bytes;
         self.metrics.discard_advised_bytes += report.discard_advised_bytes;
+        self.metrics.soft_reclaimed_bytes += report.soft_reclaimed_bytes;
+        self.metrics.hard_decommitted_bytes += report.hard_decommitted_bytes;
         self.metrics.discard_failed_bytes += report.discard_failed_bytes;
         self.metrics.discard_skipped_bytes += report.discard_skipped_bytes;
         self.metrics.partial_host_granule_bytes += report.partial_host_granule_bytes;
         self.metrics.reclaimed_bytes += report.discard_advised_bytes;
-        if free_page_report {
+        match authority {
+            ReclaimAuthority::BalloonOwned => {
+                self.metrics.balloon_owned_reclaimed_bytes += report.discard_advised_bytes;
+            }
+            ReclaimAuthority::ReportInFlight => {
+                self.metrics.report_inflight_reclaimed_bytes += report.discard_advised_bytes;
+            }
+        }
+        if page_reporting {
             self.metrics.reported_free_reclaimed_bytes += report.discard_advised_bytes;
         }
         if report.discard_failed_bytes > 0 {
@@ -723,16 +1139,25 @@ fn page_ranges_from_reporting_descriptors(
     Ok(coalesce_ranges(ranges))
 }
 
+fn eligible_reclaim_ranges(
+    memory: &GuestMemory,
+    guest_base: u64,
+    ranges: &[PageRange],
+) -> Vec<PageRange> {
+    host_granule_ranges(memory, guest_base, ranges.to_vec()).eligible
+}
+
 fn reclaim_ranges(
     memory: &GuestMemory,
     guest_base: u64,
     ranges: Vec<PageRange>,
     reclaimer: Option<&dyn GuestMemoryReclaimer>,
+    authority: ReclaimAuthority,
 ) -> ReclaimReport {
     let ranges = host_granule_ranges(memory, guest_base, ranges);
     let host_granule_eligible_bytes = ranges.eligible.iter().map(|range| range.size).sum();
     if let Some(reclaimer) = reclaimer {
-        let mut report = reclaimer.reclaim_ranges(memory, guest_base, &ranges.eligible);
+        let mut report = reclaimer.reclaim_ranges(memory, guest_base, &ranges.eligible, authority);
         report.host_granule_eligible_bytes += host_granule_eligible_bytes;
         report.partial_host_granule_bytes += ranges.partial_bytes;
         return report;
@@ -744,7 +1169,10 @@ fn reclaim_ranges(
     };
     for range in ranges.eligible {
         match memory.advise_free_at(guest_base, range.start, range.size as usize) {
-            Ok(()) => report.discard_advised_bytes += range.size,
+            Ok(()) => {
+                report.discard_advised_bytes += range.size;
+                report.soft_reclaimed_bytes += range.size;
+            }
             Err(_) => report.discard_failed_bytes += range.size,
         }
     }
@@ -1221,6 +1649,8 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingReclaimer {
         ranges: Mutex<Vec<PageRange>>,
+        authorities: Mutex<Vec<ReclaimAuthority>>,
+        hard_zero: bool,
     }
 
     impl GuestMemoryReclaimer for RecordingReclaimer {
@@ -1229,13 +1659,145 @@ mod tests {
             _memory: &GuestMemory,
             _guest_base: u64,
             ranges: &[PageRange],
+            authority: ReclaimAuthority,
         ) -> ReclaimReport {
             self.ranges.lock().unwrap().extend_from_slice(ranges);
+            self.authorities.lock().unwrap().push(authority);
+            let reclaimed_bytes = ranges.iter().map(|range| range.size).sum();
+            let hard_decommitted_bytes = if self.hard_zero { reclaimed_bytes } else { 0 };
+            let soft_reclaimed_bytes = if self.hard_zero { 0 } else { reclaimed_bytes };
             ReclaimReport {
-                discard_advised_bytes: ranges.iter().map(|range| range.size).sum(),
+                discard_advised_bytes: reclaimed_bytes,
+                soft_reclaimed_bytes,
+                hard_decommitted_bytes,
                 ..ReclaimReport::default()
             }
         }
+    }
+
+    #[test]
+    fn balloon_owned_reclaim_records_authority_and_hard_decommit_metrics() {
+        let guest_base = 0x4000_0000;
+        let base_memory = GuestMemory::anonymous(0x4000).unwrap();
+        let host_page_size = base_memory.host_page_size() as u64;
+        let required_subpages = host_page_size / PAGE_SIZE;
+        let memory = GuestMemory::anonymous(host_page_size as usize * 2).unwrap();
+        let first_pfn = guest_base / PAGE_SIZE;
+        let pfns = (0..required_subpages)
+            .map(|subpage| first_pfn + subpage)
+            .collect::<Vec<_>>();
+        let reclaimer = Arc::new(RecordingReclaimer {
+            hard_zero: true,
+            ..RecordingReclaimer::default()
+        });
+        let mut handler = BalloonQueueHandler::with_reclaimer(reclaimer.clone());
+
+        let candidates = handler.record_balloon_inflate(&memory, guest_base, &pfns);
+        handler.reclaim_balloon_owned_ranges(&memory, guest_base, candidates);
+
+        let metrics = handler.metrics();
+        assert_eq!(metrics.balloon_owned_reclaimed_bytes, host_page_size);
+        assert_eq!(metrics.report_inflight_reclaimed_bytes, 0);
+        assert_eq!(metrics.hard_decommitted_bytes, host_page_size);
+        assert_eq!(metrics.soft_reclaimed_bytes, 0);
+        let ledger = handler.memory_ledger_summary(memory.len() as u64, host_page_size);
+        assert!(ledger.ok);
+        assert_eq!(ledger.cumulative_balloon_authorized_bytes, host_page_size);
+        assert_eq!(ledger.cumulative_report_authorized_bytes, 0);
+        assert_eq!(ledger.cumulative_hard_decommitted_bytes, host_page_size);
+        assert_eq!(ledger.discarded_hard_zero_bytes, host_page_size);
+        assert_eq!(ledger.balloon_owned_bytes, host_page_size);
+        assert_eq!(ledger.reclaim_without_authority_bytes, 0);
+        assert_eq!(ledger.guest_owned_reclaimed_bytes, 0);
+        assert_eq!(
+            reclaimer.authorities.lock().unwrap().as_slice(),
+            &[ReclaimAuthority::BalloonOwned]
+        );
+    }
+
+    #[test]
+    fn reported_free_reclaim_records_inflight_authority_before_ack() {
+        let guest_base = 0x4000_0000;
+        let memory = GuestMemory::anonymous(0x4000).unwrap();
+        let host_page_size = memory.host_page_size() as u64;
+        let reclaimer = Arc::new(RecordingReclaimer::default());
+        let mut handler = BalloonQueueHandler::with_reclaimer(reclaimer.clone());
+
+        handler.reclaim_report_inflight_ranges(
+            &memory,
+            guest_base,
+            vec![PageRange {
+                start: guest_base,
+                size: host_page_size,
+            }],
+            host_page_size,
+        );
+
+        let metrics = handler.metrics();
+        assert_eq!(metrics.reported_free_bytes, host_page_size);
+        assert_eq!(metrics.reported_free_reclaimed_bytes, host_page_size);
+        assert_eq!(metrics.report_inflight_reclaimed_bytes, host_page_size);
+        assert_eq!(metrics.balloon_owned_reclaimed_bytes, 0);
+        assert_eq!(metrics.soft_reclaimed_bytes, host_page_size);
+        let ledger = handler.memory_ledger_summary(memory.len() as u64, host_page_size);
+        assert!(ledger.ok);
+        assert_eq!(ledger.cumulative_balloon_authorized_bytes, 0);
+        assert_eq!(ledger.cumulative_report_authorized_bytes, host_page_size);
+        assert_eq!(ledger.cumulative_soft_discarded_bytes, host_page_size);
+        assert_eq!(ledger.discarded_soft_bytes, host_page_size);
+        assert_eq!(ledger.report_inflight_bytes, 0);
+        assert_eq!(ledger.report_acked_before_reclaim_bytes, 0);
+        assert_eq!(ledger.reclaim_without_authority_bytes, 0);
+        assert_eq!(
+            reclaimer.authorities.lock().unwrap().as_slice(),
+            &[ReclaimAuthority::ReportInFlight]
+        );
+    }
+
+    #[test]
+    fn ledger_flags_reclaim_without_authority() {
+        let guest_base = 0x4000_0000;
+        let memory = GuestMemory::anonymous(0x4000).unwrap();
+        let host_page_size = memory.host_page_size() as u64;
+        let mut ledger = MemoryLedger::default();
+        ledger.ensure(&memory, guest_base);
+        let report = ReclaimReport {
+            discard_advised_bytes: host_page_size,
+            hard_decommitted_bytes: host_page_size,
+            ..ReclaimReport::default()
+        };
+
+        ledger.apply_reclaim(
+            &[PageRange {
+                start: guest_base,
+                size: host_page_size,
+            }],
+            &report,
+            ReclaimAuthority::ReportInFlight,
+        );
+
+        let summary = ledger.summary(memory.len() as u64, host_page_size);
+        assert!(!summary.ok);
+        assert_eq!(summary.reclaim_without_authority_bytes, host_page_size);
+        assert_eq!(summary.guest_owned_reclaimed_bytes, host_page_size);
+        assert_eq!(summary.discarded_hard_zero_bytes, host_page_size);
+    }
+
+    #[test]
+    fn rejects_free_page_reports_outside_guest_ram() {
+        let guest_base = 0x4000_0000;
+        let memory = GuestMemory::anonymous(0x4000).unwrap();
+        let descriptors = vec![QueueDescriptor {
+            address: guest_base + 0x8000,
+            length: 4096,
+            flags: 2,
+            next: 0,
+        }];
+
+        assert!(matches!(
+            page_ranges_from_reporting_descriptors(&descriptors, &memory, guest_base),
+            Err(BalloonError::Memory(_))
+        ));
     }
 
     #[test]
@@ -1260,12 +1822,17 @@ mod tests {
         assert_eq!(metrics.free_page_hint_reported_bytes, host_page_size);
         assert_eq!(metrics.free_page_hint_reclaimed_bytes, host_page_size);
         assert_eq!(metrics.reclaimed_bytes, host_page_size);
+        assert_eq!(metrics.report_inflight_reclaimed_bytes, host_page_size);
         assert_eq!(
             reclaimer.ranges.lock().unwrap().as_slice(),
             &[PageRange {
                 start: guest_base,
                 size: host_page_size
             }]
+        );
+        assert_eq!(
+            reclaimer.authorities.lock().unwrap().as_slice(),
+            &[ReclaimAuthority::ReportInFlight]
         );
     }
 }

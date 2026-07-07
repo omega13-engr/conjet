@@ -93,17 +93,65 @@ final class ConjetCoreRustVMMRun: @unchecked Sendable {
     private func recordExit(_ exitCode: Int32) {
         try? stdoutHandle?.close()
         try? stderrHandle?.close()
+        let message = Self.exitMessage(exitCode: exitCode, stdoutPath: stdoutPath, stderrPath: stderrPath)
         lock.lock()
         if exitResult == nil {
             exitResult = ExitResult(
                 exitCode: exitCode,
-                message: "Conjet Core Rust VMM exited with status \(exitCode)",
+                message: message,
                 stdoutPath: stdoutPath,
                 stderrPath: stderrPath
             )
         }
         lock.unlock()
         waitSemaphore.signal()
+    }
+
+    private static func exitMessage(exitCode: Int32, stdoutPath: String, stderrPath: String) -> String {
+        let base = "Conjet Core Rust VMM exited with status \(exitCode)"
+        guard let detail = diagnosticSummary(paths: [stderrPath, stdoutPath]) else {
+            return base
+        }
+        return "\(base): \(detail)"
+    }
+
+    private static func diagnosticSummary(paths: [String]) -> String? {
+        for path in paths {
+            guard let text = tailText(path: path) else { continue }
+            let lines = text
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if let error = lines.last(where: { $0.hasPrefix("Error:") }) {
+                return error
+            }
+            if let message = lines.last(where: { $0.contains(#""message""#) || $0.contains(#""detail""#) }) {
+                return message
+            }
+            if let fallback = lines.last(where: { $0 != "}" && $0 != "]" }) {
+                return fallback
+            }
+        }
+        return nil
+    }
+
+    private static func tailText(path: String, maxBytes: UInt64 = 64 * 1024) -> String? {
+        guard FileManager.default.fileExists(atPath: path),
+              let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else {
+            return nil
+        }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let start = size > maxBytes ? size - maxBytes : 0
+        do {
+            try handle.seek(toOffset: start)
+            guard let data = try handle.readToEnd(), !data.isEmpty else {
+                return nil
+            }
+            return String(decoding: data, as: UTF8.self)
+        } catch {
+            return nil
+        }
     }
 }
 
@@ -254,6 +302,7 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
         var targetPages: UInt32
         var balloon: Balloon
         var hostMemory: HostMemory
+        var memoryLedger: MemoryLedger?
 
         enum CodingKeys: String, CodingKey {
             case ok
@@ -263,6 +312,7 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
             case targetPages = "target_pages"
             case balloon
             case hostMemory = "host_memory"
+            case memoryLedger = "memory_ledger"
         }
     }
 
@@ -276,6 +326,10 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
         var deflatePages: UInt64
         var reportedFreePages: UInt64
         var reportedFreeBytes: UInt64?
+        var softReclaimedBytes: UInt64?
+        var hardDecommittedBytes: UInt64?
+        var balloonOwnedReclaimedBytes: UInt64?
+        var reportInFlightReclaimedBytes: UInt64?
         var reclaimedBytes: UInt64
         var reportedFreeReclaimedBytes: UInt64
         var reclaimFailures: UInt64
@@ -291,6 +345,10 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
             case deflatePages = "deflate_pages"
             case reportedFreePages = "reported_free_pages"
             case reportedFreeBytes = "reported_free_bytes"
+            case softReclaimedBytes = "soft_reclaimed_bytes"
+            case hardDecommittedBytes = "hard_decommitted_bytes"
+            case balloonOwnedReclaimedBytes = "balloon_owned_reclaimed_bytes"
+            case reportInFlightReclaimedBytes = "report_inflight_reclaimed_bytes"
             case reclaimedBytes = "reclaimed_bytes"
             case reportedFreeReclaimedBytes = "reported_free_reclaimed_bytes"
             case reclaimFailures = "reclaim_failures"
@@ -307,6 +365,77 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
             case physicalFootprintBytes = "physical_footprint_bytes"
         }
     }
+
+    struct MemoryLedger: Decodable, Equatable, Sendable {
+        var guestVisibleBytes: UInt64
+        var hostGranuleBytes: UInt64
+        var hostGranules: UInt64
+        var residentBytes: UInt64
+        var guestOwnedBytes: UInt64
+        var pinnedBytes: UInt64
+        var balloonOwnedBytes: UInt64
+        var reportInFlightBytes: UInt64
+        var discardedSoftBytes: UInt64
+        var discardedHardZeroBytes: UInt64
+        var cumulativeSoftDiscardedBytes: UInt64
+        var cumulativeHardDecommittedBytes: UInt64
+        var cumulativeBalloonAuthorizedBytes: UInt64
+        var cumulativeReportAuthorizedBytes: UInt64
+        var guestOwnedReclaimedBytes: UInt64
+        var pinnedReclaimedBytes: UInt64
+        var reclaimWithoutAuthorityBytes: UInt64
+        var reportAckedBeforeReclaimBytes: UInt64
+        var stateSumMismatchBytes: UInt64
+        var ok: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case guestVisibleBytes = "guest_visible_bytes"
+            case hostGranuleBytes = "host_granule_bytes"
+            case hostGranules = "host_granules"
+            case residentBytes = "resident_bytes"
+            case guestOwnedBytes = "guest_owned_bytes"
+            case pinnedBytes = "pinned_bytes"
+            case balloonOwnedBytes = "balloon_owned_bytes"
+            case reportInFlightBytes = "report_inflight_bytes"
+            case discardedSoftBytes = "discarded_soft_bytes"
+            case discardedHardZeroBytes = "discarded_hard_zero_bytes"
+            case cumulativeSoftDiscardedBytes = "cumulative_soft_discarded_bytes"
+            case cumulativeHardDecommittedBytes = "cumulative_hard_decommitted_bytes"
+            case cumulativeBalloonAuthorizedBytes = "cumulative_balloon_authorized_bytes"
+            case cumulativeReportAuthorizedBytes = "cumulative_report_authorized_bytes"
+            case guestOwnedReclaimedBytes = "guest_owned_reclaimed_bytes"
+            case pinnedReclaimedBytes = "pinned_reclaimed_bytes"
+            case reclaimWithoutAuthorityBytes = "reclaim_without_authority_bytes"
+            case reportAckedBeforeReclaimBytes = "report_acked_before_reclaim_bytes"
+            case stateSumMismatchBytes = "state_sum_mismatch_bytes"
+            case ok
+        }
+
+        var status: ConjetMemoryLedgerStatus {
+            ConjetMemoryLedgerStatus(
+                guestVisibleBytes: guestVisibleBytes,
+                hostGranuleBytes: hostGranuleBytes,
+                hostGranules: hostGranules,
+                residentBytes: residentBytes,
+                guestOwnedBytes: guestOwnedBytes,
+                pinnedBytes: pinnedBytes,
+                balloonOwnedBytes: balloonOwnedBytes,
+                reportInFlightBytes: reportInFlightBytes,
+                discardedSoftBytes: discardedSoftBytes,
+                discardedHardZeroBytes: discardedHardZeroBytes,
+                cumulativeSoftDiscardedBytes: cumulativeSoftDiscardedBytes,
+                cumulativeHardDecommittedBytes: cumulativeHardDecommittedBytes,
+                cumulativeBalloonAuthorizedBytes: cumulativeBalloonAuthorizedBytes,
+                cumulativeReportAuthorizedBytes: cumulativeReportAuthorizedBytes,
+                guestOwnedReclaimedBytes: guestOwnedReclaimedBytes,
+                pinnedReclaimedBytes: pinnedReclaimedBytes,
+                reclaimWithoutAuthorityBytes: reclaimWithoutAuthorityBytes,
+                reportAckedBeforeReclaimBytes: reportAckedBeforeReclaimBytes,
+                stateSumMismatchBytes: stateSumMismatchBytes,
+                ok: ok
+            )
+        }
+    }
 }
 
 extension DynamicMemoryVMMRuntimeMetrics {
@@ -318,12 +447,18 @@ extension DynamicMemoryVMMRuntimeMetrics {
             balloonInflatePages: response.balloon.inflatePages,
             balloonDeflatePages: response.balloon.deflatePages,
             balloonReportedFreePages: response.balloon.reportedFreePages,
+            balloonReportedFreeBytes: response.balloon.reportedFreeBytes,
             balloonReclaimedBytes: response.balloon.reclaimedBytes,
             balloonReportedFreeReclaimedBytes: response.balloon.reportedFreeReclaimedBytes,
+            balloonSoftReclaimedBytes: response.balloon.softReclaimedBytes,
+            balloonHardDecommittedBytes: response.balloon.hardDecommittedBytes,
+            balloonOwnedReclaimedBytes: response.balloon.balloonOwnedReclaimedBytes,
+            balloonReportInFlightReclaimedBytes: response.balloon.reportInFlightReclaimedBytes,
             balloonReclaimFailures: response.balloon.reclaimFailures,
             balloonMalformedReports: response.balloon.malformedReports,
             balloonPageReportingReady: response.balloon.reportingQueueReady,
-            balloonFreePageHintReady: response.balloon.freePageHintQueueReady
+            balloonFreePageHintReady: response.balloon.freePageHintQueueReady,
+            memoryLedger: response.memoryLedger?.status
         )
     }
 }

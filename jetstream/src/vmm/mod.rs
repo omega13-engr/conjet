@@ -1,5 +1,6 @@
 pub mod boot;
 pub mod config;
+pub mod debug_flags;
 pub mod docker_probe;
 pub mod fdt;
 pub mod machine;

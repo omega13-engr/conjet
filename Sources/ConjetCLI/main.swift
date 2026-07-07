@@ -72,7 +72,7 @@ struct ConjetCLI {
             try compose(args: args, json: json)
         case "docker":
             try docker(args: args, json: json)
-        case "memory":
+        case "memory", "mem":
             try memory(args: args, json: json)
         case "sync":
             try sync(args: args, json: json)
@@ -1195,14 +1195,9 @@ struct ConjetCLI {
     private static func memory(args: [String], json: Bool) throws {
         let subcommand = args.first ?? "status"
         switch subcommand {
-        case "status":
-            try ensureDaemon()
-            let paths = ConjetPaths.default()
-            let response = try UnixSocketClient(socketPath: try socketPath(paths: paths))
-                .send(DaemonRequest(command: .status), timeoutSeconds: 10)
-            guard let status = response.status else {
-                throw ConjetError.unavailable("Conjet Core status is unavailable")
-            }
+        case "status", "inspect":
+            let full = args.contains("--full")
+            let status = try fetchDaemonStatus()
             let memory = ConjetMemoryStatus(policy: status.memoryPolicy, runtime: status.vm?.memory)
             if json {
                 print(try ConjetJSON.string(memory))
@@ -1211,6 +1206,32 @@ struct ConjetCLI {
                 if let runtime = memory.runtime {
                     printMemoryRuntime(runtime)
                 }
+                if full {
+                    printMemoryHostAttribution(daemonPID: status.pid)
+                    printMemoryTrace(memory.runtime?.trace ?? [])
+                }
+            }
+        case "verify":
+            let full = args.contains("--full")
+            let status = try fetchDaemonStatus()
+            guard let runtime = status.vm?.memory else {
+                throw ConjetError.unavailable("Conjet Core memory runtime status is unavailable")
+            }
+            guard let ledger = runtime.memoryLedger else {
+                throw ConjetError.unavailable("Jetstream memory page ledger is unavailable")
+            }
+            let report = memoryVerificationReport(runtime: runtime, ledger: ledger)
+            if json {
+                print(try ConjetJSON.string(report))
+            } else {
+                printMemoryVerification(report, full: full)
+            }
+            if !report.passed {
+                throw ConjetError.processFailed(
+                    executable: "conjet mem verify",
+                    exitCode: 1,
+                    stderr: report.failures.joined(separator: "; ")
+                )
             }
         case "reclaim":
             try ensureDaemon()
@@ -1229,9 +1250,378 @@ struct ConjetCLI {
             } else {
                 printMemoryTrace(trace)
             }
+        case "test":
+            let testCommand = args.dropFirst().first ?? ""
+            switch testCommand {
+            case "idle-return":
+                try memoryIdleReturnTest(args: Array(args.dropFirst(2)), json: json)
+            default:
+                throw ConjetError.invalidArgument("unknown memory test '\(testCommand)'")
+            }
         default:
             throw ConjetError.invalidArgument("unknown memory command '\(subcommand)'")
         }
+    }
+
+    private static func fetchDaemonStatus(timeoutSeconds: Double = 10) throws -> DaemonStatus {
+        try ensureDaemon()
+        let paths = ConjetPaths.default()
+        let response = try UnixSocketClient(socketPath: try socketPath(paths: paths))
+            .send(DaemonRequest(command: .status), timeoutSeconds: timeoutSeconds)
+        guard let status = response.status else {
+            throw ConjetError.unavailable("Conjet Core status is unavailable")
+        }
+        return status
+    }
+
+    private struct MemoryIdleReturnSample: Encodable {
+        var phase: String
+        var timestamp: Date
+        var hostResidentMiB: Int?
+        var hostFootprintMiB: Int?
+        var guestAvailableMiB: Int?
+        var buildCgroupMemoryMiB: Int?
+        var hardDecommittedMiB: Int?
+        var reportInFlightReclaimedMiB: Int?
+        var reclaimFailures: UInt64?
+        var malformedReports: UInt64?
+    }
+
+    private struct MemoryIdleReturnTestReport: Encodable {
+        var passed: Bool
+        var projectPath: String
+        var dockerCommand: [String]
+        var targetIdleRSSMiB: Int
+        var targetFinalDeltaMiB: Int
+        var timeoutSeconds: Int
+        var baseline: MemoryIdleReturnSample
+        var peak: MemoryIdleReturnSample
+        var postBuild: MemoryIdleReturnSample
+        var final: MemoryIdleReturnSample
+        var buildExitCode: Int32
+        var buildStdoutPath: String
+        var buildStderrPath: String
+        var checks: [MemoryVerificationCheck]
+    }
+
+    private static func memoryIdleReturnTest(args: [String], json: Bool) throws {
+        var remaining = args
+        let projectPath = expandedPath(
+            try takeValueOption("--project", from: &remaining)
+                ?? FileManager.default.currentDirectoryPath
+        )
+        let targetIdleRSSMiB = try takeValueOption("--target-idle-rss", from: &remaining)
+            .map { try parseMemoryMiB($0, flag: "--target-idle-rss") } ?? 900
+        let targetFinalDeltaMiB = try takeValueOption("--target-final-delta", from: &remaining)
+            .map { try parseMemoryMiB($0, flag: "--target-final-delta", minimumMiB: 1) } ?? 64
+        let timeoutSeconds = try takeValueOption("--timeout", from: &remaining)
+            .map { try parsePositiveInt($0, flag: "--timeout") } ?? 120
+        if let unknown = remaining.first {
+            throw ConjetError.invalidArgument("unknown memory idle-return option '\(unknown)'")
+        }
+
+        let projectURL = URL(fileURLWithPath: projectPath, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: projectURL.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw ConjetError.invalidArgument("--project must point to an existing directory")
+        }
+
+        let socket = try ensureConjetDockerSocket()
+        let dockerCommand = dockerBuildCommand(projectURL: projectURL, socket: socket)
+        let qaRoot = try makeTemporaryDirectory(prefix: "conjet-mem-idle-return")
+        let stdoutURL = qaRoot.appendingPathComponent("docker-build.stdout.log")
+        let stderrURL = qaRoot.appendingPathComponent("docker-build.stderr.log")
+        FileManager.default.createFile(atPath: stdoutURL.path, contents: Data())
+        FileManager.default.createFile(atPath: stderrURL.path, contents: Data())
+        let stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+        let stderrHandle = try FileHandle(forWritingTo: stderrURL)
+        defer {
+            try? stdoutHandle.close()
+            try? stderrHandle.close()
+        }
+
+        let baseline = try memoryIdleReturnSample(phase: "baseline")
+        var peak = baseline
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = dockerCommand
+        process.currentDirectoryURL = projectURL
+        process.environment = ProcessInfo.processInfo.environment
+        process.standardOutput = stdoutHandle
+        process.standardError = stderrHandle
+        try process.run()
+
+        let startedAt = Date()
+        var timedOut = false
+        while process.isRunning {
+            Thread.sleep(forTimeInterval: 1.0)
+            if let sample = try? memoryIdleReturnSample(phase: "build_peak"),
+               sampleComparableResidentMiB(sample) >= sampleComparableResidentMiB(peak) {
+                peak = sample
+            }
+            if Date().timeIntervalSince(startedAt) > Double(timeoutSeconds) {
+                timedOut = true
+                process.terminate()
+                Thread.sleep(forTimeInterval: 2.0)
+                if process.isRunning {
+                    Darwin.kill(process.processIdentifier, SIGKILL)
+                }
+                break
+            }
+        }
+        process.waitUntilExit()
+        let buildExitCode = timedOut ? Int32(124) : process.terminationStatus
+        let postBuild = try memoryIdleReturnSample(phase: "post_build_before_reclaim")
+
+        _ = try UnixSocketClient(socketPath: try socketPath(paths: ConjetPaths.default()))
+            .send(DaemonRequest(command: .memoryReclaim), timeoutSeconds: 135)
+
+        var final = try memoryIdleReturnSample(phase: "post_reclaim")
+        let reclaimStartedAt = Date()
+        while Date().timeIntervalSince(reclaimStartedAt) < Double(timeoutSeconds) {
+            final = try memoryIdleReturnSample(phase: "post_reclaim")
+            if memoryIdleReturnSatisfied(
+                baseline: baseline,
+                final: final,
+                targetIdleRSSMiB: targetIdleRSSMiB,
+                targetFinalDeltaMiB: targetFinalDeltaMiB
+            ) {
+                break
+            }
+            Thread.sleep(forTimeInterval: 2.0)
+        }
+
+        let checks = memoryIdleReturnChecks(
+            baseline: baseline,
+            peak: peak,
+            postBuild: postBuild,
+            final: final,
+            buildExitCode: buildExitCode,
+            targetIdleRSSMiB: targetIdleRSSMiB,
+            targetFinalDeltaMiB: targetFinalDeltaMiB
+        )
+        let passed = checks.allSatisfy(\.passed)
+        let report = MemoryIdleReturnTestReport(
+            passed: passed,
+            projectPath: projectURL.path,
+            dockerCommand: dockerCommand,
+            targetIdleRSSMiB: targetIdleRSSMiB,
+            targetFinalDeltaMiB: targetFinalDeltaMiB,
+            timeoutSeconds: timeoutSeconds,
+            baseline: baseline,
+            peak: peak,
+            postBuild: postBuild,
+            final: final,
+            buildExitCode: buildExitCode,
+            buildStdoutPath: stdoutURL.path,
+            buildStderrPath: stderrURL.path,
+            checks: checks
+        )
+
+        if json {
+            print(try ConjetJSON.string(report))
+        } else {
+            printMemoryIdleReturnReport(report)
+        }
+        if !passed {
+            let failures = checks.filter { !$0.passed }.map(\.name).joined(separator: ", ")
+            throw ConjetError.processFailed(
+                executable: "conjet mem test idle-return",
+                exitCode: 1,
+                stderr: failures
+            )
+        }
+    }
+
+    private static func dockerBuildCommand(projectURL: URL, socket: String) -> [String] {
+        let manager = FileManager.default
+        let composeFiles = [
+            "compose.yaml",
+            "compose.yml",
+            "docker-compose.yaml",
+            "docker-compose.yml"
+        ]
+        if composeFiles.contains(where: { manager.fileExists(atPath: projectURL.appendingPathComponent($0).path) }) {
+            return [
+                "docker",
+                "--host",
+                "unix://\(socket)",
+                "compose",
+                "build",
+                "--no-cache"
+            ]
+        }
+        return [
+            "docker",
+            "--host",
+            "unix://\(socket)",
+            "build",
+            "--no-cache",
+            "-t",
+            "conjet-mem-idle-return:\(Int(Date().timeIntervalSince1970))",
+            "."
+        ]
+    }
+
+    private static func memoryIdleReturnSample(phase: String) throws -> MemoryIdleReturnSample {
+        let status = try fetchDaemonStatus()
+        guard let runtime = status.vm?.memory else {
+            throw ConjetError.unavailable("Conjet Core memory runtime status is unavailable")
+        }
+        return MemoryIdleReturnSample(
+            phase: phase,
+            timestamp: Date(),
+            hostResidentMiB: runtime.hostResidentMiB,
+            hostFootprintMiB: runtime.hostFootprintMiB,
+            guestAvailableMiB: runtime.guestAvailableMiB,
+            buildCgroupMemoryMiB: runtime.buildCgroupMemoryMiB,
+            hardDecommittedMiB: runtime.balloonHardDecommittedMiB,
+            reportInFlightReclaimedMiB: runtime.balloonReportInFlightReclaimedMiB,
+            reclaimFailures: runtime.balloonReclaimFailures,
+            malformedReports: runtime.balloonMalformedReports
+        )
+    }
+
+    private static func memoryIdleReturnChecks(
+        baseline: MemoryIdleReturnSample,
+        peak: MemoryIdleReturnSample,
+        postBuild: MemoryIdleReturnSample,
+        final: MemoryIdleReturnSample,
+        buildExitCode: Int32,
+        targetIdleRSSMiB: Int,
+        targetFinalDeltaMiB: Int
+    ) -> [MemoryVerificationCheck] {
+        let baselineResident = sampleComparableResidentMiB(baseline)
+        let peakResident = sampleComparableResidentMiB(peak)
+        let finalResident = sampleComparableResidentMiB(final)
+        let finalDelta = finalResident - baselineResident
+        let hardDecommitDelta = (final.hardDecommittedMiB ?? 0) - (baseline.hardDecommittedMiB ?? 0)
+        let reportInFlightDelta = (final.reportInFlightReclaimedMiB ?? 0)
+            - (baseline.reportInFlightReclaimedMiB ?? 0)
+        return [
+            MemoryVerificationCheck(
+                name: "Docker build completed",
+                passed: buildExitCode == 0,
+                detail: "exit_code=\(buildExitCode)"
+            ),
+            MemoryVerificationCheck(
+                name: "build increased resident memory",
+                passed: peakResident > baselineResident + 128,
+                detail: "baseline=\(baselineResident)MiB peak=\(peakResident)MiB"
+            ),
+            MemoryVerificationCheck(
+                name: "final RSS is within target idle RSS",
+                passed: finalResident <= targetIdleRSSMiB,
+                detail: "final=\(finalResident)MiB target=\(targetIdleRSSMiB)MiB"
+            ),
+            MemoryVerificationCheck(
+                name: "final RSS returned near baseline",
+                passed: finalDelta <= targetFinalDeltaMiB,
+                detail: "baseline=\(baselineResident)MiB final=\(finalResident)MiB delta=\(finalDelta)MiB allowed=\(targetFinalDeltaMiB)MiB"
+            ),
+            MemoryVerificationCheck(
+                name: "no reclaim failures",
+                passed: (final.reclaimFailures ?? 0) == 0,
+                detail: "reclaim_failures=\(final.reclaimFailures ?? 0)"
+            ),
+            MemoryVerificationCheck(
+                name: "no malformed page reports",
+                passed: (final.malformedReports ?? 0) == 0,
+                detail: "malformed_reports=\(final.malformedReports ?? 0)"
+            ),
+            MemoryVerificationCheck(
+                name: "hard decommit increased",
+                passed: hardDecommitDelta > 0,
+                detail: "hard_decommit_delta=\(hardDecommitDelta)MiB"
+            ),
+            MemoryVerificationCheck(
+                name: "report-in-flight reclaim increased",
+                passed: reportInFlightDelta > 0,
+                detail: "report_inflight_delta=\(reportInFlightDelta)MiB"
+            ),
+            MemoryVerificationCheck(
+                name: "build cgroup returned idle",
+                passed: (final.buildCgroupMemoryMiB ?? 0) <= 64,
+                detail: "build_cgroup=\(final.buildCgroupMemoryMiB.map { "\($0)MiB" } ?? "unavailable")"
+            )
+        ]
+    }
+
+    private static func memoryIdleReturnSatisfied(
+        baseline: MemoryIdleReturnSample,
+        final: MemoryIdleReturnSample,
+        targetIdleRSSMiB: Int,
+        targetFinalDeltaMiB: Int
+    ) -> Bool {
+        let baselineResident = sampleComparableResidentMiB(baseline)
+        let finalResident = sampleComparableResidentMiB(final)
+        return finalResident <= targetIdleRSSMiB
+            && finalResident <= baselineResident + targetFinalDeltaMiB
+            && (final.buildCgroupMemoryMiB ?? 0) <= 64
+            && (final.reclaimFailures ?? 0) == 0
+            && (final.malformedReports ?? 0) == 0
+    }
+
+    private static func sampleComparableResidentMiB(_ sample: MemoryIdleReturnSample) -> Int {
+        sample.hostResidentMiB ?? sample.hostFootprintMiB ?? 0
+    }
+
+    private static func printMemoryIdleReturnReport(_ report: MemoryIdleReturnTestReport) {
+        print("conjet mem test idle-return")
+        print("  project: \(report.projectPath)")
+        print("  command: \(shellCommand(report.dockerCommand))")
+        print("  logs: \(report.buildStdoutPath)")
+        print("        \(report.buildStderrPath)")
+        print("")
+        print("Phase                    RSS MiB   Footprint MiB   Guest Available   Hard Decommit   ReportInFlight")
+        printIdleReturnSample(report.baseline)
+        printIdleReturnSample(report.peak)
+        printIdleReturnSample(report.postBuild)
+        printIdleReturnSample(report.final)
+        print("")
+        for check in report.checks {
+            print("[\(check.passed ? "PASS" : "FAIL")] \(check.name) - \(check.detail)")
+        }
+        print("")
+        print(report.passed ? "Result: PASS" : "Result: FAIL")
+    }
+
+    private static func printIdleReturnSample(_ sample: MemoryIdleReturnSample) {
+        let rss = sample.hostResidentMiB.map(String.init) ?? "-"
+        let footprint = sample.hostFootprintMiB.map(String.init) ?? "-"
+        let guest = sample.guestAvailableMiB.map { "\($0) MiB" } ?? "-"
+        let hard = sample.hardDecommittedMiB.map { "\($0) MiB" } ?? "-"
+        let report = sample.reportInFlightReclaimedMiB.map { "\($0) MiB" } ?? "-"
+        print(
+            "\(tablePadded(sample.phase, width: 24)) \(tableLeftPad(rss, width: 7))   \(tableLeftPad(footprint, width: 13))   \(tableLeftPad(guest, width: 15))   \(tableLeftPad(hard, width: 13))   \(tableLeftPad(report, width: 14))"
+        )
+    }
+
+    private static func tablePadded(_ value: String, width: Int) -> String {
+        if value.count >= width {
+            return String(value.prefix(width))
+        }
+        return value + String(repeating: " ", count: width - value.count)
+    }
+
+    private static func tableLeftPad(_ value: String, width: Int) -> String {
+        if value.count >= width {
+            return value
+        }
+        return String(repeating: " ", count: width - value.count) + value
+    }
+
+    private static func makeTemporaryDirectory(prefix: String) throws -> URL {
+        let manager = FileManager.default
+        let preferred = URL(fileURLWithPath: "/Volumes/ExternalSSD/dev_workspace/tmp", isDirectory: true)
+        let base = manager.fileExists(atPath: preferred.path)
+            ? preferred
+            : URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let suffix = "\(Int(Date().timeIntervalSince1970)).\(UUID().uuidString.prefix(8))"
+        let url = base.appendingPathComponent("\(prefix).\(suffix)", isDirectory: true)
+        try manager.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 
     private static func start(args: [String] = [], json: Bool = false) throws {
@@ -2812,8 +3202,23 @@ struct ConjetCLI {
         if let balloonReportedFreePages = runtime.balloonReportedFreePages {
             print("  VMM reported free pages: \(balloonReportedFreePages)")
         }
+        if let reportedFreeMiB = runtime.balloonReportedFreeMiB {
+            print("  VMM reported free bytes: \(reportedFreeMiB) MiB")
+        }
         if let reportedFreeReclaimedMiB = runtime.balloonReportedFreeReclaimedMiB {
             print("  VMM reported free reclaimed: \(reportedFreeReclaimedMiB) MiB")
+        }
+        if let softReclaimedMiB = runtime.balloonSoftReclaimedMiB {
+            print("  VMM soft reclaimed: \(softReclaimedMiB) MiB")
+        }
+        if let hardDecommittedMiB = runtime.balloonHardDecommittedMiB {
+            print("  VMM hard decommitted: \(hardDecommittedMiB) MiB")
+        }
+        if let balloonOwnedReclaimedMiB = runtime.balloonOwnedReclaimedMiB {
+            print("  VMM balloon-owned reclaimed: \(balloonOwnedReclaimedMiB) MiB")
+        }
+        if let reportInFlightReclaimedMiB = runtime.balloonReportInFlightReclaimedMiB {
+            print("  VMM report-in-flight reclaimed: \(reportInFlightReclaimedMiB) MiB")
         }
         if let pageReportingReady = runtime.balloonPageReportingReady {
             print("  VMM page reporting queue: \(pageReportingReady ? "ready" : "not ready")")
@@ -2877,6 +3282,214 @@ struct ConjetCLI {
         if let trace = runtime.trace, !trace.isEmpty {
             print("  trace events: \(trace.count)")
         }
+        if let ledger = runtime.memoryLedger {
+            printMemoryLedger(ledger, indent: "  ")
+        }
+    }
+
+    private struct MemoryVerificationReport: Encodable {
+        var passed: Bool
+        var checkedAt: Date
+        var ledger: ConjetMemoryLedgerStatus
+        var checks: [MemoryVerificationCheck]
+        var failures: [String]
+    }
+
+    private struct MemoryVerificationCheck: Encodable {
+        var name: String
+        var passed: Bool
+        var detail: String
+    }
+
+    private static func memoryVerificationReport(
+        runtime: ConjetMemoryRuntimeStatus,
+        ledger: ConjetMemoryLedgerStatus
+    ) -> MemoryVerificationReport {
+        let backingSum = ledger.residentBytes
+            + ledger.discardedSoftBytes
+            + ledger.discardedHardZeroBytes
+        let authoritySum = ledger.guestOwnedBytes
+            + ledger.pinnedBytes
+            + ledger.balloonOwnedBytes
+            + ledger.reportInFlightBytes
+        let hardDecommitMiBMatches = runtime.balloonHardDecommittedMiB.map {
+            Int(ledger.cumulativeHardDecommittedBytes / 1_048_576) == $0
+        } ?? true
+
+        let checks = [
+            MemoryVerificationCheck(
+                name: "page ledger covers guest RAM",
+                passed: ledger.stateSumMismatchBytes == 0
+                    && backingSum == ledger.guestVisibleBytes
+                    && authoritySum == ledger.guestVisibleBytes,
+                detail: "backing_sum=\(memoryMiB(backingSum))MiB authority_sum=\(memoryMiB(authoritySum))MiB guest_visible=\(memoryMiB(ledger.guestVisibleBytes))MiB mismatch=\(ledger.stateSumMismatchBytes)"
+            ),
+            MemoryVerificationCheck(
+                name: "no pinned pages reclaimed",
+                passed: ledger.pinnedReclaimedBytes == 0,
+                detail: "pinned_reclaimed=\(memoryMiB(ledger.pinnedReclaimedBytes))MiB"
+            ),
+            MemoryVerificationCheck(
+                name: "no guest-owned pages reclaimed",
+                passed: ledger.guestOwnedReclaimedBytes == 0,
+                detail: "guest_owned_reclaimed=\(memoryMiB(ledger.guestOwnedReclaimedBytes))MiB"
+            ),
+            MemoryVerificationCheck(
+                name: "all hard-decommit ranges had reclaim authority",
+                passed: ledger.reclaimWithoutAuthorityBytes == 0,
+                detail: "unauthorized_reclaim=\(memoryMiB(ledger.reclaimWithoutAuthorityBytes))MiB balloon_authorized=\(memoryMiB(ledger.cumulativeBalloonAuthorizedBytes))MiB report_authorized=\(memoryMiB(ledger.cumulativeReportAuthorizedBytes))MiB"
+            ),
+            MemoryVerificationCheck(
+                name: "report-in-flight descriptors reclaimed before ack",
+                passed: ledger.reportAckedBeforeReclaimBytes == 0,
+                detail: "acked_before_reclaim=\(memoryMiB(ledger.reportAckedBeforeReclaimBytes))MiB"
+            ),
+            MemoryVerificationCheck(
+                name: "hard-decommit ledger matches VMM counter",
+                passed: hardDecommitMiBMatches,
+                detail: "ledger_hard_decommit=\(memoryMiB(ledger.cumulativeHardDecommittedBytes))MiB vmm_hard_decommit=\(runtime.balloonHardDecommittedMiB.map { "\($0)MiB" } ?? "unavailable")"
+            ),
+            MemoryVerificationCheck(
+                name: "reject and safety counters are internally consistent",
+                passed: ledger.ok,
+                detail: "ledger_ok=\(ledger.ok)"
+            )
+        ]
+        let failures = checks
+            .filter { !$0.passed }
+            .map { "\($0.name): \($0.detail)" }
+        return MemoryVerificationReport(
+            passed: failures.isEmpty,
+            checkedAt: Date(),
+            ledger: ledger,
+            checks: checks,
+            failures: failures
+        )
+    }
+
+    private static func printMemoryVerification(_ report: MemoryVerificationReport, full: Bool) {
+        print("conjet mem verify")
+        for check in report.checks {
+            print("[\(check.passed ? "PASS" : "FAIL")] \(check.name)")
+            if full || !check.passed {
+                print("       \(check.detail)")
+            }
+        }
+        print(report.passed ? "Result: PASS" : "Result: FAIL")
+        if full {
+            printMemoryLedger(report.ledger, indent: "")
+        }
+    }
+
+    private static func printMemoryLedger(_ ledger: ConjetMemoryLedgerStatus, indent: String) {
+        print("\(indent)Jetstream page ledger:")
+        print("\(indent)  guest visible: \(memoryMiB(ledger.guestVisibleBytes)) MiB")
+        print("\(indent)  host granule: \(ledger.hostGranuleBytes) bytes x \(ledger.hostGranules)")
+        print("\(indent)  resident: \(memoryMiB(ledger.residentBytes)) MiB")
+        print("\(indent)  guest owned: \(memoryMiB(ledger.guestOwnedBytes)) MiB")
+        print("\(indent)  pinned: \(memoryMiB(ledger.pinnedBytes)) MiB")
+        print("\(indent)  balloon owned: \(memoryMiB(ledger.balloonOwnedBytes)) MiB")
+        print("\(indent)  report in flight: \(memoryMiB(ledger.reportInFlightBytes)) MiB")
+        print("\(indent)  discarded soft: \(memoryMiB(ledger.discardedSoftBytes)) MiB")
+        print("\(indent)  discarded hard zero: \(memoryMiB(ledger.discardedHardZeroBytes)) MiB")
+        print("\(indent)  cumulative soft discarded: \(memoryMiB(ledger.cumulativeSoftDiscardedBytes)) MiB")
+        print("\(indent)  cumulative hard decommitted: \(memoryMiB(ledger.cumulativeHardDecommittedBytes)) MiB")
+        print("\(indent)  balloon-authorized reclaim: \(memoryMiB(ledger.cumulativeBalloonAuthorizedBytes)) MiB")
+        print("\(indent)  report-authorized reclaim: \(memoryMiB(ledger.cumulativeReportAuthorizedBytes)) MiB")
+        print("\(indent)  guest-owned reclaimed: \(memoryMiB(ledger.guestOwnedReclaimedBytes)) MiB")
+        print("\(indent)  pinned reclaimed: \(memoryMiB(ledger.pinnedReclaimedBytes)) MiB")
+        print("\(indent)  unauthorized reclaim: \(memoryMiB(ledger.reclaimWithoutAuthorityBytes)) MiB")
+        print("\(indent)  report acked before reclaim: \(memoryMiB(ledger.reportAckedBeforeReclaimBytes)) MiB")
+        print("\(indent)  state sum mismatch: \(ledger.stateSumMismatchBytes) bytes")
+        print("\(indent)  invariant status: \(ledger.ok ? "ok" : "failed")")
+    }
+
+    private static func printMemoryHostAttribution(daemonPID: Int32) {
+        print("Host process attribution:")
+        guard let vmmPID = vmmChildPID(daemonPID: daemonPID) else {
+            print("  VMM child pid: unavailable")
+            return
+        }
+        print("  VMM child pid: \(vmmPID)")
+        if let ps = processSnapshot(pid: vmmPID) {
+            print("  ps:")
+            for line in ps.split(separator: "\n") {
+                print("    \(line)")
+            }
+        }
+        guard let vmmap = vmmapSummary(pid: vmmPID) else {
+            print("  vmmap summary: unavailable")
+            return
+        }
+        let interesting = Array(vmmap
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { line in
+                let upper = line.uppercased()
+                return upper.contains("MALLOC")
+                    || upper.contains("VM_ALLOCATE")
+                    || upper.contains("HYPERVISOR")
+                    || upper.contains("IOKIT")
+                    || upper.contains("STACK")
+                    || upper.contains("TOTAL")
+                    || upper.contains("FOOTPRINT")
+                    || upper.contains("RESIDENT")
+            }
+            .prefix(24))
+        print("  vmmap summary:")
+        let lines = interesting.isEmpty
+            ? Array(vmmap.split(separator: "\n").map(String.init).prefix(16))
+            : interesting
+        for line in lines where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+            print("    \(line)")
+        }
+    }
+
+    private static func vmmChildPID(daemonPID: Int32) -> Int32? {
+        guard let result = try? ProcessRunner.run(
+            "/usr/bin/pgrep",
+            ["-P", "\(daemonPID)"],
+            timeoutSeconds: 2
+        ), result.succeeded else {
+            return nil
+        }
+        let pids = result.stdout
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Int32(String($0).trimmingCharacters(in: .whitespaces)) }
+        guard !pids.isEmpty else { return nil }
+        if pids.count == 1 {
+            return pids[0]
+        }
+        return pids.first { pid in
+            guard let snapshot = processSnapshot(pid: pid)?.lowercased() else { return false }
+            return snapshot.contains("conjet core") || snapshot.contains("jetstream")
+        } ?? pids[0]
+    }
+
+    private static func processSnapshot(pid: Int32) -> String? {
+        guard let result = try? ProcessRunner.run(
+            "/bin/ps",
+            ["-o", "pid=,ppid=,rss=,vsz=,comm=", "-p", "\(pid)"],
+            timeoutSeconds: 2
+        ), result.succeeded else {
+            return nil
+        }
+        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func vmmapSummary(pid: Int32) -> String? {
+        guard let result = try? ProcessRunner.run(
+            "/usr/bin/vmmap",
+            ["-summary", "\(pid)"],
+            timeoutSeconds: 10
+        ), result.succeeded else {
+            return nil
+        }
+        return result.stdout
+    }
+
+    private static func memoryMiB(_ bytes: UInt64) -> UInt64 {
+        bytes / 1_048_576
     }
 
     private static func printMemoryTrace(_ trace: [ConjetMemoryTraceEvent]) {
@@ -3313,8 +3926,49 @@ struct ConjetCLI {
         return backend
     }
 
-    private static func parseMemoryMiB(_ value: String, flag: String) throws -> Int {
-        try ConjetConfig.parseMemorySizeMiB(value, key: flag)
+    private static func parseMemoryMiB(_ value: String, flag: String, minimumMiB: Int = 512) throws -> Int {
+        if minimumMiB == 512 {
+            return try ConjetConfig.parseMemorySizeMiB(value, key: flag)
+        }
+        let mib = try parseMemoryQuantityMiB(value, flag: flag)
+        guard mib >= minimumMiB else {
+            throw ConjetError.invalidArgument("\(flag) must be at least \(minimumMiB) MiB")
+        }
+        return mib
+    }
+
+    private static func parseMemoryQuantityMiB(_ value: String, flag: String) throws -> Int {
+        var text = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let multiplier: Int
+        if text.hasSuffix("mib") {
+            text.removeLast(3)
+            multiplier = 1
+        } else if text.hasSuffix("mb") {
+            text.removeLast(2)
+            multiplier = 1
+        } else if text.hasSuffix("m") {
+            text.removeLast()
+            multiplier = 1
+        } else if text.hasSuffix("gib") {
+            text.removeLast(3)
+            multiplier = 1024
+        } else if text.hasSuffix("gb") {
+            text.removeLast(2)
+            multiplier = 1024
+        } else if text.hasSuffix("g") {
+            text.removeLast()
+            multiplier = 1024
+        } else {
+            multiplier = 1
+        }
+        guard let units = Int(text), units > 0 else {
+            throw ConjetError.invalidArgument("\(flag) must be a memory size such as 64M or 1G")
+        }
+        let multiplied = units.multipliedReportingOverflow(by: multiplier)
+        guard !multiplied.overflow else {
+            throw ConjetError.invalidArgument("\(flag) is too large")
+        }
+        return multiplied.partialValue
     }
 
     private static func parseOptionalGiB(_ value: String, flag: String) throws -> Int? {
@@ -4948,7 +5602,7 @@ struct ConjetCLI {
         guard !args.isEmpty else { return false }
         if isHelpFlag(args[0]) { return true }
         switch command {
-        case "core", "vm", "sync", "project", "profile", "power", "port", "network", "docker", "memory":
+        case "core", "vm", "sync", "project", "profile", "power", "port", "network", "docker", "memory", "mem":
             return args.indices.contains(1) && isHelpFlag(args[1])
         default:
             return false
@@ -5183,7 +5837,7 @@ struct ConjetCLI {
             printNetworkHelp(parts: parts)
         case "docker":
             printDockerHelp(parts: parts)
-        case "memory":
+        case "memory", "mem":
             printMemoryHelp(parts: parts)
         default:
             printHelp()
@@ -5319,10 +5973,21 @@ struct ConjetCLI {
             switch parts[1] {
             case "status":
                 print("Usage:\n  conjet memory status [--json]")
+            case "inspect":
+                print("Usage:\n  conjet mem inspect [--full] [--json]")
             case "reclaim":
                 print("Usage:\n  conjet memory reclaim [--json]")
             case "trace":
                 print("Usage:\n  conjet memory trace [--json]")
+            case "verify":
+                print("Usage:\n  conjet mem verify [--full] [--json]")
+            case "test":
+                print(
+                    """
+                    Usage:
+                      conjet mem test idle-return --project PATH [--target-idle-rss 900M] [--target-final-delta 64M] [--timeout 120] [--json]
+                    """
+                )
             default:
                 printMemoryHelp(parts: ["memory"])
             }
@@ -5338,6 +6003,9 @@ struct ConjetCLI {
 
             Commands:
               status    Show memory profile and live dynamic target
+              inspect   Show status plus debug counters; --full also prints trace
+              verify    Check Jetstream page-ledger dynamic-memory invariants
+              test      Run reproducible dynamic-memory validation workloads
               trace     Show recent dynamic memory governor decisions
               reclaim   Request guest cache cleanup and memory target recompute
             """
@@ -5601,6 +6269,7 @@ struct ConjetCLI {
               compose     Pass through to docker compose using Conjet
               docker      Inspect and repair Docker daemon metadata
               memory      Inspect and reclaim idle VM memory
+              mem         Alias for 'conjet memory'
 
             Networking:
               port list        Show Docker published ports on macOS

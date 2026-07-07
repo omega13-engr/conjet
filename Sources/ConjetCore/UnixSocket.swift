@@ -216,6 +216,9 @@ private func readLine(
     let deadline = timeout.map { Date().addingTimeInterval($0) }
 
     while bytes.count < maxBytes {
+        if let deadline {
+            try waitUntilReadable(fd, deadline: deadline, timeoutSeconds: timeout ?? 0)
+        }
         var byte: UInt8 = 0
         let count = Darwin.read(fd, &byte, 1)
         if count == 1 {
@@ -250,6 +253,36 @@ private func readLine(
         throw ConjetError.socket("daemon response exceeded \(maxBytes) bytes")
     }
     return Data(bytes)
+}
+
+private func waitUntilReadable(
+    _ fd: Int32,
+    deadline: Date,
+    timeoutSeconds: Double
+) throws {
+    while true {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else {
+            throw ConjetError.socket("read() timed out after \(formatTimeout(timeoutSeconds))s")
+        }
+
+        var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let timeoutMilliseconds = Int32(max(1, min(1000, (remaining * 1000).rounded(.up))))
+        let result = Darwin.poll(&pollFD, 1, timeoutMilliseconds)
+        if result > 0 {
+            if (pollFD.revents & Int16(POLLNVAL)) != 0 {
+                throw ConjetError.socket("read() failed: invalid file descriptor")
+            }
+            return
+        }
+        if result == 0 {
+            continue
+        }
+        if errno == EINTR {
+            continue
+        }
+        throw ConjetError.socket("poll() failed: \(lastErrno())")
+    }
 }
 
 private func setSocketTimeout(_ fd: Int32, timeoutSeconds: Double) {

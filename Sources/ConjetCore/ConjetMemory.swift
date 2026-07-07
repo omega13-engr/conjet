@@ -367,6 +367,73 @@ public struct ConjetMemoryServiceSliceStatus: Codable, Equatable, Sendable {
     }
 }
 
+public struct ConjetMemoryLedgerStatus: Codable, Equatable, Sendable {
+    public var guestVisibleBytes: UInt64
+    public var hostGranuleBytes: UInt64
+    public var hostGranules: UInt64
+    public var residentBytes: UInt64
+    public var guestOwnedBytes: UInt64
+    public var pinnedBytes: UInt64
+    public var balloonOwnedBytes: UInt64
+    public var reportInFlightBytes: UInt64
+    public var discardedSoftBytes: UInt64
+    public var discardedHardZeroBytes: UInt64
+    public var cumulativeSoftDiscardedBytes: UInt64
+    public var cumulativeHardDecommittedBytes: UInt64
+    public var cumulativeBalloonAuthorizedBytes: UInt64
+    public var cumulativeReportAuthorizedBytes: UInt64
+    public var guestOwnedReclaimedBytes: UInt64
+    public var pinnedReclaimedBytes: UInt64
+    public var reclaimWithoutAuthorityBytes: UInt64
+    public var reportAckedBeforeReclaimBytes: UInt64
+    public var stateSumMismatchBytes: UInt64
+    public var ok: Bool
+
+    public init(
+        guestVisibleBytes: UInt64,
+        hostGranuleBytes: UInt64,
+        hostGranules: UInt64,
+        residentBytes: UInt64,
+        guestOwnedBytes: UInt64,
+        pinnedBytes: UInt64,
+        balloonOwnedBytes: UInt64,
+        reportInFlightBytes: UInt64,
+        discardedSoftBytes: UInt64,
+        discardedHardZeroBytes: UInt64,
+        cumulativeSoftDiscardedBytes: UInt64,
+        cumulativeHardDecommittedBytes: UInt64,
+        cumulativeBalloonAuthorizedBytes: UInt64,
+        cumulativeReportAuthorizedBytes: UInt64,
+        guestOwnedReclaimedBytes: UInt64,
+        pinnedReclaimedBytes: UInt64,
+        reclaimWithoutAuthorityBytes: UInt64,
+        reportAckedBeforeReclaimBytes: UInt64,
+        stateSumMismatchBytes: UInt64,
+        ok: Bool
+    ) {
+        self.guestVisibleBytes = guestVisibleBytes
+        self.hostGranuleBytes = hostGranuleBytes
+        self.hostGranules = hostGranules
+        self.residentBytes = residentBytes
+        self.guestOwnedBytes = guestOwnedBytes
+        self.pinnedBytes = pinnedBytes
+        self.balloonOwnedBytes = balloonOwnedBytes
+        self.reportInFlightBytes = reportInFlightBytes
+        self.discardedSoftBytes = discardedSoftBytes
+        self.discardedHardZeroBytes = discardedHardZeroBytes
+        self.cumulativeSoftDiscardedBytes = cumulativeSoftDiscardedBytes
+        self.cumulativeHardDecommittedBytes = cumulativeHardDecommittedBytes
+        self.cumulativeBalloonAuthorizedBytes = cumulativeBalloonAuthorizedBytes
+        self.cumulativeReportAuthorizedBytes = cumulativeReportAuthorizedBytes
+        self.guestOwnedReclaimedBytes = guestOwnedReclaimedBytes
+        self.pinnedReclaimedBytes = pinnedReclaimedBytes
+        self.reclaimWithoutAuthorityBytes = reclaimWithoutAuthorityBytes
+        self.reportAckedBeforeReclaimBytes = reportAckedBeforeReclaimBytes
+        self.stateSumMismatchBytes = stateSumMismatchBytes
+        self.ok = ok
+    }
+}
+
 public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var dynamicEnabled: Bool
     public var mode: ConjetMemoryProfile
@@ -382,11 +449,17 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var balloonInflatePages: UInt64?
     public var balloonDeflatePages: UInt64?
     public var balloonReportedFreePages: UInt64?
+    public var balloonReportedFreeMiB: Int?
     public var balloonReportedFreeReclaimedMiB: Int?
+    public var balloonSoftReclaimedMiB: Int?
+    public var balloonHardDecommittedMiB: Int?
+    public var balloonOwnedReclaimedMiB: Int?
+    public var balloonReportInFlightReclaimedMiB: Int?
     public var balloonReclaimFailures: UInt64?
     public var balloonMalformedReports: UInt64?
     public var balloonPageReportingReady: Bool?
     public var balloonFreePageHintReady: Bool?
+    public var memoryLedger: ConjetMemoryLedgerStatus?
     public var queueMetrics: [String: ConjetQueueRuntimeMetrics]?
     public var guestAvailableMiB: Int?
     public var containerMemoryMiB: Int?
@@ -427,11 +500,17 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         balloonInflatePages: UInt64? = nil,
         balloonDeflatePages: UInt64? = nil,
         balloonReportedFreePages: UInt64? = nil,
+        balloonReportedFreeMiB: Int? = nil,
         balloonReportedFreeReclaimedMiB: Int? = nil,
+        balloonSoftReclaimedMiB: Int? = nil,
+        balloonHardDecommittedMiB: Int? = nil,
+        balloonOwnedReclaimedMiB: Int? = nil,
+        balloonReportInFlightReclaimedMiB: Int? = nil,
         balloonReclaimFailures: UInt64? = nil,
         balloonMalformedReports: UInt64? = nil,
         balloonPageReportingReady: Bool? = nil,
         balloonFreePageHintReady: Bool? = nil,
+        memoryLedger: ConjetMemoryLedgerStatus? = nil,
         queueMetrics: [String: ConjetQueueRuntimeMetrics]? = nil,
         guestAvailableMiB: Int? = nil,
         containerMemoryMiB: Int? = nil,
@@ -471,11 +550,17 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         self.balloonInflatePages = balloonInflatePages
         self.balloonDeflatePages = balloonDeflatePages
         self.balloonReportedFreePages = balloonReportedFreePages
+        self.balloonReportedFreeMiB = balloonReportedFreeMiB
         self.balloonReportedFreeReclaimedMiB = balloonReportedFreeReclaimedMiB
+        self.balloonSoftReclaimedMiB = balloonSoftReclaimedMiB
+        self.balloonHardDecommittedMiB = balloonHardDecommittedMiB
+        self.balloonOwnedReclaimedMiB = balloonOwnedReclaimedMiB
+        self.balloonReportInFlightReclaimedMiB = balloonReportInFlightReclaimedMiB
         self.balloonReclaimFailures = balloonReclaimFailures
         self.balloonMalformedReports = balloonMalformedReports
         self.balloonPageReportingReady = balloonPageReportingReady
         self.balloonFreePageHintReady = balloonFreePageHintReady
+        self.memoryLedger = memoryLedger
         self.queueMetrics = queueMetrics
         self.guestAvailableMiB = guestAvailableMiB
         self.containerMemoryMiB = containerMemoryMiB

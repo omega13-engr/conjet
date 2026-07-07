@@ -307,7 +307,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertTrue(status.message?.contains("guest reclaim endpoint unavailable") == true)
     }
 
-    func testMissingGuestReclaimEndpointDoesNotShrinkActiveServiceCapacity() throws {
+    func testMissingGuestReclaimEndpointKeepsActiveServiceCapacityAfterRealtimeAttempt() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -329,12 +329,12 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "guest.event")
 
         let status = manager.status()
-        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.reclaimRequests, 1)
         XCTAssertEqual(connector.serviceReclaimRequests, 0)
         XCTAssertEqual(appliedTargets.values, [])
         XCTAssertEqual(status.currentTargetMiB, 8192)
         XCTAssertEqual(status.guestWorkloadDetected, true)
-        XCTAssertEqual(status.trace?.last?.action, "observe")
+        XCTAssertEqual(status.trace?.last?.action, "reclaim")
     }
 
     func testMissingGuestReclaimEndpointFallsBackWhenStopStreamIsStillOpen() throws {
@@ -796,7 +796,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().trace?.last?.action, "observe")
     }
 
-    func testIdleAutodropRestoresOnHighGuestPressure() throws {
+    func testIdleAutodropExpandsInStepsOnHighGuestPressure() throws {
         let policy = Self.policy()
         let idleMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":268435456,"service_cgroup_memory_current":67108864,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
@@ -828,12 +828,12 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "guest.event")
 
         let status = manager.status()
-        XCTAssertEqual(appliedTargets.values, [640, 8192])
-        XCTAssertEqual(status.currentTargetMiB, 8192)
-        XCTAssertEqual(status.balloonedMiB, 0)
+        XCTAssertEqual(appliedTargets.values, [640, 1664])
+        XCTAssertEqual(status.currentTargetMiB, 1664)
+        XCTAssertEqual(status.balloonedMiB, 6528)
         XCTAssertEqual(status.pressure, .high)
-        XCTAssertEqual(status.trace?.last?.action, "restore")
-        XCTAssertTrue(status.message?.contains("restored to configured maximum") == true)
+        XCTAssertEqual(status.trace?.last?.action, "idle-expand")
+        XCTAssertTrue(status.message?.contains("expanded idle target") == true)
     }
 
     func testEcoIdleAutodropFallsTowardLinuxFloorPlusRuntimeUsage() throws {
@@ -935,7 +935,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().trace?.last?.action, "reclaim-footprint")
     }
 
-    func testGuestEventActiveServiceIdleRequestsServiceReclaimWithoutTargetDrop() throws {
+    func testGuestEventActiveServiceIdleReclaimsAndDropsToServiceDemandTarget() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -959,15 +959,16 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.reclaimRequests, 1)
         XCTAssertEqual(connector.serviceReclaimRequests, 1)
-        XCTAssertEqual(appliedTargets.values, [])
-        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(appliedTargets.values, [4096])
+        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
         XCTAssertEqual(manager.status().guestWorkloadDetected, true)
         XCTAssertTrue(manager.status().trace?.contains { $0.action == "service-slice-reclaim" } == true)
+        XCTAssertTrue(manager.status().trace?.contains { $0.action == "idle-autodrop" } == true)
     }
 
-    func testGuestEventActiveServiceIdleWithPersistentNonBuildDockerStreamKeepsTarget() throws {
+    func testGuestEventActiveServiceIdleWithPersistentNonBuildDockerStreamDropsTarget() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -999,14 +1000,14 @@ final class DynamicMemoryManagerTests: XCTestCase {
         ))
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(appliedTargets.values, [4096])
         XCTAssertEqual(connector.serviceReclaimRequests, 1)
         XCTAssertEqual(manager.status().activeDockerStreams, 1)
-        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
         XCTAssertTrue(manager.status().trace?.contains { $0.action == "service-slice-reclaim" } == true)
     }
 
-    func testActiveServiceIdleReportsDockerWorkingSetWithoutTargetResize() throws {
+    func testActiveServiceIdleReportsDockerWorkingSetAndDropsTarget() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":4514119680,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":5952765952,"container_memory_peak":6442450944,"container_anon":4383047680,"container_file":1569718272,"container_inactive_file":1569718272,"daemon_cgroup_memory_current":178257920,"service_cgroup_memory_current":5945425920,"service_cgroup_file":1569718272,"service_cgroup_inactive_file":1569718272,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":4,"build_workload_detected":false,"source":"test"}
@@ -1035,13 +1036,13 @@ final class DynamicMemoryManagerTests: XCTestCase {
         let status = manager.status()
         XCTAssertEqual(status.containerMemoryMiB, 4180)
         XCTAssertEqual(status.serviceCgroupMemoryMiB, 4173)
-        XCTAssertEqual(appliedTargets.values, [])
-        XCTAssertEqual(status.currentTargetMiB, 8192)
+        XCTAssertEqual(appliedTargets.values, [5376])
+        XCTAssertEqual(status.currentTargetMiB, 5376)
         XCTAssertEqual(status.activeDockerStreams, 1)
-        XCTAssertEqual(status.trace?.last?.action, "observe")
+        XCTAssertEqual(status.trace?.last?.action, "idle-autodrop")
     }
 
-    func testActiveServiceIdleDoesNotRefineGuestCapacityAsLiveCgroupUsageFalls() throws {
+    func testActiveServiceIdleRefinesGuestCapacityAsLiveCgroupUsageFalls() throws {
         let policy = Self.policy()
         let serviceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":3221225472,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":3221225472,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -1065,13 +1066,13 @@ final class DynamicMemoryManagerTests: XCTestCase {
         connector.setBody(lowerServiceMetricsBody)
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [])
-        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
+        XCTAssertEqual(appliedTargets.values, [4096, 1792])
+        XCTAssertEqual(manager.status().currentTargetMiB, 1792)
         XCTAssertEqual(manager.status().guestWorkloadDetected, true)
-        XCTAssertEqual(manager.status().trace?.last?.action, "observe")
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-refine")
     }
 
-    func testActiveServiceIdleDoesNotExpandFromLiveCgroupDemandTarget() throws {
+    func testActiveServiceIdleExpandsFromLiveCgroupDemandTarget() throws {
         let policy = Self.policy()
         let smallServiceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":1073741824,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":134217728,"service_cgroup_memory_current":1073741824,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -1095,11 +1096,11 @@ final class DynamicMemoryManagerTests: XCTestCase {
         connector.setBody(largerServiceMetricsBody)
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [])
-        XCTAssertEqual(manager.status().currentTargetMiB, 8192)
-        XCTAssertEqual(manager.status().balloonedMiB, 0)
+        XCTAssertEqual(appliedTargets.values, [1792, 4096])
+        XCTAssertEqual(manager.status().currentTargetMiB, 4096)
+        XCTAssertEqual(manager.status().balloonedMiB, 4096)
         XCTAssertEqual(manager.status().guestWorkloadDetected, true)
-        XCTAssertEqual(manager.status().trace?.last?.action, "observe")
+        XCTAssertEqual(manager.status().trace?.last?.action, "idle-expand")
     }
 
     func testActiveServicePressureKeepsConfiguredCapacityAfterIdleDrop() throws {
@@ -1133,7 +1134,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(manager.status().trace?.last?.action, "restore")
     }
 
-    func testActiveServicePressureDoesNotResizeConfiguredCapacity() throws {
+    func testActiveServicePressureRestoresRealtimeIdleDrop() throws {
         let policy = Self.policy()
         let largeServiceMetricsBody = """
         {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":2147483648,"sreclaimable_bytes":134217728,"container_memory_current":5575278592,"container_memory_peak":6442450944,"daemon_cgroup_memory_current":180355072,"service_cgroup_memory_current":5575278592,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":2,"build_workload_detected":false,"source":"test"}
@@ -1158,7 +1159,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "guest.event")
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(appliedTargets.values, [])
+        XCTAssertEqual(appliedTargets.values, [6656, 8192])
         XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertEqual(manager.status().pressure, .high)
     }
@@ -1230,7 +1231,7 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "guest.event")
 
         let status = manager.status()
-        XCTAssertEqual(connector.reclaimRequests, 1)
+        XCTAssertEqual(connector.reclaimRequests, 2)
         XCTAssertEqual(connector.serviceReclaimRequests, 0)
         XCTAssertTrue(connector.lastRequest.contains("/conjet-memory-reclaim?reason="))
         XCTAssertTrue(connector.lastRequest.contains("aggregate-incomplete-telemetry"))
@@ -1240,7 +1241,6 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(status.serviceSliceTelemetryComplete, false)
         XCTAssertEqual(status.serviceSliceCoveredMiB, 3)
         XCTAssertEqual(status.serviceSliceUncoveredMiB, 6141)
-        XCTAssertTrue(status.trace?.contains { $0.action == "observe" && $0.suppressionReason == "active-service.telemetry-incomplete" } == true)
         XCTAssertTrue(status.trace?.contains { $0.action == "aggregate-reclaim" } == true)
         XCTAssertTrue(status.trace?.contains { $0.action == "idle-autodrop" } == true)
     }
@@ -1274,15 +1274,16 @@ final class DynamicMemoryManagerTests: XCTestCase {
 
         try manager.forceRecompute(reason: "guest.event")
 
-        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.reclaimRequests, 1)
         XCTAssertEqual(connector.serviceReclaimRequests, 1)
-        XCTAssertTrue(connector.lastRequest.contains("reason=host.footprint.slices"))
+        XCTAssertTrue(connector.lastRequest.contains("/conjet-memory-reclaim/service"))
         XCTAssertTrue(connector.lastRequest.contains("key=chum_mem_postgres"))
-        XCTAssertTrue(connector.lastRequest.contains("bytes=1073741824"))
         XCTAssertEqual(appliedTargets.values, [])
         XCTAssertEqual(manager.status().currentTargetMiB, 8192)
         XCTAssertEqual(manager.status().hostFootprintMiB, 11264)
         XCTAssertEqual(manager.status().pressure, .low)
+        XCTAssertTrue(manager.status().trace?.contains { $0.action == "reclaim" } == true)
+        XCTAssertTrue(manager.status().trace?.contains { $0.action == "service-slice-reclaim" } == true)
     }
 
     func testActiveServiceFootprintOverTargetAppliesDemandTargetAfterServiceReclaim() throws {
@@ -1318,10 +1319,9 @@ final class DynamicMemoryManagerTests: XCTestCase {
         try manager.forceRecompute(reason: "guest.event")
 
         let status = manager.status()
-        XCTAssertEqual(connector.reclaimRequests, 0)
+        XCTAssertEqual(connector.reclaimRequests, 1)
         XCTAssertEqual(connector.serviceReclaimRequests, 1)
         XCTAssertTrue(connector.lastRequest.contains("/conjet-memory-reclaim/service"))
-        XCTAssertTrue(connector.lastRequest.contains("reason=host.footprint.slices"))
         XCTAssertEqual(appliedTargets.values, [4096])
         XCTAssertEqual(status.currentTargetMiB, 4096)
         XCTAssertEqual(status.balloonedMiB, 4096)
@@ -1503,12 +1503,39 @@ final class DynamicMemoryManagerTests: XCTestCase {
                     balloonInflatePages: 262_144,
                     balloonDeflatePages: 4_096,
                     balloonReportedFreePages: 65_536,
+                    balloonReportedFreeBytes: UInt64(512 * 1024 * 1024),
                     balloonReclaimedBytes: UInt64(768 * 1024 * 1024),
                     balloonReportedFreeReclaimedBytes: UInt64(256 * 1024 * 1024),
+                    balloonSoftReclaimedBytes: UInt64(128 * 1024 * 1024),
+                    balloonHardDecommittedBytes: UInt64(640 * 1024 * 1024),
+                    balloonOwnedReclaimedBytes: UInt64(384 * 1024 * 1024),
+                    balloonReportInFlightReclaimedBytes: UInt64(384 * 1024 * 1024),
                     balloonReclaimFailures: 2,
                     balloonMalformedReports: 3,
                     balloonPageReportingReady: true,
-                    balloonFreePageHintReady: false
+                    balloonFreePageHintReady: false,
+                    memoryLedger: ConjetMemoryLedgerStatus(
+                        guestVisibleBytes: UInt64(8192 * 1024 * 1024),
+                        hostGranuleBytes: 16_384,
+                        hostGranules: 524_288,
+                        residentBytes: UInt64(512 * 1024 * 1024),
+                        guestOwnedBytes: UInt64(384 * 1024 * 1024),
+                        pinnedBytes: UInt64(128 * 1024 * 1024),
+                        balloonOwnedBytes: UInt64(256 * 1024 * 1024),
+                        reportInFlightBytes: 0,
+                        discardedSoftBytes: UInt64(128 * 1024 * 1024),
+                        discardedHardZeroBytes: UInt64(7552 * 1024 * 1024),
+                        cumulativeSoftDiscardedBytes: UInt64(128 * 1024 * 1024),
+                        cumulativeHardDecommittedBytes: UInt64(640 * 1024 * 1024),
+                        cumulativeBalloonAuthorizedBytes: UInt64(384 * 1024 * 1024),
+                        cumulativeReportAuthorizedBytes: UInt64(384 * 1024 * 1024),
+                        guestOwnedReclaimedBytes: 0,
+                        pinnedReclaimedBytes: 0,
+                        reclaimWithoutAuthorityBytes: 0,
+                        reportAckedBeforeReclaimBytes: 0,
+                        stateSumMismatchBytes: 0,
+                        ok: true
+                    )
                 )
             },
             hostFootprintConvergenceDelays: [0]
@@ -1523,12 +1550,23 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(status.balloonInflatePages, 262_144)
         XCTAssertEqual(status.balloonDeflatePages, 4_096)
         XCTAssertEqual(status.balloonReportedFreePages, 65_536)
+        XCTAssertEqual(status.balloonReportedFreeMiB, 512)
         XCTAssertEqual(status.balloonReclaimedMiB, 768)
         XCTAssertEqual(status.balloonReportedFreeReclaimedMiB, 256)
+        XCTAssertEqual(status.balloonSoftReclaimedMiB, 128)
+        XCTAssertEqual(status.balloonHardDecommittedMiB, 640)
+        XCTAssertEqual(status.balloonOwnedReclaimedMiB, 384)
+        XCTAssertEqual(status.balloonReportInFlightReclaimedMiB, 384)
         XCTAssertEqual(status.balloonReclaimFailures, 2)
         XCTAssertEqual(status.balloonMalformedReports, 3)
         XCTAssertEqual(status.balloonPageReportingReady, true)
         XCTAssertEqual(status.balloonFreePageHintReady, false)
+        XCTAssertEqual(status.memoryLedger?.guestVisibleBytes, UInt64(8192 * 1024 * 1024))
+        XCTAssertEqual(status.memoryLedger?.hostGranuleBytes, 16_384)
+        XCTAssertEqual(status.memoryLedger?.cumulativeHardDecommittedBytes, UInt64(640 * 1024 * 1024))
+        XCTAssertEqual(status.memoryLedger?.cumulativeReportAuthorizedBytes, UInt64(384 * 1024 * 1024))
+        XCTAssertEqual(status.memoryLedger?.guestOwnedReclaimedBytes, 0)
+        XCTAssertEqual(status.memoryLedger?.ok, true)
     }
 
     func testBalloonedIdleGuestUsesRelativeAvailableMemoryPressureFloor() throws {

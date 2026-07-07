@@ -114,6 +114,32 @@ final class VirtualMachineControllerTests: XCTestCase {
         )
     }
 
+    func testRustVMMRunCapturesFailedStartupDiagnosticAndStopsAfterExit() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("conjet-rust-vmm-run-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let stdout = root.appendingPathComponent("jetstream.stdout.log").path
+        let stderr = root.appendingPathComponent("jetstream.stderr.log").path
+        let run = try ConjetCoreRustVMMRun(
+            executable: "/bin/sh",
+            arguments: ["-c", "echo 'Error: HVF VM creation failed' >&2; exit 7"],
+            stdoutPath: stdout,
+            stderrPath: stderr
+        )
+
+        try run.start()
+        let deadline = Date().addingTimeInterval(5)
+        while run.resultSnapshot() == nil && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+
+        XCTAssertTrue(run.stop(timeoutSeconds: 5))
+        let result = try XCTUnwrap(run.resultSnapshot())
+        XCTAssertEqual(result.exitCode, 7)
+        XCTAssertTrue(result.message.contains("HVF VM creation failed"), result.message)
+    }
+
     func testDockerBridgeReadinessPolicySkipsHostProbeForLegacyAutoBridge() {
         let policy = GuestDockerBridgeReadinessPolicy.resolve(
             requested: .auto,

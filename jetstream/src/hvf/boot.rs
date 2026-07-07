@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use crate::arch::aarch64;
 use crate::devices::balloon::{
-    self, BalloonMetrics, BalloonQueueHandler, GuestMemoryReclaimer, PageRange, ReclaimReport,
+    self, BalloonMetrics, BalloonQueueHandler, GuestMemoryReclaimer, MemoryLedgerSummary,
+    PageRange, ReclaimAuthority, ReclaimReport,
 };
 use crate::devices::block::{BlockQueueHandler, RawBlockDevice};
 use crate::devices::bus::{MmioDevice, MmioError};
@@ -31,6 +32,7 @@ use crate::hvf::ffi::{
 use crate::hvf::gic::{Gic, GicLayout, GicMmio};
 use crate::vmm::boot::{load_boot_artifacts, BootArtifacts, BootPlan};
 use crate::vmm::config::JetstreamConfig;
+use crate::vmm::debug_flags;
 use crate::vmm::docker_probe::{DockerProbeReport, DockerSocketReadinessProbe};
 use crate::vmm::memory::GuestMemory;
 use crate::vmm::vstate::VmState;
@@ -140,6 +142,9 @@ struct EventReclaimMetrics {
 struct HvfGuestMemoryReclaimer {
     vm: Arc<Vm>,
     flags: u64,
+    hard_decommit_only: bool,
+    disable_hard_decommit: bool,
+    disable_madv_free: bool,
 }
 
 impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
@@ -148,6 +153,7 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
         memory: &GuestMemory,
         guest_base: u64,
         ranges: &[PageRange],
+        _authority: ReclaimAuthority,
     ) -> ReclaimReport {
         let mut report = ReclaimReport::default();
         for range in ranges {
@@ -170,33 +176,49 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
                         continue;
                     }
                 };
-                if self.vm.unmap_memory(chunk.start, size).is_err() {
-                    report.discard_skipped_bytes += chunk.size;
-                    continue;
-                }
+                if !self.disable_hard_decommit {
+                    if self.vm.unmap_memory(chunk.start, size).is_err() {
+                        report.discard_skipped_bytes += chunk.size;
+                        continue;
+                    }
 
-                let decommit_result = memory.decommit_zero_at(guest_base, chunk.start, size);
-                let (map_address, decommit_ok) = match decommit_result {
-                    Ok(address) => (address, true),
-                    Err(_) => (host_address, false),
-                };
-                let remap_result = self
-                    .vm
-                    .map_memory(map_address, chunk.start, size, self.flags);
-                match remap_result {
-                    Ok(()) => {
-                        if decommit_ok {
-                            report.discard_advised_bytes += chunk.size;
-                        } else {
-                            report.discard_failed_bytes += chunk.size;
+                    let decommit_result = memory.decommit_zero_at(guest_base, chunk.start, size);
+                    let (map_address, decommit_ok) = match decommit_result {
+                        Ok(address) => (address, true),
+                        Err(_) => (host_address, false),
+                    };
+                    let remap_result =
+                        self.vm
+                            .map_memory(map_address, chunk.start, size, self.flags);
+                    match remap_result {
+                        Ok(()) => {
+                            if decommit_ok {
+                                report.discard_advised_bytes += chunk.size;
+                                report.hard_decommitted_bytes += chunk.size;
+                                continue;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "fatal HVF remap failure after memory reclaim at 0x{:x}+{}: {}",
+                                chunk.start, size, error
+                            );
+                            std::process::abort();
                         }
                     }
-                    Err(error) => {
-                        eprintln!(
-                            "fatal HVF remap failure after memory reclaim at 0x{:x}+{}: {}",
-                            chunk.start, size, error
-                        );
-                        std::process::abort();
+                }
+
+                if self.hard_decommit_only || self.disable_madv_free {
+                    report.discard_failed_bytes += chunk.size;
+                    continue;
+                }
+                match memory.advise_free_at(guest_base, chunk.start, size) {
+                    Ok(()) => {
+                        report.discard_advised_bytes += chunk.size;
+                        report.soft_reclaimed_bytes += chunk.size;
+                    }
+                    Err(_) => {
+                        report.discard_failed_bytes += chunk.size;
                     }
                 }
             }
@@ -458,6 +480,9 @@ impl HvfBootRunner {
         let memory_reclaimer: Arc<dyn GuestMemoryReclaimer> = Arc::new(HvfGuestMemoryReclaimer {
             vm: vm.clone(),
             flags: HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC,
+            hard_decommit_only: debug_flags::enabled("CONJET_MEM_HARD_DECOMMIT_ONLY"),
+            disable_hard_decommit: debug_flags::enabled("CONJET_MEM_DISABLE_HARD_DECOMMIT"),
+            disable_madv_free: debug_flags::enabled("CONJET_MEM_DISABLE_MADV_FREE"),
         });
         match configure_virtio_runtime(
             &self.config,
@@ -1786,6 +1811,7 @@ struct MemoryControlResponse {
     docker_phase_events: DockerPhaseControlMetrics,
     event_reclaim: EventReclaimMetrics,
     balloon: BalloonMetrics,
+    memory_ledger: MemoryLedgerSummary,
     host_memory: HostMemoryFootprint,
 }
 
@@ -2014,6 +2040,10 @@ fn memory_control_snapshot(
     let mut vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
     refresh_balloon_transport_metrics(&mut vm_state);
     let balloon = vm_state.devices.balloon_metrics();
+    let memory_ledger = vm_state.devices.memory_ledger_summary(
+        vm_state.memory.len() as u64,
+        vm_state.memory.host_page_size() as u64,
+    );
     let docker_phase_events = vm_state.devices.docker_phase_events();
     let event_reclaim = shared
         .event_reclaim
@@ -2052,6 +2082,7 @@ fn memory_control_snapshot(
         },
         event_reclaim,
         balloon,
+        memory_ledger,
         host_memory: host_memory_footprint(),
     })
 }
@@ -2078,6 +2109,7 @@ fn memory_control_error(message: &str, configured_memory_mib: u64) -> MemoryCont
         docker_phase_events: DockerPhaseControlMetrics::default(),
         event_reclaim: EventReclaimMetrics::default(),
         balloon: BalloonMetrics::default(),
+        memory_ledger: MemoryLedgerSummary::default(),
         host_memory: host_memory_footprint(),
     }
 }
@@ -2764,10 +2796,7 @@ mod tests {
         assert_eq!(chunks[0].size, HOST_RECLAIM_CHUNK_BYTES);
         assert_eq!(chunks[1].start, 0x4000_0000 + HOST_RECLAIM_CHUNK_BYTES);
         assert_eq!(chunks[1].size, HOST_RECLAIM_CHUNK_BYTES);
-        assert_eq!(
-            chunks[2].start,
-            0x4000_0000 + HOST_RECLAIM_CHUNK_BYTES * 2
-        );
+        assert_eq!(chunks[2].start, 0x4000_0000 + HOST_RECLAIM_CHUNK_BYTES * 2);
         assert_eq!(chunks[2].size, 4096);
     }
 

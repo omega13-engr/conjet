@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use crate::arch::aarch64;
 use crate::devices::bus::{MmioDevice, MmioError};
+use crate::vmm::debug_flags;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum VirtioDeviceKind {
@@ -348,7 +349,7 @@ pub fn default_device_plan(
     }
     plans.push(VirtioMmioDevicePlan::new(VirtioDeviceKind::Net, 3));
     plans.push(VirtioMmioDevicePlan::new(VirtioDeviceKind::Vsock, 4));
-    if include_balloon {
+    if include_balloon && !debug_flags::enabled("CONJET_MEM_DISABLE_BALLOON") {
         plans.push(VirtioMmioDevicePlan::new(VirtioDeviceKind::Balloon, 5));
     }
     plans.push(VirtioMmioDevicePlan::new(VirtioDeviceKind::Rng, 6));
@@ -359,9 +360,17 @@ fn common_features_for(kind: VirtioDeviceKind) -> u64 {
     match kind {
         VirtioDeviceKind::Block | VirtioDeviceKind::Vsock => FEATURE_VERSION_1,
         VirtioDeviceKind::Net => FEATURE_VERSION_1 | NET_FEATURE_MAC | NET_FEATURE_STATUS,
-        VirtioDeviceKind::Balloon => FEATURE_VERSION_1 | BALLOON_FEATURE_PAGE_REPORTING,
+        VirtioDeviceKind::Balloon => balloon_features(),
         VirtioDeviceKind::Rng => FEATURE_VERSION_1 | FEATURE_INDIRECT_DESC | FEATURE_EVENT_IDX,
     }
+}
+
+fn balloon_features() -> u64 {
+    let mut features = FEATURE_VERSION_1;
+    if !debug_flags::enabled("CONJET_MEM_DISABLE_PAGE_REPORTING") {
+        features |= BALLOON_FEATURE_PAGE_REPORTING;
+    }
+    features
 }
 
 fn feature_page(features: u64, page: u32) -> u32 {

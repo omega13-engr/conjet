@@ -26,6 +26,38 @@ manual pulse reclaim path is fallback only. Reclaim-capable kernels must keep
 `CONFIG_SWAP`, `CONFIG_ZSMALLOC`, and `CONFIG_ZRAM` enabled; the Docker profile
 also enables `CONFIG_ZRAM_WRITEBACK`.
 
+### Dynamic Memory Safety Contract
+
+Conjet dynamic memory does not shrink guest-visible RAM as a normal runtime
+policy. Jetstream reserves a stable guest physical memory aperture and lets
+Linux manage it normally. Host RSS is reduced only by reclaiming host backing
+for guest-cooperatively disposable pages:
+
+- `BalloonOwned` pages that Linux has removed from the allocator through
+  virtio-balloon inflation.
+- `ReportedFree` pages that Linux has reported through virtio-balloon page
+  reporting and that Jetstream has not yet acked back to the reporting queue.
+
+Docker lifecycle events, cgroup v2 `memory.current`, `memory.stat`
+`inactive_file`, `/proc/meminfo`, PSI, and host memory pressure are policy
+inputs only. They may decide when and how aggressively Conjet asks Linux for
+reclaim, but they must never authorize reclaim of a guest physical address.
+`GuestOwned` pages and pinned kernel, boot, MMIO-adjacent, virtio ring, or DMA
+pages are never reclaimable from host-side policy alone.
+
+The VMM reclaim invariant is:
+
+```text
+A guest physical range may be decommitted only while it is BalloonOwned, or
+while it is ReportedFree and the page-reporting descriptor remains in flight.
+```
+
+Soft reclaim may use `MADV_FREE`; this keeps the address range valid but does
+not guarantee immediate RSS drop or deterministic zero fill. Hard reclaim may
+unmap the HVF range, remap fresh anonymous zero backing, and map it back into
+the same guest physical range; this is heavier and must be reserved for large,
+cold ranges or host pressure.
+
 The reproducible builder is:
 
 ```sh

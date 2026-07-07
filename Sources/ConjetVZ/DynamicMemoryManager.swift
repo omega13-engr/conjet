@@ -395,12 +395,18 @@ struct DynamicMemoryVMMRuntimeMetrics: Equatable, Sendable {
     var balloonInflatePages: UInt64
     var balloonDeflatePages: UInt64
     var balloonReportedFreePages: UInt64
+    var balloonReportedFreeBytes: UInt64?
     var balloonReclaimedBytes: UInt64
     var balloonReportedFreeReclaimedBytes: UInt64
+    var balloonSoftReclaimedBytes: UInt64?
+    var balloonHardDecommittedBytes: UInt64?
+    var balloonOwnedReclaimedBytes: UInt64?
+    var balloonReportInFlightReclaimedBytes: UInt64?
     var balloonReclaimFailures: UInt64
     var balloonMalformedReports: UInt64
     var balloonPageReportingReady: Bool?
     var balloonFreePageHintReady: Bool?
+    var memoryLedger: ConjetMemoryLedgerStatus?
 }
 
 private struct ServiceSliceCoverage: Equatable {
@@ -697,11 +703,17 @@ final class DynamicMemoryManager: @unchecked Sendable {
             balloonInflatePages: vmmMetrics?.balloonInflatePages,
             balloonDeflatePages: vmmMetrics?.balloonDeflatePages,
             balloonReportedFreePages: vmmMetrics?.balloonReportedFreePages,
+            balloonReportedFreeMiB: vmmMetrics.flatMap { $0.balloonReportedFreeBytes.map(Self.bytesToMiB) },
             balloonReportedFreeReclaimedMiB: vmmMetrics.map { Self.bytesToMiB($0.balloonReportedFreeReclaimedBytes) },
+            balloonSoftReclaimedMiB: vmmMetrics.flatMap { $0.balloonSoftReclaimedBytes.map(Self.bytesToMiB) },
+            balloonHardDecommittedMiB: vmmMetrics.flatMap { $0.balloonHardDecommittedBytes.map(Self.bytesToMiB) },
+            balloonOwnedReclaimedMiB: vmmMetrics.flatMap { $0.balloonOwnedReclaimedBytes.map(Self.bytesToMiB) },
+            balloonReportInFlightReclaimedMiB: vmmMetrics.flatMap { $0.balloonReportInFlightReclaimedBytes.map(Self.bytesToMiB) },
             balloonReclaimFailures: vmmMetrics?.balloonReclaimFailures,
             balloonMalformedReports: vmmMetrics?.balloonMalformedReports,
             balloonPageReportingReady: vmmMetrics?.balloonPageReportingReady,
             balloonFreePageHintReady: vmmMetrics?.balloonFreePageHintReady,
+            memoryLedger: vmmMetrics?.memoryLedger,
             guestAvailableMiB: guestAvailableMiB,
             containerMemoryMiB: containerMiB,
             buildCgroupMemoryMiB: buildCgroupMiB,
@@ -871,7 +883,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
     }
 
     private func schedulePostWorkloadReclaims(reason: String, generation: Int) {
-        for (suffix, delay) in [("quiesced", 0.15), ("observe", 1.0)] {
+        for (suffix, delay) in Self.postWorkloadReclaimBursts {
             let scheduledReason = "\(reason).\(suffix)"
             let item = DispatchWorkItem { [weak self] in
                 self?.requestSnapshot(reason: scheduledReason, generation: generation)
@@ -1303,6 +1315,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         )
         if activeGuestWorkload
             && activeServiceMemoryTelemetryAvailable(metrics: metrics)
+            && !activeServiceIdleReclaimReady
             && !activeServiceAggregateReclaim {
             return false
         }
@@ -1388,6 +1401,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         )
         if activeGuestWorkload
             && activeServiceMemoryTelemetryAvailable(metrics: metrics)
+            && !activeServiceIdleReclaimReady
             && !activeServiceAggregateReclaim {
             return serviceSliceCoverage.isComplete
                 ? "active-service.telemetry-complete"
@@ -1639,7 +1653,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
             guard activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure) else {
                 return nil
             }
-        } else if activeDockerStreams > 0 || pressure == .high {
+        } else if activeDockerStreams > 0 {
             return nil
         }
 
@@ -1649,18 +1663,14 @@ final class DynamicMemoryManager: @unchecked Sendable {
         case .high:
             targetMiB = max(
                 demandTargetMiB,
-                min(
-                    Self.saturatingAddMiB(currentTargetMiB, Self.highPressureExpansionStepMiB),
-                    Self.saturatingAddMiB(demandTargetMiB, Self.highPressureExpansionStepMiB)
-                )
+                Self.saturatingAddMiB(currentTargetMiB, Self.highPressureExpansionStepMiB),
+                Self.saturatingAddMiB(demandTargetMiB, Self.highPressureExpansionStepMiB)
             )
         case .elevated:
             targetMiB = max(
                 demandTargetMiB,
-                min(
-                    Self.saturatingAddMiB(currentTargetMiB, Self.elevatedPressureExpansionStepMiB),
-                    Self.saturatingAddMiB(demandTargetMiB, Self.elevatedPressureExpansionStepMiB)
-                )
+                Self.saturatingAddMiB(currentTargetMiB, Self.elevatedPressureExpansionStepMiB),
+                Self.saturatingAddMiB(demandTargetMiB, Self.elevatedPressureExpansionStepMiB)
             )
         case .low, .unknown, .stale:
             break
@@ -1675,7 +1685,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         if activeGuestWorkload {
             return activeServiceIdleConditionsLocked(metrics: metrics, pressure: pressure)
         }
-        if activeDockerStreams > 0 || pressure == .high {
+        if activeDockerStreams > 0 {
             return false
         }
         return !buildWorkloadActive
@@ -1848,7 +1858,7 @@ final class DynamicMemoryManager: @unchecked Sendable {
         let activeGuestWorkload = Self.hasActiveGuestWorkload(metrics)
         let activeServiceIdle = activeServiceIdleConditionsLocked(metrics: metrics, pressure: .low)
         if activeGuestWorkload,
-           !(activeServiceIdle && activeServiceDemandTargetDropAllowedLocked()) {
+           !activeServiceIdle {
             lock.unlock()
             return
         }
@@ -1877,7 +1887,6 @@ final class DynamicMemoryManager: @unchecked Sendable {
                    (!Self.hasActiveGuestWorkload(latestMetrics) && activeDockerStreams == 0)
                        || (
                            activeServiceIdleConditionsLocked(metrics: latestMetrics, pressure: .low)
-                               && activeServiceDemandTargetDropAllowedLocked()
                        )
                ) {
                 currentTargetMiB = targetMiB
@@ -2012,17 +2021,6 @@ final class DynamicMemoryManager: @unchecked Sendable {
             || reason == "docker.containerStopped"
             || reason == "docker.containerStopped.slices"
             || reason.hasPrefix("docker.containerStopped.final.")
-    }
-
-    private func activeServiceDemandTargetDropAllowedLocked() -> Bool {
-        guard let footprint = lastHostFootprintBytes else {
-            return false
-        }
-        let currentTargetBytes = UInt64(currentTargetMiB) * Self.bytesPerMiB
-        return footprint > Self.saturatingAdd(
-            currentTargetBytes,
-            Self.serviceSliceHostFootprintHeadroomBytes
-        )
     }
 
     private static func isMissingGuestReclaimEndpoint(_ error: Error) -> Bool {
@@ -2573,6 +2571,13 @@ final class DynamicMemoryManager: @unchecked Sendable {
     private static let elevatedPressureExpansionStepMiB = 512
     private static let highPressureExpansionStepMiB = 1024
     private static let eventStreamStableSeconds: TimeInterval = 10.0
+    private static let postWorkloadReclaimBursts: [(suffix: String, delay: TimeInterval)] = [
+        ("quiesced", 0.15),
+        ("observe", 0.5),
+        ("settled", 1.0),
+        ("idle-1s", 1.5),
+        ("idle-2s", 2.0)
+    ]
 
     private func restoreConfiguredTarget(reason: String) {
         lock.lock()

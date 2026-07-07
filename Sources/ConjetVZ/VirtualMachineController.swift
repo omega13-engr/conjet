@@ -421,7 +421,8 @@ public final class VirtualMachineController {
             if waitMode == .docker {
                 try waitForDockerAPIReady(
                     socketPath: manifest.dockerSocketPath,
-                    timeoutSeconds: Self.managedHVFReadinessTimeoutSeconds()
+                    timeoutSeconds: Self.managedHVFReadinessTimeoutSeconds(),
+                    livenessCheck: { try self.assertRustVMMStillRunning(managedRun) }
                 )
                 startRustPublishedPortForwarder(manifest: manifest, config: config)
                 _ = startRustDynamicMemoryManager(
@@ -458,8 +459,9 @@ public final class VirtualMachineController {
                 backend: config.vmBackend
             )
         } catch {
-            let result = managedRun.resultSnapshot()
+            let initialResult = managedRun.resultSnapshot()
             _ = managedRun.stop(timeoutSeconds: 15)
+            let result = initialResult ?? managedRun.resultSnapshot()
             try? FileManager.default.removeItem(atPath: manifest.dockerSocketPath)
             try? FileManager.default.removeItem(atPath: rustMemorySocketPath)
             try? FileManager.default.removeItem(atPath: rustMemoryControlSocketPath)
@@ -892,14 +894,24 @@ public final class VirtualMachineController {
 
     private func waitForDockerAPIReady(
         socketPath: String,
-        timeoutSeconds: TimeInterval = 45
+        timeoutSeconds: TimeInterval = 45,
+        livenessCheck: (() throws -> Void)? = nil
     ) throws {
         setProgress(state: .starting, phase: "docker-ready", message: "waiting for Conjet Docker API readiness")
-        try DockerSocketReadinessProbe(socketPath: socketPath).requireReady(
-            timeoutSeconds: timeoutSeconds,
-            intervalSeconds: 0.25
-        )
-        setProgress(state: .starting, phase: "docker-ready", message: "Conjet Docker API ready")
+        let deadline = Date().addingTimeInterval(max(0, timeoutSeconds))
+        let probe = DockerSocketReadinessProbe(socketPath: socketPath)
+        repeat {
+            try livenessCheck?()
+            if probe.isReady(timeoutSeconds: min(1, max(0.1, deadline.timeIntervalSinceNow))) {
+                setProgress(state: .starting, phase: "docker-ready", message: "Conjet Docker API ready")
+                return
+            }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { break }
+            Thread.sleep(forTimeInterval: min(0.25, remaining))
+        } while Date() < deadline
+        try livenessCheck?()
+        throw ConjetError.unavailable("timed out waiting \(Int(timeoutSeconds))s for Conjet Docker API readiness")
     }
 
     private func ensureGuestMemorySetup(socketPath: String) {
