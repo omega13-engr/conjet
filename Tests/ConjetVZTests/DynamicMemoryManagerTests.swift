@@ -879,6 +879,43 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertTrue(status.message?.contains("expanded idle target") == true)
     }
 
+    func testIdleBalloonDoesNotExpandOnLowAvailableMemoryWithoutPressureEvidence() throws {
+        let policy = Self.policy()
+        let idleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":6442450944,"mem_free":1073741824,"page_cache_bytes":3221225472,"sreclaimable_bytes":268435456,"container_memory_current":0,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":268435456,"service_cgroup_memory_current":67108864,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let constrainedIdleMetricsBody = """
+        {"mem_total":8589934592,"mem_available":74448896,"mem_free":33554432,"page_cache_bytes":33554432,"sreclaimable_bytes":16777216,"container_memory_current":0,"container_memory_peak":4294967296,"daemon_cgroup_memory_current":67108864,"service_cgroup_memory_current":0,"psi_some_avg10":0.0,"psi_full_avg10":0.0,"active_workloads":0,"build_workload_detected":false,"source":"test"}
+        """
+        let connector = StaticHTTPGuestConnectionConnector(body: idleMetricsBody)
+        let metricsClient = GuestMemoryMetricsClient(connector: connector)
+        let footprintSamples = HostFootprintSamples([
+            UInt64(12 * 1024 * 1024 * 1024),
+            UInt64(12 * 1024 * 1024 * 1024)
+        ])
+        let appliedTargets = AppliedMemoryTargets()
+        let manager = DynamicMemoryManager(
+            policy: policy,
+            metricsClient: metricsClient,
+            setTargetBytes: { bytes in
+                appliedTargets.append(Int(bytes / 1024 / 1024))
+            },
+            hostFootprintBytes: { footprintSamples.next() },
+            hostFootprintConvergenceDelays: [0]
+        )
+
+        try manager.forceRecompute(reason: "guest.event")
+        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
+
+        connector.setBody(constrainedIdleMetricsBody)
+        try manager.forceRecompute(reason: "guest.event")
+
+        XCTAssertEqual(appliedTargets.values, [1024])
+        XCTAssertEqual(manager.status().currentTargetMiB, 1024)
+        XCTAssertEqual(manager.status().pressure, .low)
+        XCTAssertFalse(manager.status().trace?.contains { $0.action == "idle-expand" } == true)
+    }
+
     func testEcoIdleAutodropFallsTowardLinuxFloorPlusRuntimeUsage() throws {
         let policy = ConjetMemoryPolicy(
             profile: .eco,
@@ -1542,6 +1579,10 @@ final class DynamicMemoryManagerTests: XCTestCase {
                     balloonReusableReclaimedBytes: UInt64(512 * 1024 * 1024),
                     balloonReusableRestoredBytes: UInt64(256 * 1024 * 1024),
                     balloonCurrentReusableBytes: UInt64(256 * 1024 * 1024),
+                    balloonHostGranuleEligibleBytes: UInt64(640 * 1024 * 1024),
+                    balloonPartialHostGranuleBytes: UInt64(128 * 1024 * 1024),
+                    balloonCurrentFullyOwnedHostGranules: 16_384,
+                    balloonCurrentPartiallyOwnedHostGranules: 32,
                     balloonZeroSweptBytes: UInt64(512 * 1024 * 1024),
                     balloonZeroSweepFailedBytes: 0,
                     balloonHardDecommittedBytes: UInt64(640 * 1024 * 1024),
@@ -1596,6 +1637,10 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(status.balloonReusableReclaimedMiB, 512)
         XCTAssertEqual(status.balloonReusableRestoredMiB, 256)
         XCTAssertEqual(status.balloonCurrentReusableMiB, 256)
+        XCTAssertEqual(status.balloonHostGranuleEligibleMiB, 640)
+        XCTAssertEqual(status.balloonPartialHostGranuleMiB, 128)
+        XCTAssertEqual(status.balloonCurrentFullyOwnedHostGranules, 16_384)
+        XCTAssertEqual(status.balloonCurrentPartiallyOwnedHostGranules, 32)
         XCTAssertEqual(status.balloonZeroSweptMiB, 512)
         XCTAssertEqual(status.balloonZeroSweepFailedMiB, 0)
         XCTAssertEqual(status.balloonHardDecommittedMiB, 640)

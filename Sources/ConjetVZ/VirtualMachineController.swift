@@ -425,8 +425,7 @@ public final class VirtualMachineController {
                     livenessCheck: { try self.assertRustVMMStillRunning(managedRun) }
                 )
                 startRustPublishedPortForwarder(manifest: manifest, config: config)
-                _ = startRustDynamicMemoryManager(
-                    config: config,
+                _ = waitForRustCoreMemoryController(
                     memorySocketPath: rustMemorySocketPath,
                     controlSocketPath: rustMemoryControlSocketPath
                 )
@@ -442,8 +441,7 @@ public final class VirtualMachineController {
                 )
             }
             startRustPublishedPortForwarder(manifest: manifest, config: config)
-            _ = startRustDynamicMemoryManager(
-                config: config,
+            _ = waitForRustCoreMemoryController(
                 memorySocketPath: rustMemorySocketPath,
                 controlSocketPath: rustMemoryControlSocketPath
             )
@@ -643,6 +641,21 @@ public final class VirtualMachineController {
             message: "reclaiming idle guest memory (\(reason))"
         )
 
+        if hvfRun?.isRunning == true {
+            markIdleMemoryReclaimed()
+            setProgress(
+                state: .running,
+                phase: "ready",
+                message: "Jetstream owns idle memory reclaim; no host-side target change"
+            )
+            return statusWithProgress(
+                store.status(
+                    state: .running,
+                    message: "Jetstream owns idle memory reclaim; no host-side target change"
+                ),
+                backend: config.vmBackend
+            )
+        }
         if let dynamicMemoryManager {
             try dynamicMemoryManager.forceRecompute(reason: "manual.\(reason)")
             markIdleMemoryReclaimed()
@@ -1011,27 +1024,20 @@ public final class VirtualMachineController {
         return true
     }
 
-    private func startRustDynamicMemoryManager(
-        config: ConjetConfig,
+    private func waitForRustCoreMemoryController(
         memorySocketPath: String,
         controlSocketPath: String
     ) -> Bool {
-        let policy = config.memoryPolicy
-        guard policy.dynamicMemoryEnabled else {
-            return false
-        }
-
         stopDynamicMemoryManager()
-        setProgress(state: .starting, phase: "dynamic-memory", message: "probing Rust guest memory agent")
+        setProgress(state: .starting, phase: "dynamic-memory", message: "verifying Jetstream memory telemetry")
         let connector = RetryingGuestConnectionConnector(
             base: UnixSocketGuestConnectionConnector(socketPath: memorySocketPath, timeoutSeconds: 3),
             timeoutSeconds: 8,
             intervalSeconds: 0.5
         )
         let metricsClient = GuestMemoryMetricsClient(connector: connector)
-        let initialMetrics: GuestMemoryMetrics
         do {
-            initialMetrics = try waitForRustDynamicMemoryReadiness(
+            try waitForRustCoreMemoryControllerReadiness(
                 metricsClient: metricsClient,
                 controlSocketPath: controlSocketPath,
                 timeoutSeconds: 60
@@ -1040,46 +1046,33 @@ public final class VirtualMachineController {
             setProgress(
                 state: .starting,
                 phase: "dynamic-memory",
-                message: "Rust dynamic memory unavailable: \(error)"
+                message: "Jetstream memory telemetry unavailable: \(error)"
             )
             return false
         }
 
-        let controlClient = ConjetCoreRustMemoryControlClient(socketPath: controlSocketPath)
-        let manager = DynamicMemoryManager(
-            policy: policy,
-            metricsClient: metricsClient,
-            setTargetBytes: { targetBytes in
-                try controlClient.setTargetBytes(targetBytes)
-            },
-            vmmRuntimeMetrics: {
-                try DynamicMemoryVMMRuntimeMetrics(controlClient.metrics())
-            }
-        )
-        dynamicMemoryManager = manager
-        manager.start(initialMetrics: initialMetrics)
-        setProgress(state: .starting, phase: "dynamic-memory", message: "Rust dynamic memory manager enabled")
+        setProgress(state: .starting, phase: "dynamic-memory", message: "Jetstream memory controller enabled")
         return true
     }
 
-    private func waitForRustDynamicMemoryReadiness(
+    private func waitForRustCoreMemoryControllerReadiness(
         metricsClient: GuestMemoryMetricsClient,
         controlSocketPath: String,
         timeoutSeconds: TimeInterval
-    ) throws -> GuestMemoryMetrics {
+    ) throws {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         var lastError: Error?
         repeat {
             do {
-                let metrics = try metricsClient.snapshot()
+                _ = try metricsClient.snapshot()
                 _ = try ConjetCoreRustMemoryControlClient(socketPath: controlSocketPath).metrics()
-                return metrics
+                return
             } catch {
                 lastError = error
                 Thread.sleep(forTimeInterval: 0.5)
             }
         } while Date() < deadline
-        throw lastError ?? ConjetError.unavailable("timed out waiting for Rust dynamic memory")
+        throw lastError ?? ConjetError.unavailable("timed out waiting for Jetstream memory telemetry")
     }
 
     private func stopDynamicMemoryManager() {

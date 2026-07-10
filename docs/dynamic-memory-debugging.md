@@ -8,14 +8,54 @@ Docker/cgroup memory drops
   -> Linux frees pages
   -> virtio-balloon reports disposable pages
   -> Jetstream validates GPA ranges
-  -> Jetstream soft-discards or hard-decommits host backing
+  -> Jetstream detaches and marks whole balloon-owned host granules reusable
   -> macOS Conjet Core RSS/footprint drops
 ```
 
 The correctness question is which bytes moved from `GuestOwned` to
-`ReportInFlight` or `BalloonOwned`, then to `DiscardedSoft` or
-`DiscardedHardZero`. Docker, cgroup, PSI, and host pressure signals may explain
-why reclaim was requested, but they are never proof that a GPA is disposable.
+`ReportInFlight` or `BalloonOwned`, then to reusable-detached or hard-zero
+backing. Docker, cgroup, PSI, and host pressure signals may explain why reclaim
+was requested, but they are never proof that a GPA is disposable.
+
+## Host–Guest Granule Contract
+
+On the supported ARM64 host, the VMM can detach memory only in native 16 KiB
+host granules while the virtio-balloon protocol uses 4 KiB PFNs. A 4 KiB guest
+can leave one host granule partly guest-owned after build activity; that page
+must remain resident because detaching it would revoke memory Linux still owns.
+
+The Docker and fast direct kernels therefore use 16 KiB ARM64 Linux pages. Each
+balloon allocation is reported as four adjacent 4 KiB PFNs, giving the VMM a
+whole host granule that it can detach, mark reusable immediately, and restore
+before guest ownership is returned. This is a compatibility requirement for
+near-baseline idle memory after large builds, not a best-effort reclaim policy.
+
+## Controller Ownership
+
+Jetstream is the sole owner of balloon-target transitions for the direct-kernel
+VMM. macOS-side code only checks the guest and VMM telemetry endpoints; it does
+not set a balloon target or run a competing reclaim policy.
+
+After runtime readiness, Jetstream waits for a quiet dwell, verifies the guest
+snapshot, and then reduces its own target to the 512 MiB idle floor. Workload
+start is recognized from Docker API requests, framed TCP payloads, or verified
+build-progress output when a client transport does not expose its request path.
+Any Docker transport-byte progress also restores configured capacity, so opaque
+BuildKit sessions cannot remain at the idle floor while they compile. After
+transport becomes quiet, Jetstream first asks the guest to reclaim caches, then
+repeats the quiet-state verification before shrinking. It defers a shrink
+when the daemon-scoped build cgroup is populated, container or service working
+set is at least 64 MiB, disk-backed swap is in use, or full memory PSI is
+elevated. Build workers are sibling scopes beneath the Docker daemon slice;
+the guest metrics and reclaimer resolve that location directly.
+Once the idle target is applied, the controller disarms its probe state until a
+new workload is observed.
+
+The 512 MiB target is guest capacity, not an absolute host-process number.
+Activity Monitor also charges the VMM executable, Hypervisor framework state,
+device queues, and the Linux/Docker idle working set. Validate the target,
+page-ledger residency, zero partial granules, and final physical footprint
+together rather than treating one displayed number as the guest allocation.
 
 ## Current Debug Surface
 
@@ -154,9 +194,9 @@ conjet mem test idle-return --project ~/Workspace/Org/chum-mem --target-idle-rss
 
 ```text
 Pinned pages are in DiscardedSoft or DiscardedHardZero
-GuestOwned pages are hard-decommitted
+GuestOwned pages are detached from the guest mapping
 ReportInFlight pages are acked before reclaim completes
-hv_vm_unmap bytes do not match DiscardedHardZero bytes
+detached balloon pages lack a matching restore path
 page-report descriptors are acked despite partial invalid ranges
 ranges overlap MMIO or device memory
 ranges are not host-page aligned
@@ -167,6 +207,12 @@ page-state bytes do not sum to guest_visible_ram
 `ps` and `vmmap -summary` for the VMM child process. A large virtual size is
 not a failure; with sparse guest RAM, the important values are RSS, physical
 footprint, and the guest RAM region's resident contribution.
+
+The isolated ChumMem trace also records
+`current_partially_owned_host_granules`. A no-cache build should leave this
+near zero after the target returns to idle. A large value identifies a
+granularity mismatch: the pages are intentionally retained because only part
+of each host granule is balloon-owned.
 
 ## Build Validation Checklist
 
@@ -197,7 +243,7 @@ guest MemAvailable and inactive file
 Docker/cgroup working set
 PSI memory some/full
 page-report received and accepted bytes
-soft-reclaimed and hard-decommitted bytes
+soft/reusable and hard-decommitted bytes
 balloon-owned and report-in-flight reclaimed bytes
 reclaim failures and malformed report counts
 ```
@@ -205,6 +251,29 @@ reclaim failures and malformed report counts
 The pass condition is not just "RSS dropped". The evidence must show Linux
 reported disposable pages and Jetstream reclaimed only `BalloonOwned` or
 in-flight `ReportInFlight` ranges.
+
+For an isolated no-cache Docker build, use the trace harness with an explicit
+idle observation period. It leaves the user runtime untouched and records the
+post-build return rather than only the peak:
+
+```sh
+build-support/run-chum-mem-memory-trace.sh \
+  --manifest /path/to/isolated-manifest.json \
+  --import-command 'docker compose build --no-cache' \
+  --skip-compose-up \
+  --skip-api-forward \
+  --pre-import-idle-seconds 20 \
+  --post-import-settle-seconds 90 \
+  --expect-core-idle-target-mib 512 \
+  --expect-core-workload-expansions 1 \
+  --require-core-capacity-during-import \
+  --max-core-post-idle-probes 1 \
+  --max-final-physical-footprint-mib 1024
+```
+
+`--require-core-capacity-during-import` is a regression gate for reclaim
+thrash: after a Docker workload expands capacity, every import-stage sample
+must retain the configured target until the client command exits.
 
 ## Runtime Flags
 
@@ -216,15 +285,18 @@ CONJET_MEM_DISABLE_HARD_DECOMMIT=1
 CONJET_MEM_DISABLE_MADV_FREE=1
 CONJET_MEM_DISABLE_BALLOON=1
 CONJET_MEM_DISABLE_PAGE_REPORTING=1
+CONJET_MEM_DISABLE_CORE_IDLE_CONTROLLER=1
+CONJET_MEM_CORE_IDLE_TARGET_MIB=512
+CONJET_MEM_CORE_IDLE_DWELL_MS=8000
 ```
 
 Use these for focused validation:
 
 ```sh
-# Prove the hard decommit path is responsible for deterministic RSS drops.
+# Exercise the hard-decommit fallback when reusable detached backing is unavailable.
 CONJET_MEM_HARD_DECOMMIT_ONLY=1 conjet start
 
-# Prove the soft-discard fallback still works when hard decommit is disabled.
+# Prove the mapping-preserving soft-discard fallback still works when hard decommit is disabled.
 CONJET_MEM_DISABLE_HARD_DECOMMIT=1 conjet start
 
 # Prove page reporting is required for post-build discard.

@@ -114,20 +114,20 @@ Observed progress on 2026-05-30:
   `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260530-fsevents-hot-reload/conjetfs-hot-reload.json`
   exited 0 with `hot_reload_seconds = 0.479`, `watch_sync_seconds = 0.343`, and
   `watch_event_paths = 1`.
-- OrbStack 2.1.3 is installed and exposes Docker context `orbstack`. A
+- ReferenceRuntime 2.1.3 is installed and exposes Docker context `reference-runtime`. A
   watcher-focused smoke report was written to
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260530-orbstack-smoke/hot-reload-contexts.json`.
-  `container-start` passed on Conjet, OrbStack, and Colima. The in-container
-  `fs.watch` bind-mount probe passed on OrbStack but timed out on Conjet and
+  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260530-reference-runtime-smoke/hot-reload-contexts.json`.
+  `container-start` passed on Conjet, ReferenceRuntime, and Colima. The in-container
+  `fs.watch` bind-mount probe passed on ReferenceRuntime but timed out on Conjet and
   Colima, while `conjetfs-hot-reload` passed on all three contexts. This keeps
   the direct bind watcher gap visible and proves why the ConjetFS path is the
   current fast/hot-reload path.
 - A repeated 3-sample hot-reload matrix was written to
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260530-orbstack-hot-reload-3x/hot-reload-contexts.json`.
+  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260530-reference-runtime-hot-reload-3x/hot-reload-contexts.json`.
   ConjetFS hot reload had 0 failures on all three contexts: Conjet P50/P95
-  `0.425/0.428s`, OrbStack P50/P95 `0.471/0.475s`, and Colima P50/P95
+  `0.425/0.428s`, ReferenceRuntime P50/P95 `0.471/0.475s`, and Colima P50/P95
   `0.443/0.448s`. Direct bind `fs.watch` still timed out on Conjet and Colima
-  and passed on OrbStack with P50/P95 `0.133/0.200s`.
+  and passed on ReferenceRuntime with P50/P95 `0.133/0.200s`.
 - A 3-iteration benchmark report was generated at
   `benchmarks/reports/docker-conjetfs-contexts-20260530-090525.md` on an Apple M1 Pro
   with AC power and nominal thermals. All 72 benchmark samples exited 0. Conjet
@@ -150,9 +150,9 @@ Observed progress on 2026-05-30:
 - A local standalone benchmark power smoke confirmed structured output on permission failure:
   exit code 1, `powermetrics must be invoked as the superuser`, and machine
   profile metadata captured.
-- `conjet-bench gate` was added as the faster-than-OrbStack claim verifier. It
+- `conjet-bench gate` was added as the faster-than-ReferenceRuntime claim verifier. It
   accepts raw JSON reports, requires the release workload matrix to include
-  Conjet plus OrbStack and tuned Colima, enforces minimum sample counts and zero
+  Conjet plus ReferenceRuntime and tuned Colima, enforces minimum sample counts and zero
   failures, and rejects the claim unless Conjet P50/P95 is at or below each
   baseline for each required workload or metric. Hot-reload rules now compare
   the `hot_reload_seconds` metric directly.
@@ -166,13 +166,13 @@ Observed progress on 2026-05-30:
   `all-results.md`, `gate.json`, and `gate.md`, then exits nonzero unless the
   same claim gate passes.
 - Unit coverage now verifies that the release-gate runner writes all expected
-  artifacts and still fails when OrbStack evidence is not collected.
+  artifacts and still fails when ReferenceRuntime evidence is not collected.
 
 Observed progress on 2026-05-31:
 
-- Conjet, OrbStack, and Colima state were moved onto the external SSD-backed
+- Conjet, ReferenceRuntime, and Colima state were moved onto the external SSD-backed
   `/Volumes/ExternalSSD/dev_worskpace` path for same-storage benchmarking.
-  `~/.orbstack` is a symlink into the external SSD, `CONJET_HOME` points at
+  `~/.reference-runtime` is a symlink into the external SSD, `CONJET_HOME` points at
   `/Volumes/ExternalSSD/dev_worskpace/.conjet`, and `COLIMA_HOME` points at
   `/Volumes/ExternalSSD/dev_worskpace/.colima`.
 - The Docker benchmark suite now uses a global fast path: keep source-visible
@@ -183,11 +183,11 @@ Observed progress on 2026-05-31:
 - The process runner now captures child stdout/stderr through temporary files
   instead of pipes. This avoids pipe descriptor failures and pipe backpressure
   during long benchmark matrices with hundreds of Docker child processes.
-- A fresh 30-iteration warm Conjet-vs-OrbStack matrix was written to
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-30x-v3.json`.
+- A fresh 30-iteration warm Conjet-vs-ReferenceRuntime matrix was written to
+  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-reference-runtime-30x-v3.json`.
   The gate report is
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-orbstack-30x-v3-gate.md`.
-- That gate passed every configured non-power workload against OrbStack. The
+  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-reference-runtime-30x-v3-gate.md`.
+- That gate passed every configured non-power workload against ReferenceRuntime. The
   current run uses interleaved measured samples by iteration, so the second
   runtime no longer gets a systematic host-cache ordering advantage:
   container start, image build, copy-heavy layers, npm, pnpm, Cargo, bind
@@ -201,7 +201,7 @@ Observed progress on 2026-05-31:
   latest Colima full gate passed nearly all non-power rules, but raw
   `pnpm-install` and one `volume-pnpm-install` ratio still missed on small
   P95/P50 deltas under five-sample nearest-rank P95. The ConjetFS/native-volume
-  fast paths remained comfortably ahead. This is not part of the OrbStack
+  fast paths remained comfortably ahead. This is not part of the ReferenceRuntime
   verdict, but it stays open as a harness/runtime stabilization item.
 - `conjet-bench` active energy sampling was added for active energy-to-solution evidence. It
   runs a workload while sampling `powermetrics`, records workload duration,
@@ -214,13 +214,13 @@ Observed progress on 2026-05-31:
 - Local `bench energy` smoke tests proved structured output and workload
   execution, but macOS denied `powermetrics` both without sudo and with
   `sudo -n` because no cached sudo credential was available. Therefore the
-  wall-time claim against OrbStack is currently proven by the gate, while the
+  wall-time claim against ReferenceRuntime is currently proven by the gate, while the
   active energy-to-solution claim remains blocked on privileged power sampling.
 
 Next required work:
 
 - Run `bench power` and `bench energy` under configured noninteractive
-  `powermetrics` for Conjet, OrbStack, and tuned Colima.
+  `powermetrics` for Conjet, ReferenceRuntime, and tuned Colima.
 - Run `bench release-gate` with power enabled and publish the failed or passed
   gate result as a release artifact.
 - Add guest-side inotify/fanotify replay from the FSEvents watch stream once

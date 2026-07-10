@@ -213,7 +213,7 @@ final class DockerSocketBridgeTests: XCTestCase {
             encoding: .utf8
         ) ?? ""
 
-        XCTAssertTrue(rewritten.contains("POST /v1.52/build?t=demo&nocache=1&cgroupparent=/conjet.slice/conjet-build.slice HTTP/1.1"))
+        XCTAssertTrue(rewritten.contains("POST /v1.52/build?t=demo&nocache=1&cgroupparent=conjet-build.slice HTTP/1.1"))
     }
 
     func testBuildRequestRewritePreservesExistingCgroupParent() {
@@ -231,7 +231,7 @@ final class DockerSocketBridgeTests: XCTestCase {
         ) ?? ""
 
         XCTAssertTrue(rewritten.contains("POST /build?cgroupparent=custom.slice&t=demo HTTP/1.1"))
-        XCTAssertFalse(rewritten.contains("/conjet.slice/conjet-build.slice"))
+        XCTAssertFalse(rewritten.contains("cgroupparent=conjet-build.slice"))
     }
 
     func testContainerCreateRewriteAddsPerServiceCgroupParent() throws {
@@ -539,7 +539,7 @@ final class DockerSocketBridgeTests: XCTestCase {
         XCTAssertTrue(response.contains("204 No Content"))
         XCTAssertTrue(waitUntil { observed.events.contains(where: { $0.kind == .workloadFinished }) })
         XCTAssertTrue(waitUntil {
-            connector.requests.first?.contains("cgroupparent=/conjet.slice/conjet-build.slice") == true
+            connector.requests.first?.contains("cgroupparent=conjet-build.slice") == true
         })
         XCTAssertTrue(observed.events.contains(DockerMemoryActivity(
             kind: .workloadStarted,
@@ -628,7 +628,7 @@ final class DockerSocketBridgeTests: XCTestCase {
 
         XCTAssertTrue(response.contains("#1 DONE 0.1s"))
         XCTAssertTrue(waitUntil {
-            connector.requests.first?.contains("cgroupparent=/conjet.slice/conjet-build.slice") == true
+            connector.requests.first?.contains("cgroupparent=conjet-build.slice") == true
         })
         XCTAssertTrue(waitUntil { observed.events.contains(where: { $0.kind == .streamPhaseFinished }) })
         let phase = observed.events.first { $0.kind == .streamPhaseFinished }

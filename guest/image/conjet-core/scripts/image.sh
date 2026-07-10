@@ -683,7 +683,7 @@ touch "${MOUNT_DIR}/etc/cloud/cloud-init.disabled"
 mkdir -p "${MOUNT_DIR}/etc/docker" "${MOUNT_DIR}/etc/sysctl.d"
 cat >"${MOUNT_DIR}/etc/docker/daemon.json" <<'EOF_DOCKER'
 {
-  "cgroup-parent": "/conjet.slice/conjet-build.slice",
+  "cgroup-parent": "conjet-build.slice",
   "features": {
     "buildkit": true
   },

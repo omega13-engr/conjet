@@ -20,6 +20,20 @@ Options:
   --import-max-files N         Default importer max files (default: 25)
   --api-host-port N            Local proxy port for guest chum-mem API (default: 63001)
   --sample-interval SECONDS    Trace sample interval (default: 1)
+  --pre-import-idle-seconds N  Idle observation before the workload (default: 0)
+  --post-import-settle-seconds N
+                               Idle observation period after the workload (default: 90)
+  --expect-core-idle-target-mib N
+                               Require Jetstream to return to this target after idle
+  --expect-core-workload-expansions N
+                               Require at least this many Core workload expansions
+  --require-core-capacity-during-import
+                               Require Core to retain configured capacity after workload expansion
+                               until the import command exits
+  --max-core-post-idle-probes N
+                               Fail if Jetstream exceeds this probe budget after reaching idle
+  --max-final-physical-footprint-mib N
+                               Fail if the final Core physical footprint exceeds this limit
   --memory-mib N               Configured guest memory MiB (default: 8192)
   --cpus N                     vCPU count (default: 4)
   --timeout-seconds N          Readiness timeout (default: 900)
@@ -53,6 +67,13 @@ IMPORT_COMMAND=""
 IMPORT_MAX_FILES=25
 API_HOST_PORT=63001
 SAMPLE_INTERVAL=1
+PRE_IMPORT_IDLE_SECONDS=0
+POST_IMPORT_SETTLE_SECONDS=90
+EXPECT_CORE_IDLE_TARGET_MIB=""
+EXPECT_CORE_WORKLOAD_EXPANSIONS=""
+REQUIRE_CORE_CAPACITY_DURING_IMPORT=0
+MAX_CORE_POST_IDLE_PROBES=""
+MAX_FINAL_PHYSICAL_FOOTPRINT_MIB=""
 MEMORY_MIB=8192
 CPUS=4
 TIMEOUT_SECONDS=900
@@ -97,6 +118,34 @@ while [ "$#" -gt 0 ]; do
       ;;
     --sample-interval)
       SAMPLE_INTERVAL="${2:?missing value for --sample-interval}"
+      shift 2
+      ;;
+    --pre-import-idle-seconds)
+      PRE_IMPORT_IDLE_SECONDS="${2:?missing value for --pre-import-idle-seconds}"
+      shift 2
+      ;;
+    --post-import-settle-seconds)
+      POST_IMPORT_SETTLE_SECONDS="${2:?missing value for --post-import-settle-seconds}"
+      shift 2
+      ;;
+    --expect-core-idle-target-mib)
+      EXPECT_CORE_IDLE_TARGET_MIB="${2:?missing value for --expect-core-idle-target-mib}"
+      shift 2
+      ;;
+    --expect-core-workload-expansions)
+      EXPECT_CORE_WORKLOAD_EXPANSIONS="${2:?missing value for --expect-core-workload-expansions}"
+      shift 2
+      ;;
+    --require-core-capacity-during-import)
+      REQUIRE_CORE_CAPACITY_DURING_IMPORT=1
+      shift
+      ;;
+    --max-core-post-idle-probes)
+      MAX_CORE_POST_IDLE_PROBES="${2:?missing value for --max-core-post-idle-probes}"
+      shift 2
+      ;;
+    --max-final-physical-footprint-mib)
+      MAX_FINAL_PHYSICAL_FOOTPRINT_MIB="${2:?missing value for --max-final-physical-footprint-mib}"
       shift 2
       ;;
     --memory-mib)
@@ -164,12 +213,52 @@ if [ "$RUN_API_FORWARD" -eq 1 ] && ! command -v socat >/dev/null 2>&1; then
   exit 1
 fi
 
-case "$MEMORY_MIB:$CPUS:$TIMEOUT_SECONDS:$IMPORT_MAX_FILES:$API_HOST_PORT" in
+case "$MEMORY_MIB:$CPUS:$TIMEOUT_SECONDS:$IMPORT_MAX_FILES:$API_HOST_PORT:$PRE_IMPORT_IDLE_SECONDS:$POST_IMPORT_SETTLE_SECONDS" in
   *[!0-9:]*)
     echo "numeric options must be positive integers" >&2
     exit 2
     ;;
 esac
+if [ -n "$EXPECT_CORE_IDLE_TARGET_MIB" ]; then
+  case "$EXPECT_CORE_IDLE_TARGET_MIB" in
+    *[!0-9]*|"")
+      echo "--expect-core-idle-target-mib must be a positive integer" >&2
+      exit 2
+      ;;
+  esac
+  if [ "$EXPECT_CORE_IDLE_TARGET_MIB" -le 0 ]; then
+    echo "--expect-core-idle-target-mib must be a positive integer" >&2
+    exit 2
+  fi
+fi
+if [ -n "$EXPECT_CORE_WORKLOAD_EXPANSIONS" ]; then
+  case "$EXPECT_CORE_WORKLOAD_EXPANSIONS" in
+    *[!0-9]*|"")
+      echo "--expect-core-workload-expansions must be a non-negative integer" >&2
+      exit 2
+      ;;
+  esac
+fi
+if [ -n "$MAX_CORE_POST_IDLE_PROBES" ]; then
+  case "$MAX_CORE_POST_IDLE_PROBES" in
+    *[!0-9]*|"")
+      echo "--max-core-post-idle-probes must be a non-negative integer" >&2
+      exit 2
+      ;;
+  esac
+fi
+if [ -n "$MAX_FINAL_PHYSICAL_FOOTPRINT_MIB" ]; then
+  case "$MAX_FINAL_PHYSICAL_FOOTPRINT_MIB" in
+    *[!0-9]*|"")
+      echo "--max-final-physical-footprint-mib must be a positive integer" >&2
+      exit 2
+      ;;
+  esac
+  if [ "$MAX_FINAL_PHYSICAL_FOOTPRINT_MIB" -le 0 ]; then
+    echo "--max-final-physical-footprint-mib must be a positive integer" >&2
+    exit 2
+  fi
+fi
 
 if [ -z "$QA_ROOT" ]; then
   QA_ROOT="$(mktemp -d "$DEFAULT_TMP_PARENT/conjet-chum-mem-trace.XXXXXX")"
@@ -447,6 +536,10 @@ sample_trace() {
          reusable_reclaimed_bytes: ($control.balloon.reusable_reclaimed_bytes // 0),
          reusable_restored_bytes: ($control.balloon.reusable_restored_bytes // 0),
          current_balloon_reusable_bytes: ($control.balloon.current_balloon_reusable_bytes // 0),
+         host_granule_eligible_bytes: ($control.balloon.host_granule_eligible_bytes // 0),
+         partial_host_granule_bytes: ($control.balloon.partial_host_granule_bytes // 0),
+         current_fully_owned_host_granules: ($control.balloon.current_fully_owned_host_granules // 0),
+         current_partially_owned_host_granules: ($control.balloon.current_partially_owned_host_granules // 0),
          zero_swept_bytes: ($control.balloon.zero_swept_bytes // 0),
          zero_sweep_failed_bytes: ($control.balloon.zero_sweep_failed_bytes // 0),
          reuse_failures: ($control.balloon.reuse_failures // 0),
@@ -455,6 +548,21 @@ sample_trace() {
        vmm: {
          target_mib: ($control.target_mib // 0),
          target_pages: ($control.target_pages // 0)
+       },
+       core_memory: {
+         enabled: ($control.core_memory.enabled // false),
+         idle_target_mib: ($control.core_memory.idle_target_mib // 0),
+         current_target_mib: ($control.core_memory.current_target_mib // 0),
+         pending_idle_probe: ($control.core_memory.pending_idle_probe // false),
+         idle_probe_inflight: ($control.core_memory.idle_probe_inflight // false),
+         workload_expansions: ($control.core_memory.workload_expansions // 0),
+         idle_shrinks: ($control.core_memory.idle_shrinks // 0),
+        idle_deferrals: ($control.core_memory.idle_deferrals // 0),
+        idle_probes: ($control.core_memory.idle_probes // 0),
+        transport_activity_events: ($control.core_memory.transport_activity_events // 0),
+        transport_quiet_transitions: ($control.core_memory.transport_quiet_transitions // 0),
+        last_reason: ($control.core_memory.last_reason // null),
+         last_error: ($control.core_memory.last_error // null)
        },
        host: {
          resident_bytes: ($control.host_memory.resident_bytes // 0),
@@ -475,6 +583,17 @@ wait_for_socket "memory-control" "$CONTROL_SOCKET"
 wait_for_docker_ping
 wait_for_guest_metrics
 sample_trace "boot-ready"
+
+if [ "$PRE_IMPORT_IDLE_SECONDS" -gt 0 ]; then
+  rm -f "$TRACE_STOP"
+  sample_loop "pre-import-idle" &
+  SAMPLER_PID=$!
+  sleep "$PRE_IMPORT_IDLE_SECONDS"
+  : >"$TRACE_STOP"
+  wait "$SAMPLER_PID" >/dev/null 2>&1 || true
+  SAMPLER_PID=""
+  sample_trace "pre-import-idle"
+fi
 
 export DOCKER_HOST="unix://$DOCKER_SOCKET"
 export COMPOSE_PROJECT_NAME="chum-mem"
@@ -503,8 +622,39 @@ import_rc=0
 wait "$SAMPLER_PID" >/dev/null 2>&1 || true
 SAMPLER_PID=""
 sample_trace "import-finished"
+if [ "$POST_IMPORT_SETTLE_SECONDS" -gt 0 ]; then
+  rm -f "$TRACE_STOP"
+  sample_loop "post-import-idle" &
+  SAMPLER_PID=$!
+  sleep "$POST_IMPORT_SETTLE_SECONDS"
+  : >"$TRACE_STOP"
+  wait "$SAMPLER_PID" >/dev/null 2>&1 || true
+  SAMPLER_PID=""
+fi
+sample_trace "post-import-idle"
 vmmap -summary "$VMM_PID" >"$VMMAP_FINAL" 2>&1 || true
 footprint "$VMM_PID" >"$FOOTPRINT_FINAL" 2>&1 || true
+
+EXPECTED_CORE_IDLE_TARGET_JSON="null"
+if [ -n "$EXPECT_CORE_IDLE_TARGET_MIB" ]; then
+  EXPECTED_CORE_IDLE_TARGET_JSON="$EXPECT_CORE_IDLE_TARGET_MIB"
+fi
+MAX_CORE_POST_IDLE_PROBES_JSON="null"
+if [ -n "$MAX_CORE_POST_IDLE_PROBES" ]; then
+  MAX_CORE_POST_IDLE_PROBES_JSON="$MAX_CORE_POST_IDLE_PROBES"
+fi
+EXPECTED_CORE_WORKLOAD_EXPANSIONS_JSON="null"
+if [ -n "$EXPECT_CORE_WORKLOAD_EXPANSIONS" ]; then
+  EXPECTED_CORE_WORKLOAD_EXPANSIONS_JSON="$EXPECT_CORE_WORKLOAD_EXPANSIONS"
+fi
+REQUIRE_CORE_CAPACITY_DURING_IMPORT_JSON=false
+if [ "$REQUIRE_CORE_CAPACITY_DURING_IMPORT" -eq 1 ]; then
+  REQUIRE_CORE_CAPACITY_DURING_IMPORT_JSON=true
+fi
+MAX_FINAL_PHYSICAL_FOOTPRINT_MIB_JSON="null"
+if [ -n "$MAX_FINAL_PHYSICAL_FOOTPRINT_MIB" ]; then
+  MAX_FINAL_PHYSICAL_FOOTPRINT_MIB_JSON="$MAX_FINAL_PHYSICAL_FOOTPRINT_MIB"
+fi
 
 jq -s \
   --arg qa_root "$QA_ROOT" \
@@ -515,8 +665,45 @@ jq -s \
   --arg vmmap_final "$VMMAP_FINAL" \
   --arg footprint_final "$FOOTPRINT_FINAL" \
   --argjson import_exit_code "$import_rc" \
-  '{
-    ok: ($import_exit_code == 0 and length > 0),
+  --argjson expected_core_idle_target_mib "$EXPECTED_CORE_IDLE_TARGET_JSON" \
+  --argjson max_core_post_idle_probes "$MAX_CORE_POST_IDLE_PROBES_JSON" \
+  --argjson expected_core_workload_expansions "$EXPECTED_CORE_WORKLOAD_EXPANSIONS_JSON" \
+  --argjson require_core_capacity_during_import "$REQUIRE_CORE_CAPACITY_DURING_IMPORT_JSON" \
+  --argjson configured_memory_mib "$MEMORY_MIB" \
+  --argjson max_final_physical_footprint_mib "$MAX_FINAL_PHYSICAL_FOOTPRINT_MIB_JSON" \
+  '($expected_core_idle_target_mib == null or
+      ((.[-1].vmm.target_mib // -1) == $expected_core_idle_target_mib and
+       (.[-1].core_memory.enabled // false) and
+       (.[-1].core_memory.idle_shrinks // 0) > 0)) as $core_idle_target_ok |
+   ([.[].core_memory.idle_shrinks] | max // 0) as $final_idle_shrink_count |
+   ([.[] | select(
+      $final_idle_shrink_count > 0 and
+      (.core_memory.idle_shrinks // 0) == $final_idle_shrink_count
+    )] | first) as $first_final_idle_sample |
+   (if $first_final_idle_sample == null then null
+    else ((.[-1].core_memory.idle_probes // 0) - ($first_final_idle_sample.core_memory.idle_probes // 0))
+    end) as $post_idle_probe_count |
+   ($max_core_post_idle_probes == null or
+      ($post_idle_probe_count != null and $post_idle_probe_count <= $max_core_post_idle_probes))
+      as $core_post_idle_probe_budget_ok |
+   ($expected_core_workload_expansions == null or
+      (([.[].core_memory.workload_expansions] | max // 0) >= $expected_core_workload_expansions))
+      as $core_workload_expansion_ok |
+   ([.[] | select(
+      .stage == "chum-mem-import" and
+      (.core_memory.workload_expansions // 0) > 0
+    )]) as $import_workload_samples |
+   ($require_core_capacity_during_import | not or
+      (($import_workload_samples | length) > 0 and
+       ($import_workload_samples |
+        all(.[]; (.vmm.target_mib // 0) == $configured_memory_mib))))
+      as $core_capacity_during_import_ok |
+   (.[-1].host.physical_footprint_bytes // 0) as $final_physical_footprint_bytes |
+   ($max_final_physical_footprint_mib == null or
+      $final_physical_footprint_bytes <= ($max_final_physical_footprint_mib * 1024 * 1024))
+      as $final_physical_footprint_ok |
+   {
+    ok: ($import_exit_code == 0 and length > 0 and $core_idle_target_ok and $core_post_idle_probe_budget_ok and $core_workload_expansion_ok and $core_capacity_during_import_ok and $final_physical_footprint_ok),
     qa_root: $qa_root,
     trace_jsonl: $trace_jsonl,
     import_log: $import_log,
@@ -525,6 +712,18 @@ jq -s \
     vmmap_final: $vmmap_final,
     footprint_final: $footprint_final,
     import_exit_code: $import_exit_code,
+    expected_core_idle_target_mib: $expected_core_idle_target_mib,
+    core_idle_target_ok: $core_idle_target_ok,
+    max_core_post_idle_probes: $max_core_post_idle_probes,
+    post_idle_probe_count: $post_idle_probe_count,
+    core_post_idle_probe_budget_ok: $core_post_idle_probe_budget_ok,
+    expected_core_workload_expansions: $expected_core_workload_expansions,
+    core_workload_expansion_ok: $core_workload_expansion_ok,
+    require_core_capacity_during_import: $require_core_capacity_during_import,
+    core_capacity_during_import_ok: $core_capacity_during_import_ok,
+    max_final_physical_footprint_mib: $max_final_physical_footprint_mib,
+    final_physical_footprint_bytes: $final_physical_footprint_bytes,
+    final_physical_footprint_ok: $final_physical_footprint_ok,
     samples: length,
     first: (.[0] // null),
     last: (.[-1] // null),
@@ -537,10 +736,26 @@ jq -s \
     max_reusable_reclaimed_bytes: ([.[].balloon.reusable_reclaimed_bytes] | max // 0),
     max_reusable_restored_bytes: ([.[].balloon.reusable_restored_bytes] | max // 0),
     max_current_balloon_reusable_bytes: ([.[].balloon.current_balloon_reusable_bytes] | max // 0),
+    max_host_granule_eligible_bytes: ([.[].balloon.host_granule_eligible_bytes] | max // 0),
+    max_partial_host_granule_bytes: ([.[].balloon.partial_host_granule_bytes] | max // 0),
+    max_current_fully_owned_host_granules: ([.[].balloon.current_fully_owned_host_granules] | max // 0),
+    max_current_partially_owned_host_granules: ([.[].balloon.current_partially_owned_host_granules] | max // 0),
     max_zero_swept_bytes: ([.[].balloon.zero_swept_bytes] | max // 0),
     max_zero_sweep_failed_bytes: ([.[].balloon.zero_sweep_failed_bytes] | max // 0),
-    max_reuse_failures: ([.[].balloon.reuse_failures] | max // 0)
+    max_reuse_failures: ([.[].balloon.reuse_failures] | max // 0),
+    max_core_workload_expansions: ([.[].core_memory.workload_expansions] | max // 0),
+    max_core_idle_shrinks: ([.[].core_memory.idle_shrinks] | max // 0),
+    max_core_idle_deferrals: ([.[].core_memory.idle_deferrals] | max // 0),
+    max_core_idle_probes: ([.[].core_memory.idle_probes] | max // 0),
+    max_core_transport_activity_events: ([.[].core_memory.transport_activity_events] | max // 0),
+    max_core_transport_quiet_transitions: ([.[].core_memory.transport_quiet_transitions] | max // 0)
   }' "$TRACE_JSONL" >"$SUMMARY_JSON"
 
 cat "$SUMMARY_JSON"
-exit "$import_rc"
+if [ "$import_rc" -ne 0 ]; then
+  exit "$import_rc"
+fi
+if ! jq -e '.ok == true' "$SUMMARY_JSON" >/dev/null; then
+  exit 1
+fi
+exit 0

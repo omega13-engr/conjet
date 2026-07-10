@@ -391,8 +391,12 @@ final class GuestKernelConfigTests: XCTestCase {
                 }
         )
 
+        XCTAssertTrue(config.contains("CONFIG_ARM64_16K_PAGES=y"))
+        XCTAssertTrue(config.contains("# CONFIG_ARM64_4K_PAGES is not set"))
+        XCTAssertTrue(configBuiltIns.contains("CONFIG_ARM64_16K_PAGES"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_OVERLAY_FS"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_BLK_DEV"))
+        XCTAssertTrue(configBuiltIns.contains("CONFIG_BLK_DEV_LOOP"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_PCI"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_PCI_HOST_GENERIC"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_NVME_CORE"))
@@ -476,6 +480,7 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(dockerDirectBuiltIns.contains("CONFIG_VETH"))
         XCTAssertTrue(dockerDirectBuiltIns.contains("CONFIG_BRIDGE_NETFILTER"))
         XCTAssertTrue(dockerDirectBuiltIns.contains("CONFIG_CGROUP_BPF"))
+        XCTAssertTrue(dockerDirectBuiltIns.contains("CONFIG_ARM64_16K_PAGES"))
     }
 
     func testPulseFastKernelConfigKeepsDirectOCISubstrateWithoutSerialOrDockerBulk() throws {
@@ -494,8 +499,10 @@ final class GuestKernelConfigTests: XCTestCase {
         )
 
         for required in [
+            "CONFIG_ARM64_16K_PAGES",
             "CONFIG_OF",
             "CONFIG_BLK_DEV_INITRD",
+            "CONFIG_BLK_DEV_LOOP",
             "CONFIG_DEVTMPFS",
             "CONFIG_VIRTIO_MMIO",
             "CONFIG_VIRTIO_BLK",
@@ -530,6 +537,7 @@ final class GuestKernelConfigTests: XCTestCase {
         }
 
         XCTAssertFalse(configBuiltIns.contains("CONFIG_SERIAL_AMBA_PL011"))
+        XCTAssertTrue(config.contains("# CONFIG_ARM64_4K_PAGES is not set"))
         XCTAssertFalse(configBuiltIns.contains("CONFIG_SERIAL_AMBA_PL011_CONSOLE"))
         XCTAssertFalse(configBuiltIns.contains("CONFIG_BRIDGE"))
         XCTAssertFalse(configBuiltIns.contains("CONFIG_NETFILTER"))
@@ -561,7 +569,7 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(imageScript.contains("conjet-build.slice"))
         XCTAssertTrue(imageScript.contains("enable_unit conjet-build.slice conjet-appliance.target"))
         XCTAssertTrue(imageScript.contains("enable_unit conjet-services.slice conjet-appliance.target"))
-        XCTAssertTrue(imageScript.contains(#""cgroup-parent": "/conjet.slice/conjet-build.slice""#))
+        XCTAssertTrue(imageScript.contains(#""cgroup-parent": "conjet-build.slice""#))
         XCTAssertTrue(imageScript.contains(#""buildkit": true"#))
         XCTAssertFalse(imageScript.contains("buildkit-${BUILDKIT_VERSION}.linux-${buildkit_arch}.tar.gz"))
         XCTAssertFalse(imageScript.contains("bin/buildkitd"))
@@ -647,7 +655,7 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(script.contains("CONJET_QA_ROOT_BASE:-/tmp"))
         XCTAssertTrue(script.contains("mktemp -d \"${qa_root_base%/}/conjet-core-release-local.XXXXXX\""))
         XCTAssertTrue(script.contains("Docker socket is not available"))
-        XCTAssertTrue(script.contains("docker --host \"${docker_host}\" run --rm"))
+        XCTAssertTrue(script.contains("docker --host \"${docker_host}\" create"))
         XCTAssertTrue(script.contains("--ulimit nofile=65536:65536"))
         XCTAssertTrue(script.contains("container_platform=\"linux/arm64\""))
         XCTAssertTrue(script.contains("--root-disk-gb"))
@@ -658,7 +666,13 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(script.contains("sha512sum \"$(basename \"${kernel_asset}\")\" > \"$(basename \"${kernel_asset}\").sha512sum\""))
         XCTAssertTrue(script.contains("make -C guest/image/conjet-core image"))
         XCTAssertTrue(script.contains("guest/image/conjet-core/dist/out/*.raw.gz"))
-        XCTAssertTrue(script.contains("ARTIFACT_DIR=\"${artifact_dir}\""))
+        XCTAssertTrue(script.contains("ARTIFACT_DIR=\"${container_artifact_dir}\""))
+        XCTAssertTrue(script.contains("docker --host \"${docker_host}\" cp - \"${container_id}:/\""))
+        XCTAssertTrue(script.contains("copy_release_artifacts()"))
+        XCTAssertTrue(script.contains("verify_release_checksum"))
+        XCTAssertTrue(script.contains("failed to transfer and verify the complete Core release artifact set"))
+        XCTAssertTrue(script.contains("${rootfs_asset_name}.sha512sum"))
+        XCTAssertFalse(script.contains("${container_id}:${container_artifact_dir}/.\" \"${artifact_dir}"))
         XCTAssertFalse(script.contains("ROOTFS_ONLY"))
     }
 

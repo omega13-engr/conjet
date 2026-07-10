@@ -555,7 +555,7 @@ static void test_build_request_rewrite_adds_cgroup_parent(void) {
         "build request cgroup rewrite",
         (const char *)rewritten,
         rewritten_len,
-        "POST /v1.52/build?t=chum-mem-api&nocache=1&cgroupparent=/conjet.slice/conjet-build.slice HTTP/1.1"
+        "POST /v1.52/build?t=chum-mem-api&nocache=1&cgroupparent=conjet-build.slice HTTP/1.1"
     );
     free(rewritten);
 }
@@ -628,6 +628,58 @@ static void test_docker_http_request_extent_detects_complete_requests(void) {
         docker_http_request_extent((const uint8_t *)chunked_request, strlen(chunked_request), &needed),
         0
     );
+}
+
+static void test_large_fixed_length_request_streams_after_the_initial_prefix(void) {
+    char first[256];
+    int first_len = snprintf(
+        first,
+        sizeof(first),
+        "PUT /v1.52/containers/example/archive?path=/work HTTP/1.1\r\n"
+        "Host: docker\r\n"
+        "Content-Length: %u\r\n"
+        "\r\n"
+        "prefix",
+        DOCKER_MAX_INITIAL_REQUEST
+    );
+    if (first_len <= 0 || (size_t)first_len >= sizeof(first)) {
+        fprintf(stderr, "large fixed-length request fixture overflow\n");
+        exit(1);
+    }
+
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
+        perror("socketpair");
+        exit(1);
+    }
+
+    uint8_t *initial = NULL;
+    size_t initial_len = 0;
+    int complete = 1;
+    require_int(
+        "large fixed-length request initial receive",
+        receive_initial_docker_request(
+            pair[0],
+            (const uint8_t *)first,
+            (size_t)first_len,
+            &initial,
+            &initial_len,
+            &complete
+        ),
+        0
+    );
+    require_int("large fixed-length request remains streaming", complete, 0);
+    require_size("large fixed-length request preserves prefix", initial_len, (size_t)first_len);
+    if (memcmp(initial, first, initial_len) != 0) {
+        fprintf(stderr, "large fixed-length request prefix mismatch\n");
+        free(initial);
+        close(pair[0]);
+        close(pair[1]);
+        exit(1);
+    }
+    free(initial);
+    close(pair[0]);
+    close(pair[1]);
 }
 
 static void test_rewrite_http_request_connection_close_replaces_keepalive(void) {
@@ -751,7 +803,7 @@ static void test_handle_docker_proxy_rewrites_fragmented_build_request(void) {
         "fragmented build request proxy",
         first,
         remainder,
-        "cgroupparent=/conjet.slice/conjet-build.slice",
+        "cgroupparent=conjet-build.slice",
         response,
         "{\"ok\":true}",
         0,
@@ -860,6 +912,7 @@ int main(void) {
     test_build_request_rewrite_adds_cgroup_parent();
     test_build_request_rewrite_skips_existing_cgroup_parent();
     test_docker_http_request_extent_detects_complete_requests();
+    test_large_fixed_length_request_streams_after_the_initial_prefix();
     test_rewrite_http_request_connection_close_replaces_keepalive();
     test_docker_upgraded_requests_use_bidirectional_pump();
     test_handle_docker_proxy_rewrites_fragmented_container_create();

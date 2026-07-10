@@ -880,8 +880,8 @@ public struct NetworkBenchmarkSuite: Sendable {
         switch context {
         case "conjet":
             patterns = ["conjetd", "conjet-netd", "conjet-docker-vsock-bridge.py"]
-        case "orbstack":
-            patterns = ["OrbStack Helper"]
+        case "reference-runtime":
+            patterns = ["ReferenceRuntime Helper"]
         case "colima":
             patterns = ["colima", "qemu", "vz"]
         default:

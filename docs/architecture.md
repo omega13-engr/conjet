@@ -208,7 +208,7 @@ On the host, Conjet Core starts a Docker socket bridge after the VM reaches
 connections from the local Docker CLI, and forwards each byte stream to the
 guest's VSOCK listener. If the guest bridge is not ready yet, the host bridge
 returns HTTP 503 instead of silently falling back to Docker Desktop, Colima, or
-OrbStack.
+ReferenceRuntime.
 
 The verified Ubuntu lane now supports `conjet run hello-world` through this
 socket path.

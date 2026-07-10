@@ -31,8 +31,16 @@ const HEADER_LEN: usize = 44;
 const DEFAULT_BUF_ALLOC: u32 = 4 * 1024 * 1024;
 const DEFAULT_GUEST_BUF_ALLOC: u64 = 256 * 1024;
 const MAX_HOST_PAYLOAD: usize = 32 * 1024;
+const TRANSMIT_DRAIN_BATCH_LIMIT: usize = 64;
 const SHUTDOWN_SEND: u32 = 2;
+const MAX_HTTP_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
+const MAX_HTTP_CHUNK_LINE_BYTES: usize = 8 * 1024;
 const CONJET_BINARY_FRAME_MAGIC: [u8; 4] = [0x43, 0x4a, 0x4e, 0x54];
+const CONJET_BINARY_FRAME_VERSION: u8 = 1;
+const CONJET_BINARY_FRAME_HEADER_LEN: usize = 20;
+const CONJET_BINARY_FRAME_TCP_DATA: u8 = 15;
+const MAX_CONJET_BINARY_FRAME_PAYLOAD: usize = 1024 * 1024;
+const MAX_DOCKER_WORKLOAD_REQUEST_PREFIX_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Error)]
 pub enum VsockError {
@@ -208,21 +216,53 @@ impl VsockQueueHandler {
         self.import_bridge_packets();
         match queue_index {
             x if x == VsockQueue::Transmit as u32 => {
-                let packets = self.transmit_executor.drain_and_publish(
-                    queue,
-                    transport,
-                    memory,
-                    guest_base,
-                    Some(64),
-                    |chain| receive_guest_packet(chain, memory, guest_base, &self.bridges),
-                )?;
-                Ok(packets)
+                self.drain_transmit_queue(queue, transport, memory, guest_base)
             }
             x if x == VsockQueue::Receive as u32 => {
                 self.deliver_host_packets(queue, transport, memory, guest_base)
             }
             _ => Ok(Vec::new()),
         }
+    }
+
+    fn drain_transmit_queue(
+        &mut self,
+        queue: VirtioQueueState,
+        transport: &mut VirtioMmioDevice,
+        memory: &GuestMemory,
+        guest_base: u64,
+    ) -> Result<Vec<UsedElement>, VsockError> {
+        let mut used = Vec::new();
+        loop {
+            // A Linux virtio-vsock sender can fill its entire ring before it
+            // waits for used descriptors. Drain every available batch for one
+            // notification; otherwise a bounded one-shot drain can strand a
+            // large Docker archive behind the initial batch indefinitely.
+            let batch = self.transmit_executor.drain_and_publish(
+                queue,
+                transport,
+                memory,
+                guest_base,
+                Some(TRANSMIT_DRAIN_BATCH_LIMIT),
+                |chain| receive_guest_packet(chain, memory, guest_base, &self.bridges),
+            )?;
+            let batch_len = batch.len();
+            used.extend(batch);
+            if batch_len < TRANSMIT_DRAIN_BATCH_LIMIT {
+                break;
+            }
+        }
+        // A shutdown control packet can be queued independently from a
+        // producer's data work.  Let every bridge observe the completed
+        // transport drain before using a close-delimited response fallback;
+        // framed HTTP responses use their wire terminator instead.
+        for bridge in &self.bridges {
+            bridge
+                .lock()
+                .expect("vsock bridge mutex poisoned")
+                .finish_pending_guest_shutdowns_after_transport_drain();
+        }
+        Ok(used)
     }
 
     fn import_bridge_packets(&mut self) {
@@ -384,6 +424,7 @@ pub struct HostUnixVsockBridgeState {
     detect_docker_phases: bool,
     docker_phase_request_events: u64,
     docker_phase_response_events: u64,
+    docker_workload_started_events: u64,
     docker_completed_stream_events: u64,
     docker_completed_workload_stream_events: u64,
     docker_request_bytes: u64,
@@ -406,6 +447,7 @@ impl HostUnixVsockBridgeState {
             detect_docker_phases,
             docker_phase_request_events: 0,
             docker_phase_response_events: 0,
+            docker_workload_started_events: 0,
             docker_completed_stream_events: 0,
             docker_completed_workload_stream_events: 0,
             docker_request_bytes: 0,
@@ -428,12 +470,23 @@ impl HostUnixVsockBridgeState {
         self.docker_phase_response_events
     }
 
+    pub fn docker_workload_started_events(&self) -> u64 {
+        self.docker_workload_started_events
+    }
+
     pub fn docker_completed_stream_events(&self) -> u64 {
         self.docker_completed_stream_events
     }
 
     pub fn docker_completed_workload_stream_events(&self) -> u64 {
         self.docker_completed_workload_stream_events
+    }
+
+    pub fn active_docker_workload_streams(&self) -> u64 {
+        self.streams
+            .values()
+            .filter(|stream| stream.is_docker_workload())
+            .count() as u64
     }
 
     pub fn docker_request_bytes(&self) -> u64 {
@@ -466,7 +519,7 @@ impl HostUnixVsockBridgeState {
             let finished = stream.finished();
             if finished {
                 completed = completed.saturating_add(1);
-                if stream.docker_workload_detected || stream.docker_response_phase_detected {
+                if stream.is_docker_workload() {
                     completed_workloads = completed_workloads.saturating_add(1);
                 }
             }
@@ -518,12 +571,24 @@ impl HostUnixVsockBridgeState {
                 Ok(count) => {
                     buf.truncate(count);
                     stream.observe_host_protocol(&buf);
+                    let Some(buf) = stream.take_host_payload_after_protocol_detection(buf) else {
+                        continue;
+                    };
                     if !stream.binary_frame_stream {
                         self.docker_request_bytes =
-                            self.docker_request_bytes.saturating_add(count as u64);
+                            self.docker_request_bytes.saturating_add(buf.len() as u64);
                     }
-                    if self.detect_docker_phases && !stream.binary_frame_stream {
-                        stream.detect_docker_workload_request(&buf);
+                    if self.detect_docker_phases {
+                        let workload_was_detected = stream.is_docker_workload();
+                        if stream.binary_frame_stream {
+                            stream.inspect_binary_frame_payloads(&buf);
+                        } else {
+                            stream.detect_docker_workload_request(&buf);
+                        }
+                        if !workload_was_detected && stream.is_docker_workload() {
+                            self.docker_workload_started_events =
+                                self.docker_workload_started_events.saturating_add(1);
+                        }
                     }
                     let host_payload = stream.prepare_host_payload_for_guest(buf);
                     let Some((buf, request_complete)) = host_payload.into_forwarded() else {
@@ -565,6 +630,7 @@ impl HostUnixVsockBridgeState {
                 }
             }
         }
+        self.enqueue_guest_credit_update(host_port);
     }
 
     fn handle_guest_packet(&mut self, packet: VsockPacket) -> bool {
@@ -590,6 +656,7 @@ impl HostUnixVsockBridgeState {
             OP_RW => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
                     stream.update_guest_credit(&packet);
+                    let workload_was_detected = stream.is_docker_workload();
                     if !stream.binary_frame_stream {
                         self.docker_response_bytes = self
                             .docker_response_bytes
@@ -602,7 +669,12 @@ impl HostUnixVsockBridgeState {
                         }
                         self.docker_phase_response_events =
                             self.docker_phase_response_events.saturating_add(phases);
+                        if !workload_was_detected && stream.is_docker_workload() {
+                            self.docker_workload_started_events =
+                                self.docker_workload_started_events.saturating_add(1);
+                        }
                     }
+                    stream.observe_guest_response(&packet.payload);
                     stream.enqueue_host_output(&packet.payload);
                     stream.bytes_received_from_guest = stream
                         .bytes_received_from_guest
@@ -616,13 +688,6 @@ impl HostUnixVsockBridgeState {
                         ));
                         return true;
                     }
-                    stream.finish_terminal_build_response();
-                    self.pending_guest_packets
-                        .push_back(VsockPacket::credit_update(
-                            host_port,
-                            packet.src_port,
-                            stream.forward_count(),
-                        ));
                     self.poll_host_stream(host_port);
                     true
                 } else {
@@ -656,12 +721,58 @@ impl HostUnixVsockBridgeState {
             _ => false,
         }
     }
+
+    fn finish_pending_guest_shutdowns_after_transport_drain(&mut self) {
+        let mut resets = Vec::new();
+        let mut credit_updates = Vec::new();
+        for (host_port, stream) in &mut self.streams {
+            stream.note_transport_drain_after_guest_shutdown();
+            if stream.flush_host_output().is_err() {
+                stream.reset = true;
+                resets.push((*host_port, stream.forward_count()));
+            } else if let Some(fwd_cnt) = stream.take_guest_credit_update() {
+                credit_updates.push((*host_port, fwd_cnt));
+            }
+        }
+        for (host_port, fwd_cnt) in resets {
+            self.pending_guest_packets.push_back(VsockPacket::reset(
+                host_port,
+                self.guest_port,
+                fwd_cnt,
+            ));
+        }
+        for (host_port, fwd_cnt) in credit_updates {
+            self.pending_guest_packets
+                .push_back(VsockPacket::credit_update(
+                    host_port,
+                    self.guest_port,
+                    fwd_cnt,
+                ));
+        }
+    }
+
+    fn enqueue_guest_credit_update(&mut self, host_port: u32) {
+        let fwd_cnt = self
+            .streams
+            .get_mut(&host_port)
+            .and_then(HostUnixVsockStream::take_guest_credit_update);
+        if let Some(fwd_cnt) = fwd_cnt {
+            self.pending_guest_packets
+                .push_back(VsockPacket::credit_update(
+                    host_port,
+                    self.guest_port,
+                    fwd_cnt,
+                ));
+        }
+    }
 }
 
 #[derive(Debug)]
 struct HostUnixVsockStream {
     socket: UnixStream,
     bytes_received_from_guest: u64,
+    bytes_forwarded_to_host: u64,
+    last_advertised_guest_forward_count: u32,
     bytes_sent_to_guest: u64,
     guest_forward_count: u64,
     guest_buffer_allocation: u64,
@@ -672,16 +783,21 @@ struct HostUnixVsockStream {
     reset: bool,
     docker_workload_detected: bool,
     docker_response_phase_detected: bool,
-    docker_exporting_to_image_seen: bool,
-    docker_terminal_response_seen: bool,
     docker_response_phase_line_buffer: Vec<u8>,
+    response_framing: HostResponseFraming,
+    guest_shutdown_transport_drained: bool,
+    docker_workload_request_prefix: Vec<u8>,
     host_request_observed: Vec<u8>,
     host_request_complete: bool,
     host_request_forwarding_started: bool,
     host_request_streaming_upgrade: bool,
-    host_protocol_prefix: Vec<u8>,
+    host_protocol_buffer: Vec<u8>,
     host_protocol_known: bool,
     binary_frame_stream: bool,
+    binary_frame_inspection_header: Vec<u8>,
+    binary_frame_inspection_payload_remaining: usize,
+    binary_frame_inspection_tcp_data: bool,
+    binary_frame_inspection_disabled: bool,
 }
 
 impl HostUnixVsockStream {
@@ -689,6 +805,8 @@ impl HostUnixVsockStream {
         Self {
             socket,
             bytes_received_from_guest: 0,
+            bytes_forwarded_to_host: 0,
+            last_advertised_guest_forward_count: 0,
             bytes_sent_to_guest: 0,
             guest_forward_count: 0,
             guest_buffer_allocation: DEFAULT_GUEST_BUF_ALLOC,
@@ -699,16 +817,21 @@ impl HostUnixVsockStream {
             reset: false,
             docker_workload_detected: false,
             docker_response_phase_detected: false,
-            docker_exporting_to_image_seen: false,
-            docker_terminal_response_seen: false,
             docker_response_phase_line_buffer: Vec::new(),
+            response_framing: HostResponseFraming::default(),
+            guest_shutdown_transport_drained: false,
+            docker_workload_request_prefix: Vec::new(),
             host_request_observed: Vec::new(),
             host_request_complete: false,
             host_request_forwarding_started: false,
             host_request_streaming_upgrade: false,
-            host_protocol_prefix: Vec::new(),
+            host_protocol_buffer: Vec::new(),
             host_protocol_known: false,
             binary_frame_stream: false,
+            binary_frame_inspection_header: Vec::new(),
+            binary_frame_inspection_payload_remaining: 0,
+            binary_frame_inspection_tcp_data: false,
+            binary_frame_inspection_disabled: false,
         }
     }
 
@@ -716,14 +839,70 @@ impl HostUnixVsockStream {
         if self.host_protocol_known {
             return;
         }
-        let needed = CONJET_BINARY_FRAME_MAGIC
-            .len()
-            .saturating_sub(self.host_protocol_prefix.len());
-        self.host_protocol_prefix
-            .extend_from_slice(&payload[..payload.len().min(needed)]);
-        if self.host_protocol_prefix.len() >= CONJET_BINARY_FRAME_MAGIC.len() {
-            self.binary_frame_stream = self.host_protocol_prefix == CONJET_BINARY_FRAME_MAGIC;
+        self.host_protocol_buffer.extend_from_slice(payload);
+        if self.host_protocol_buffer.len() >= CONJET_BINARY_FRAME_MAGIC.len() {
+            self.binary_frame_stream = self.host_protocol_buffer[..CONJET_BINARY_FRAME_MAGIC.len()]
+                == CONJET_BINARY_FRAME_MAGIC;
             self.host_protocol_known = true;
+        }
+    }
+
+    fn take_host_payload_after_protocol_detection(&mut self, payload: Vec<u8>) -> Option<Vec<u8>> {
+        if !self.host_protocol_known {
+            return None;
+        }
+        if self.host_protocol_buffer.is_empty() {
+            Some(payload)
+        } else {
+            Some(std::mem::take(&mut self.host_protocol_buffer))
+        }
+    }
+
+    fn inspect_binary_frame_payloads(&mut self, mut payload: &[u8]) {
+        if self.binary_frame_inspection_disabled {
+            return;
+        }
+
+        while !payload.is_empty() {
+            if self.binary_frame_inspection_payload_remaining > 0 {
+                let count = payload
+                    .len()
+                    .min(self.binary_frame_inspection_payload_remaining);
+                if self.binary_frame_inspection_tcp_data {
+                    self.detect_docker_workload_request(&payload[..count]);
+                }
+                self.binary_frame_inspection_payload_remaining -= count;
+                payload = &payload[count..];
+                if self.binary_frame_inspection_payload_remaining == 0 {
+                    self.binary_frame_inspection_tcp_data = false;
+                }
+                continue;
+            }
+
+            let needed = CONJET_BINARY_FRAME_HEADER_LEN
+                .saturating_sub(self.binary_frame_inspection_header.len());
+            let count = payload.len().min(needed);
+            self.binary_frame_inspection_header
+                .extend_from_slice(&payload[..count]);
+            payload = &payload[count..];
+            if self.binary_frame_inspection_header.len() < CONJET_BINARY_FRAME_HEADER_LEN {
+                break;
+            }
+
+            let header = &self.binary_frame_inspection_header;
+            let payload_len =
+                u32::from_be_bytes([header[16], header[17], header[18], header[19]]) as usize;
+            if header[..CONJET_BINARY_FRAME_MAGIC.len()] != CONJET_BINARY_FRAME_MAGIC
+                || header[4] != CONJET_BINARY_FRAME_VERSION
+                || payload_len > MAX_CONJET_BINARY_FRAME_PAYLOAD
+            {
+                self.binary_frame_inspection_header.clear();
+                self.binary_frame_inspection_disabled = true;
+                return;
+            }
+            self.binary_frame_inspection_tcp_data = header[5] == CONJET_BINARY_FRAME_TCP_DATA;
+            self.binary_frame_inspection_payload_remaining = payload_len;
+            self.binary_frame_inspection_header.clear();
         }
     }
 
@@ -827,9 +1006,25 @@ impl HostUnixVsockStream {
         if self.docker_workload_detected {
             return;
         }
-        if docker_workload_request_detected(payload) {
-            self.docker_workload_detected = true;
+        let remaining = MAX_DOCKER_WORKLOAD_REQUEST_PREFIX_BYTES
+            .saturating_sub(self.docker_workload_request_prefix.len());
+        if remaining > 0 {
+            self.docker_workload_request_prefix
+                .extend_from_slice(&payload[..payload.len().min(remaining)]);
         }
+        if docker_workload_request_detected(&self.docker_workload_request_prefix) {
+            self.docker_workload_detected = true;
+            self.docker_workload_request_prefix.clear();
+        } else if self.docker_workload_request_prefix.len()
+            >= MAX_DOCKER_WORKLOAD_REQUEST_PREFIX_BYTES
+            || http_header_end(&self.docker_workload_request_prefix).is_some()
+        {
+            self.docker_workload_request_prefix.clear();
+        }
+    }
+
+    fn is_docker_workload(&self) -> bool {
+        self.docker_workload_detected || self.docker_response_phase_detected
     }
 
     fn detect_docker_response_phase_events(&mut self, payload: &[u8]) -> u64 {
@@ -853,31 +1048,33 @@ impl HostUnixVsockStream {
     }
 
     fn inspect_docker_response_line(&mut self, line: &[u8]) -> u64 {
-        let text = String::from_utf8_lossy(line);
-        if text.contains("exporting to image") {
-            self.docker_exporting_to_image_seen = true;
-        }
-        if self.docker_exporting_to_image_seen
-            && (text.contains(" DONE ") || text.contains(" DONE\\n"))
-        {
-            self.docker_terminal_response_seen = true;
-        }
         docker_phase_marker_count(line)
     }
 
-    fn finish_terminal_build_response(&mut self) {
-        if self.host_shutdown_sent
-            && self.docker_terminal_response_seen
-            && self.host_output.is_empty()
-            && !self.guest_shutdown
-        {
-            let _ = self.socket.shutdown(Shutdown::Write);
-            self.guest_shutdown = true;
+    fn observe_guest_response(&mut self, payload: &[u8]) {
+        if !self.binary_frame_stream {
+            self.response_framing.observe(payload);
+        }
+        if self.guest_shutdown_pending && !self.response_framing.is_complete() {
+            self.guest_shutdown_transport_drained = false;
         }
     }
 
     fn forward_count(&self) -> u32 {
-        self.bytes_received_from_guest as u32
+        // `fwd_cnt` is a receive acknowledgement to the guest.  Advancing it
+        // when bytes merely enter `host_output` lets a fast guest accumulate
+        // an unbounded host-side queue; acknowledge only completed socket
+        // writes so virtio-vsock credit provides the backpressure.
+        self.bytes_forwarded_to_host as u32
+    }
+
+    fn take_guest_credit_update(&mut self) -> Option<u32> {
+        let fwd_cnt = self.forward_count();
+        if fwd_cnt == self.last_advertised_guest_forward_count {
+            return None;
+        }
+        self.last_advertised_guest_forward_count = fwd_cnt;
+        Some(fwd_cnt)
     }
 
     fn update_guest_credit(&mut self, packet: &VsockPacket) {
@@ -917,6 +1114,8 @@ impl HostUnixVsockStream {
                 }
                 Ok(count) => {
                     self.host_output.drain(..count);
+                    self.bytes_forwarded_to_host =
+                        self.bytes_forwarded_to_host.wrapping_add(count as u64);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -928,10 +1127,24 @@ impl HostUnixVsockStream {
     }
 
     fn finish_guest_shutdown_if_drained(&mut self) {
-        if self.guest_shutdown_pending && self.host_output.is_empty() && !self.guest_shutdown {
+        if self.guest_shutdown_pending
+            && self.host_output.is_empty()
+            && self.response_framing.permits_guest_shutdown(
+                self.guest_shutdown_transport_drained,
+                self.binary_frame_stream,
+            )
+            && !self.guest_shutdown
+        {
             let _ = self.socket.shutdown(Shutdown::Write);
             self.guest_shutdown = true;
             self.guest_shutdown_pending = false;
+        }
+    }
+
+    fn note_transport_drain_after_guest_shutdown(&mut self) {
+        if self.guest_shutdown_pending && self.response_framing.is_close_delimited() {
+            self.guest_shutdown_transport_drained = true;
+            self.finish_guest_shutdown_if_drained();
         }
     }
 
@@ -939,6 +1152,231 @@ impl HostUnixVsockStream {
         self.reset
             || (self.guest_shutdown && self.host_shutdown_sent && self.host_output.is_empty())
     }
+}
+
+/// Tracks the response framing without retaining response bodies.  A guest
+/// vsock shutdown only tells us that a peer wants to close; it is not a proof
+/// that all data work has already reached the virtqueue.  HTTP framing gives a
+/// precise, allocation-bounded completion boundary for Docker API streams.
+#[derive(Debug)]
+enum HostResponseFraming {
+    DetectingHeaders(Vec<u8>),
+    ContentLength { remaining: u64 },
+    Chunked(HttpChunkedResponseDecoder),
+    CloseDelimited,
+    Complete,
+}
+
+impl Default for HostResponseFraming {
+    fn default() -> Self {
+        Self::DetectingHeaders(Vec::new())
+    }
+}
+
+impl HostResponseFraming {
+    fn observe(&mut self, payload: &[u8]) {
+        match self {
+            Self::DetectingHeaders(headers) => {
+                let available = MAX_HTTP_RESPONSE_HEADER_BYTES.saturating_sub(headers.len());
+                headers.extend_from_slice(&payload[..payload.len().min(available)]);
+                let Some(header_end) = http_header_end(headers) else {
+                    if headers.len() >= MAX_HTTP_RESPONSE_HEADER_BYTES {
+                        *self = Self::CloseDelimited;
+                    }
+                    return;
+                };
+                let trailing = headers[header_end..].to_vec();
+                let next = http_response_framing(&headers[..header_end]);
+                *self = next;
+                if !trailing.is_empty() {
+                    self.observe(&trailing);
+                }
+            }
+            Self::ContentLength { remaining } => {
+                *remaining = remaining.saturating_sub(payload.len() as u64);
+                if *remaining == 0 {
+                    *self = Self::Complete;
+                }
+            }
+            Self::Chunked(decoder) => match decoder.observe(payload) {
+                Ok(true) => *self = Self::Complete,
+                Ok(false) => {}
+                Err(()) => *self = Self::CloseDelimited,
+            },
+            Self::CloseDelimited | Self::Complete => {}
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    fn is_close_delimited(&self) -> bool {
+        matches!(self, Self::CloseDelimited)
+    }
+
+    fn has_no_response_bytes(&self) -> bool {
+        matches!(self, Self::DetectingHeaders(headers) if headers.is_empty())
+    }
+
+    fn permits_guest_shutdown(&self, transport_drained: bool, binary_frame_stream: bool) -> bool {
+        self.is_complete()
+            || (transport_drained
+                && (binary_frame_stream
+                    || self.is_close_delimited()
+                    || self.has_no_response_bytes()))
+    }
+}
+
+fn http_response_framing(headers: &[u8]) -> HostResponseFraming {
+    let text = String::from_utf8_lossy(headers);
+    let Some(status_line) = text.lines().next() else {
+        return HostResponseFraming::CloseDelimited;
+    };
+    let mut status_parts = status_line.split_whitespace();
+    let version = status_parts.next().unwrap_or_default();
+    let status = status_parts
+        .next()
+        .and_then(|value| value.parse::<u16>().ok());
+    if !version.starts_with("HTTP/") {
+        return HostResponseFraming::CloseDelimited;
+    }
+    if status.is_some_and(|value| (100..200).contains(&value) && value != 101) {
+        // Informational responses precede the response that carries the body.
+        return HostResponseFraming::default();
+    }
+    if status.is_some_and(|value| matches!(value, 101 | 204 | 304)) {
+        return HostResponseFraming::Complete;
+    }
+
+    let lower = text.to_ascii_lowercase();
+    if lower.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.trim() == "transfer-encoding"
+            && value
+                .split(',')
+                .any(|encoding| encoding.trim() == "chunked")
+    }) {
+        return HostResponseFraming::Chunked(HttpChunkedResponseDecoder::default());
+    }
+    if let Some(length) = lower.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        (name.trim() == "content-length")
+            .then(|| value.trim().parse::<u64>().ok())
+            .flatten()
+    }) {
+        return if length == 0 {
+            HostResponseFraming::Complete
+        } else {
+            HostResponseFraming::ContentLength { remaining: length }
+        };
+    }
+    HostResponseFraming::CloseDelimited
+}
+
+#[derive(Debug, Default)]
+struct HttpChunkedResponseDecoder {
+    state: HttpChunkedResponseState,
+    line: Vec<u8>,
+}
+
+#[derive(Debug, Default)]
+enum HttpChunkedResponseState {
+    #[default]
+    ChunkSize,
+    ChunkData {
+        remaining: u64,
+    },
+    ChunkTerminator {
+        saw_carriage_return: bool,
+    },
+    Trailers,
+}
+
+impl HttpChunkedResponseDecoder {
+    /// Returns `Ok(true)` only after the terminal zero-sized chunk and all
+    /// trailers have been consumed.  The retained line buffer is capped so a
+    /// malformed stream cannot grow the VMM's host memory with its body size.
+    fn observe(&mut self, payload: &[u8]) -> Result<bool, ()> {
+        let mut offset = 0usize;
+        while offset < payload.len() {
+            match &mut self.state {
+                HttpChunkedResponseState::ChunkSize => {
+                    if !append_http_line(&mut self.line, payload, &mut offset)? {
+                        return Ok(false);
+                    }
+                    let size_text = std::str::from_utf8(&self.line[..self.line.len() - 2])
+                        .map_err(|_| ())?
+                        .split(';')
+                        .next()
+                        .unwrap_or_default()
+                        .trim();
+                    let size = u64::from_str_radix(size_text, 16).map_err(|_| ())?;
+                    self.line.clear();
+                    self.state = if size == 0 {
+                        HttpChunkedResponseState::Trailers
+                    } else {
+                        HttpChunkedResponseState::ChunkData { remaining: size }
+                    };
+                }
+                HttpChunkedResponseState::ChunkData { remaining } => {
+                    let remaining_usize = usize::try_from(*remaining).unwrap_or(usize::MAX);
+                    let consumed = (payload.len() - offset).min(remaining_usize);
+                    offset += consumed;
+                    *remaining = remaining.saturating_sub(consumed as u64);
+                    if *remaining > 0 {
+                        return Ok(false);
+                    }
+                    self.state = HttpChunkedResponseState::ChunkTerminator {
+                        saw_carriage_return: false,
+                    };
+                }
+                HttpChunkedResponseState::ChunkTerminator {
+                    saw_carriage_return,
+                } => {
+                    if !*saw_carriage_return {
+                        if payload[offset] != b'\r' {
+                            return Err(());
+                        }
+                        *saw_carriage_return = true;
+                        offset += 1;
+                        continue;
+                    }
+                    if payload[offset] != b'\n' {
+                        return Err(());
+                    }
+                    offset += 1;
+                    self.state = HttpChunkedResponseState::ChunkSize;
+                }
+                HttpChunkedResponseState::Trailers => {
+                    if !append_http_line(&mut self.line, payload, &mut offset)? {
+                        return Ok(false);
+                    }
+                    if self.line == b"\r\n" {
+                        return Ok(true);
+                    }
+                    self.line.clear();
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+fn append_http_line(line: &mut Vec<u8>, payload: &[u8], offset: &mut usize) -> Result<bool, ()> {
+    while *offset < payload.len() {
+        line.push(payload[*offset]);
+        *offset += 1;
+        if line.len() > MAX_HTTP_CHUNK_LINE_BYTES {
+            return Err(());
+        }
+        if line.ends_with(b"\r\n") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 enum HostRequestPayload {
@@ -1262,11 +1700,33 @@ fn docker_phase_marker_count(line: &[u8]) -> u64 {
 }
 
 fn docker_workload_request_detected(payload: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(payload);
-    text.contains(" /build")
-        || text.contains("/build?")
-        || text.contains(" /images/create")
-        || text.contains("/images/create?")
+    let Some(header_end) = http_header_end(payload) else {
+        return false;
+    };
+    let Some(header) = payload.get(..header_end) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(header) else {
+        return false;
+    };
+    let Some(request_line) = text.lines().next() else {
+        return false;
+    };
+    let mut parts = request_line.split_whitespace();
+    matches!(parts.next(), Some("POST")) && parts.next().is_some_and(docker_path_is_workload)
+}
+
+fn docker_path_is_workload(path: &str) -> bool {
+    let path_only = path.split_once('?').map_or(path, |(path, _)| path);
+    let components = path_only
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    match components.as_slice() {
+        ["build"] | ["images", "create"] => true,
+        [version, "build"] | [version, "images", "create"] => version.starts_with('v'),
+        _ => false,
+    }
 }
 
 fn accept_loop(listener: UnixListener, state: Arc<Mutex<HostUnixVsockBridgeState>>) {
@@ -1331,12 +1791,25 @@ mod tests {
             dst_cid: HOST_CID,
             src_port: DOCKER_BRIDGE_PORT,
             dst_port: 49_152,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: b"HTTP/1.1 204 No Content\r\n\r\n".to_vec(),
+        }));
+
+        assert!(bridge.handle_guest_packet(VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: DOCKER_BRIDGE_PORT,
+            dst_port: 49_152,
             op: OP_SHUTDOWN,
             flags: SHUTDOWN_SEND,
             buf_alloc: DEFAULT_BUF_ALLOC,
             fwd_cnt: 0,
             payload: Vec::new(),
         }));
+        bridge.finish_pending_guest_shutdowns_after_transport_drain();
         bridge.poll_host_streams();
         assert!(!bridge.streams.contains_key(&49_152));
     }
@@ -1364,6 +1837,43 @@ mod tests {
             .iter()
             .any(|packet| packet.op == OP_SHUTDOWN));
         assert_eq!(bridge.docker_request_bytes(), 0);
+        assert_eq!(bridge.docker_workload_started_events(), 0);
+    }
+
+    #[test]
+    fn fragmented_binary_tcp_build_request_starts_workload_and_forwards_all_bytes() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let mut wire = conjet_binary_frame(14, 7, b"127.0.0.1 2375");
+        wire.extend_from_slice(&conjet_binary_frame(
+            CONJET_BINARY_FRAME_TCP_DATA,
+            7,
+            b"POST /v1.52/build?t=idle-cycle HTTP/1.1\r\nHost: docker\r\n\r\n",
+        ));
+        let first_split = 3;
+        let second_split = CONJET_BINARY_FRAME_HEADER_LEN + 3;
+        client.write_all(&wire[..first_split]).unwrap();
+
+        let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
+        bridge.accept_stream(server);
+        bridge.poll_host_streams();
+        assert_eq!(bridge.pending_guest_packets.len(), 1);
+        assert_eq!(bridge.pending_guest_packets[0].op, OP_REQUEST);
+
+        client.write_all(&wire[first_split..second_split]).unwrap();
+        bridge.poll_host_streams();
+        client.write_all(&wire[second_split..]).unwrap();
+        bridge.poll_host_streams();
+
+        assert_eq!(bridge.docker_workload_started_events(), 1);
+        assert_eq!(bridge.active_docker_workload_streams(), 1);
+        assert_eq!(bridge.docker_request_bytes(), 0);
+        let forwarded = bridge
+            .pending_guest_packets
+            .iter()
+            .filter(|packet| packet.op == OP_RW)
+            .flat_map(|packet| packet.payload.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(forwarded, wire);
     }
 
     #[test]
@@ -1395,6 +1905,110 @@ mod tests {
     }
 
     #[test]
+    fn guest_credit_advances_only_after_host_output_is_written() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut stream = HostUnixVsockStream::new(server);
+        let payload = vec![b'x'; 1024];
+
+        stream.enqueue_host_output(&payload);
+        stream.bytes_received_from_guest = payload.len() as u64;
+        assert_eq!(stream.forward_count(), 0);
+        assert_eq!(stream.take_guest_credit_update(), None);
+
+        stream.flush_host_output().unwrap();
+        let mut received = vec![0u8; payload.len()];
+        client.read_exact(&mut received).unwrap();
+        assert_eq!(received, payload);
+        assert_eq!(stream.forward_count(), payload.len() as u32);
+        assert_eq!(
+            stream.take_guest_credit_update(),
+            Some(payload.len() as u32)
+        );
+    }
+
+    #[test]
+    fn transmit_notification_drains_every_pending_batch() {
+        let guest_base = 0x4000_0000;
+        let queue_size = (TRANSMIT_DRAIN_BATCH_LIMIT + 1) as u32;
+        let memory = GuestMemory::anonymous(0x20_000).unwrap();
+        let queue = VirtioQueueState {
+            size: queue_size,
+            ready: true,
+            descriptor_address: guest_base + 0x1000,
+            driver_address: guest_base + 0x3000,
+            device_address: guest_base + 0x4000,
+        };
+        let plan = crate::devices::virtio::VirtioMmioDevicePlan::new(
+            crate::devices::virtio::VirtioDeviceKind::Vsock,
+            0,
+        );
+        let mut transport = VirtioMmioDevice::new(plan, configuration(DEFAULT_GUEST_CID));
+        let packet = VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: DOCKER_BRIDGE_PORT,
+            dst_port: 49_152,
+            op: OP_CREDIT_UPDATE,
+            flags: 0,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: Vec::new(),
+        }
+        .encode();
+
+        for index in 0..queue_size as usize {
+            let payload_address = guest_base + 0x8000 + (index as u64 * 0x100);
+            memory
+                .write_at(guest_base, payload_address, &packet)
+                .unwrap();
+            let mut descriptor = [0u8; 16];
+            descriptor[..8].copy_from_slice(&payload_address.to_le_bytes());
+            descriptor[8..12].copy_from_slice(&(packet.len() as u32).to_le_bytes());
+            memory
+                .write_at(
+                    guest_base,
+                    queue.descriptor_address + (index as u64 * 16),
+                    &descriptor,
+                )
+                .unwrap();
+            memory
+                .write_le_u16(
+                    guest_base,
+                    queue.driver_address + 4 + (index as u64 * 2),
+                    index as u16,
+                )
+                .unwrap();
+        }
+        memory
+            .write_le_u16(guest_base, queue.driver_address + 2, queue_size as u16)
+            .unwrap();
+
+        let mut handler = VsockQueueHandler::new();
+        let used = handler
+            .handle_available(
+                queue,
+                VsockQueue::Transmit as u32,
+                &mut transport,
+                &memory,
+                guest_base,
+            )
+            .unwrap();
+
+        assert_eq!(used.len(), queue_size as usize);
+        assert_eq!(
+            handler.transmit_executor.last_available_index,
+            queue_size as u16
+        );
+        assert_eq!(
+            memory
+                .read_le_u16(guest_base, queue.device_address + 2)
+                .unwrap(),
+            queue_size as u16
+        );
+    }
+
+    #[test]
     fn docker_phase_markers_from_host_request_do_not_trigger_reclaim_phase() {
         let (mut client, server) = UnixStream::pair().unwrap();
         let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
@@ -1413,12 +2027,25 @@ mod tests {
 
     #[test]
     fn finished_docker_streams_increment_completion_counter() {
-        let (client, server) = UnixStream::pair().unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .write_all(b"GET /_ping HTTP/1.1\r\nHost: docker\r\n\r\n")
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
         let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
         bridge.accept_stream(server);
-        drop(client);
-
         bridge.poll_host_streams();
+        assert!(bridge.handle_guest_packet(VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: DOCKER_BRIDGE_PORT,
+            dst_port: 49_152,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: b"HTTP/1.1 204 No Content\r\n\r\n".to_vec(),
+        }));
         assert!(bridge.handle_guest_packet(VsockPacket {
             src_cid: DEFAULT_GUEST_CID,
             dst_cid: HOST_CID,
@@ -1430,6 +2057,7 @@ mod tests {
             fwd_cnt: 0,
             payload: Vec::new(),
         }));
+        bridge.finish_pending_guest_shutdowns_after_transport_drain();
         bridge.poll_host_streams();
 
         assert_eq!(bridge.docker_completed_stream_events(), 1);
@@ -1452,12 +2080,25 @@ mod tests {
             dst_cid: HOST_CID,
             src_port: DOCKER_BRIDGE_PORT,
             dst_port: 49_152,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK".to_vec(),
+        }));
+
+        assert!(bridge.handle_guest_packet(VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: DOCKER_BRIDGE_PORT,
+            dst_port: 49_152,
             op: OP_SHUTDOWN,
             flags: SHUTDOWN_SEND,
             buf_alloc: DEFAULT_BUF_ALLOC,
             fwd_cnt: 0,
             payload: Vec::new(),
         }));
+        bridge.finish_pending_guest_shutdowns_after_transport_drain();
         bridge.poll_host_streams();
 
         assert_eq!(bridge.docker_completed_stream_events(), 1);
@@ -1610,6 +2251,20 @@ mod tests {
         let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
         bridge.accept_stream(server);
         bridge.poll_host_streams();
+        assert_eq!(bridge.active_docker_workload_streams(), 1);
+        assert_eq!(bridge.docker_workload_started_events(), 1);
+
+        assert!(bridge.handle_guest_packet(VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: DOCKER_BRIDGE_PORT,
+            dst_port: 49_152,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        }));
 
         assert!(bridge.handle_guest_packet(VsockPacket {
             src_cid: DEFAULT_GUEST_CID,
@@ -1622,10 +2277,28 @@ mod tests {
             fwd_cnt: 0,
             payload: Vec::new(),
         }));
+        bridge.finish_pending_guest_shutdowns_after_transport_drain();
         bridge.poll_host_streams();
 
         assert_eq!(bridge.docker_completed_stream_events(), 1);
         assert_eq!(bridge.docker_completed_workload_stream_events(), 1);
+        assert_eq!(bridge.active_docker_workload_streams(), 0);
+        assert_eq!(bridge.docker_workload_started_events(), 1);
+    }
+
+    #[test]
+    fn versioned_docker_build_without_query_starts_workload() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .write_all(b"POST /v1.52/build HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+
+        let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
+        bridge.accept_stream(server);
+        bridge.poll_host_streams();
+
+        assert_eq!(bridge.active_docker_workload_streams(), 1);
+        assert_eq!(bridge.docker_workload_started_events(), 1);
     }
 
     #[test]
@@ -1645,12 +2318,25 @@ mod tests {
             dst_cid: HOST_CID,
             src_port: DOCKER_BRIDGE_PORT,
             dst_port: 49_152,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        }));
+
+        assert!(bridge.handle_guest_packet(VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: DOCKER_BRIDGE_PORT,
+            dst_port: 49_152,
             op: OP_SHUTDOWN,
             flags: SHUTDOWN_SEND,
             buf_alloc: DEFAULT_BUF_ALLOC,
             fwd_cnt: 0,
             payload: Vec::new(),
         }));
+        bridge.finish_pending_guest_shutdowns_after_transport_drain();
         bridge.poll_host_streams();
 
         assert_eq!(bridge.docker_completed_stream_events(), 1);
@@ -1664,6 +2350,15 @@ mod tests {
         bridge.accept_stream(server);
         bridge.pending_guest_packets.clear();
 
+        let body = b"#1 DONE 0.1s\n";
+        let payload = [
+            b"HTTP/1.1 200 OK\r\nContent-Length: ".as_slice(),
+            body.len().to_string().as_bytes(),
+            b"\r\n\r\n",
+            body,
+        ]
+        .concat();
+
         assert!(bridge.handle_guest_packet(VsockPacket {
             src_cid: DEFAULT_GUEST_CID,
             dst_cid: HOST_CID,
@@ -1673,11 +2368,13 @@ mod tests {
             flags: 0,
             buf_alloc: DEFAULT_BUF_ALLOC,
             fwd_cnt: 0,
-            payload: b"#1 DONE 0.1s\n".to_vec(),
+            payload,
         }));
 
         let mut received = [0u8; 64];
         let _ = client.read(&mut received).unwrap();
+        assert_eq!(bridge.docker_workload_started_events(), 1);
+        assert_eq!(bridge.active_docker_workload_streams(), 1);
 
         drop(client);
         bridge.poll_host_streams();
@@ -1692,15 +2389,17 @@ mod tests {
             fwd_cnt: 0,
             payload: Vec::new(),
         }));
+        bridge.finish_pending_guest_shutdowns_after_transport_drain();
         bridge.poll_host_streams();
 
         assert_eq!(bridge.docker_phase_response_events(), 1);
         assert_eq!(bridge.docker_completed_stream_events(), 1);
         assert_eq!(bridge.docker_completed_workload_stream_events(), 1);
+        assert_eq!(bridge.docker_workload_started_events(), 1);
     }
 
     #[test]
-    fn terminal_build_response_half_closes_host_client() {
+    fn chunked_response_waits_for_terminal_chunk_before_half_closing_host_client() {
         let (mut client, server) = UnixStream::pair().unwrap();
         client
             .write_all(b"POST /v1.52/build?t=demo HTTP/1.1\r\nHost: docker\r\n\r\n")
@@ -1712,7 +2411,12 @@ mod tests {
         bridge.poll_host_streams();
         bridge.pending_guest_packets.clear();
 
-        let payload = b"#8 exporting to image\n#8 DONE 6.3s\n".to_vec();
+        let body = vec![b'x'; 1024];
+        let mut payload =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
+        payload.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
+        payload.extend_from_slice(&body);
+        payload.extend_from_slice(b"\r\n");
         assert!(bridge.handle_guest_packet(VsockPacket {
             src_cid: DEFAULT_GUEST_CID,
             dst_cid: HOST_CID,
@@ -1725,15 +2429,58 @@ mod tests {
             payload: payload.clone(),
         }));
 
-        let mut received = vec![0u8; payload.len()];
+        assert!(bridge.handle_guest_packet(VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: DOCKER_BRIDGE_PORT,
+            dst_port: 49_152,
+            op: OP_SHUTDOWN,
+            flags: SHUTDOWN_SEND,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: Vec::new(),
+        }));
+        assert!(bridge.streams.contains_key(&49_152));
+        assert!(!bridge.streams[&49_152].guest_shutdown);
+
+        let terminal = b"0\r\n\r\n".to_vec();
+        assert!(bridge.handle_guest_packet(VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: DOCKER_BRIDGE_PORT,
+            dst_port: 49_152,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: terminal.clone(),
+        }));
+        assert!(bridge.streams[&49_152].guest_shutdown);
+
+        let mut received = vec![0u8; payload.len() + terminal.len()];
         client.read_exact(&mut received).unwrap();
-        assert_eq!(received, payload);
+        assert_eq!(&received[..payload.len()], payload);
+        assert_eq!(&received[payload.len()..], terminal);
         let mut eof = [0u8; 1];
         assert_eq!(client.read(&mut eof).unwrap(), 0);
 
         bridge.poll_host_streams();
         assert_eq!(bridge.docker_completed_stream_events(), 1);
         assert_eq!(bridge.docker_completed_workload_stream_events(), 1);
+    }
+
+    #[test]
+    fn chunked_response_decoder_tracks_large_body_without_retaining_it() {
+        let body = vec![b'x'; 2 * 1024 * 1024];
+        let mut decoder = HttpChunkedResponseDecoder::default();
+        assert!(!decoder
+            .observe(format!("{:x}\r\n", body.len()).as_bytes())
+            .unwrap());
+        assert!(!decoder.observe(&body).unwrap());
+        assert_eq!(decoder.line.len(), 0);
+        assert!(!decoder.observe(b"\r\n0\r\n").unwrap());
+        assert!(decoder.observe(b"\r\n").unwrap());
+        assert_eq!(decoder.line.len(), 2);
     }
 
     #[test]

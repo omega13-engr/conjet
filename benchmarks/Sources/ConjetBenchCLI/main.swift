@@ -55,7 +55,7 @@ struct ConjetBenchCLI {
     }
 
     private static func runAll(args: [String]) throws -> BenchmarkRunAllOutcome {
-        let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack", "colima"]
+        let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "reference-runtime", "colima"]
         let samples = benchmarkSamples()
         let outputDirectory = URL(
             fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? defaultRunAllDirectory().path),
@@ -464,11 +464,11 @@ struct ConjetBenchCLI {
 
     private static func gate(args: [String]) throws {
         guard let reportPaths = value(after: "--reports", in: args) else {
-            throw ConjetError.invalidArgument("usage: conjet-bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines orbstack,colima] [--required-baselines orbstack] [--min-samples N]")
+            throw ConjetError.invalidArgument("usage: conjet-bench gate --reports report.json[,report2.json] [--candidate conjet] [--baselines reference-runtime,colima] [--required-baselines reference-runtime] [--min-samples N]")
         }
         let urls = reportPaths.split(separator: ",").map { URL(fileURLWithPath: expandedPath(String($0))) }
         let candidate = value(after: "--candidate", in: args) ?? "conjet"
-        let baselines = value(after: "--baselines", in: args).map(csvList) ?? ["orbstack", "colima"]
+        let baselines = value(after: "--baselines", in: args).map(csvList) ?? ["reference-runtime", "colima"]
         let requiredBaselines = value(after: "--required-baselines", in: args).map(csvList) ?? baselines
         let minSamples = value(after: "--min-samples", in: args).flatMap(Int.init) ?? 10
         let phase = try samplePhase(value(after: "--phase", in: args))
@@ -503,7 +503,7 @@ struct ConjetBenchCLI {
         )
         let result = try BenchmarkEnergyGateRunner(
             options: BenchmarkEnergyGateOptions(
-                contexts: value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack", "colima"],
+                contexts: value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "reference-runtime", "colima"],
                 workloads: value(after: "--workloads", in: args).map(csvList) ?? ["idle", "container-start-loop", "hot-reload-loop", "compose-loop", "npm-install", "pnpm-install", "cargo-build"],
                 samples: benchmarkSamples(),
                 requirePower: args.contains("--require-power"),
@@ -715,7 +715,7 @@ struct ConjetBenchCLI {
     }
 
     private static func networkGate(args: [String]) throws {
-        let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "orbstack", "colima"]
+        let contexts = value(after: "--contexts", in: args).map(csvList) ?? ["conjet", "reference-runtime", "colima"]
         let samples = benchmarkSamples()
         let outputDirectory = URL(
             fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? "benchmarks/reports/network-gate-local"),
@@ -1530,7 +1530,7 @@ struct ConjetBenchCLI {
 
     private static func requiredBaselines(from contexts: [String]) -> [String] {
         let baselines = contexts.filter { $0 != "conjet" }
-        return baselines.contains("orbstack") ? ["orbstack"] : baselines
+        return baselines.contains("reference-runtime") ? ["reference-runtime"] : baselines
     }
 
     private static func rulesRepresented(in results: [BenchmarkResult]) -> [BenchmarkClaimRule] {
@@ -1627,7 +1627,7 @@ struct ConjetBenchCLI {
             "",
             "- Proven: only workloads with zero failures and sufficient samples in this report.",
             "- Partial: ConjetNet functionality is measured when baseline workloads fail or candidate/baseline wins are mixed.",
-            "- Not proven: Conjet beating OrbStack or Colima unless the measured rows show lower p50/p95/p99 for the configured workload.",
+            "- Not proven: Conjet beating ReferenceRuntime or Colima unless the measured rows show lower p50/p95/p99 for the configured workload.",
             "",
             "## Implementation Status",
             "",
@@ -1916,7 +1916,7 @@ struct ConjetBenchCLI {
               help         Show this help text.
 
             Run options:
-              --contexts LIST          Docker contexts to measure (default: conjet,orbstack,colima)
+              --contexts LIST          Docker contexts to measure (default: conjet,reference-runtime,colima)
               --samples N              Accepted for compatibility; benchmark runs use 5 samples
               --suites LIST            Run only selected suites: warm-gate,cold-base-prepulled-gate,no-cache-gate,topology-gate,polyglot-gate,network-gate,energy-gate
               --network-workloads LIST Network workloads for run-all network-gate

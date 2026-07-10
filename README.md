@@ -20,7 +20,7 @@ tools.
 - Simple profiles for separate workspaces
 - Project sync commands for local development
 - Smart storage behavior for dependency and build-heavy projects
-- Benchmark tooling for comparing Conjet, OrbStack, and Colima
+- Benchmark tooling for comparing Conjet, ReferenceRuntime, and Colima
 - Energy benchmark path when macOS power metrics are available
 - User-selectable energy modes: `performance`, `balanced`, and `eco`
 
@@ -243,14 +243,14 @@ Conjet includes a separate benchmark package for local comparisons.
 The benchmark runner can compare:
 
 - Conjet
-- OrbStack
+- ReferenceRuntime
 - Colima
 
 It reports timing, failures, topology labels, and energy data when power
 measurement is available. The benchmark output is comparison data, not a global
 performance claim.
 
-Current benchmark positioning: Conjet can be described as faster than OrbStack
+Current benchmark positioning: Conjet can be described as faster than ReferenceRuntime
 on the measured warm, cold/no-cache, topology, and most cross-language local
 Docker workflow gates. Conjet has shown very low idle power in directional
 measurements, but active energy optimization is still ongoing.
@@ -271,7 +271,7 @@ Run the local comparison:
 
 ```sh
 swift run --package-path benchmarks conjet-bench run \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --samples 10 \
   --output-dir benchmarks/reports/run-all-local
 ```
@@ -280,7 +280,7 @@ Run only the energy benchmark:
 
 ```sh
 swift run --package-path benchmarks conjet-bench energy-gate \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --workloads idle,container-start-loop,hot-reload-loop,compose-loop,npm-install,pnpm-install,cargo-build \
   --samples 10 \
   --require-power \
@@ -306,7 +306,7 @@ Run only the networking benchmark:
 
 ```sh
 swift run --package-path benchmarks conjet-bench network-gate \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --samples 10 \
   --output-dir benchmarks/reports/network-gate-local
 ```

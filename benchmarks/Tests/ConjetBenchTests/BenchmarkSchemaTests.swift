@@ -32,7 +32,7 @@ final class BenchmarkSchemaTests: XCTestCase {
     func testBenchmarkResultGeneratesTraceID() throws {
         let result = BenchmarkResult(
             workload: "pnpm install",
-            runtime: "OrbStack",
+            runtime: "ReferenceRuntime",
             startedAt: Date(),
             durationSeconds: 1,
             exitCode: 0,
@@ -40,7 +40,7 @@ final class BenchmarkSchemaTests: XCTestCase {
         )
 
         let traceID = try XCTUnwrap(result.traceID)
-        XCTAssertTrue(traceID.hasPrefix("bench-pnpm-install-orbstack-"))
+        XCTAssertTrue(traceID.hasPrefix("bench-pnpm-install-referenceruntime-"))
     }
 
     func testMarkdownReportIncludesFailureDetails() throws {
@@ -247,7 +247,7 @@ final class BenchmarkSchemaTests: XCTestCase {
 
         let coldRecorder = DockerCommandRecorder()
         _ = try DockerBenchmarkSuite(
-            contexts: ["orbstack"],
+            contexts: ["reference-runtime"],
             iterations: 1,
             warmup: false,
             workloads: ["bind-pnpm-install"],
@@ -262,7 +262,7 @@ final class BenchmarkSchemaTests: XCTestCase {
 
         let warmRecorder = DockerCommandRecorder()
         let warmResults = try DockerBenchmarkSuite(
-            contexts: ["orbstack"],
+            contexts: ["reference-runtime"],
             iterations: 1,
             warmup: true,
             workloads: ["bind-pnpm-install"],
@@ -461,8 +461,8 @@ final class BenchmarkSchemaTests: XCTestCase {
 
     func testPowerMetricsSamplerRecordsPermissionFailureAsBenchmarkFailure() throws {
         let sampler = PowerMetricsSampler(
-            runtime: "orbstack",
-            processPattern: "orbstack",
+            runtime: "reference-runtime",
+            processPattern: "reference-runtime",
             durationSeconds: 1,
             intervalSeconds: 1,
             useSudo: true
@@ -479,7 +479,7 @@ final class BenchmarkSchemaTests: XCTestCase {
         let result = try sampler.run()
 
         XCTAssertEqual(result.workload, "idle-power-sample")
-        XCTAssertEqual(result.runtime, "orbstack")
+        XCTAssertEqual(result.runtime, "reference-runtime")
         XCTAssertEqual(result.exitCode, 1)
         XCTAssertEqual(result.command.prefix(3), ["/usr/bin/sudo", "-n", "/usr/bin/powermetrics"])
         XCTAssertTrue(result.stderrTail.contains("password is required"))
@@ -508,17 +508,17 @@ final class BenchmarkSchemaTests: XCTestCase {
         ]
         let results =
             makeResults(workload: "copy-node-modules", runtime: "conjet", values: [0.8, 0.9, 1.0]) +
-            makeResults(workload: "copy-node-modules", runtime: "orbstack", values: [1.2, 1.3, 1.4]) +
+            makeResults(workload: "copy-node-modules", runtime: "reference-runtime", values: [1.2, 1.3, 1.4]) +
             makeResults(workload: "copy-node-modules", runtime: "colima", values: [1.4, 1.5, 1.6]) +
             makeResults(workload: "idle-resource-sample", runtime: "conjet", metric: "cpu_percent_mean", values: [0.1, 0.2, 0.3]) +
-            makeResults(workload: "idle-resource-sample", runtime: "orbstack", metric: "cpu_percent_mean", values: [0.3, 0.4, 0.5]) +
+            makeResults(workload: "idle-resource-sample", runtime: "reference-runtime", metric: "cpu_percent_mean", values: [0.3, 0.4, 0.5]) +
             makeResults(workload: "idle-resource-sample", runtime: "colima", metric: "cpu_percent_mean", values: [1.0, 1.2, 1.4])
 
         let report = BenchmarkClaimGate.evaluate(
             results: results,
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: "conjet",
-                baselineRuntimes: ["orbstack", "colima"],
+                baselineRuntimes: ["reference-runtime", "colima"],
                 minimumSamples: 3,
                 rules: rules
             )
@@ -533,19 +533,19 @@ final class BenchmarkSchemaTests: XCTestCase {
         let report = BenchmarkClaimGate.evaluate(
             results:
                 makeResults(workload: "copy-node-modules", runtime: "conjet", values: [0.8, 0.9, 1.0]) +
-                makeResults(workload: "copy-node-modules", runtime: "orbstack", values: [1.2, 1.3, 1.4]) +
+                makeResults(workload: "copy-node-modules", runtime: "reference-runtime", values: [1.2, 1.3, 1.4]) +
                 makeResults(workload: "copy-node-modules", runtime: "colima", values: [0.5, 0.6, 0.7]),
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: "conjet",
-                baselineRuntimes: ["orbstack", "colima"],
-                requiredBaselineRuntimes: ["orbstack"],
+                baselineRuntimes: ["reference-runtime", "colima"],
+                requiredBaselineRuntimes: ["reference-runtime"],
                 minimumSamples: 3,
                 rules: [BenchmarkClaimRule(workload: "copy-node-modules")]
             )
         )
 
         XCTAssertTrue(report.passed)
-        XCTAssertEqual(report.requiredBaselineRuntimes, ["orbstack"])
+        XCTAssertEqual(report.requiredBaselineRuntimes, ["reference-runtime"])
         let colimaComparison = try XCTUnwrap(report.comparisons.first { $0.baselineRuntime == "colima" })
         XCTAssertFalse(colimaComparison.requiredBaseline)
         XCTAssertFalse(colimaComparison.passed)
@@ -556,10 +556,10 @@ final class BenchmarkSchemaTests: XCTestCase {
         let report = BenchmarkClaimGate.evaluate(
             results:
                 makeResults(workload: "idle-resource-sample", runtime: "conjet", metric: "cpu_percent_mean", values: [0, 0, 0]) +
-                makeResults(workload: "idle-resource-sample", runtime: "orbstack", metric: "cpu_percent_mean", values: [0, 0, 0]),
+                makeResults(workload: "idle-resource-sample", runtime: "reference-runtime", metric: "cpu_percent_mean", values: [0, 0, 0]),
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: "conjet",
-                baselineRuntimes: ["orbstack"],
+                baselineRuntimes: ["reference-runtime"],
                 minimumSamples: 3,
                 rules: [BenchmarkClaimRule(workload: "idle-resource-sample", measure: .metric("cpu_percent_mean"))]
             )
@@ -570,32 +570,32 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertEqual(report.comparisons.first?.p95Ratio, 1)
     }
 
-    func testBenchmarkClaimGateFailsWhenOrbStackEvidenceIsMissing() throws {
+    func testBenchmarkClaimGateFailsWhenReferenceRuntimeEvidenceIsMissing() throws {
         let report = BenchmarkClaimGate.evaluate(
             results: makeResults(workload: "copy-node-modules", runtime: "conjet", values: [1.0, 1.1, 1.2])
                 + makeResults(workload: "copy-node-modules", runtime: "colima", values: [2.0, 2.1, 2.2]),
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: "conjet",
-                baselineRuntimes: ["orbstack", "colima"],
+                baselineRuntimes: ["reference-runtime", "colima"],
                 minimumSamples: 3,
                 rules: [BenchmarkClaimRule(workload: "copy-node-modules")]
             )
         )
 
         XCTAssertFalse(report.passed)
-        XCTAssertTrue(report.missingRequirements.contains { $0.contains("copy-node-modules / orbstack") })
-        XCTAssertTrue(report.comparisons.contains { $0.baselineRuntime == "orbstack" && !$0.passed })
+        XCTAssertTrue(report.missingRequirements.contains { $0.contains("copy-node-modules / reference-runtime") })
+        XCTAssertTrue(report.comparisons.contains { $0.baselineRuntime == "reference-runtime" && !$0.passed })
     }
 
     func testBenchmarkClaimGateFailsOnP95RegressionAndFailures() throws {
-        var failingBaseline = makeResults(workload: "conjetfs-hot-reload", runtime: "orbstack", values: [1.0, 1.0, 1.0])
+        var failingBaseline = makeResults(workload: "conjetfs-hot-reload", runtime: "reference-runtime", values: [1.0, 1.0, 1.0])
         failingBaseline[0].exitCode = 125
         let report = BenchmarkClaimGate.evaluate(
             results: makeResults(workload: "conjetfs-hot-reload", runtime: "conjet", values: [0.8, 0.9, 1.5])
                 + failingBaseline,
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: "conjet",
-                baselineRuntimes: ["orbstack"],
+                baselineRuntimes: ["reference-runtime"],
                 minimumSamples: 3,
                 rules: [BenchmarkClaimRule(workload: "conjetfs-hot-reload")]
             )
@@ -616,13 +616,13 @@ final class BenchmarkSchemaTests: XCTestCase {
         )
         let results =
             makeResults(workload: "conjetfs-hot-reload", runtime: "conjet", metric: "hot_reload_seconds", values: [0.40, 0.42, 0.44]) +
-            makeResults(workload: "bind-hot-reload", runtime: "orbstack", metric: "hot_reload_seconds", values: [0.60, 0.62, 0.64])
+            makeResults(workload: "bind-hot-reload", runtime: "reference-runtime", metric: "hot_reload_seconds", values: [0.60, 0.62, 0.64])
 
         let report = BenchmarkClaimGate.evaluate(
             results: results,
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: "conjet",
-                baselineRuntimes: ["orbstack"],
+                baselineRuntimes: ["reference-runtime"],
                 minimumSamples: 3,
                 rules: [rule]
             )
@@ -675,15 +675,15 @@ final class BenchmarkSchemaTests: XCTestCase {
         let rule = BenchmarkClaimRule(workload: "conjetfs-pnpm-install")
         let results =
             makeResults(workload: "conjetfs-pnpm-install", runtime: "conjet", values: [3.0, 3.1, 3.2], phase: .cold) +
-            makeResults(workload: "conjetfs-pnpm-install", runtime: "orbstack", values: [2.0, 2.1, 2.2], phase: .cold) +
+            makeResults(workload: "conjetfs-pnpm-install", runtime: "reference-runtime", values: [2.0, 2.1, 2.2], phase: .cold) +
             makeResults(workload: "conjetfs-pnpm-install", runtime: "conjet", values: [1.0, 1.1, 1.2], phase: .warm) +
-            makeResults(workload: "conjetfs-pnpm-install", runtime: "orbstack", values: [1.4, 1.5, 1.6], phase: .warm)
+            makeResults(workload: "conjetfs-pnpm-install", runtime: "reference-runtime", values: [1.4, 1.5, 1.6], phase: .warm)
 
         let warmReport = BenchmarkClaimGate.evaluate(
             results: results,
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: "conjet",
-                baselineRuntimes: ["orbstack"],
+                baselineRuntimes: ["reference-runtime"],
                 minimumSamples: 3,
                 samplePhase: .warm,
                 rules: [rule]
@@ -698,7 +698,7 @@ final class BenchmarkSchemaTests: XCTestCase {
             results: results,
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: "conjet",
-                baselineRuntimes: ["orbstack"],
+                baselineRuntimes: ["reference-runtime"],
                 minimumSamples: 3,
                 samplePhase: .cold,
                 rules: [rule]
@@ -721,14 +721,14 @@ final class BenchmarkSchemaTests: XCTestCase {
             results: makeResults(workload: "conjetfs-hot-reload", runtime: "conjet", metric: "hot_reload_seconds", values: [0.40, 0.42, 0.44]),
             options: BenchmarkClaimGateOptions(
                 candidateRuntime: "conjet",
-                baselineRuntimes: ["orbstack"],
+                baselineRuntimes: ["reference-runtime"],
                 minimumSamples: 3,
                 rules: [rule]
             )
         )
 
         XCTAssertFalse(report.passed)
-        XCTAssertTrue(report.missingRequirements.contains { $0.contains("hot-reload-fast-path baseline bind-hot-reload / orbstack") })
+        XCTAssertTrue(report.missingRequirements.contains { $0.contains("hot-reload-fast-path baseline bind-hot-reload / reference-runtime") })
     }
 
     func testBenchmarkClaimGateRequiresRawJSONReports() throws {
@@ -748,9 +748,9 @@ final class BenchmarkSchemaTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let options = BenchmarkReleaseGateOptions(
-            contexts: ["conjet", "orbstack", "colima"],
+            contexts: ["conjet", "reference-runtime", "colima"],
             candidateRuntime: "conjet",
-            baselineRuntimes: ["orbstack", "colima"],
+            baselineRuntimes: ["reference-runtime", "colima"],
             iterations: 2,
             minimumSamples: 2,
             workloads: ["container-start"],
@@ -823,7 +823,7 @@ final class BenchmarkSchemaTests: XCTestCase {
         XCTAssertTrue(allResults.allSatisfy { $0.traceID?.hasPrefix(result.traceID) == true })
     }
 
-    func testBenchmarkReleaseGateRunnerFailsWhenOrbStackContextWasNotCollected() throws {
+    func testBenchmarkReleaseGateRunnerFailsWhenReferenceRuntimeContextWasNotCollected() throws {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("conjet-release-gate-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -831,7 +831,7 @@ final class BenchmarkSchemaTests: XCTestCase {
         let options = BenchmarkReleaseGateOptions(
             contexts: ["conjet", "colima"],
             candidateRuntime: "conjet",
-            baselineRuntimes: ["orbstack", "colima"],
+            baselineRuntimes: ["reference-runtime", "colima"],
             iterations: 1,
             minimumSamples: 1,
             workloads: ["container-start"],
@@ -856,7 +856,7 @@ final class BenchmarkSchemaTests: XCTestCase {
         let result = try runner.run(outputDirectory: directory)
 
         XCTAssertFalse(result.gateReport.passed)
-        XCTAssertTrue(result.gateReport.missingRequirements.contains { $0.contains("container-start / orbstack") })
+        XCTAssertTrue(result.gateReport.missingRequirements.contains { $0.contains("container-start / reference-runtime") })
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.artifacts.gateReport))
     }
 
@@ -866,9 +866,9 @@ final class BenchmarkSchemaTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let options = BenchmarkReleaseGateOptions(
-            contexts: ["conjet", "orbstack"],
+            contexts: ["conjet", "reference-runtime"],
             candidateRuntime: "conjet",
-            baselineRuntimes: ["orbstack"],
+            baselineRuntimes: ["reference-runtime"],
             iterations: 1,
             minimumSamples: 1,
             workloads: ["idle-resource-sample"],
@@ -988,7 +988,7 @@ final class BenchmarkSchemaTests: XCTestCase {
 
         let runner = BenchmarkEnergyGateRunner(
             options: BenchmarkEnergyGateOptions(
-                contexts: ["conjet", "orbstack"],
+                contexts: ["conjet", "reference-runtime"],
                 workloads: ["idle"],
                 samples: 1,
                 requirePower: false,

@@ -182,6 +182,6 @@ SwiftNIO-class host listener path. Newer Conjet Core images also provide a
 compiled guest helper foundation for binary-framed guest echo, metrics, and UDP
 fast-path work.
 
-Do not claim Conjet networking beats OrbStack or Colima unless
+Do not claim Conjet networking beats ReferenceRuntime or Colima unless
 `conjet-bench network-gate` produces sufficient measured evidence for the
 specific workload.

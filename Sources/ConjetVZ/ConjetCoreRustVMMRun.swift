@@ -164,13 +164,8 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
         self.timeoutSeconds = timeoutSeconds
     }
 
-    @discardableResult
-    func setTargetBytes(_ targetBytes: UInt64) throws -> Response {
-        try request(Request(command: "set_target_bytes", targetBytes: targetBytes))
-    }
-
     func metrics() throws -> Response {
-        try request(Request(command: "metrics", targetBytes: nil))
+        try request(Request(command: "metrics"))
     }
 
     private func request(_ request: Request) throws -> Response {
@@ -281,17 +276,6 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
 
     private struct Request: Encodable {
         var command: String
-        var targetBytes: UInt64?
-
-        init(command: String, targetBytes: UInt64? = nil) {
-            self.command = command
-            self.targetBytes = targetBytes
-        }
-
-        enum CodingKeys: String, CodingKey {
-            case command
-            case targetBytes = "target_bytes"
-        }
     }
 
     struct Response: Decodable, Equatable, Sendable {
@@ -331,6 +315,10 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
         var reusableReclaimedBytes: UInt64?
         var reusableRestoredBytes: UInt64?
         var currentBalloonReusableBytes: UInt64?
+        var hostGranuleEligibleBytes: UInt64?
+        var partialHostGranuleBytes: UInt64?
+        var currentFullyOwnedHostGranules: UInt64?
+        var currentPartiallyOwnedHostGranules: UInt64?
         var zeroSweptBytes: UInt64?
         var zeroSweepFailedBytes: UInt64?
         var hardDecommittedBytes: UInt64?
@@ -357,6 +345,10 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
             case reusableReclaimedBytes = "reusable_reclaimed_bytes"
             case reusableRestoredBytes = "reusable_restored_bytes"
             case currentBalloonReusableBytes = "current_balloon_reusable_bytes"
+            case hostGranuleEligibleBytes = "host_granule_eligible_bytes"
+            case partialHostGranuleBytes = "partial_host_granule_bytes"
+            case currentFullyOwnedHostGranules = "current_fully_owned_host_granules"
+            case currentPartiallyOwnedHostGranules = "current_partially_owned_host_granules"
             case zeroSweptBytes = "zero_swept_bytes"
             case zeroSweepFailedBytes = "zero_sweep_failed_bytes"
             case hardDecommittedBytes = "hard_decommitted_bytes"
@@ -468,6 +460,10 @@ extension DynamicMemoryVMMRuntimeMetrics {
             balloonReusableReclaimedBytes: response.balloon.reusableReclaimedBytes,
             balloonReusableRestoredBytes: response.balloon.reusableRestoredBytes,
             balloonCurrentReusableBytes: response.balloon.currentBalloonReusableBytes,
+            balloonHostGranuleEligibleBytes: response.balloon.hostGranuleEligibleBytes,
+            balloonPartialHostGranuleBytes: response.balloon.partialHostGranuleBytes,
+            balloonCurrentFullyOwnedHostGranules: response.balloon.currentFullyOwnedHostGranules,
+            balloonCurrentPartiallyOwnedHostGranules: response.balloon.currentPartiallyOwnedHostGranules,
             balloonZeroSweptBytes: response.balloon.zeroSweptBytes,
             balloonZeroSweepFailedBytes: response.balloon.zeroSweepFailedBytes,
             balloonHardDecommittedBytes: response.balloon.hardDecommittedBytes,

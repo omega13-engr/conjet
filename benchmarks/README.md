@@ -13,11 +13,11 @@ swift build --package-path benchmarks
 swift test --package-path benchmarks
 ```
 
-Run the combined wrapper for Conjet, OrbStack, and Colima:
+Run the combined wrapper for Conjet, ReferenceRuntime, and Colima:
 
 ```sh
 swift run --package-path benchmarks conjet-bench run \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --samples 10 \
   --output-dir benchmarks/reports/run-all-local
 ```
@@ -61,7 +61,7 @@ To rerun only selected suites, pass `--suites`:
 
 ```sh
 swift run --package-path benchmarks conjet-bench run \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --samples 5 \
   --suites warm-gate,no-cache-gate,cold-base-prepulled-gate \
   --output-dir benchmarks/reports/rerun-failed-gates
@@ -73,7 +73,7 @@ Run the energy gate with required power measurement:
 
 ```sh
 swift run --package-path benchmarks conjet-bench energy-gate \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --workloads idle,container-start-loop,hot-reload-loop,compose-loop,npm-install,pnpm-install,cargo-build \
   --samples 10 \
   --require-power \
@@ -85,7 +85,7 @@ records an honest skip. When `--require-power` is present, missing privileges or
 missing power samples fail the command.
 
 Energy publication runs should use at least 10 samples per workload. Active
-energy claims require Conjet, OrbStack, and Colima to be measured in the same
+energy claims require Conjet, ReferenceRuntime, and Colima to be measured in the same
 report under the same power source and thermal conditions.
 
 ## Gate Existing Reports
@@ -94,8 +94,8 @@ report under the same power source and thermal conditions.
 swift run --package-path benchmarks conjet-bench gate \
   --reports benchmarks/reports/run-all-local/warm-gate/all-results.json \
   --candidate conjet \
-  --baselines orbstack,colima \
-  --required-baselines orbstack \
+  --baselines reference-runtime,colima \
+  --required-baselines reference-runtime \
   --min-samples 10 \
   --phase warm \
   --markdown

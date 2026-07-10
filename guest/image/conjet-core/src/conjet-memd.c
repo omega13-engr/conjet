@@ -70,6 +70,8 @@ static int inotify_add_watch(int fd, const char *path, uint32_t mask) {
 #define CONJET_MEMD_PORT 2376
 #define MAX_CGROUP_DEPTH 8
 #define MIN_EVENT_INTERVAL_MS 1000
+#define DEFAULT_BUILD_CGROUP_PATH \
+    "/sys/fs/cgroup/conjet.slice/conjet-daemons.slice/conjet-build.slice"
 
 #define SERVICE_ROOT_RESIDUAL_KEY "conjet_services_residual"
 #define SERVICE_SLICE_RESIDUAL_MIN_BYTES (64ULL * 1024ULL * 1024ULL)
@@ -694,7 +696,7 @@ static struct build_cgroup_snapshot read_build_cgroup_snapshot(const char *cgrou
 static void read_configured_cgroup_metrics(struct memory_metrics *metrics) {
     const char *build_cgroup = configured_cgroup_path(
         "CONJET_RECLAIM_BUILD_CGROUP",
-        "/sys/fs/cgroup/conjet.slice/conjet-build.slice"
+        DEFAULT_BUILD_CGROUP_PATH
     );
     const char *daemon_cgroup = configured_cgroup_path(
         "CONJET_RECLAIM_DAEMON_CGROUP",

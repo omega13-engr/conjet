@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use crate::arch::aarch64;
 use crate::devices::balloon::{
-    self, BalloonMetrics, BalloonQueueHandler, GuestMemoryReclaimer, MemoryLedgerSummary,
-    PageRange, ReclaimAuthority, ReclaimReport, RestoreReport,
+    self, BalloonMetrics, BalloonQueueHandler, BalloonRestoreMode, GuestMemoryReclaimer,
+    MemoryLedgerSummary, PageRange, ReclaimAuthority, ReclaimReport, RestoreReport,
 };
 use crate::devices::block::{BlockQueueHandler, RawBlockDevice};
 use crate::devices::bus::{MmioDevice, MmioError};
@@ -38,6 +38,11 @@ use crate::vmm::memory::GuestMemory;
 use crate::vmm::vstate::VmState;
 
 const HOST_RECLAIM_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RETAINED_CONSOLE_BYTES: usize = 256 * 1024;
+const DEFAULT_CORE_IDLE_TARGET_MIB: u64 = 512;
+const DEFAULT_CORE_IDLE_QUIET_DWELL: Duration = Duration::from_secs(8);
+const DEFAULT_CORE_IDLE_RETRY_DWELL: Duration = Duration::from_secs(20);
+const CORE_IDLE_WORKLOAD_NOISE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HvfBootReport {
@@ -118,6 +123,7 @@ struct SharedBootState {
     console_output: Mutex<String>,
     stages: Mutex<Vec<HvfBootStage>>,
     event_reclaim: Mutex<EventReclaimMetrics>,
+    core_memory: Mutex<CoreMemoryControllerMetrics>,
     event_reclaim_inflight: AtomicBool,
     event_reclaim_pending: AtomicBool,
     stop_reason: Mutex<Option<String>>,
@@ -136,6 +142,468 @@ struct EventReclaimMetrics {
     applied_range_bytes: u64,
     last_reason: Option<String>,
     last_error: Option<String>,
+}
+
+/// Jetstream owns balloon target transitions. Host-side clients may inspect
+/// this state, but they never need to drive the target for normal operation.
+#[derive(Debug, Clone, Serialize)]
+struct CoreMemoryControllerMetrics {
+    enabled: bool,
+    idle_target_mib: u64,
+    current_target_mib: u64,
+    quiet_dwell_ms: u64,
+    pending_idle_probe: bool,
+    idle_probe_inflight: bool,
+    workload_expansions: u64,
+    idle_shrinks: u64,
+    idle_deferrals: u64,
+    idle_probes: u64,
+    transport_activity_events: u64,
+    transport_quiet_transitions: u64,
+    last_reason: Option<String>,
+    last_error: Option<String>,
+}
+
+impl Default for CoreMemoryControllerMetrics {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_target_mib: 0,
+            current_target_mib: 0,
+            quiet_dwell_ms: 0,
+            pending_idle_probe: false,
+            idle_probe_inflight: false,
+            workload_expansions: 0,
+            idle_shrinks: 0,
+            idle_deferrals: 0,
+            idle_probes: 0,
+            transport_activity_events: 0,
+            transport_quiet_transitions: 0,
+            last_reason: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CoreIdleMemoryPolicy {
+    enabled: bool,
+    target_mib: u64,
+    quiet_dwell: Duration,
+    retry_dwell: Duration,
+}
+
+impl CoreIdleMemoryPolicy {
+    fn from_environment(configured_memory_mib: u64) -> Self {
+        let minimum_target_mib = 256.min(configured_memory_mib);
+        let target_mib = environment_u64("CONJET_MEM_CORE_IDLE_TARGET_MIB")
+            .unwrap_or(DEFAULT_CORE_IDLE_TARGET_MIB)
+            .clamp(minimum_target_mib, configured_memory_mib);
+        let quiet_dwell = Duration::from_millis(
+            environment_u64("CONJET_MEM_CORE_IDLE_DWELL_MS")
+                .unwrap_or(DEFAULT_CORE_IDLE_QUIET_DWELL.as_millis() as u64)
+                .max(1),
+        );
+        Self {
+            enabled: configured_memory_mib > target_mib
+                && !debug_flags::enabled("CONJET_MEM_DISABLE_CORE_IDLE_CONTROLLER"),
+            target_mib,
+            quiet_dwell,
+            retry_dwell: DEFAULT_CORE_IDLE_RETRY_DWELL,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CoreIdleMemoryController {
+    policy: CoreIdleMemoryPolicy,
+    configured_memory_mib: u64,
+    requested_target_mib: u64,
+    runtime_ready: bool,
+    idle_deadline: Option<Instant>,
+    idle_probe: Option<mpsc::Receiver<Result<GuestMemorySnapshot, String>>>,
+    last_docker_transport_activity: Option<Instant>,
+    docker_transport_active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoreMemoryTargetTransition {
+    RestoreConfigured,
+    ReduceToIdle,
+}
+
+impl CoreIdleMemoryController {
+    fn new(
+        policy: CoreIdleMemoryPolicy,
+        configured_memory_mib: u64,
+        initial_target_mib: u64,
+    ) -> Self {
+        Self {
+            policy,
+            configured_memory_mib,
+            requested_target_mib: initial_target_mib.min(configured_memory_mib),
+            runtime_ready: false,
+            idle_deadline: None,
+            idle_probe: None,
+            last_docker_transport_activity: None,
+            docker_transport_active: false,
+        }
+    }
+
+    fn metrics(&self) -> CoreMemoryControllerMetrics {
+        CoreMemoryControllerMetrics {
+            enabled: self.policy.enabled,
+            idle_target_mib: self.policy.target_mib,
+            current_target_mib: self.requested_target_mib,
+            quiet_dwell_ms: self.policy.quiet_dwell.as_millis() as u64,
+            ..CoreMemoryControllerMetrics::default()
+        }
+    }
+
+    fn note_runtime_ready(&mut self, now: Instant, shared: &SharedBootState) {
+        if !self.policy.enabled || self.runtime_ready {
+            return;
+        }
+        self.runtime_ready = true;
+        if self.idle_target_reached() {
+            return;
+        }
+        self.idle_deadline = Some(now + self.policy.quiet_dwell);
+        let mut metrics = shared
+            .core_memory
+            .lock()
+            .expect("core memory controller mutex poisoned");
+        metrics.pending_idle_probe = true;
+        metrics.last_reason = Some("runtime ready; waiting for guest idle".to_string());
+        metrics.last_error = None;
+    }
+
+    fn note_workload_started(
+        &mut self,
+        shared: &SharedBootState,
+    ) -> Option<CoreMemoryTargetTransition> {
+        if !self.policy.enabled {
+            return None;
+        }
+        self.idle_deadline = None;
+        self.idle_probe = None;
+        let mut metrics = shared
+            .core_memory
+            .lock()
+            .expect("core memory controller mutex poisoned");
+        metrics.pending_idle_probe = false;
+        metrics.idle_probe_inflight = false;
+        metrics.last_reason = Some("docker workload active".to_string());
+        metrics.last_error = None;
+        if self.requested_target_mib >= self.configured_memory_mib {
+            return None;
+        }
+        metrics.last_reason = Some(format!(
+            "docker workload active; restoring {} MiB",
+            self.configured_memory_mib
+        ));
+        Some(CoreMemoryTargetTransition::RestoreConfigured)
+    }
+
+    fn note_workload_finished(&mut self, now: Instant, shared: &SharedBootState) {
+        if !self.policy.enabled
+            || !self.runtime_ready
+            || self.requested_target_mib <= self.policy.target_mib
+        {
+            return;
+        }
+        self.idle_deadline = Some(now + self.policy.quiet_dwell);
+        let mut metrics = shared
+            .core_memory
+            .lock()
+            .expect("core memory controller mutex poisoned");
+        metrics.pending_idle_probe = true;
+        metrics.last_reason = Some("docker workload finished; waiting for guest idle".to_string());
+        metrics.last_error = None;
+    }
+
+    fn note_docker_transport_activity(
+        &mut self,
+        now: Instant,
+        shared: &SharedBootState,
+    ) -> Option<CoreMemoryTargetTransition> {
+        if !self.policy.enabled {
+            return None;
+        }
+        self.last_docker_transport_activity = Some(now);
+        self.docker_transport_active = true;
+        {
+            let mut metrics = shared
+                .core_memory
+                .lock()
+                .expect("core memory controller mutex poisoned");
+            metrics.transport_activity_events = metrics.transport_activity_events.saturating_add(1);
+        }
+        self.note_workload_started(shared)
+    }
+
+    fn poll_docker_transport_quiet(&mut self, now: Instant, shared: &SharedBootState) {
+        if !self.docker_transport_active
+            || !self
+                .last_docker_transport_activity
+                .is_some_and(|last| now.duration_since(last) >= self.policy.quiet_dwell)
+        {
+            return;
+        }
+        self.docker_transport_active = false;
+        self.last_docker_transport_activity = None;
+        {
+            let mut metrics = shared
+                .core_memory
+                .lock()
+                .expect("core memory controller mutex poisoned");
+            metrics.transport_quiet_transitions =
+                metrics.transport_quiet_transitions.saturating_add(1);
+        }
+        if !self.runtime_ready || self.requested_target_mib <= self.policy.target_mib {
+            return;
+        }
+        // The transport was already quiet for `quiet_dwell`, so starting a
+        // second dwell here would delay the initial return to idle by twice
+        // the configured interval. Verify the guest immediately instead.
+        self.idle_deadline = Some(now);
+        self.idle_probe = None;
+        let mut metrics = shared
+            .core_memory
+            .lock()
+            .expect("core memory controller mutex poisoned");
+        metrics.pending_idle_probe = true;
+        metrics.idle_probe_inflight = false;
+        metrics.last_reason = Some("docker transport quiet; verifying guest idle".to_string());
+        metrics.last_error = None;
+    }
+
+    fn poll(
+        &mut self,
+        now: Instant,
+        memory_socket_path: &std::path::Path,
+        shared: &SharedBootState,
+    ) -> Option<CoreMemoryTargetTransition> {
+        if !self.policy.enabled || !self.runtime_ready {
+            return None;
+        }
+        // A byte-moving Docker stream is authoritative activity even when an
+        // opaque BuildKit session cannot be classified by its request path.
+        // Do not race it with an idle probe; `poll_docker_transport_quiet`
+        // arms the normal guest-idle verification only after the quiet dwell.
+        if self.docker_transport_active {
+            return None;
+        }
+        // A successful idle transition is terminal until another workload is
+        // observed. Without this guard the host tick would continuously spawn
+        // read-only guest probes after already reaching the idle target.
+        if self.requested_target_mib <= self.policy.target_mib {
+            let had_pending_probe = self.idle_deadline.is_some() || self.idle_probe.is_some();
+            self.idle_deadline = None;
+            self.idle_probe = None;
+            if had_pending_probe {
+                let mut metrics = shared
+                    .core_memory
+                    .lock()
+                    .expect("core memory controller mutex poisoned");
+                metrics.pending_idle_probe = false;
+                metrics.idle_probe_inflight = false;
+            }
+            return None;
+        }
+        let probe_result = match self.idle_probe.as_ref() {
+            Some(receiver) => match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => return None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("guest idle probe disconnected".to_string()))
+                }
+            },
+            None => None,
+        };
+        if let Some(result) = probe_result {
+            self.idle_probe = None;
+            let mut metrics = shared
+                .core_memory
+                .lock()
+                .expect("core memory controller mutex poisoned");
+            metrics.idle_probe_inflight = false;
+            match result {
+                Ok(snapshot) if snapshot.allows_idle_target() => {
+                    self.idle_deadline = None;
+                    metrics.pending_idle_probe = false;
+                    metrics.last_reason = Some(format!(
+                        "guest idle; reducing target to {} MiB",
+                        self.policy.target_mib
+                    ));
+                    metrics.last_error = None;
+                    if self.requested_target_mib == self.policy.target_mib {
+                        return None;
+                    }
+                    return Some(CoreMemoryTargetTransition::ReduceToIdle);
+                }
+                Ok(snapshot) => {
+                    self.idle_deadline = Some(now + self.policy.retry_dwell);
+                    metrics.pending_idle_probe = true;
+                    metrics.idle_deferrals = metrics.idle_deferrals.saturating_add(1);
+                    metrics.last_reason =
+                        Some("guest remains active; deferred idle target".to_string());
+                    metrics.last_error = Some(snapshot.idle_block_reason());
+                    return None;
+                }
+                Err(error) => {
+                    self.idle_deadline = Some(now + self.policy.retry_dwell);
+                    metrics.pending_idle_probe = true;
+                    metrics.idle_deferrals = metrics.idle_deferrals.saturating_add(1);
+                    metrics.last_reason = Some("guest idle probe failed; retrying".to_string());
+                    metrics.last_error = Some(error);
+                    return None;
+                }
+            }
+        }
+        if self.idle_deadline.is_some_and(|deadline| now < deadline) {
+            return None;
+        }
+        self.idle_deadline = None;
+        let socket_path = memory_socket_path.to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("jetstream-guest-idle-probe".to_string())
+            .spawn(move || {
+                let _ = tx.send(request_guest_memory_snapshot(&socket_path));
+            }) {
+            Ok(_) => {
+                self.idle_probe = Some(rx);
+                let mut metrics = shared
+                    .core_memory
+                    .lock()
+                    .expect("core memory controller mutex poisoned");
+                metrics.pending_idle_probe = true;
+                metrics.idle_probe_inflight = true;
+                metrics.idle_probes = metrics.idle_probes.saturating_add(1);
+                metrics.last_reason = Some("probing guest idle state".to_string());
+                metrics.last_error = None;
+            }
+            Err(error) => {
+                self.idle_deadline = Some(now + self.policy.retry_dwell);
+                let mut metrics = shared
+                    .core_memory
+                    .lock()
+                    .expect("core memory controller mutex poisoned");
+                metrics.pending_idle_probe = true;
+                metrics.idle_deferrals = metrics.idle_deferrals.saturating_add(1);
+                metrics.last_reason = Some("failed to start guest idle probe".to_string());
+                metrics.last_error = Some(error.to_string());
+            }
+        }
+        None
+    }
+
+    fn target_mib(&self, transition: CoreMemoryTargetTransition) -> u64 {
+        match transition {
+            CoreMemoryTargetTransition::RestoreConfigured => self.configured_memory_mib,
+            CoreMemoryTargetTransition::ReduceToIdle => self.policy.target_mib,
+        }
+    }
+
+    fn idle_target_reached(&self) -> bool {
+        self.requested_target_mib <= self.policy.target_mib
+    }
+
+    fn record_target_applied(
+        &mut self,
+        transition: CoreMemoryTargetTransition,
+        shared: &SharedBootState,
+    ) {
+        let target_mib = self.target_mib(transition);
+        self.requested_target_mib = target_mib;
+        let mut metrics = shared
+            .core_memory
+            .lock()
+            .expect("core memory controller mutex poisoned");
+        metrics.current_target_mib = target_mib;
+        metrics.last_error = None;
+        match transition {
+            CoreMemoryTargetTransition::RestoreConfigured => {
+                metrics.workload_expansions = metrics.workload_expansions.saturating_add(1);
+                metrics.last_reason = Some(format!(
+                    "docker transport active; restored {} MiB",
+                    self.configured_memory_mib
+                ));
+            }
+            CoreMemoryTargetTransition::ReduceToIdle => {
+                metrics.pending_idle_probe = false;
+                metrics.idle_shrinks = metrics.idle_shrinks.saturating_add(1);
+                metrics.last_reason = Some(format!(
+                    "guest idle; reduced target to {} MiB",
+                    self.policy.target_mib
+                ));
+            }
+        }
+    }
+
+    fn record_target_error(
+        &mut self,
+        transition: CoreMemoryTargetTransition,
+        now: Instant,
+        error: String,
+        shared: &SharedBootState,
+    ) {
+        if transition == CoreMemoryTargetTransition::ReduceToIdle {
+            self.idle_deadline = Some(now + self.policy.retry_dwell);
+        }
+        let mut metrics = shared
+            .core_memory
+            .lock()
+            .expect("core memory controller mutex poisoned");
+        if transition == CoreMemoryTargetTransition::ReduceToIdle {
+            metrics.pending_idle_probe = true;
+            metrics.idle_deferrals = metrics.idle_deferrals.saturating_add(1);
+        }
+        metrics.last_error = Some(error);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct GuestMemorySnapshot {
+    #[serde(default)]
+    active_workloads: u64,
+    #[serde(default)]
+    build_workload_detected: bool,
+    #[serde(default)]
+    container_memory_current: u64,
+    #[serde(default)]
+    service_cgroup_memory_current: u64,
+    #[serde(default)]
+    disk_swap_used: u64,
+    #[serde(default)]
+    psi_full_avg10: f64,
+}
+
+impl GuestMemorySnapshot {
+    fn allows_idle_target(&self) -> bool {
+        !self.build_workload_detected
+            && self.container_memory_current < CORE_IDLE_WORKLOAD_NOISE_BYTES
+            && self.service_cgroup_memory_current < CORE_IDLE_WORKLOAD_NOISE_BYTES
+            && self.disk_swap_used == 0
+            && self.psi_full_avg10 <= 0.05
+    }
+
+    fn idle_block_reason(&self) -> String {
+        format!(
+            "active_workloads={} build={} containers={} services={} disk_swap={} psi_full={:.2}",
+            self.active_workloads,
+            self.build_workload_detected,
+            self.container_memory_current,
+            self.service_cgroup_memory_current,
+            self.disk_swap_used,
+            self.psi_full_avg10
+        )
+    }
+}
+
+fn environment_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.trim().parse().ok()
 }
 
 #[derive(Debug)]
@@ -177,70 +645,90 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
                         continue;
                     }
                 };
+                // Free-page reports are advisory: the guest can return the page to
+                // service without a later deflate handshake. Never detach their GPA
+                // mapping. Balloon-owned pages have the MUST_TELL_HOST ordering
+                // guarantee and may take the deterministic decommit path below.
+                if authority == ReclaimAuthority::ReportInFlight {
+                    if !self.disable_madv_free
+                        && memory.advise_free_at(guest_base, chunk.start, size).is_ok()
+                    {
+                        report.discard_advised_bytes += chunk.size;
+                        report.soft_reclaimed_bytes += chunk.size;
+                    } else {
+                        report.discard_failed_bytes += chunk.size;
+                    }
+                    continue;
+                }
+
                 let prefer_soft_reclaim = should_prefer_soft_reclaim(
                     authority,
                     self.hard_decommit_only,
                     self.disable_hard_decommit,
                     self.disable_madv_free,
                 );
-                let mut soft_reclaim_attempted = false;
                 if prefer_soft_reclaim {
-                    soft_reclaim_attempted = true;
                     if memory.advise_free_at(guest_base, chunk.start, size).is_ok() {
                         report.discard_advised_bytes += chunk.size;
                         report.soft_reclaimed_bytes += chunk.size;
-                        continue;
+                    } else {
+                        report.discard_failed_bytes += chunk.size;
                     }
+                    continue;
                 }
-                if !self.disable_hard_decommit {
+                let mut guest_mapping_detached = false;
+                if !self.hard_decommit_only && !self.disable_free_reusable {
                     if self.vm.unmap_memory(chunk.start, size).is_ok() {
-                        // Detaching the GPA mapping removes Hypervisor's extra VM-object
-                        // reference. Darwin can then purge reusable pages without splitting
-                        // the process mapping. Keep the GPA detached while the balloon owns
-                        // it; deflate restores the mapping before acknowledging the queue.
-                        if !self.disable_free_reusable
-                            && memory
-                                .advise_reusable_at(guest_base, chunk.start, size)
-                                .is_ok()
+                        guest_mapping_detached = true;
+                        // `MADV_FREE_REUSABLE` drops the host footprint while
+                        // retaining one contiguous host mapping. Do not follow it
+                        // with `MADV_ZERO`: that materializes the pages again and
+                        // defeats immediate idle return. MUST_TELL_HOST keeps the
+                        // detached GPA inaccessible until deflate restores it.
+                        if memory
+                            .advise_reusable_at(guest_base, chunk.start, size)
+                            .is_ok()
                         {
-                            match memory.advise_zero_at(guest_base, chunk.start, size) {
-                                Ok(()) => report.zero_swept_bytes += chunk.size,
-                                Err(_) => report.zero_sweep_failed_bytes += chunk.size,
-                            }
                             report.discard_advised_bytes += chunk.size;
                             report.soft_reclaimed_bytes += chunk.size;
                             report.reusable_reclaimed_bytes += chunk.size;
                             continue;
                         }
-                        let decommit_result =
-                            memory.decommit_zero_at(guest_base, chunk.start, size);
-                        let (map_address, decommit_ok) = match decommit_result {
-                            Ok(address) => (address, true),
-                            Err(_) => (host_address, false),
-                        };
-                        let remap_result =
-                            self.vm
-                                .map_memory(map_address, chunk.start, size, self.flags);
-                        match remap_result {
-                            Ok(()) => {
-                                if decommit_ok {
-                                    report.discard_advised_bytes += chunk.size;
-                                    report.hard_decommitted_bytes += chunk.size;
-                                    continue;
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!(
-                                    "fatal HVF remap failure after memory reclaim at 0x{:x}+{}: {}",
-                                    chunk.start, size, error
-                                );
-                                std::process::abort();
-                            }
-                        }
                     }
                 }
 
-                if self.hard_decommit_only || self.disable_madv_free || soft_reclaim_attempted {
+                if !self.disable_hard_decommit {
+                    if !guest_mapping_detached && self.vm.unmap_memory(chunk.start, size).is_ok() {
+                        guest_mapping_detached = true;
+                    }
+                    if guest_mapping_detached
+                        && memory
+                            .decommit_zero_at(guest_base, chunk.start, size)
+                            .is_ok()
+                    {
+                        // This is a deterministic fallback when the reusable
+                        // advisory path is unavailable. It is more expensive in
+                        // VM-map entries, so it is deliberately not the default.
+                        report.discard_advised_bytes += chunk.size;
+                        report.hard_decommitted_bytes += chunk.size;
+                        continue;
+                    }
+                }
+
+                if guest_mapping_detached {
+                    if let Err(error) =
+                        self.vm
+                            .map_memory(host_address, chunk.start, size, self.flags)
+                    {
+                        eprintln!(
+                            "fatal HVF remap failure after memory reclaim at 0x{:x}+{}: {}",
+                            chunk.start, size, error
+                        );
+                        std::process::abort();
+                    }
+                }
+
+                if self.hard_decommit_only || self.disable_madv_free {
                     report.discard_failed_bytes += chunk.size;
                     continue;
                 }
@@ -263,6 +751,7 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
         memory: &GuestMemory,
         guest_base: u64,
         ranges: &[PageRange],
+        mode: BalloonRestoreMode,
     ) -> RestoreReport {
         let mut report = RestoreReport::default();
         for range in ranges {
@@ -271,9 +760,10 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
                     report.failed_bytes += chunk.size;
                     continue;
                 };
-                if memory
-                    .advise_reuse_at(guest_base, chunk.start, size)
-                    .is_err()
+                if mode == BalloonRestoreMode::Reusable
+                    && memory
+                        .advise_reuse_at(guest_base, chunk.start, size)
+                        .is_err()
                 {
                     report.failed_bytes += chunk.size;
                     continue;
@@ -629,6 +1119,18 @@ impl HvfBootRunner {
             ),
         );
 
+        let initial_target_mib = self
+            .options
+            .balloon_target_mib
+            .unwrap_or(self.config.memory_mib)
+            .min(self.config.memory_mib);
+        let core_memory_policy = CoreIdleMemoryPolicy::from_environment(self.config.memory_mib);
+        let mut core_memory_controller = CoreIdleMemoryController::new(
+            core_memory_policy,
+            self.config.memory_mib,
+            initial_target_mib,
+        );
+        let core_memory_metrics = core_memory_controller.metrics();
         let shared = Arc::new(SharedBootState {
             vm_state: Mutex::new(vm_state),
             gic_mmio: Mutex::new(GicMmio::new(gic_layout)),
@@ -637,6 +1139,7 @@ impl HvfBootRunner {
             console_output: Mutex::new(String::new()),
             stages: Mutex::new(Vec::new()),
             event_reclaim: Mutex::new(EventReclaimMetrics::default()),
+            core_memory: Mutex::new(core_memory_metrics),
             event_reclaim_inflight: AtomicBool::new(false),
             event_reclaim_pending: AtomicBool::new(false),
             stop_reason: Mutex::new(None),
@@ -853,7 +1356,10 @@ impl HvfBootRunner {
         let mut hold_deadline: Option<Instant> = None;
         let mut hold_stop_reason = "ready hold elapsed".to_string();
         let mut last_docker_phase_events = 0u64;
+        let mut last_docker_workload_started_events = 0u64;
         let mut last_docker_completed_workload_streams = 0u64;
+        let mut last_active_docker_workload_streams = 0u64;
+        let mut last_docker_transport_bytes = 0u64;
         let memory_reclaim_socket_path =
             memory_socket_path(&self.config.boot_source.docker_socket_path);
         while exit_count < self.options.max_exits {
@@ -874,6 +1380,9 @@ impl HvfBootRunner {
                                 report.message.clone(),
                             );
                             let ok = report.ok;
+                            if ok {
+                                core_memory_controller.note_runtime_ready(Instant::now(), &shared);
+                            }
                             docker_probe = Some(report);
                             docker_probe_finished = true;
                             if ok || self.options.require_docker_ready {
@@ -954,23 +1463,78 @@ impl HvfBootRunner {
                     break;
                 }
             }
-            let docker_phase_events = docker_phase_event_total(&shared);
-            if docker_phase_events > last_docker_phase_events {
-                last_docker_phase_events = docker_phase_events;
+            let docker_phase_metrics = docker_phase_metrics(&shared);
+            let now = Instant::now();
+            let docker_transport_bytes = docker_transport_bytes(&docker_phase_metrics);
+            let transport_activity = docker_transport_bytes > last_docker_transport_bytes;
+            let workload_started =
+                docker_phase_metrics.workload_started > last_docker_workload_started_events;
+            let workload_active = docker_phase_metrics.active_workload_streams > 0
+                && last_active_docker_workload_streams == 0;
+            if transport_activity || workload_started || workload_active {
+                let transition = if transport_activity {
+                    core_memory_controller.note_docker_transport_activity(now, &shared)
+                } else {
+                    core_memory_controller.note_workload_started(&shared)
+                };
+                if let Some(transition) = transition {
+                    let _ = apply_core_memory_target_transition(
+                        &mut core_memory_controller,
+                        transition,
+                        now,
+                        &shared,
+                        &gic,
+                        &vcpu_ids,
+                        &self.virtio_devices,
+                        self.config.memory_mib,
+                    );
+                }
+            }
+            last_docker_transport_bytes = docker_transport_bytes;
+            last_docker_workload_started_events = docker_phase_metrics.workload_started;
+            last_active_docker_workload_streams = docker_phase_metrics.active_workload_streams;
+            if docker_phase_metrics.total > last_docker_phase_events {
+                last_docker_phase_events = docker_phase_metrics.total;
                 schedule_guest_memory_reclaim(
                     memory_reclaim_socket_path.clone(),
                     "docker.streamPhaseFinished",
                     shared.clone(),
                 );
             }
-            let docker_completed_workload_streams = docker_completed_workload_stream_total(&shared);
-            if docker_completed_workload_streams > last_docker_completed_workload_streams {
-                last_docker_completed_workload_streams = docker_completed_workload_streams;
+            if docker_phase_metrics.completed_workload_streams
+                > last_docker_completed_workload_streams
+            {
+                last_docker_completed_workload_streams =
+                    docker_phase_metrics.completed_workload_streams;
                 schedule_guest_memory_reclaim(
                     memory_reclaim_socket_path.clone(),
                     "docker.workloadFinished",
                     shared.clone(),
                 );
+                core_memory_controller.note_workload_finished(now, &shared);
+            }
+            core_memory_controller.poll_docker_transport_quiet(now, &shared);
+            if let Some(transition) =
+                core_memory_controller.poll(now, &memory_reclaim_socket_path, &shared)
+            {
+                let reduced_to_idle = transition == CoreMemoryTargetTransition::ReduceToIdle;
+                let applied = apply_core_memory_target_transition(
+                    &mut core_memory_controller,
+                    transition,
+                    now,
+                    &shared,
+                    &gic,
+                    &vcpu_ids,
+                    &self.virtio_devices,
+                    self.config.memory_mib,
+                );
+                if reduced_to_idle && applied {
+                    schedule_guest_memory_reclaim(
+                        memory_reclaim_socket_path.clone(),
+                        "core.idleTarget",
+                        shared.clone(),
+                    );
+                }
             }
             match poll_host_net_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices) {
                 Ok(true) => {
@@ -1004,6 +1568,9 @@ impl HvfBootRunner {
                                 report.message.clone(),
                             );
                             let ok = report.ok;
+                            if ok {
+                                core_memory_controller.note_runtime_ready(Instant::now(), &shared);
+                            }
                             docker_probe = Some(report);
                             docker_probe_finished = true;
                             if ok || self.options.require_docker_ready {
@@ -1124,7 +1691,7 @@ impl HvfBootRunner {
                         .expect("UART mutex poisoned")
                         .drain_string();
                     if !drained.is_empty() {
-                        console_output.push_str(&drained);
+                        append_console_output(&mut console_output, &drained);
                         if console_output.contains("CONJET_INIT_READY") && !conjet_ready_recorded {
                             conjet_ready_recorded = true;
                             stage(
@@ -1133,6 +1700,11 @@ impl HvfBootRunner {
                                 true,
                                 "captured CONJET_INIT_READY on serial console".to_string(),
                             );
+                            if !self.options.require_docker_ready
+                                && self.options.docker_probe_timeout_ms == 0
+                            {
+                                core_memory_controller.note_runtime_ready(Instant::now(), &shared);
+                            }
                             if self.options.require_conjet_ready
                                 && !self.options.require_docker_ready
                                 && self.options.docker_probe_timeout_ms == 0
@@ -1249,7 +1821,8 @@ impl HvfBootRunner {
         let ids = vcpu_ids.lock().expect("vCPU id mutex poisoned").clone();
         let _ = exit_vcpus(&ids);
 
-        console_output.push_str(
+        append_console_output(
+            &mut console_output,
             &shared
                 .console_output
                 .lock()
@@ -1264,7 +1837,8 @@ impl HvfBootRunner {
                 .drain(..),
         );
 
-        console_output.push_str(
+        append_console_output(
+            &mut console_output,
             &shared
                 .uart
                 .lock()
@@ -1298,7 +1872,7 @@ impl HvfBootRunner {
             .len();
         let _ = vm.unmap_memory(self.plan.ram_base, len);
 
-        let ready = console_output.contains("CONJET_INIT_READY");
+        let ready = conjet_ready_recorded || console_output.contains("CONJET_INIT_READY");
         let message = stop_reason.unwrap_or_else(|| {
             if ready {
                 "conjet-init ready captured".to_string()
@@ -1616,12 +2190,26 @@ fn append_shared_console(shared: &SharedBootState) {
         .expect("UART mutex poisoned")
         .drain_string();
     if !drained.is_empty() {
-        shared
-            .console_output
-            .lock()
-            .expect("console mutex poisoned")
-            .push_str(&drained);
+        append_console_output(
+            &mut shared
+                .console_output
+                .lock()
+                .expect("console mutex poisoned"),
+            &drained,
+        );
     }
+}
+
+fn append_console_output(output: &mut String, incoming: &str) {
+    output.push_str(incoming);
+    if output.len() <= MAX_RETAINED_CONSOLE_BYTES {
+        return;
+    }
+    let mut retained_start = output.len().saturating_sub(MAX_RETAINED_CONSOLE_BYTES);
+    while retained_start < output.len() && !output.is_char_boundary(retained_start) {
+        retained_start += 1;
+    }
+    *output = output[retained_start..].to_owned();
 }
 
 fn request_shared_stop(shared: &SharedBootState, reason: String) {
@@ -1899,6 +2487,7 @@ struct MemoryControlResponse {
     target_pages: u32,
     docker_phase_events: DockerPhaseControlMetrics,
     event_reclaim: EventReclaimMetrics,
+    core_memory: CoreMemoryControllerMetrics,
     balloon: BalloonMetrics,
     memory_ledger: MemoryLedgerSummary,
     host_memory: HostMemoryFootprint,
@@ -1909,8 +2498,10 @@ struct DockerPhaseControlMetrics {
     total: u64,
     request: u64,
     response: u64,
+    workload_started: u64,
     completed_streams: u64,
     completed_workload_streams: u64,
+    active_workload_streams: u64,
     request_bytes: u64,
     response_bytes: u64,
 }
@@ -2049,10 +2640,6 @@ fn handle_memory_control_request(
     }
 }
 
-fn shared_plan_ram_base() -> u64 {
-    crate::arch::aarch64::RAM_BASE
-}
-
 fn set_balloon_target_bytes(
     shared: &SharedBootState,
     gic: &Gic,
@@ -2091,17 +2678,44 @@ fn set_balloon_target_bytes(
     Ok(())
 }
 
-fn docker_phase_event_total(shared: &SharedBootState) -> u64 {
-    let vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
-    vm_state.devices.docker_phase_events().total
+fn apply_core_memory_target_transition(
+    controller: &mut CoreIdleMemoryController,
+    transition: CoreMemoryTargetTransition,
+    now: Instant,
+    shared: &SharedBootState,
+    gic: &Gic,
+    vcpu_ids: &Arc<Mutex<Vec<u64>>>,
+    devices: &[VirtioMmioDevicePlan],
+    configured_memory_mib: u64,
+) -> bool {
+    let target_mib = controller.target_mib(transition);
+    match set_balloon_target_bytes(
+        shared,
+        gic,
+        devices,
+        configured_memory_mib,
+        target_mib.saturating_mul(1024 * 1024),
+    ) {
+        Ok(()) => {
+            controller.record_target_applied(transition, shared);
+            let ids = vcpu_ids.lock().expect("vCPU id mutex poisoned").clone();
+            let _ = exit_vcpus(&ids);
+            true
+        }
+        Err(error) => {
+            controller.record_target_error(transition, now, error, shared);
+            false
+        }
+    }
 }
 
-fn docker_completed_workload_stream_total(shared: &SharedBootState) -> u64 {
+fn docker_phase_metrics(shared: &SharedBootState) -> crate::vmm::vstate::DockerPhaseMetrics {
     let vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
-    vm_state
-        .devices
-        .docker_phase_events()
-        .completed_workload_streams
+    vm_state.devices.docker_phase_events()
+}
+
+fn docker_transport_bytes(metrics: &crate::vmm::vstate::DockerPhaseMetrics) -> u64 {
+    metrics.request_bytes.saturating_add(metrics.response_bytes)
 }
 
 fn balloon_free_page_hint_cmd_id(transport: &crate::devices::virtio::VirtioMmioDevice) -> u32 {
@@ -2139,6 +2753,11 @@ fn memory_control_snapshot(
         .lock()
         .expect("event reclaim mutex poisoned")
         .clone();
+    let core_memory = shared
+        .core_memory
+        .lock()
+        .expect("core memory controller mutex poisoned")
+        .clone();
     let balloon_bases = vm_state.devices.balloon.keys().copied().collect::<Vec<_>>();
     let target_pages = balloon_bases
         .into_iter()
@@ -2164,12 +2783,15 @@ fn memory_control_snapshot(
             total: docker_phase_events.total,
             request: docker_phase_events.request,
             response: docker_phase_events.response,
+            workload_started: docker_phase_events.workload_started,
             completed_streams: docker_phase_events.completed_streams,
             completed_workload_streams: docker_phase_events.completed_workload_streams,
+            active_workload_streams: docker_phase_events.active_workload_streams,
             request_bytes: docker_phase_events.request_bytes,
             response_bytes: docker_phase_events.response_bytes,
         },
         event_reclaim,
+        core_memory,
         balloon,
         memory_ledger,
         host_memory: host_memory_footprint(),
@@ -2197,6 +2819,7 @@ fn memory_control_error(message: &str, configured_memory_mib: u64) -> MemoryCont
         target_pages: 0,
         docker_phase_events: DockerPhaseControlMetrics::default(),
         event_reclaim: EventReclaimMetrics::default(),
+        core_memory: CoreMemoryControllerMetrics::default(),
         balloon: BalloonMetrics::default(),
         memory_ledger: MemoryLedgerSummary::default(),
         host_memory: host_memory_footprint(),
@@ -2352,6 +2975,58 @@ fn request_guest_memory_reclaim(
         }
     }
     Ok(())
+}
+
+fn request_guest_memory_snapshot(
+    socket_path: &std::path::Path,
+) -> Result<GuestMemorySnapshot, String> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .write_all(
+            b"GET /conjet-memory-metrics HTTP/1.1\r\nHost: conjet-memd\r\nConnection: close\r\n\r\n",
+        )
+        .map_err(|error| error.to_string())?;
+    let mut response = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while response.len() < 16 * 1024 {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                response.extend_from_slice(&buffer[..count]);
+                if http_response_body_complete(&response) {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    if response.is_empty() {
+        return Err("guest memory metrics returned an empty response".to_string());
+    }
+    if http_response_status(&response) != Some(200) {
+        return Err("guest memory metrics returned a non-200 response".to_string());
+    }
+    let body_start = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .ok_or_else(|| "guest memory metrics response lacks HTTP headers".to_string())?;
+    serde_json::from_slice::<GuestMemorySnapshot>(&response[body_start..])
+        .map_err(|error| format!("invalid guest memory metrics: {error}"))
 }
 
 fn record_event_reclaim_error(shared: &SharedBootState, error: String) {
@@ -2799,6 +3474,8 @@ mod tests {
         let json = serde_json::to_value(response).unwrap();
         assert!(json.get("docker_phase_events").is_some());
         assert_eq!(json["docker_phase_events"]["total"], 0);
+        assert!(json.get("core_memory").is_some());
+        assert_eq!(json["core_memory"]["enabled"], false);
         assert!(json.get("host_memory").is_some());
         assert!(json["host_memory"].get("resident_bytes").is_some());
         assert!(json["host_memory"]
@@ -2839,6 +3516,16 @@ mod tests {
         assert_eq!(chunks[1].size, HOST_RECLAIM_CHUNK_BYTES);
         assert_eq!(chunks[2].start, 0x4000_0000 + HOST_RECLAIM_CHUNK_BYTES * 2);
         assert_eq!(chunks[2].size, 4096);
+    }
+
+    #[test]
+    fn retained_console_output_is_bounded_on_utf8_boundaries() {
+        let mut console = "start:".to_string();
+        append_console_output(&mut console, &"界".repeat(MAX_RETAINED_CONSOLE_BYTES));
+
+        assert!(console.len() <= MAX_RETAINED_CONSOLE_BYTES);
+        assert!(std::str::from_utf8(console.as_bytes()).is_ok());
+        assert!(console.ends_with('界'));
     }
 
     #[test]
@@ -2903,5 +3590,90 @@ mod tests {
             percent_encode_reason("docker.workloadFinished final/1"),
             "docker.workloadFinished%20final%2F1"
         );
+    }
+
+    #[test]
+    fn guest_memory_snapshot_allows_only_quiet_low_working_set_state() {
+        let quiet = GuestMemorySnapshot {
+            active_workloads: 1,
+            build_workload_detected: false,
+            container_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
+            service_cgroup_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
+            disk_swap_used: 0,
+            psi_full_avg10: 0.05,
+        };
+        assert!(quiet.allows_idle_target());
+
+        let build = GuestMemorySnapshot {
+            build_workload_detected: true,
+            ..quiet
+        };
+        assert!(!build.allows_idle_target());
+
+        let container = GuestMemorySnapshot {
+            container_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES,
+            ..quiet
+        };
+        assert!(!container.allows_idle_target());
+
+        let service = GuestMemorySnapshot {
+            service_cgroup_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES,
+            ..quiet
+        };
+        assert!(!service.allows_idle_target());
+
+        let swap = GuestMemorySnapshot {
+            disk_swap_used: 4096,
+            ..quiet
+        };
+        assert!(!swap.allows_idle_target());
+
+        let stalled = GuestMemorySnapshot {
+            psi_full_avg10: 0.06,
+            ..quiet
+        };
+        assert!(!stalled.allows_idle_target());
+    }
+
+    #[test]
+    fn core_memory_controller_uses_configured_capacity_and_idle_floor() {
+        let controller = CoreIdleMemoryController::new(
+            CoreIdleMemoryPolicy {
+                enabled: true,
+                target_mib: 512,
+                quiet_dwell: Duration::from_secs(8),
+                retry_dwell: Duration::from_secs(20),
+            },
+            8192,
+            8192,
+        );
+
+        let metrics = controller.metrics();
+        assert!(metrics.enabled);
+        assert_eq!(metrics.idle_target_mib, 512);
+        assert_eq!(metrics.current_target_mib, 8192);
+        assert_eq!(
+            controller.target_mib(CoreMemoryTargetTransition::RestoreConfigured),
+            8192
+        );
+        assert_eq!(
+            controller.target_mib(CoreMemoryTargetTransition::ReduceToIdle),
+            512
+        );
+        assert!(!controller.idle_target_reached());
+
+        let mut settled = controller;
+        settled.requested_target_mib = 512;
+        assert!(settled.idle_target_reached());
+    }
+
+    #[test]
+    fn docker_transport_bytes_include_both_stream_directions() {
+        let metrics = crate::vmm::vstate::DockerPhaseMetrics {
+            request_bytes: 17,
+            response_bytes: 29,
+            ..Default::default()
+        };
+        assert_eq!(docker_transport_bytes(&metrics), 46);
     }
 }

@@ -455,6 +455,10 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var balloonReusableReclaimedMiB: Int?
     public var balloonReusableRestoredMiB: Int?
     public var balloonCurrentReusableMiB: Int?
+    public var balloonHostGranuleEligibleMiB: Int?
+    public var balloonPartialHostGranuleMiB: Int?
+    public var balloonCurrentFullyOwnedHostGranules: UInt64?
+    public var balloonCurrentPartiallyOwnedHostGranules: UInt64?
     public var balloonZeroSweptMiB: Int?
     public var balloonZeroSweepFailedMiB: Int?
     public var balloonHardDecommittedMiB: Int?
@@ -513,6 +517,10 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         balloonReusableReclaimedMiB: Int? = nil,
         balloonReusableRestoredMiB: Int? = nil,
         balloonCurrentReusableMiB: Int? = nil,
+        balloonHostGranuleEligibleMiB: Int? = nil,
+        balloonPartialHostGranuleMiB: Int? = nil,
+        balloonCurrentFullyOwnedHostGranules: UInt64? = nil,
+        balloonCurrentPartiallyOwnedHostGranules: UInt64? = nil,
         balloonZeroSweptMiB: Int? = nil,
         balloonZeroSweepFailedMiB: Int? = nil,
         balloonHardDecommittedMiB: Int? = nil,
@@ -570,6 +578,10 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         self.balloonReusableReclaimedMiB = balloonReusableReclaimedMiB
         self.balloonReusableRestoredMiB = balloonReusableRestoredMiB
         self.balloonCurrentReusableMiB = balloonCurrentReusableMiB
+        self.balloonHostGranuleEligibleMiB = balloonHostGranuleEligibleMiB
+        self.balloonPartialHostGranuleMiB = balloonPartialHostGranuleMiB
+        self.balloonCurrentFullyOwnedHostGranules = balloonCurrentFullyOwnedHostGranules
+        self.balloonCurrentPartiallyOwnedHostGranules = balloonCurrentPartiallyOwnedHostGranules
         self.balloonZeroSweptMiB = balloonZeroSweptMiB
         self.balloonZeroSweepFailedMiB = balloonZeroSweepFailedMiB
         self.balloonHardDecommittedMiB = balloonHardDecommittedMiB

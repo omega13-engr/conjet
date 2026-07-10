@@ -1271,7 +1271,7 @@ public final class DockerSocketBridge: @unchecked Sendable {
         }
 
         let separator = parts[1].contains("?") ? "&" : "?"
-        lines[0] = "\(parts[0]) \(parts[1])\(separator)cgroupparent=/conjet.slice/conjet-build.slice \(parts[2])"
+        lines[0] = "\(parts[0]) \(parts[1])\(separator)cgroupparent=conjet-build.slice \(parts[2])"
         var rewritten = Data((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8)
         rewritten.append(data[headerRange.upperBound...])
         return rewritten

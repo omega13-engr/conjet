@@ -72,7 +72,7 @@ The standard local runner is:
 
 ```sh
 swift run --package-path benchmarks conjet-bench run \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --samples 10 \
   --output-dir benchmarks/reports/run-all-YYYYMMDD-HHMMSS
 ```
@@ -95,7 +95,7 @@ To rerun only specific suites after a partial failure, use `--suites`:
 
 ```sh
 swift run --package-path benchmarks conjet-bench run \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --samples 5 \
   --suites warm-gate,no-cache-gate,cold-base-prepulled-gate \
   --output-dir benchmarks/reports/rerun-failed-gates
@@ -146,7 +146,7 @@ generalize beyond synthetic Node/Cargo workloads:
 
 ```sh
 swift run --package-path benchmarks conjet-bench run \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --samples 10 \
   --polyglot-samples 10 \
   --ecosystems js,python,jvm,dotnet,go,rust,cpp \
@@ -186,7 +186,7 @@ Energy superiority requires measured `powermetrics` data:
 
 ```sh
 swift run --package-path benchmarks conjet-bench energy-gate \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --workloads idle,container-start-loop,hot-reload-loop,compose-loop,npm-install,pnpm-install,cargo-build \
   --samples 10 \
   --require-power \
@@ -199,7 +199,7 @@ lower energy or lower power.
 
 Energy publication runs must use at least 10 samples per workload. Conjet has
 shown very low idle power in directional measurements, but active energy
-optimization is ongoing until measured active joules are at or below OrbStack
+optimization is ongoing until measured active joules are at or below ReferenceRuntime
 on the target workloads.
 
 ## Network Gate
@@ -208,7 +208,7 @@ ConjetNet networking is measured with:
 
 ```sh
 swift run --package-path benchmarks conjet-bench network-gate \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --samples 10 \
   --output-dir benchmarks/reports/network-gate-local
 ```
@@ -260,8 +260,8 @@ Existing raw JSON reports can be scored with:
 swift run --package-path benchmarks conjet-bench gate \
   --reports benchmarks/reports/run-all-local/warm-gate/all-results.json \
   --candidate conjet \
-  --baselines orbstack,colima \
-  --required-baselines orbstack \
+  --baselines reference-runtime,colima \
+  --required-baselines reference-runtime \
   --min-samples 10 \
   --phase warm \
   --markdown

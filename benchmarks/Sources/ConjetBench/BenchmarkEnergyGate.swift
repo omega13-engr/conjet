@@ -18,7 +18,7 @@ public struct BenchmarkEnergyGateOptions: Codable, Equatable, Sendable {
     public var prepullImages: Bool
 
     public init(
-        contexts: [String] = ["conjet", "orbstack"],
+        contexts: [String] = ["conjet", "reference-runtime"],
         workloads: [String] = ["idle", "container-start-loop", "hot-reload-loop", "compose-loop", "npm-install", "pnpm-install", "cargo-build"],
         samples: Int = 10,
         requirePower: Bool = false,

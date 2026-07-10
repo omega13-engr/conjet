@@ -8,7 +8,7 @@ Run the power gate with explicit privileges:
 
 ```sh
 swift run --package-path benchmarks conjet-bench energy-gate \
-  --contexts conjet,orbstack,colima \
+  --contexts conjet,reference-runtime,colima \
   --workloads idle,container-start-loop,hot-reload-loop,compose-loop,npm-install,pnpm-install,cargo-build \
   --samples 10 \
   --require-power \
@@ -38,4 +38,4 @@ Remaining power work:
   same timeline.
 - Repeat idle and energy-to-solution runs under controlled thermal and power
   conditions.
-- Keep Conjet, OrbStack, and Colima measurements in the same report set.
+- Keep Conjet, ReferenceRuntime, and Colima measurements in the same report set.

@@ -9,8 +9,10 @@ use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use JSON::PP qw(decode_json);
 
 my @required_kernel_builtins = qw(
+  CONFIG_ARM64_16K_PAGES
   CONFIG_OF
   CONFIG_BLK_DEV_INITRD
+  CONFIG_BLK_DEV_LOOP
   CONFIG_RD_GZIP
   CONFIG_DEVTMPFS
   CONFIG_DEVTMPFS_MOUNT

@@ -13,7 +13,7 @@ Options:
   --kernel-version X.Y.Z   Linux kernel version. Default: 6.12.86
   --root-disk-gb GB        Rootfs appliance disk size. Default: 16
   --qa-root PATH           Existing QA root. Default: mktemp under CONJET_QA_ROOT_BASE or /tmp
-  --docker-host URI        Docker host. Default: OrbStack socket when present, otherwise /var/run/docker.sock
+  --docker-host URI        Docker host. Default: active Docker context endpoint, otherwise /var/run/docker.sock
   -h, --help               Show this help.
 
 The script copies the current working tree to <qa-root>/worktree before running
@@ -79,12 +79,14 @@ if ! printf '%s\n' "${root_disk_gb}" | grep -Eq '^[0-9]+$'; then
   exit 64
 fi
 
+if [ -z "${docker_host}" ] && [ -n "${DOCKER_HOST:-}" ]; then
+  docker_host="${DOCKER_HOST}"
+fi
 if [ -z "${docker_host}" ]; then
-  if [ -S "/Users/sly/.orbstack/run/docker.sock" ]; then
-    docker_host="unix:///Users/sly/.orbstack/run/docker.sock"
-  else
-    docker_host="unix:///var/run/docker.sock"
-  fi
+  docker_host="$(docker context inspect --format '{{ .Endpoints.docker.Host }}' 2>/dev/null || true)"
+fi
+if [ -z "${docker_host}" ]; then
+  docker_host="unix:///var/run/docker.sock"
 fi
 
 case "${docker_host}" in
@@ -118,8 +120,13 @@ mkdir -p "$(dirname "${latest_path}")"
 echo "${qa_root}" > "${latest_path}"
 
 rsync -a --delete \
+  --delete-excluded \
   --exclude '.git' \
   --exclude '.build' \
+  --exclude 'target/***' \
+  --exclude 'graphify-out/***' \
+  --exclude 'benchmarks/***' \
+  --exclude 'dist/***' \
   --exclude 'guest/kernel/.build' \
   --exclude 'guest/kernel/dist' \
   --exclude 'guest/image/conjet-core/dist' \
@@ -135,25 +142,103 @@ echo "kernel_version=${kernel_version}"
 echo "root_disk_gb=${root_disk_gb}"
 
 docker --host "${docker_host}" info > "${log_dir}/docker-info.log"
+daemon_name="$(docker --host "${docker_host}" info --format '{{.Name}}')"
+image_builder_cgroup_parent=""
+if [ "${daemon_name}" = "conjet-core" ]; then
+  # A currently running Core image from before the cgroup-parent correction
+  # needs an explicit valid slice while it builds its replacement rootfs.
+  image_builder_cgroup_parent="conjet-build.slice"
+fi
 
-docker --host "${docker_host}" run --rm \
+# Transfer the source snapshot and completed outputs through the Docker API.
+# This avoids assuming that arbitrary host paths are bind-mountable by the
+# selected daemon. The inner Docker client still receives the daemon's native
+# socket for the rootfs appliance build.
+container_worktree="/worktree"
+container_artifact_dir="/release-assets"
+container_log_dir="/release-logs"
+container_name="conjet-core-release-local-${$}-${RANDOM}"
+container_id=""
+
+cleanup_container() {
+  if [ -n "${container_id}" ]; then
+    docker --host "${docker_host}" rm -f "${container_id}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_container EXIT
+
+kernel_asset_name="conjet-linux-${kernel_version}-aarch64-Image"
+rootfs_asset_name="conjet-ubuntu-24.04-rootfs-aarch64-docker.raw.gz"
+release_artifacts=(
+  "${kernel_asset_name}"
+  "${kernel_asset_name}.json"
+  "${kernel_asset_name}.sha512sum"
+  "${rootfs_asset_name}"
+  "${rootfs_asset_name}.json"
+  "${rootfs_asset_name}.sha512sum"
+)
+
+verify_release_checksum() {
+  local checksum_name="$1"
+  if command -v sha512sum >/dev/null 2>&1; then
+    (
+      cd "${artifact_dir}"
+      sha512sum -c "${checksum_name}"
+    )
+  else
+    (
+      cd "${artifact_dir}"
+      shasum -a 512 -c "${checksum_name}"
+    )
+  fi
+}
+
+copy_release_artifacts() {
+  local attempt artifact
+  for attempt in 1 2 3; do
+    rm -f "${release_artifacts[@]/#/${artifact_dir}/}"
+    if (
+      set -e
+      for artifact in "${release_artifacts[@]}"; do
+        docker --host "${docker_host}" cp \
+          "${container_id}:${container_artifact_dir}/${artifact}" \
+          "${artifact_dir}/${artifact}"
+        test -s "${artifact_dir}/${artifact}"
+      done
+      verify_release_checksum "${kernel_asset_name}.sha512sum"
+      verify_release_checksum "${rootfs_asset_name}.sha512sum"
+    ); then
+      return 0
+    fi
+
+    if [ "${attempt}" -lt 3 ]; then
+      echo "release artifact transfer attempt ${attempt} failed; retrying" >&2
+    fi
+  done
+
+  echo "failed to transfer and verify the complete Core release artifact set" >&2
+  return 1
+}
+
+container_id="$(docker --host "${docker_host}" create \
+  --name "${container_name}" \
   --ulimit nofile=65536:65536 \
   --platform "${container_platform}" \
-  --workdir "${worktree}" \
-  --volume "${worktree}:${worktree}" \
-  --volume "${log_dir}:${log_dir}" \
-  --volume "${artifact_dir}:${artifact_dir}" \
-  --volume "${docker_socket}:/var/run/docker.sock" \
+  --workdir "${container_worktree}" \
+  --volume /var/run/docker.sock:/var/run/docker.sock \
   --env DOCKER_HOST=unix:///var/run/docker.sock \
   --env CONJET_CORE_VERSION="${version}" \
   --env KERNEL_VERSION="${kernel_version}" \
   --env ROOT_DISK_GB="${root_disk_gb}" \
-  --env ARTIFACT_DIR="${artifact_dir}" \
-  --env LOG_DIR="${log_dir}" \
+  --env ARTIFACT_DIR="${container_artifact_dir}" \
+  --env LOG_DIR="${container_log_dir}" \
+  --env CONJET_IMAGE_BUILDER_CGROUP_PARENT="${image_builder_cgroup_parent}" \
   --env DEBIAN_FRONTEND=noninteractive \
   "ubuntu:24.04" \
   bash -lc '
     set -euo pipefail
+
+    mkdir -p "${ARTIFACT_DIR}" "${LOG_DIR}"
 
     apt-get update
     apt-get install -y --no-install-recommends \
@@ -219,7 +304,31 @@ docker --host "${docker_host}" run --rm \
       "${ARTIFACT_DIR}/"
 
     find "${ARTIFACT_DIR}" -maxdepth 1 -type f -print | sort
-  ' | tee "${log_dir}/container-release-rehearsal.log"
+  ')"
+
+if command -v bsdtar >/dev/null 2>&1; then
+  (
+    cd "${qa_root}"
+    bsdtar --no-xattrs -cf - worktree
+  ) | docker --host "${docker_host}" cp - "${container_id}:/"
+else
+  (
+    cd "${qa_root}"
+    tar --no-xattrs -cf - worktree
+  ) | docker --host "${docker_host}" cp - "${container_id}:/"
+fi
+
+container_status=0
+docker --host "${docker_host}" start -a "${container_id}" \
+  | tee "${log_dir}/container-release-rehearsal.log" || container_status=$?
+
+docker --host "${docker_host}" cp "${container_id}:${container_log_dir}/." "${log_dir}" || true
+
+if [ "${container_status}" -ne 0 ]; then
+  exit "${container_status}"
+fi
+
+copy_release_artifacts
 
 find "${artifact_dir}" -maxdepth 1 -type f -print | sort > "${qa_root}/artifact-list.txt"
 echo "artifact_dir=${artifact_dir}"

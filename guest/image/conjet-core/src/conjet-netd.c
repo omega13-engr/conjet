@@ -77,7 +77,7 @@ static int conjet_netd_unit_test_mount_stub(const char *source, const char *targ
 #define CONJET_VSOCK_FRAME_HEADER_SIZE 28
 #define CONJET_SERVICE_CGROUP_PARENT "conjet-services.slice"
 #define CONJET_BUILD_CGROUP_PARENT "conjet-build.slice"
-#define CONJET_BUILD_API_CGROUP_PARENT "/conjet.slice/conjet-build.slice"
+#define CONJET_BUILD_API_CGROUP_PARENT "conjet-build.slice"
 
 enum frame_type {
     FRAME_HELLO = 1,
@@ -812,9 +812,10 @@ static int docker_http_request_is_complete(const uint8_t *request, size_t reques
 
 /*
  * Assemble enough of one Docker HTTP request to make the relay mode decision
- * independent of socket/vsock read boundaries. For unsupported streaming
- * request framing (currently Transfer-Encoding), return the complete header
- * plus any bytes already received and let the full-duplex pump carry the rest.
+ * independent of socket/vsock read boundaries. Requests with a large fixed
+ * body, such as Docker archive uploads, are deliberately not buffered in
+ * full: return their header and already-read prefix so the duplex relay can
+ * stream the remaining bytes without a size ceiling.
  */
 static int receive_initial_docker_request(
     int fd,
@@ -839,9 +840,16 @@ static int receive_initial_docker_request(
     for (;;) {
         size_t needed = 0;
         int extent_rc = docker_http_request_extent(buffer, used, &needed);
-        if (extent_rc < 0 || needed > DOCKER_MAX_INITIAL_REQUEST) {
+        if (extent_rc < 0) {
             free(buffer);
             return -1;
+        }
+
+        if (extent_rc > 0 && needed > DOCKER_MAX_INITIAL_REQUEST) {
+            *out = buffer;
+            *out_len = used;
+            *out_complete = 0;
+            return 0;
         }
 
         if (extent_rc > 0) {
@@ -2347,6 +2355,49 @@ static void handle_docker_proxy(int client, const uint8_t *first, size_t first_l
             return;
         }
         pthread_join(response_thread, NULL);
+        close_fd(upstream);
+        close_fd(client);
+        return;
+    }
+
+    if (!upgraded_stream && !streaming_http) {
+        pthread_t request_thread, response_thread;
+        struct pump_args *ab = calloc(1, sizeof(*ab));
+        struct pump_args *ba = calloc(1, sizeof(*ba));
+        if (ab == NULL || ba == NULL) {
+            free(ab);
+            free(ba);
+            close_fd(upstream);
+            close_fd(client);
+            return;
+        }
+        ab->from = client;
+        ab->to = upstream;
+        ab->shutdown_to_on_eof = 1;
+        ba->from = upstream;
+        ba->to = client;
+        ba->shutdown_to_on_eof = 1;
+
+        if (pthread_create(&request_thread, NULL, pump_thread, ab) != 0) {
+            free(ab);
+            free(ba);
+            close_fd(upstream);
+            close_fd(client);
+            return;
+        }
+        if (pthread_create(&response_thread, NULL, docker_response_pump_thread, ba) != 0) {
+            free(ba);
+            shutdown(client, SHUT_RDWR);
+            shutdown(upstream, SHUT_RDWR);
+            pthread_join(request_thread, NULL);
+            close_fd(upstream);
+            close_fd(client);
+            return;
+        }
+        pthread_join(response_thread, NULL);
+        shutdown(client, SHUT_RDWR);
+        shutdown(upstream, SHUT_RDWR);
+        pthread_join(request_thread, NULL);
         close_fd(upstream);
         close_fd(client);
         return;

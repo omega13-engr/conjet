@@ -26,6 +26,19 @@ manual pulse reclaim path is fallback only. Reclaim-capable kernels must keep
 `CONFIG_SWAP`, `CONFIG_ZSMALLOC`, and `CONFIG_ZRAM` enabled; the Docker profile
 also enables `CONFIG_ZRAM_WRITEBACK`.
 
+### Host-Granule Alignment
+
+The ARM64 Docker and fast profiles select `CONFIG_ARM64_16K_PAGES`. The
+virtio-balloon wire format remains in 4 KiB PFNs, but the Linux driver submits
+all PFNs belonging to one Linux page together. Matching the guest allocation
+page to the native host granule prevents a post-build mix of guest-owned and
+balloon-owned subpages in one host page. That mix is safe but unreclaimable,
+and otherwise leaves an avoidable idle footprint after a large build.
+
+The release metadata treats `CONFIG_ARM64_16K_PAGES` as a required direct
+kernel capability. A host must select a matching Conjet Core kernel asset
+rather than silently falling back to an older 4 KiB direct kernel.
+
 ### Dynamic Memory Safety Contract
 
 Conjet dynamic memory does not shrink guest-visible RAM as a normal runtime

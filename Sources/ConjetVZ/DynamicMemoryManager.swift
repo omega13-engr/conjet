@@ -402,6 +402,10 @@ struct DynamicMemoryVMMRuntimeMetrics: Equatable, Sendable {
     var balloonReusableReclaimedBytes: UInt64?
     var balloonReusableRestoredBytes: UInt64?
     var balloonCurrentReusableBytes: UInt64?
+    var balloonHostGranuleEligibleBytes: UInt64?
+    var balloonPartialHostGranuleBytes: UInt64?
+    var balloonCurrentFullyOwnedHostGranules: UInt64?
+    var balloonCurrentPartiallyOwnedHostGranules: UInt64?
     var balloonZeroSweptBytes: UInt64?
     var balloonZeroSweepFailedBytes: UInt64?
     var balloonHardDecommittedBytes: UInt64?
@@ -720,6 +724,10 @@ final class DynamicMemoryManager: @unchecked Sendable {
             balloonReusableReclaimedMiB: vmmMetrics.flatMap { $0.balloonReusableReclaimedBytes.map(Self.bytesToMiB) },
             balloonReusableRestoredMiB: vmmMetrics.flatMap { $0.balloonReusableRestoredBytes.map(Self.bytesToMiB) },
             balloonCurrentReusableMiB: vmmMetrics.flatMap { $0.balloonCurrentReusableBytes.map(Self.bytesToMiB) },
+            balloonHostGranuleEligibleMiB: vmmMetrics.flatMap { $0.balloonHostGranuleEligibleBytes.map(Self.bytesToMiB) },
+            balloonPartialHostGranuleMiB: vmmMetrics.flatMap { $0.balloonPartialHostGranuleBytes.map(Self.bytesToMiB) },
+            balloonCurrentFullyOwnedHostGranules: vmmMetrics?.balloonCurrentFullyOwnedHostGranules,
+            balloonCurrentPartiallyOwnedHostGranules: vmmMetrics?.balloonCurrentPartiallyOwnedHostGranules,
             balloonZeroSweptMiB: vmmMetrics.flatMap { $0.balloonZeroSweptBytes.map(Self.bytesToMiB) },
             balloonZeroSweepFailedMiB: vmmMetrics.flatMap { $0.balloonZeroSweepFailedBytes.map(Self.bytesToMiB) },
             balloonHardDecommittedMiB: vmmMetrics.flatMap { $0.balloonHardDecommittedBytes.map(Self.bytesToMiB) },
@@ -2862,14 +2870,20 @@ final class DynamicMemoryManager: @unchecked Sendable {
         if metrics.psiFullAvg10 > 0.05 {
             return .high
         }
+        if metrics.psiSomeAvg10 > 0.5 {
+            return .elevated
+        }
+        // A deeply ballooned idle guest deliberately has little MemAvailable.
+        // Treat that value as a capacity signal only while a workload is using
+        // the guest; otherwise it creates a self-induced expand/refine loop.
+        guard hasActiveGuestWorkload(metrics) else {
+            return .low
+        }
         let memTotalMiB = max(1, bytesToMiB(metrics.memTotalBytes))
         let availableMiB = bytesToMiB(metrics.memAvailableBytes)
         let highAvailableFloorMiB = min(512, max(64, memTotalMiB / 8))
         if availableMiB < highAvailableFloorMiB {
             return .high
-        }
-        if metrics.psiSomeAvg10 > 0.5 {
-            return .elevated
         }
         let elevatedAvailableFloorMiB = min(768, max(96, memTotalMiB / 6))
         if availableMiB < elevatedAvailableFloorMiB {

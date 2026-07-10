@@ -28,6 +28,8 @@
 #define LOW_PROGRESS_BYTES (4ULL * 1024ULL * 1024ULL)
 #define NO_PROGRESS_LIMIT 2
 #define SYNCFS_DIRTY_THRESHOLD_BYTES (64ULL * 1024ULL * 1024ULL)
+#define DEFAULT_BUILD_CGROUP_PATH \
+    "/sys/fs/cgroup/conjet.slice/conjet-daemons.slice/conjet-build.slice"
 
 static volatile sig_atomic_t stop_requested = 0;
 
@@ -697,7 +699,7 @@ int main(int argc, char **argv) {
     const char *daemon_cgroup = getenv("CONJET_RECLAIM_DAEMON_CGROUP");
     const char *service_cgroup = getenv("CONJET_RECLAIM_SERVICE_CGROUP");
     if (build_cgroup == NULL || build_cgroup[0] == '\0') {
-        build_cgroup = "/sys/fs/cgroup/conjet.slice/conjet-build.slice";
+        build_cgroup = DEFAULT_BUILD_CGROUP_PATH;
     }
     if (daemon_cgroup == NULL || daemon_cgroup[0] == '\0') {
         daemon_cgroup = "/sys/fs/cgroup/conjet.slice/conjet-daemons.slice";

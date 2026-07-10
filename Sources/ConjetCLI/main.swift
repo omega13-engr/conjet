@@ -1282,6 +1282,7 @@ struct ConjetCLI {
         var guestAvailableMiB: Int?
         var buildCgroupMemoryMiB: Int?
         var hardDecommittedMiB: Int?
+        var reusableReclaimedMiB: Int?
         var reportInFlightReclaimedMiB: Int?
         var reclaimFailures: UInt64?
         var malformedReports: UInt64?
@@ -1477,6 +1478,7 @@ struct ConjetCLI {
             guestAvailableMiB: runtime.guestAvailableMiB,
             buildCgroupMemoryMiB: runtime.buildCgroupMemoryMiB,
             hardDecommittedMiB: runtime.balloonHardDecommittedMiB,
+            reusableReclaimedMiB: runtime.balloonReusableReclaimedMiB,
             reportInFlightReclaimedMiB: runtime.balloonReportInFlightReclaimedMiB,
             reclaimFailures: runtime.balloonReclaimFailures,
             malformedReports: runtime.balloonMalformedReports
@@ -1497,6 +1499,8 @@ struct ConjetCLI {
         let finalResident = sampleComparableResidentMiB(final)
         let finalDelta = finalResident - baselineResident
         let hardDecommitDelta = (final.hardDecommittedMiB ?? 0) - (baseline.hardDecommittedMiB ?? 0)
+        let reusableReclaimDelta = (final.reusableReclaimedMiB ?? 0)
+            - (baseline.reusableReclaimedMiB ?? 0)
         let reportInFlightDelta = (final.reportInFlightReclaimedMiB ?? 0)
             - (baseline.reportInFlightReclaimedMiB ?? 0)
         return [
@@ -1531,9 +1535,9 @@ struct ConjetCLI {
                 detail: "malformed_reports=\(final.malformedReports ?? 0)"
             ),
             MemoryVerificationCheck(
-                name: "hard decommit increased",
-                passed: hardDecommitDelta > 0,
-                detail: "hard_decommit_delta=\(hardDecommitDelta)MiB"
+                name: "detached balloon reclaim increased",
+                passed: hardDecommitDelta > 0 || reusableReclaimDelta > 0,
+                detail: "hard_decommit_delta=\(hardDecommitDelta)MiB reusable_reclaim_delta=\(reusableReclaimDelta)MiB"
             ),
             MemoryVerificationCheck(
                 name: "report-in-flight reclaim increased",
@@ -1574,7 +1578,7 @@ struct ConjetCLI {
         print("  logs: \(report.buildStdoutPath)")
         print("        \(report.buildStderrPath)")
         print("")
-        print("Phase                    RSS MiB   Footprint MiB   Guest Available   Hard Decommit   ReportInFlight")
+        print("Phase                    RSS MiB   Footprint MiB   Guest Available   Hard Decommit   Reusable Reclaim   ReportInFlight")
         printIdleReturnSample(report.baseline)
         printIdleReturnSample(report.peak)
         printIdleReturnSample(report.postBuild)
@@ -1592,9 +1596,10 @@ struct ConjetCLI {
         let footprint = sample.hostFootprintMiB.map(String.init) ?? "-"
         let guest = sample.guestAvailableMiB.map { "\($0) MiB" } ?? "-"
         let hard = sample.hardDecommittedMiB.map { "\($0) MiB" } ?? "-"
+        let reusable = sample.reusableReclaimedMiB.map { "\($0) MiB" } ?? "-"
         let report = sample.reportInFlightReclaimedMiB.map { "\($0) MiB" } ?? "-"
         print(
-            "\(tablePadded(sample.phase, width: 24)) \(tableLeftPad(rss, width: 7))   \(tableLeftPad(footprint, width: 13))   \(tableLeftPad(guest, width: 15))   \(tableLeftPad(hard, width: 13))   \(tableLeftPad(report, width: 14))"
+            "\(tablePadded(sample.phase, width: 24)) \(tableLeftPad(rss, width: 7))   \(tableLeftPad(footprint, width: 13))   \(tableLeftPad(guest, width: 15))   \(tableLeftPad(hard, width: 13))   \(tableLeftPad(reusable, width: 13))   \(tableLeftPad(report, width: 14))"
         )
     }
 
@@ -3219,6 +3224,15 @@ struct ConjetCLI {
         }
         if let currentReusableMiB = runtime.balloonCurrentReusableMiB {
             print("  VMM currently detached reusable: \(currentReusableMiB) MiB")
+        }
+        if let fullyOwned = runtime.balloonCurrentFullyOwnedHostGranules {
+            print("  VMM fully balloon-owned host granules: \(fullyOwned)")
+        }
+        if let partiallyOwned = runtime.balloonCurrentPartiallyOwnedHostGranules {
+            print("  VMM partially balloon-owned host granules: \(partiallyOwned)")
+        }
+        if let partialMiB = runtime.balloonPartialHostGranuleMiB, partialMiB > 0 {
+            print("  VMM partial host-granule reclaim skipped: \(partialMiB) MiB")
         }
         if let zeroSweptMiB = runtime.balloonZeroSweptMiB {
             print("  VMM compressed-page sweep: \(zeroSweptMiB) MiB")

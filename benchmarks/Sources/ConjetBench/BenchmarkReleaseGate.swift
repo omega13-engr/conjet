@@ -25,7 +25,7 @@ public struct BenchmarkReleaseGateOptions: Codable, Equatable, Sendable {
     public init(
         contexts: [String] = [],
         candidateRuntime: String = "conjet",
-        baselineRuntimes: [String] = ["orbstack", "colima"],
+        baselineRuntimes: [String] = ["reference-runtime", "colima"],
         requiredBaselineRuntimes: [String]? = nil,
         iterations: Int = 3,
         minimumSamples: Int = 3,
@@ -393,8 +393,8 @@ public struct BenchmarkReleaseGateRunner {
             return "conjetd"
         case "colima":
             return "colima|lima|qemu|vz|socket_vmnet"
-        case "orbstack":
-            return "orbstack"
+        case "reference-runtime":
+            return "reference-runtime"
         case "docker", "docker-desktop":
             return "docker|com\\.docker"
         default:

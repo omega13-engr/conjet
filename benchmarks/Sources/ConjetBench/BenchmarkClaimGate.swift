@@ -173,7 +173,7 @@ public struct BenchmarkClaimGateOptions: Codable, Equatable, Sendable {
 
     public init(
         candidateRuntime: String = "conjet",
-        baselineRuntimes: [String] = ["orbstack", "colima"],
+        baselineRuntimes: [String] = ["reference-runtime", "colima"],
         requiredBaselineRuntimes: [String]? = nil,
         minimumSamples: Int = 3,
         samplePhase: BenchmarkSamplePhase = .any,

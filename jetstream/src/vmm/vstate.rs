@@ -47,8 +47,10 @@ impl DeviceRuntimeState {
                     total: state.docker_phase_events(),
                     request: state.docker_phase_request_events(),
                     response: state.docker_phase_response_events(),
+                    workload_started: state.docker_workload_started_events(),
                     completed_streams: state.docker_completed_stream_events(),
                     completed_workload_streams: state.docker_completed_workload_stream_events(),
+                    active_workload_streams: state.active_docker_workload_streams(),
                     request_bytes: state.docker_request_bytes(),
                     response_bytes: state.docker_response_bytes(),
                 }
@@ -197,8 +199,10 @@ pub struct DockerPhaseMetrics {
     pub total: u64,
     pub request: u64,
     pub response: u64,
+    pub workload_started: u64,
     pub completed_streams: u64,
     pub completed_workload_streams: u64,
+    pub active_workload_streams: u64,
     pub request_bytes: u64,
     pub response_bytes: u64,
 }

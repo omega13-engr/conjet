@@ -128,6 +128,14 @@ static void test_build_snapshot_aggregates_prefixed_sibling_memory_without_false
     require_int("active build populated", snapshot.populated, 1);
 }
 
+static void test_default_build_cgroup_path_tracks_daemon_scoped_build_workers(void) {
+    require_string(
+        "default build cgroup path",
+        DEFAULT_BUILD_CGROUP_PATH,
+        "/sys/fs/cgroup/conjet.slice/conjet-daemons.slice/conjet-build.slice"
+    );
+}
+
 static void test_service_cgroup_memory_stat_is_exported(void) {
     const char *tmpdir = getenv("TMPDIR");
     if (tmpdir == NULL || tmpdir[0] == '\0') {
@@ -404,6 +412,7 @@ static void test_residual_service_reclaim_request_validation_is_root_scoped(void
 
 int main(void) {
     test_build_snapshot_aggregates_prefixed_sibling_memory_without_false_activity();
+    test_default_build_cgroup_path_tracks_daemon_scoped_build_workers();
     test_service_cgroup_memory_stat_is_exported();
     test_service_slice_scanner_aggregates_working_set_by_service_key();
     test_service_slice_scanner_adds_root_residual_for_uncovered_service_charge();

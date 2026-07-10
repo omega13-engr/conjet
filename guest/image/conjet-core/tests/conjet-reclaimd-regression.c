@@ -26,6 +26,13 @@ static void require_u64(const char *name, uint64_t actual, uint64_t expected) {
     }
 }
 
+static void require_string(const char *name, const char *actual, const char *expected) {
+    if (strcmp(actual, expected) != 0) {
+        fprintf(stderr, "%s: expected %s, got %s\n", name, expected, actual);
+        exit(1);
+    }
+}
+
 static void require_true(const char *name, bool value) {
     if (!value) {
         fprintf(stderr, "%s: expected true\n", name);
@@ -145,6 +152,14 @@ static void test_reclaim_target_stats_include_prefixed_build_and_service_sibling
     require_u64("file_writeback", total.file_writeback, 65550);
 }
 
+static void test_default_build_cgroup_path_tracks_daemon_scoped_build_workers(void) {
+    require_string(
+        "default build cgroup path",
+        DEFAULT_BUILD_CGROUP_PATH,
+        "/sys/fs/cgroup/conjet.slice/conjet-daemons.slice/conjet-build.slice"
+    );
+}
+
 static void test_syncfs_gate_uses_dirty_writeback_threshold_and_path(void) {
     struct memcg_stat stat;
     memset(&stat, 0, sizeof(stat));
@@ -242,6 +257,7 @@ static void test_scoped_reclaim_config_requires_service_path_and_bytes(void) {
 
 int main(void) {
     test_reclaim_target_stats_include_prefixed_build_and_service_siblings();
+    test_default_build_cgroup_path_tracks_daemon_scoped_build_workers();
     test_syncfs_gate_uses_dirty_writeback_threshold_and_path();
     test_drop_caches_gate_defaults_off_and_accepts_enable_values();
     test_scoped_reclaim_config_requires_service_path_and_bytes();
