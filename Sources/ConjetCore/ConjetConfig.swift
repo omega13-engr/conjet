@@ -366,7 +366,18 @@ public struct ConjetMemoryPolicy: Codable, Equatable, Sendable {
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        configuredMemoryMiB
+        let target: Int
+        switch profile {
+        case .noPolicy:
+            target = 1024
+        case .performance:
+            target = 2048
+        case .balanced:
+            target = 1024
+        case .eco:
+            target = 768
+        }
+        return min(configuredMemoryMiB, target)
     }
 
     public static func defaultIdleMemoryReclaimDwellSeconds(profile: ConjetMemoryProfile) -> Double {
@@ -403,7 +414,7 @@ public struct ConjetMemoryPolicy: Codable, Equatable, Sendable {
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        min(configuredMemoryMiB, 128)
+        min(configuredMemoryMiB, 256)
     }
 
     public static func defaultDynamicMemoryHeadroomRatio(profile: ConjetMemoryProfile) -> Double {
@@ -428,7 +439,18 @@ public struct ConjetMemoryPolicy: Codable, Equatable, Sendable {
         profile: ConjetMemoryProfile,
         configuredMemoryMiB: Int
     ) -> Int {
-        configuredMemoryMiB
+        let step: Int
+        switch profile {
+        case .performance:
+            step = 1024
+        case .balanced:
+            step = 512
+        case .eco:
+            step = 256
+        case .noPolicy:
+            step = 512
+        }
+        return min(configuredMemoryMiB, step)
     }
 
     public static func defaultDynamicMemoryBaseOverheadMiB(profile: ConjetMemoryProfile) -> Int {
@@ -515,7 +537,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkLANAllowedCIDRs: [String] = [],
         networkLANAllowedPorts: [Int] = [],
         energyMode: ConjetEnergyMode = .balanced,
-        memoryProfile: ConjetMemoryProfile = .noPolicy,
+        memoryProfile: ConjetMemoryProfile = .balanced,
         ssh: ConjetSSHPolicy = ConjetSSHPolicy()
     ) {
         self.vmCPUs = vmCPUs
@@ -564,7 +586,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkLANAllowedCIDRs: [String] = [],
         networkLANAllowedPorts: [Int] = [],
         energyMode: ConjetEnergyMode = .balanced,
-        memoryProfile: ConjetMemoryProfile = .noPolicy,
+        memoryProfile: ConjetMemoryProfile = .balanced,
         ssh: ConjetSSHPolicy = ConjetSSHPolicy()
     ) {
         self.init(
@@ -599,7 +621,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         memoryMiB: 4096,
         vmProfile: .dockerCompatibility,
         networkBridgeEngine: .conjetNetdC,
-        memoryProfile: .noPolicy
+        memoryProfile: .balanced
     )
 
     public var containerRuntime: ConjetContainerRuntimeKind {

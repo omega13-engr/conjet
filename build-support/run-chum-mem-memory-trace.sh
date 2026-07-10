@@ -24,6 +24,7 @@ Options:
   --cpus N                     vCPU count (default: 4)
   --timeout-seconds N          Readiness timeout (default: 900)
   --skip-compose-up            Do not run docker compose up before import
+  --reset-compose-volumes      Remove isolated Compose containers and volumes first
   --skip-api-forward           Do not proxy localhost API traffic into guest Docker
   --skip-sign                  Do not ad-hoc sign VMM with debug entitlements
   -h, --help                   Show this help
@@ -56,6 +57,7 @@ MEMORY_MIB=8192
 CPUS=4
 TIMEOUT_SECONDS=900
 RUN_COMPOSE_UP=1
+RESET_COMPOSE_VOLUMES=0
 RUN_API_FORWARD=1
 SIGN_VMM=1
 
@@ -111,6 +113,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --skip-compose-up)
       RUN_COMPOSE_UP=0
+      shift
+      ;;
+    --reset-compose-volumes)
+      RESET_COMPOSE_VOLUMES=1
       shift
       ;;
     --skip-api-forward)
@@ -332,7 +338,7 @@ wait_for_docker_ping() {
     if [ -S "$DOCKER_SOCKET" ] &&
       printf 'GET /_ping HTTP/1.1\r\nHost: docker\r\nConnection: close\r\n\r\n' \
         | nc -U "$DOCKER_SOCKET" 2>/dev/null \
-        | grep -q 'OK'; then
+        | grep 'OK' >/dev/null; then
       return 0
     fi
     if ! kill -0 "$VMM_PID" >/dev/null 2>&1; then
@@ -468,6 +474,9 @@ export COMPOSE_PROJECT_NAME="chum-mem"
 if [ "$RUN_COMPOSE_UP" -eq 1 ]; then
   (
     cd "$CHUM_MEM_DIR"
+    if [ "$RESET_COMPOSE_VOLUMES" -eq 1 ]; then
+      docker compose down --volumes --remove-orphans
+    fi
     docker compose up -d --build postgres api worker
   ) >"$COMPOSE_LOG" 2>&1
   sample_trace "compose-ready"

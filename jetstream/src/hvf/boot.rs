@@ -153,7 +153,7 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
         memory: &GuestMemory,
         guest_base: u64,
         ranges: &[PageRange],
-        _authority: ReclaimAuthority,
+        authority: ReclaimAuthority,
     ) -> ReclaimReport {
         let mut report = ReclaimReport::default();
         for range in ranges {
@@ -176,39 +176,51 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
                         continue;
                     }
                 };
-                if !self.disable_hard_decommit {
-                    if self.vm.unmap_memory(chunk.start, size).is_err() {
-                        report.discard_skipped_bytes += chunk.size;
+                let prefer_soft_reclaim = should_prefer_soft_reclaim(
+                    authority,
+                    self.hard_decommit_only,
+                    self.disable_madv_free,
+                );
+                let mut soft_reclaim_attempted = false;
+                if prefer_soft_reclaim {
+                    soft_reclaim_attempted = true;
+                    if memory.advise_free_at(guest_base, chunk.start, size).is_ok() {
+                        report.discard_advised_bytes += chunk.size;
+                        report.soft_reclaimed_bytes += chunk.size;
                         continue;
                     }
-
-                    let decommit_result = memory.decommit_zero_at(guest_base, chunk.start, size);
-                    let (map_address, decommit_ok) = match decommit_result {
-                        Ok(address) => (address, true),
-                        Err(_) => (host_address, false),
-                    };
-                    let remap_result =
-                        self.vm
-                            .map_memory(map_address, chunk.start, size, self.flags);
-                    match remap_result {
-                        Ok(()) => {
-                            if decommit_ok {
-                                report.discard_advised_bytes += chunk.size;
-                                report.hard_decommitted_bytes += chunk.size;
-                                continue;
+                }
+                if !self.disable_hard_decommit {
+                    if self.vm.unmap_memory(chunk.start, size).is_ok() {
+                        let decommit_result =
+                            memory.decommit_zero_at(guest_base, chunk.start, size);
+                        let (map_address, decommit_ok) = match decommit_result {
+                            Ok(address) => (address, true),
+                            Err(_) => (host_address, false),
+                        };
+                        let remap_result =
+                            self.vm
+                                .map_memory(map_address, chunk.start, size, self.flags);
+                        match remap_result {
+                            Ok(()) => {
+                                if decommit_ok {
+                                    report.discard_advised_bytes += chunk.size;
+                                    report.hard_decommitted_bytes += chunk.size;
+                                    continue;
+                                }
                             }
-                        }
-                        Err(error) => {
-                            eprintln!(
-                                "fatal HVF remap failure after memory reclaim at 0x{:x}+{}: {}",
-                                chunk.start, size, error
-                            );
-                            std::process::abort();
+                            Err(error) => {
+                                eprintln!(
+                                    "fatal HVF remap failure after memory reclaim at 0x{:x}+{}: {}",
+                                    chunk.start, size, error
+                                );
+                                std::process::abort();
+                            }
                         }
                     }
                 }
 
-                if self.hard_decommit_only || self.disable_madv_free {
+                if self.hard_decommit_only || self.disable_madv_free || soft_reclaim_attempted {
                     report.discard_failed_bytes += chunk.size;
                     continue;
                 }
@@ -225,6 +237,14 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
         }
         report
     }
+}
+
+fn should_prefer_soft_reclaim(
+    _authority: ReclaimAuthority,
+    hard_decommit_only: bool,
+    disable_madv_free: bool,
+) -> bool {
+    !hard_decommit_only && !disable_madv_free
 }
 
 fn host_reclaim_chunks(range: PageRange) -> Vec<PageRange> {
@@ -2116,64 +2136,16 @@ fn memory_control_error(message: &str, configured_memory_mib: u64) -> MemoryCont
 
 #[cfg(target_os = "macos")]
 fn host_memory_footprint() -> HostMemoryFootprint {
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct RUsageInfoV2 {
-        ri_uuid: [u8; 16],
-        ri_user_time: u64,
-        ri_system_time: u64,
-        ri_pkg_idle_wkups: u64,
-        ri_interrupt_wkups: u64,
-        ri_pageins: u64,
-        ri_wired_size: u64,
-        ri_resident_size: u64,
-        ri_phys_footprint: u64,
-        ri_proc_start_abstime: u64,
-        ri_proc_exit_abstime: u64,
-        ri_child_user_time: u64,
-        ri_child_system_time: u64,
-        ri_child_pkg_idle_wkups: u64,
-        ri_child_interrupt_wkups: u64,
-        ri_child_pageins: u64,
-        ri_child_elapsed_abstime: u64,
-    }
-
-    extern "C" {
-        fn proc_pid_rusage(
-            pid: libc::pid_t,
-            flavor: libc::c_int,
-            buffer: *mut libc::c_void,
-        ) -> libc::c_int;
-    }
-
-    const RUSAGE_INFO_V2: libc::c_int = 2;
-    let mut info = RUsageInfoV2 {
-        ri_uuid: [0; 16],
-        ri_user_time: 0,
-        ri_system_time: 0,
-        ri_pkg_idle_wkups: 0,
-        ri_interrupt_wkups: 0,
-        ri_pageins: 0,
-        ri_wired_size: 0,
-        ri_resident_size: 0,
-        ri_phys_footprint: 0,
-        ri_proc_start_abstime: 0,
-        ri_proc_exit_abstime: 0,
-        ri_child_user_time: 0,
-        ri_child_system_time: 0,
-        ri_child_pkg_idle_wkups: 0,
-        ri_child_interrupt_wkups: 0,
-        ri_child_pageins: 0,
-        ri_child_elapsed_abstime: 0,
-    };
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
     let rc = unsafe {
-        proc_pid_rusage(
+        libc::proc_pid_rusage(
             libc::getpid(),
-            RUSAGE_INFO_V2,
-            (&mut info as *mut RUsageInfoV2).cast(),
+            libc::RUSAGE_INFO_V2,
+            info.as_mut_ptr().cast::<libc::rusage_info_t>(),
         )
     };
     if rc == 0 {
+        let info = unsafe { info.assume_init() };
         HostMemoryFootprint {
             resident_bytes: Some(info.ri_resident_size),
             physical_footprint_bytes: Some(info.ri_phys_footprint),
@@ -2798,6 +2770,30 @@ mod tests {
         assert_eq!(chunks[1].size, HOST_RECLAIM_CHUNK_BYTES);
         assert_eq!(chunks[2].start, 0x4000_0000 + HOST_RECLAIM_CHUNK_BYTES * 2);
         assert_eq!(chunks[2].size, 4096);
+    }
+
+    #[test]
+    fn production_reclaim_preserves_the_guest_memory_mapping() {
+        assert!(should_prefer_soft_reclaim(
+            ReclaimAuthority::ReportInFlight,
+            false,
+            false
+        ));
+        assert!(should_prefer_soft_reclaim(
+            ReclaimAuthority::BalloonOwned,
+            false,
+            false
+        ));
+        assert!(!should_prefer_soft_reclaim(
+            ReclaimAuthority::ReportInFlight,
+            true,
+            false
+        ));
+        assert!(!should_prefer_soft_reclaim(
+            ReclaimAuthority::ReportInFlight,
+            false,
+            true
+        ));
     }
 
     #[test]

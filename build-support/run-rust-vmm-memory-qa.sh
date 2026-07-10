@@ -20,7 +20,11 @@ Options:
   --target-mib N               Live target MiB after shrink (default: 4096)
   --timeout-seconds N          Readiness timeout (default: 600)
   --settle-seconds N           Seconds to wait after shrink (default: 45)
-  --min-footprint-drop-mib N   Required phys_footprint drop (default: 128)
+  --min-footprint-drop-mib N   Optional required footprint drop (default: 0)
+  --max-footprint-over-target-mib N
+                               Allowed footprint above target (default: 1024)
+  --max-shared-memory-regions N
+                               Maximum post-reclaim VM map regions (default: 512)
   --no-build                   Do not build the default Rust VMM first
   --skip-sign                  Do not ad-hoc sign the Rust VMM with debug entitlements
   -h, --help                   Show this help
@@ -44,7 +48,9 @@ CPUS=4
 TARGET_MIB=4096
 TIMEOUT_SECONDS=600
 SETTLE_SECONDS=45
-MIN_FOOTPRINT_DROP_MIB=128
+MIN_FOOTPRINT_DROP_MIB=0
+MAX_FOOTPRINT_OVER_TARGET_MIB=1024
+MAX_SHARED_MEMORY_REGIONS=512
 BUILD_VMM=1
 SIGN_VMM=1
 
@@ -86,6 +92,14 @@ while [ "$#" -gt 0 ]; do
       MIN_FOOTPRINT_DROP_MIB="${2:?missing value for --min-footprint-drop-mib}"
       shift 2
       ;;
+    --max-footprint-over-target-mib)
+      MAX_FOOTPRINT_OVER_TARGET_MIB="${2:?missing value for --max-footprint-over-target-mib}"
+      shift 2
+      ;;
+    --max-shared-memory-regions)
+      MAX_SHARED_MEMORY_REGIONS="${2:?missing value for --max-shared-memory-regions}"
+      shift 2
+      ;;
     --no-build)
       BUILD_VMM=0
       shift
@@ -124,7 +138,7 @@ if ! command -v nc >/dev/null 2>&1; then
   exit 1
 fi
 
-case "$MEMORY_MIB:$CPUS:$TARGET_MIB:$TIMEOUT_SECONDS:$SETTLE_SECONDS:$MIN_FOOTPRINT_DROP_MIB" in
+case "$MEMORY_MIB:$CPUS:$TARGET_MIB:$TIMEOUT_SECONDS:$SETTLE_SECONDS:$MIN_FOOTPRINT_DROP_MIB:$MAX_FOOTPRINT_OVER_TARGET_MIB:$MAX_SHARED_MEMORY_REGIONS" in
   *[!0-9:]*)
     echo "numeric options must be positive integers" >&2
     exit 2
@@ -313,8 +327,10 @@ sleep "$SETTLE_SECONDS"
 
 GUEST_METRICS_AFTER="$QA_ROOT/guest-memory-after.json"
 CONTROL_AFTER="$QA_ROOT/control-after.json"
+VMMAP_AFTER="$QA_ROOT/vmmap-after.txt"
 http_unix_get "$MEMORY_SOCKET" "/conjet-memory-metrics" >"$GUEST_METRICS_AFTER"
 control_request '{"command":"metrics"}' >"$CONTROL_AFTER"
+vmmap -summary "$VMM_PID" >"$VMMAP_AFTER"
 
 before_footprint="$(jq -r '.host_memory.physical_footprint_bytes // 0' "$CONTROL_BEFORE")"
 after_footprint="$(jq -r '.host_memory.physical_footprint_bytes // 0' "$CONTROL_AFTER")"
@@ -323,6 +339,11 @@ after_rss="$(jq -r '.host_memory.resident_bytes // 0' "$CONTROL_AFTER")"
 reported_free_reclaimed="$(jq -r '.balloon.reported_free_reclaimed_bytes // 0' "$CONTROL_AFTER")"
 balloon_reclaimed="$(jq -r '.balloon.reclaimed_bytes // 0' "$CONTROL_AFTER")"
 target_after="$(jq -r '.target_mib' "$CONTROL_AFTER")"
+memory_ledger_ok="$(jq -r '.memory_ledger.ok // false' "$CONTROL_AFTER")"
+shared_memory_regions="$(awk '$1 == "shared" && $2 == "memory" { print $NF }' "$VMMAP_AFTER" | tail -1)"
+if ! [[ "$shared_memory_regions" =~ ^[0-9]+$ ]]; then
+  shared_memory_regions=0
+fi
 
 footprint_drop_mib=0
 if [ "$before_footprint" -gt "$after_footprint" ]; then
@@ -331,6 +352,11 @@ fi
 rss_drop_mib=0
 if [ "$before_rss" -gt "$after_rss" ]; then
   rss_drop_mib=$(( (before_rss - after_rss) / 1024 / 1024 ))
+fi
+footprint_over_target_mib=0
+target_bytes=$(( TARGET_MIB * 1024 * 1024 ))
+if [ "$after_footprint" -gt "$target_bytes" ]; then
+  footprint_over_target_mib=$(( (after_footprint - target_bytes) / 1024 / 1024 ))
 fi
 
 jq -n \
@@ -347,11 +373,21 @@ jq -n \
   --argjson reported_free_reclaimed "$reported_free_reclaimed" \
   --argjson balloon_reclaimed "$balloon_reclaimed" \
   --argjson min_footprint_drop_mib "$MIN_FOOTPRINT_DROP_MIB" \
+  --argjson footprint_over_target_mib "$footprint_over_target_mib" \
+  --argjson max_footprint_over_target_mib "$MAX_FOOTPRINT_OVER_TARGET_MIB" \
+  --argjson shared_memory_regions "$shared_memory_regions" \
+  --argjson max_shared_memory_regions "$MAX_SHARED_MEMORY_REGIONS" \
+  --argjson memory_ledger_ok "$memory_ledger_ok" \
+  --arg vmmap_path "$VMMAP_AFTER" \
   '{
     ok: (
       $target_after == $target_mib and
       $balloon_reclaimed > 0 and
-      $footprint_drop_mib >= $min_footprint_drop_mib
+      $memory_ledger_ok and
+      ($min_footprint_drop_mib == 0 or $footprint_drop_mib >= $min_footprint_drop_mib) and
+      $footprint_over_target_mib <= $max_footprint_over_target_mib and
+      $shared_memory_regions > 0 and
+      $shared_memory_regions <= $max_shared_memory_regions
     ),
     qa_root: $qa_root,
     configured_mib: $memory_mib,
@@ -363,12 +399,18 @@ jq -n \
       physical_footprint_drop_mib: $footprint_drop_mib,
       before_resident_bytes: $before_rss,
       after_resident_bytes: $after_rss,
-      resident_drop_mib: $rss_drop_mib
+      resident_drop_mib: $rss_drop_mib,
+      footprint_over_target_mib: $footprint_over_target_mib,
+      max_footprint_over_target_mib: $max_footprint_over_target_mib
     },
     balloon: {
       reclaimed_bytes: $balloon_reclaimed,
       reported_free_reclaimed_bytes: $reported_free_reclaimed
-    }
+    },
+    memory_ledger_ok: $memory_ledger_ok,
+    shared_memory_regions: $shared_memory_regions,
+    max_shared_memory_regions: $max_shared_memory_regions,
+    vmmap_path: $vmmap_path
   }' >"$SUMMARY_JSON"
 
 cat "$SUMMARY_JSON"
