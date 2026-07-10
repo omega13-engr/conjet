@@ -369,13 +369,13 @@ public struct ConjetMemoryPolicy: Codable, Equatable, Sendable {
         let target: Int
         switch profile {
         case .noPolicy:
-            target = 1024
+            target = 512
         case .performance:
             target = 2048
         case .balanced:
-            target = 1024
+            target = 512
         case .eco:
-            target = 768
+            target = 512
         }
         return min(configuredMemoryMiB, target)
     }

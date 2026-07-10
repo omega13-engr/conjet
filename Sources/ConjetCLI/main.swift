@@ -3211,6 +3211,18 @@ struct ConjetCLI {
         if let softReclaimedMiB = runtime.balloonSoftReclaimedMiB {
             print("  VMM soft reclaimed: \(softReclaimedMiB) MiB")
         }
+        if let reusableMiB = runtime.balloonReusableReclaimedMiB {
+            print("  VMM reusable reclaimed: \(reusableMiB) MiB")
+        }
+        if let restoredMiB = runtime.balloonReusableRestoredMiB {
+            print("  VMM reusable restored: \(restoredMiB) MiB")
+        }
+        if let currentReusableMiB = runtime.balloonCurrentReusableMiB {
+            print("  VMM currently detached reusable: \(currentReusableMiB) MiB")
+        }
+        if let zeroSweptMiB = runtime.balloonZeroSweptMiB {
+            print("  VMM compressed-page sweep: \(zeroSweptMiB) MiB")
+        }
         if let hardDecommittedMiB = runtime.balloonHardDecommittedMiB {
             print("  VMM hard decommitted: \(hardDecommittedMiB) MiB")
         }
@@ -3223,11 +3235,20 @@ struct ConjetCLI {
         if let pageReportingReady = runtime.balloonPageReportingReady {
             print("  VMM page reporting queue: \(pageReportingReady ? "ready" : "not ready")")
         }
+        if let synchronized = runtime.balloonMustTellHostReady {
+            print("  VMM synchronized deflate: \(synchronized ? "ready" : "not ready")")
+        }
         if let freePageHintReady = runtime.balloonFreePageHintReady {
             print("  VMM free-page hint queue: \(freePageHintReady ? "ready" : "not ready")")
         }
         if let failures = runtime.balloonReclaimFailures, failures > 0 {
             print("  VMM reclaim failures: \(failures)")
+        }
+        if let failures = runtime.balloonReuseFailures, failures > 0 {
+            print("  VMM reuse failures: \(failures)")
+        }
+        if let failedMiB = runtime.balloonZeroSweepFailedMiB, failedMiB > 0 {
+            print("  VMM compressed-page sweep failures: \(failedMiB) MiB")
         }
         if let malformedReports = runtime.balloonMalformedReports, malformedReports > 0 {
             print("  VMM malformed reports: \(malformedReports)")

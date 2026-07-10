@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::arch::aarch64;
 use crate::devices::balloon::{
     self, BalloonMetrics, BalloonQueueHandler, GuestMemoryReclaimer, MemoryLedgerSummary,
-    PageRange, ReclaimAuthority, ReclaimReport,
+    PageRange, ReclaimAuthority, ReclaimReport, RestoreReport,
 };
 use crate::devices::block::{BlockQueueHandler, RawBlockDevice};
 use crate::devices::bus::{MmioDevice, MmioError};
@@ -145,6 +145,7 @@ struct HvfGuestMemoryReclaimer {
     hard_decommit_only: bool,
     disable_hard_decommit: bool,
     disable_madv_free: bool,
+    disable_free_reusable: bool,
 }
 
 impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
@@ -179,6 +180,7 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
                 let prefer_soft_reclaim = should_prefer_soft_reclaim(
                     authority,
                     self.hard_decommit_only,
+                    self.disable_hard_decommit,
                     self.disable_madv_free,
                 );
                 let mut soft_reclaim_attempted = false;
@@ -192,6 +194,24 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
                 }
                 if !self.disable_hard_decommit {
                     if self.vm.unmap_memory(chunk.start, size).is_ok() {
+                        // Detaching the GPA mapping removes Hypervisor's extra VM-object
+                        // reference. Darwin can then purge reusable pages without splitting
+                        // the process mapping. Keep the GPA detached while the balloon owns
+                        // it; deflate restores the mapping before acknowledging the queue.
+                        if !self.disable_free_reusable
+                            && memory
+                                .advise_reusable_at(guest_base, chunk.start, size)
+                                .is_ok()
+                        {
+                            match memory.advise_zero_at(guest_base, chunk.start, size) {
+                                Ok(()) => report.zero_swept_bytes += chunk.size,
+                                Err(_) => report.zero_sweep_failed_bytes += chunk.size,
+                            }
+                            report.discard_advised_bytes += chunk.size;
+                            report.soft_reclaimed_bytes += chunk.size;
+                            report.reusable_reclaimed_bytes += chunk.size;
+                            continue;
+                        }
                         let decommit_result =
                             memory.decommit_zero_at(guest_base, chunk.start, size);
                         let (map_address, decommit_ok) = match decommit_result {
@@ -237,14 +257,62 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
         }
         report
     }
+
+    fn restore_ranges(
+        &self,
+        memory: &GuestMemory,
+        guest_base: u64,
+        ranges: &[PageRange],
+    ) -> RestoreReport {
+        let mut report = RestoreReport::default();
+        for range in ranges {
+            for chunk in host_reclaim_chunks(*range) {
+                let Ok(size) = usize::try_from(chunk.size) else {
+                    report.failed_bytes += chunk.size;
+                    continue;
+                };
+                if memory
+                    .advise_reuse_at(guest_base, chunk.start, size)
+                    .is_err()
+                {
+                    report.failed_bytes += chunk.size;
+                    continue;
+                }
+                let host_address = match memory.host_address_at(guest_base, chunk.start, size) {
+                    Ok(address) => address,
+                    Err(_) => {
+                        report.failed_bytes += chunk.size;
+                        continue;
+                    }
+                };
+                match self
+                    .vm
+                    .map_memory(host_address, chunk.start, size, self.flags)
+                {
+                    Ok(()) => report.restored_bytes += chunk.size,
+                    Err(error) => {
+                        eprintln!(
+                            "fatal HVF remap failure while restoring balloon memory at 0x{:x}+{}: {}",
+                            chunk.start, size, error
+                        );
+                        std::process::abort();
+                    }
+                }
+            }
+        }
+        report
+    }
 }
 
 fn should_prefer_soft_reclaim(
-    _authority: ReclaimAuthority,
+    authority: ReclaimAuthority,
     hard_decommit_only: bool,
+    disable_hard_decommit: bool,
     disable_madv_free: bool,
 ) -> bool {
-    !hard_decommit_only && !disable_madv_free
+    !hard_decommit_only
+        && !disable_madv_free
+        && (authority == ReclaimAuthority::ReportInFlight || disable_hard_decommit)
 }
 
 fn host_reclaim_chunks(range: PageRange) -> Vec<PageRange> {
@@ -503,6 +571,7 @@ impl HvfBootRunner {
             hard_decommit_only: debug_flags::enabled("CONJET_MEM_HARD_DECOMMIT_ONLY"),
             disable_hard_decommit: debug_flags::enabled("CONJET_MEM_DISABLE_HARD_DECOMMIT"),
             disable_madv_free: debug_flags::enabled("CONJET_MEM_DISABLE_MADV_FREE"),
+            disable_free_reusable: debug_flags::enabled("CONJET_MEM_DISABLE_FREE_REUSABLE"),
         });
         match configure_virtio_runtime(
             &self.config,
@@ -2773,24 +2842,34 @@ mod tests {
     }
 
     #[test]
-    fn production_reclaim_preserves_the_guest_memory_mapping() {
+    fn production_reclaim_separates_report_and_balloon_paths() {
         assert!(should_prefer_soft_reclaim(
             ReclaimAuthority::ReportInFlight,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_prefer_soft_reclaim(
+            ReclaimAuthority::BalloonOwned,
+            false,
             false,
             false
         ));
         assert!(should_prefer_soft_reclaim(
             ReclaimAuthority::BalloonOwned,
             false,
-            false
-        ));
-        assert!(!should_prefer_soft_reclaim(
-            ReclaimAuthority::ReportInFlight,
             true,
             false
         ));
         assert!(!should_prefer_soft_reclaim(
             ReclaimAuthority::ReportInFlight,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_prefer_soft_reclaim(
+            ReclaimAuthority::ReportInFlight,
+            false,
             false,
             true
         ));

@@ -317,6 +317,7 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
     }
 
     struct Balloon: Decodable, Equatable, Sendable {
+        var mustTellHostNegotiated: Bool?
         var pageReportingNegotiated: Bool?
         var reportingQueueReady: Bool?
         var freePageHintNegotiated: Bool?
@@ -327,15 +328,22 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
         var reportedFreePages: UInt64
         var reportedFreeBytes: UInt64?
         var softReclaimedBytes: UInt64?
+        var reusableReclaimedBytes: UInt64?
+        var reusableRestoredBytes: UInt64?
+        var currentBalloonReusableBytes: UInt64?
+        var zeroSweptBytes: UInt64?
+        var zeroSweepFailedBytes: UInt64?
         var hardDecommittedBytes: UInt64?
         var balloonOwnedReclaimedBytes: UInt64?
         var reportInFlightReclaimedBytes: UInt64?
         var reclaimedBytes: UInt64
         var reportedFreeReclaimedBytes: UInt64
         var reclaimFailures: UInt64
+        var reuseFailures: UInt64?
         var malformedReports: UInt64
 
         enum CodingKeys: String, CodingKey {
+            case mustTellHostNegotiated = "must_tell_host_negotiated"
             case pageReportingNegotiated = "page_reporting_negotiated"
             case reportingQueueReady = "reporting_queue_ready"
             case freePageHintNegotiated = "free_page_hint_negotiated"
@@ -346,12 +354,18 @@ struct ConjetCoreRustMemoryControlClient: Sendable {
             case reportedFreePages = "reported_free_pages"
             case reportedFreeBytes = "reported_free_bytes"
             case softReclaimedBytes = "soft_reclaimed_bytes"
+            case reusableReclaimedBytes = "reusable_reclaimed_bytes"
+            case reusableRestoredBytes = "reusable_restored_bytes"
+            case currentBalloonReusableBytes = "current_balloon_reusable_bytes"
+            case zeroSweptBytes = "zero_swept_bytes"
+            case zeroSweepFailedBytes = "zero_sweep_failed_bytes"
             case hardDecommittedBytes = "hard_decommitted_bytes"
             case balloonOwnedReclaimedBytes = "balloon_owned_reclaimed_bytes"
             case reportInFlightReclaimedBytes = "report_inflight_reclaimed_bytes"
             case reclaimedBytes = "reclaimed_bytes"
             case reportedFreeReclaimedBytes = "reported_free_reclaimed_bytes"
             case reclaimFailures = "reclaim_failures"
+            case reuseFailures = "reuse_failures"
             case malformedReports = "malformed_reports"
         }
     }
@@ -451,11 +465,18 @@ extension DynamicMemoryVMMRuntimeMetrics {
             balloonReclaimedBytes: response.balloon.reclaimedBytes,
             balloonReportedFreeReclaimedBytes: response.balloon.reportedFreeReclaimedBytes,
             balloonSoftReclaimedBytes: response.balloon.softReclaimedBytes,
+            balloonReusableReclaimedBytes: response.balloon.reusableReclaimedBytes,
+            balloonReusableRestoredBytes: response.balloon.reusableRestoredBytes,
+            balloonCurrentReusableBytes: response.balloon.currentBalloonReusableBytes,
+            balloonZeroSweptBytes: response.balloon.zeroSweptBytes,
+            balloonZeroSweepFailedBytes: response.balloon.zeroSweepFailedBytes,
             balloonHardDecommittedBytes: response.balloon.hardDecommittedBytes,
             balloonOwnedReclaimedBytes: response.balloon.balloonOwnedReclaimedBytes,
             balloonReportInFlightReclaimedBytes: response.balloon.reportInFlightReclaimedBytes,
             balloonReclaimFailures: response.balloon.reclaimFailures,
+            balloonReuseFailures: response.balloon.reuseFailures,
             balloonMalformedReports: response.balloon.malformedReports,
+            balloonMustTellHostReady: response.balloon.mustTellHostNegotiated,
             balloonPageReportingReady: response.balloon.reportingQueueReady,
             balloonFreePageHintReady: response.balloon.freePageHintQueueReady,
             memoryLedger: response.memoryLedger?.status

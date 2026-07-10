@@ -399,11 +399,18 @@ struct DynamicMemoryVMMRuntimeMetrics: Equatable, Sendable {
     var balloonReclaimedBytes: UInt64
     var balloonReportedFreeReclaimedBytes: UInt64
     var balloonSoftReclaimedBytes: UInt64?
+    var balloonReusableReclaimedBytes: UInt64?
+    var balloonReusableRestoredBytes: UInt64?
+    var balloonCurrentReusableBytes: UInt64?
+    var balloonZeroSweptBytes: UInt64?
+    var balloonZeroSweepFailedBytes: UInt64?
     var balloonHardDecommittedBytes: UInt64?
     var balloonOwnedReclaimedBytes: UInt64?
     var balloonReportInFlightReclaimedBytes: UInt64?
     var balloonReclaimFailures: UInt64
+    var balloonReuseFailures: UInt64?
     var balloonMalformedReports: UInt64
+    var balloonMustTellHostReady: Bool?
     var balloonPageReportingReady: Bool?
     var balloonFreePageHintReady: Bool?
     var memoryLedger: ConjetMemoryLedgerStatus?
@@ -710,11 +717,18 @@ final class DynamicMemoryManager: @unchecked Sendable {
             balloonReportedFreeMiB: vmmMetrics.flatMap { $0.balloonReportedFreeBytes.map(Self.bytesToMiB) },
             balloonReportedFreeReclaimedMiB: vmmMetrics.map { Self.bytesToMiB($0.balloonReportedFreeReclaimedBytes) },
             balloonSoftReclaimedMiB: vmmMetrics.flatMap { $0.balloonSoftReclaimedBytes.map(Self.bytesToMiB) },
+            balloonReusableReclaimedMiB: vmmMetrics.flatMap { $0.balloonReusableReclaimedBytes.map(Self.bytesToMiB) },
+            balloonReusableRestoredMiB: vmmMetrics.flatMap { $0.balloonReusableRestoredBytes.map(Self.bytesToMiB) },
+            balloonCurrentReusableMiB: vmmMetrics.flatMap { $0.balloonCurrentReusableBytes.map(Self.bytesToMiB) },
+            balloonZeroSweptMiB: vmmMetrics.flatMap { $0.balloonZeroSweptBytes.map(Self.bytesToMiB) },
+            balloonZeroSweepFailedMiB: vmmMetrics.flatMap { $0.balloonZeroSweepFailedBytes.map(Self.bytesToMiB) },
             balloonHardDecommittedMiB: vmmMetrics.flatMap { $0.balloonHardDecommittedBytes.map(Self.bytesToMiB) },
             balloonOwnedReclaimedMiB: vmmMetrics.flatMap { $0.balloonOwnedReclaimedBytes.map(Self.bytesToMiB) },
             balloonReportInFlightReclaimedMiB: vmmMetrics.flatMap { $0.balloonReportInFlightReclaimedBytes.map(Self.bytesToMiB) },
             balloonReclaimFailures: vmmMetrics?.balloonReclaimFailures,
+            balloonReuseFailures: vmmMetrics?.balloonReuseFailures,
             balloonMalformedReports: vmmMetrics?.balloonMalformedReports,
+            balloonMustTellHostReady: vmmMetrics?.balloonMustTellHostReady,
             balloonPageReportingReady: vmmMetrics?.balloonPageReportingReady,
             balloonFreePageHintReady: vmmMetrics?.balloonFreePageHintReady,
             memoryLedger: vmmMetrics?.memoryLedger,

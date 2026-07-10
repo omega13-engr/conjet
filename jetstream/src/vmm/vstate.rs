@@ -65,6 +65,7 @@ impl DeviceRuntimeState {
                 total.driver_features |= metrics.driver_features;
                 total.driver_ok |= metrics.driver_ok;
                 total.features_ok |= metrics.features_ok;
+                total.must_tell_host_negotiated |= metrics.must_tell_host_negotiated;
                 total.page_reporting_negotiated |= metrics.page_reporting_negotiated;
                 total.reporting_queue_index = total
                     .reporting_queue_index
@@ -105,6 +106,10 @@ impl DeviceRuntimeState {
                 total.host_granule_eligible_bytes += metrics.host_granule_eligible_bytes;
                 total.discard_advised_bytes += metrics.discard_advised_bytes;
                 total.soft_reclaimed_bytes += metrics.soft_reclaimed_bytes;
+                total.reusable_reclaimed_bytes += metrics.reusable_reclaimed_bytes;
+                total.reusable_restored_bytes += metrics.reusable_restored_bytes;
+                total.zero_swept_bytes += metrics.zero_swept_bytes;
+                total.zero_sweep_failed_bytes += metrics.zero_sweep_failed_bytes;
                 total.hard_decommitted_bytes += metrics.hard_decommitted_bytes;
                 total.discard_failed_bytes += metrics.discard_failed_bytes;
                 total.discard_skipped_bytes += metrics.discard_skipped_bytes;
@@ -120,7 +125,9 @@ impl DeviceRuntimeState {
                     metrics.current_partially_owned_host_granules;
                 total.current_balloon_decommitted_bytes +=
                     metrics.current_balloon_decommitted_bytes;
+                total.current_balloon_reusable_bytes += metrics.current_balloon_reusable_bytes;
                 total.reclaim_failures += metrics.reclaim_failures;
+                total.reuse_failures += metrics.reuse_failures;
                 total.malformed_reports += metrics.malformed_reports;
                 total
             })

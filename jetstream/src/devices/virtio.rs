@@ -49,6 +49,7 @@ pub const FEATURE_EVENT_IDX: u64 = 1 << 29;
 pub const NET_FEATURE_MAC: u64 = 1 << 5;
 pub const NET_FEATURE_MRG_RXBUF: u64 = 1 << 15;
 pub const NET_FEATURE_STATUS: u64 = 1 << 16;
+pub const BALLOON_FEATURE_MUST_TELL_HOST: u64 = 1;
 pub const BALLOON_FEATURE_FREE_PAGE_HINT: u64 = 1 << 3;
 pub const BALLOON_FEATURE_PAGE_POISON: u64 = 1 << 4;
 pub const BALLOON_FEATURE_PAGE_REPORTING: u64 = 1 << 5;
@@ -366,7 +367,7 @@ fn common_features_for(kind: VirtioDeviceKind) -> u64 {
 }
 
 fn balloon_features() -> u64 {
-    let mut features = FEATURE_VERSION_1;
+    let mut features = FEATURE_VERSION_1 | BALLOON_FEATURE_MUST_TELL_HOST;
     if !debug_flags::enabled("CONJET_MEM_DISABLE_PAGE_REPORTING") {
         features |= BALLOON_FEATURE_PAGE_REPORTING;
     }

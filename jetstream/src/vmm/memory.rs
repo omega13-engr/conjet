@@ -163,13 +163,54 @@ impl GuestMemory {
         guest_address: u64,
         size: usize,
     ) -> Result<(), GuestMemoryError> {
-        self.validate_host_page_aligned(guest_base, guest_address, size)?;
-        let address = self.host_address_at(guest_base, guest_address, size)?;
-        let result = unsafe { libc::madvise(address, size, free_advice()) };
-        if result == 0 {
+        self.advise_at(guest_base, guest_address, size, free_advice())
+    }
+
+    pub fn advise_reusable_at(
+        &self,
+        guest_base: u64,
+        guest_address: u64,
+        size: usize,
+    ) -> Result<(), GuestMemoryError> {
+        self.advise_at(guest_base, guest_address, size, reusable_advice())
+    }
+
+    pub fn advise_reuse_at(
+        &self,
+        guest_base: u64,
+        guest_address: u64,
+        size: usize,
+    ) -> Result<(), GuestMemoryError> {
+        #[cfg(target_os = "macos")]
+        {
+            self.advise_at(guest_base, guest_address, size, libc::MADV_FREE_REUSE)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.validate_host_page_aligned(guest_base, guest_address, size)?;
+            self.host_address_at(guest_base, guest_address, size)?;
             Ok(())
-        } else {
-            Err(GuestMemoryError::MapFailed(std::io::Error::last_os_error()))
+        }
+    }
+
+    pub fn advise_zero_at(
+        &self,
+        guest_base: u64,
+        guest_address: u64,
+        size: usize,
+    ) -> Result<(), GuestMemoryError> {
+        #[cfg(target_os = "macos")]
+        {
+            self.advise_at(guest_base, guest_address, size, libc::MADV_ZERO)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.validate_host_page_aligned(guest_base, guest_address, size)?;
+            let address = self.host_address_at(guest_base, guest_address, size)?;
+            unsafe {
+                std::ptr::write_bytes(address.cast::<u8>(), 0, size);
+            }
+            Ok(())
         }
     }
 
@@ -258,6 +299,23 @@ impl GuestMemory {
         }
         Ok(())
     }
+
+    fn advise_at(
+        &self,
+        guest_base: u64,
+        guest_address: u64,
+        size: usize,
+        advice: libc::c_int,
+    ) -> Result<(), GuestMemoryError> {
+        self.validate_host_page_aligned(guest_base, guest_address, size)?;
+        let address = self.host_address_at(guest_base, guest_address, size)?;
+        let result = unsafe { libc::madvise(address, size, advice) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(GuestMemoryError::MapFailed(std::io::Error::last_os_error()))
+        }
+    }
 }
 
 impl Drop for GuestMemory {
@@ -290,6 +348,16 @@ fn free_advice() -> libc::c_int {
 
 #[cfg(not(target_os = "macos"))]
 fn free_advice() -> libc::c_int {
+    libc::MADV_DONTNEED
+}
+
+#[cfg(target_os = "macos")]
+fn reusable_advice() -> libc::c_int {
+    libc::MADV_FREE_REUSABLE
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reusable_advice() -> libc::c_int {
     libc::MADV_DONTNEED
 }
 
@@ -436,5 +504,66 @@ mod tests {
             .unwrap();
 
         assert_eq!(after, before);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn advise_reusable_at_requires_reuse_before_guest_access() {
+        let guest_base = 0x4000_0000;
+        let page_size = page_size();
+        let memory = GuestMemory::anonymous(page_size * 2).unwrap();
+        let guest_address = guest_base + page_size as u64;
+        memory
+            .write_at(guest_base, guest_address, &[0x5a; 64])
+            .unwrap();
+
+        let before = memory
+            .host_address_at(guest_base, guest_address, page_size)
+            .unwrap();
+        memory
+            .advise_reusable_at(guest_base, guest_address, page_size)
+            .unwrap();
+        memory
+            .advise_reuse_at(guest_base, guest_address, page_size)
+            .unwrap();
+        memory
+            .write_at(guest_base, guest_address, &[0xa5; 64])
+            .unwrap();
+        let after = memory
+            .host_address_at(guest_base, guest_address, page_size)
+            .unwrap();
+
+        assert_eq!(after, before);
+        assert_eq!(
+            memory.read_at(guest_base, guest_address, 64).unwrap(),
+            vec![0xa5; 64]
+        );
+    }
+
+    #[test]
+    fn advise_zero_at_discards_existing_contents_without_moving_the_mapping() {
+        let page_size = page_size();
+        let guest_base = 0x4000_0000;
+        let memory = GuestMemory::anonymous(page_size * 2).unwrap();
+        let address = guest_base + page_size as u64;
+        memory.write_at(guest_base, address, &[0x5a; 64]).unwrap();
+        let before = memory
+            .host_address_at(guest_base, address, page_size)
+            .unwrap();
+
+        memory
+            .advise_zero_at(guest_base, address, page_size)
+            .unwrap();
+
+        assert_eq!(
+            memory
+                .host_address_at(guest_base, address, page_size)
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            memory.read_at(guest_base, address, 64).unwrap(),
+            vec![0; 64]
+        );
     }
 }

@@ -252,6 +252,8 @@ SUMMARY_JSON="$QA_ROOT/chum-mem-memory-trace-summary.json"
 COMPOSE_LOG="$QA_ROOT/chum-mem-compose.log"
 IMPORT_LOG="$QA_ROOT/chum-mem-import.log"
 API_FORWARD_LOG="$QA_ROOT/chum-mem-api-forward.log"
+VMMAP_FINAL="$QA_ROOT/conjet-core-vmmap-final.txt"
+FOOTPRINT_FINAL="$QA_ROOT/conjet-core-footprint-final.txt"
 TRACE_STOP="$QA_ROOT/trace.stop"
 
 mkdir -p "$RUN_DIR" "$(dirname -- "$SERIAL_LOG")"
@@ -442,6 +444,12 @@ sample_trace() {
          reported_free_pages: ($control.balloon.reported_free_pages // 0),
          reclaimed_bytes: ($control.balloon.reclaimed_bytes // 0),
          reported_free_reclaimed_bytes: ($control.balloon.reported_free_reclaimed_bytes // 0),
+         reusable_reclaimed_bytes: ($control.balloon.reusable_reclaimed_bytes // 0),
+         reusable_restored_bytes: ($control.balloon.reusable_restored_bytes // 0),
+         current_balloon_reusable_bytes: ($control.balloon.current_balloon_reusable_bytes // 0),
+         zero_swept_bytes: ($control.balloon.zero_swept_bytes // 0),
+         zero_sweep_failed_bytes: ($control.balloon.zero_sweep_failed_bytes // 0),
+         reuse_failures: ($control.balloon.reuse_failures // 0),
          reclaim_failures: ($control.balloon.reclaim_failures // 0)
        },
        vmm: {
@@ -495,6 +503,8 @@ import_rc=0
 wait "$SAMPLER_PID" >/dev/null 2>&1 || true
 SAMPLER_PID=""
 sample_trace "import-finished"
+vmmap -summary "$VMM_PID" >"$VMMAP_FINAL" 2>&1 || true
+footprint "$VMM_PID" >"$FOOTPRINT_FINAL" 2>&1 || true
 
 jq -s \
   --arg qa_root "$QA_ROOT" \
@@ -502,6 +512,8 @@ jq -s \
   --arg import_log "$IMPORT_LOG" \
   --arg compose_log "$COMPOSE_LOG" \
   --arg api_forward_log "$API_FORWARD_LOG" \
+  --arg vmmap_final "$VMMAP_FINAL" \
+  --arg footprint_final "$FOOTPRINT_FINAL" \
   --argjson import_exit_code "$import_rc" \
   '{
     ok: ($import_exit_code == 0 and length > 0),
@@ -510,6 +522,8 @@ jq -s \
     import_log: $import_log,
     compose_log: $compose_log,
     api_forward_log: $api_forward_log,
+    vmmap_final: $vmmap_final,
+    footprint_final: $footprint_final,
     import_exit_code: $import_exit_code,
     samples: length,
     first: (.[0] // null),
@@ -519,7 +533,13 @@ jq -s \
     max_resident_bytes: ([.[].host.resident_bytes] | max // 0),
     min_resident_bytes: ([.[].host.resident_bytes] | min // 0),
     max_reported_free_reclaimed_bytes: ([.[].balloon.reported_free_reclaimed_bytes] | max // 0),
-    max_balloon_reclaimed_bytes: ([.[].balloon.reclaimed_bytes] | max // 0)
+    max_balloon_reclaimed_bytes: ([.[].balloon.reclaimed_bytes] | max // 0),
+    max_reusable_reclaimed_bytes: ([.[].balloon.reusable_reclaimed_bytes] | max // 0),
+    max_reusable_restored_bytes: ([.[].balloon.reusable_restored_bytes] | max // 0),
+    max_current_balloon_reusable_bytes: ([.[].balloon.current_balloon_reusable_bytes] | max // 0),
+    max_zero_swept_bytes: ([.[].balloon.zero_swept_bytes] | max // 0),
+    max_zero_sweep_failed_bytes: ([.[].balloon.zero_sweep_failed_bytes] | max // 0),
+    max_reuse_failures: ([.[].balloon.reuse_failures] | max // 0)
   }' "$TRACE_JSONL" >"$SUMMARY_JSON"
 
 cat "$SUMMARY_JSON"

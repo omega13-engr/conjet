@@ -83,7 +83,7 @@ final class DaemonProtocolTests: XCTestCase {
         let policy = try ConjetJSON.decoder().decode(ConjetMemoryPolicy.self, from: payload)
 
         XCTAssertTrue(policy.automaticIdleMemoryReclaim)
-        XCTAssertEqual(policy.idleMemoryReclaimTargetMiB, 1024)
+        XCTAssertEqual(policy.idleMemoryReclaimTargetMiB, 512)
         XCTAssertEqual(policy.idleMemoryReclaimDwellSeconds, 0)
         XCTAssertTrue(policy.dynamicMemoryEnabled)
         XCTAssertEqual(policy.dynamicMemoryMinimumMiB, 512)

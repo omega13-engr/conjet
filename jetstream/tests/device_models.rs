@@ -6,8 +6,8 @@ use jetstream::devices::psci::{
 };
 use jetstream::devices::virtio::{
     VirtioDeviceKind, VirtioMmioDevice, VirtioMmioDevicePlan, BALLOON_FEATURE_FREE_PAGE_HINT,
-    BALLOON_FEATURE_PAGE_POISON, BALLOON_FEATURE_PAGE_REPORTING, MAGIC_VALUE, STATUS_FAILED,
-    STATUS_FEATURES_OK,
+    BALLOON_FEATURE_MUST_TELL_HOST, BALLOON_FEATURE_PAGE_POISON, BALLOON_FEATURE_PAGE_REPORTING,
+    MAGIC_VALUE, STATUS_FAILED, STATUS_FEATURES_OK,
 };
 use jetstream::hvf::gic::{GicLayout, GicMmio};
 use jetstream::vmm::boot::BootPlan;
@@ -101,9 +101,10 @@ fn virtio_mmio_rejects_unsupported_features_when_features_ok_is_set() {
 }
 
 #[test]
-fn virtio_balloon_offers_only_page_reporting_for_destructive_reclaim() {
+fn virtio_balloon_requires_deflate_ack_before_the_guest_reuses_pages() {
     let plan = VirtioMmioDevicePlan::new(VirtioDeviceKind::Balloon, 0);
 
+    assert_ne!(plan.features & BALLOON_FEATURE_MUST_TELL_HOST, 0);
     assert_eq!(plan.features & BALLOON_FEATURE_FREE_PAGE_HINT, 0);
     assert_eq!(plan.features & BALLOON_FEATURE_PAGE_POISON, 0);
     assert_ne!(plan.features & BALLOON_FEATURE_PAGE_REPORTING, 0);

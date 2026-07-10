@@ -9,6 +9,7 @@ use crate::devices::virtqueue::{read_descriptors, QueueError, SplitQueueExecutor
 use crate::vmm::memory::{GuestMemory, GuestMemoryError};
 
 pub const BALLOON_FEATURE_STATS: u64 = 1 << 1;
+pub const BALLOON_FEATURE_MUST_TELL_HOST: u64 = 1;
 pub const BALLOON_FEATURE_FREE_PAGE_HINT: u64 = 1 << 3;
 pub const BALLOON_FEATURE_PAGE_REPORTING: u64 = 1 << 5;
 const PAGE_SIZE: u64 = 4096;
@@ -74,6 +75,7 @@ pub struct BalloonMetrics {
     pub driver_features: u64,
     pub driver_ok: bool,
     pub features_ok: bool,
+    pub must_tell_host_negotiated: bool,
     pub page_reporting_negotiated: bool,
     pub reporting_queue_index: Option<u32>,
     pub reporting_queue_ready: bool,
@@ -105,6 +107,10 @@ pub struct BalloonMetrics {
     pub discard_skipped_bytes: u64,
     pub partial_host_granule_bytes: u64,
     pub soft_reclaimed_bytes: u64,
+    pub reusable_reclaimed_bytes: u64,
+    pub reusable_restored_bytes: u64,
+    pub zero_swept_bytes: u64,
+    pub zero_sweep_failed_bytes: u64,
     pub hard_decommitted_bytes: u64,
     pub balloon_owned_reclaimed_bytes: u64,
     pub report_inflight_reclaimed_bytes: u64,
@@ -114,7 +120,9 @@ pub struct BalloonMetrics {
     pub current_fully_owned_host_granules: u64,
     pub current_partially_owned_host_granules: u64,
     pub current_balloon_decommitted_bytes: u64,
+    pub current_balloon_reusable_bytes: u64,
     pub reclaim_failures: u64,
+    pub reuse_failures: u64,
     pub malformed_reports: u64,
 }
 
@@ -161,6 +169,8 @@ pub enum BalloonError {
     MisalignedFreePageReport,
     #[error("free-page report descriptor address overflows")]
     FreePageReportOverflow,
+    #[error("failed to restore {bytes} reusable balloon bytes before guest ownership returned")]
+    ReusableRestoreFailed { bytes: u64 },
     #[error(transparent)]
     Queue(#[from] QueueError),
     #[error(transparent)]
@@ -184,10 +194,19 @@ pub struct ReclaimReport {
     pub host_granule_eligible_bytes: u64,
     pub discard_advised_bytes: u64,
     pub soft_reclaimed_bytes: u64,
+    pub reusable_reclaimed_bytes: u64,
+    pub zero_swept_bytes: u64,
+    pub zero_sweep_failed_bytes: u64,
     pub hard_decommitted_bytes: u64,
     pub discard_failed_bytes: u64,
     pub discard_skipped_bytes: u64,
     pub partial_host_granule_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    pub restored_bytes: u64,
+    pub failed_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +322,13 @@ impl MemoryLedger {
     fn mark_guest_owned(&mut self, ranges: &[PageRange]) {
         for index in self.indices_for_ranges(ranges) {
             self.entries[index].authority = LedgerAuthority::GuestOwned;
+        }
+    }
+
+    fn mark_guest_owned_restored(&mut self, ranges: &[PageRange]) {
+        for index in self.indices_for_ranges(ranges) {
+            self.entries[index].authority = LedgerAuthority::GuestOwned;
+            self.entries[index].backing = BackingState::Resident;
         }
     }
 
@@ -483,6 +509,18 @@ pub trait GuestMemoryReclaimer: std::fmt::Debug + Send + Sync {
         ranges: &[PageRange],
         authority: ReclaimAuthority,
     ) -> ReclaimReport;
+
+    fn restore_ranges(
+        &self,
+        _memory: &GuestMemory,
+        _guest_base: u64,
+        ranges: &[PageRange],
+    ) -> RestoreReport {
+        RestoreReport {
+            restored_bytes: ranges.iter().map(|range| range.size).sum(),
+            failed_bytes: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,6 +528,7 @@ struct HostGranuleOwnership {
     ballooned_subpages: u128,
     required_subpages: u8,
     decommitted: bool,
+    reusable: bool,
 }
 
 impl HostGranuleOwnership {
@@ -498,6 +537,7 @@ impl HostGranuleOwnership {
             ballooned_subpages: 0,
             required_subpages,
             decommitted: false,
+            reusable: false,
         }
     }
 
@@ -562,6 +602,12 @@ impl BalloonQueueHandler {
             .balloon_host_granules
             .values()
             .filter(|ownership| ownership.decommitted)
+            .map(|ownership| ownership.host_granule_bytes())
+            .sum();
+        metrics.current_balloon_reusable_bytes = self
+            .balloon_host_granules
+            .values()
+            .filter(|ownership| ownership.reusable)
             .map(|ownership| ownership.host_granule_bytes())
             .sum();
         metrics
@@ -644,16 +690,29 @@ impl BalloonQueueHandler {
             };
             if inflate {
                 self.metrics.inflate_pages += pfns.len() as u64;
-                let reclaim_ranges = self.record_balloon_inflate(memory, guest_base, &pfns);
-                self.reclaim_balloon_owned_ranges(memory, guest_base, reclaim_ranges);
+                self.record_balloon_inflate(memory, guest_base, &pfns);
             } else {
                 self.metrics.deflate_pages += pfns.len() as u64;
-                self.record_balloon_deflate(memory, guest_base, &pfns);
+                self.record_balloon_deflate(memory, guest_base, &pfns)?;
             }
             used.push(UsedElement {
                 id: u32::from(chain.head_index),
                 length: 0,
             });
+        }
+
+        // Replacing the anonymous backing one descriptor at a time leaves one Mach VM
+        // region per tiny reclaim. Wait until the guest reaches the requested balloon
+        // size, then replace every fully owned run in one globally coalesced pass.
+        // Page reporting still provides mapping-preserving reclaim while a workload is
+        // active, so this batching only delays the destructive zero-remap until Linux
+        // has finished transferring ownership.
+        if inflate
+            && transport.negotiated(BALLOON_FEATURE_MUST_TELL_HOST)
+            && self.balloon_target_reached(transport)
+        {
+            let reclaim_ranges = self.balloon_owned_reclaim_candidates();
+            self.reclaim_balloon_owned_ranges(memory, guest_base, reclaim_ranges);
         }
 
         {
@@ -669,6 +728,33 @@ impl BalloonQueueHandler {
             transport.mark_queue_used();
         }
         Ok(used)
+    }
+
+    fn balloon_target_reached(&self, transport: &VirtioMmioDevice) -> bool {
+        let config = transport.configuration_bytes();
+        if config.len() < 4 {
+            return false;
+        }
+        let target_pages = u32::from_le_bytes(
+            config[..4]
+                .try_into()
+                .expect("virtio-balloon target field is 4 bytes"),
+        );
+        target_pages > 0 && self.ballooned_pfns.len() as u64 >= u64::from(target_pages)
+    }
+
+    fn balloon_owned_reclaim_candidates(&self) -> Vec<PageRange> {
+        coalesce_ranges(
+            self.balloon_host_granules
+                .iter()
+                .filter_map(|(&start, ownership)| {
+                    (ownership.fully_owned() && !ownership.decommitted).then_some(PageRange {
+                        start,
+                        size: ownership.host_granule_bytes(),
+                    })
+                })
+                .collect(),
+        )
     }
 
     fn record_balloon_inflate(
@@ -721,6 +807,7 @@ impl BalloonQueueHandler {
                 ReclaimAuthority::BalloonOwned,
             );
             let reclaimed = report.discard_advised_bytes == range.size;
+            let reusable = report.reusable_reclaimed_bytes == range.size;
             self.memory_ledger.apply_reclaim(
                 &eligible_ranges,
                 &report,
@@ -728,12 +815,12 @@ impl BalloonQueueHandler {
             );
             self.record_reclaim_report(report, ReclaimAuthority::BalloonOwned, false);
             if reclaimed {
-                self.mark_balloon_range_decommitted(range);
+                self.mark_balloon_range_decommitted(range, reusable);
             }
         }
     }
 
-    fn mark_balloon_range_decommitted(&mut self, range: PageRange) {
+    fn mark_balloon_range_decommitted(&mut self, range: PageRange, reusable: bool) {
         let Some(end) = range.end() else {
             return;
         };
@@ -741,6 +828,7 @@ impl BalloonQueueHandler {
         while granule_start < end {
             let step = if let Some(ownership) = self.balloon_host_granules.get_mut(&granule_start) {
                 ownership.decommitted = true;
+                ownership.reusable = reusable;
                 ownership.host_granule_bytes()
             } else {
                 PAGE_SIZE
@@ -752,8 +840,42 @@ impl BalloonQueueHandler {
         }
     }
 
-    fn record_balloon_deflate(&mut self, memory: &GuestMemory, guest_base: u64, pfns: &[u64]) {
+    fn record_balloon_deflate(
+        &mut self,
+        memory: &GuestMemory,
+        guest_base: u64,
+        pfns: &[u64],
+    ) -> Result<(), BalloonError> {
         self.memory_ledger.ensure(memory, guest_base);
+        let (released_ranges, reusable_ranges) =
+            self.balloon_release_ranges_for_deflate(memory, guest_base, pfns);
+        if !reusable_ranges.is_empty() {
+            let report = self
+                .reclaimer
+                .as_deref()
+                .map(|reclaimer| reclaimer.restore_ranges(memory, guest_base, &reusable_ranges))
+                .unwrap_or_else(|| RestoreReport {
+                    restored_bytes: 0,
+                    failed_bytes: reusable_ranges.iter().map(|range| range.size).sum(),
+                });
+            self.metrics.reusable_restored_bytes = self
+                .metrics
+                .reusable_restored_bytes
+                .saturating_add(report.restored_bytes);
+            if report.failed_bytes > 0 {
+                self.metrics.reuse_failures = self.metrics.reuse_failures.saturating_add(1);
+                return Err(BalloonError::ReusableRestoreFailed {
+                    bytes: report.failed_bytes,
+                });
+            }
+        }
+        if !released_ranges.is_empty() {
+            self.memory_ledger
+                .mark_guest_owned_restored(&released_ranges);
+            for range in &released_ranges {
+                self.mark_balloon_range_restored(*range);
+            }
+        }
         let mut guest_owned_ranges = Vec::new();
         for &pfn in pfns {
             if !self.ballooned_pfns.remove(&pfn) {
@@ -768,6 +890,7 @@ impl BalloonQueueHandler {
             if let Some(ownership) = self.balloon_host_granules.get_mut(&granule_start) {
                 ownership.ballooned_subpages &= !subpage_mask;
                 ownership.decommitted = false;
+                ownership.reusable = false;
                 remove_granule = ownership.ballooned_subpages == 0;
             }
             if remove_granule {
@@ -780,6 +903,60 @@ impl BalloonQueueHandler {
         }
         let guest_owned_ranges = eligible_reclaim_ranges(memory, guest_base, &guest_owned_ranges);
         self.memory_ledger.mark_guest_owned(&guest_owned_ranges);
+        Ok(())
+    }
+
+    fn balloon_release_ranges_for_deflate(
+        &self,
+        memory: &GuestMemory,
+        guest_base: u64,
+        pfns: &[u64],
+    ) -> (Vec<PageRange>, Vec<PageRange>) {
+        let mut released = Vec::new();
+        let mut reusable = Vec::new();
+        for &pfn in pfns {
+            if !self.ballooned_pfns.contains(&pfn) {
+                continue;
+            }
+            let Some((granule_start, _, _)) = host_granule_for_pfn(memory, guest_base, pfn) else {
+                continue;
+            };
+            let Some(ownership) = self.balloon_host_granules.get(&granule_start) else {
+                continue;
+            };
+            if !ownership.decommitted {
+                continue;
+            }
+            let range = PageRange {
+                start: granule_start,
+                size: ownership.host_granule_bytes(),
+            };
+            released.push(range);
+            if ownership.reusable {
+                reusable.push(range);
+            }
+        }
+        (coalesce_ranges(released), coalesce_ranges(reusable))
+    }
+
+    fn mark_balloon_range_restored(&mut self, range: PageRange) {
+        let Some(end) = range.end() else {
+            return;
+        };
+        let mut granule_start = range.start;
+        while granule_start < end {
+            let step = if let Some(ownership) = self.balloon_host_granules.get_mut(&granule_start) {
+                ownership.decommitted = false;
+                ownership.reusable = false;
+                ownership.host_granule_bytes()
+            } else {
+                PAGE_SIZE
+            };
+            if step == 0 {
+                break;
+            }
+            granule_start = granule_start.saturating_add(step);
+        }
     }
 
     fn handle_reporting_queue(
@@ -999,6 +1176,9 @@ impl BalloonQueueHandler {
         self.metrics.discard_skipped_bytes += report.discard_skipped_bytes;
         self.metrics.partial_host_granule_bytes += report.partial_host_granule_bytes;
         self.metrics.reclaimed_bytes += report.discard_advised_bytes;
+        self.metrics.reusable_reclaimed_bytes += report.reusable_reclaimed_bytes;
+        self.metrics.zero_swept_bytes += report.zero_swept_bytes;
+        self.metrics.zero_sweep_failed_bytes += report.zero_sweep_failed_bytes;
         match authority {
             ReclaimAuthority::BalloonOwned => {
                 self.metrics.balloon_owned_reclaimed_bytes += report.discard_advised_bytes;
@@ -1020,6 +1200,8 @@ impl BalloonQueueHandler {
         self.metrics.driver_features = transport.driver_features;
         self.metrics.driver_ok = transport.driver_ok();
         self.metrics.features_ok = transport.features_ok();
+        self.metrics.must_tell_host_negotiated =
+            transport.negotiated(BALLOON_FEATURE_MUST_TELL_HOST);
         let layout = BalloonQueueLayout::from_transport(transport);
         self.metrics.page_reporting_negotiated =
             transport.negotiated(BALLOON_FEATURE_PAGE_REPORTING);
@@ -1331,6 +1513,18 @@ mod tests {
     }
 
     #[test]
+    fn balloon_reclaim_waits_until_the_requested_target_is_reached() {
+        let plan = VirtioMmioDevicePlan::new(VirtioDeviceKind::Balloon, 0);
+        let transport = VirtioMmioDevice::new(plan, configuration(4, 0, 0));
+        let mut handler = BalloonQueueHandler::new();
+        handler.ballooned_pfns.extend([1, 2, 3]);
+        assert!(!handler.balloon_target_reached(&transport));
+
+        handler.ballooned_pfns.insert(4);
+        assert!(handler.balloon_target_reached(&transport));
+    }
+
+    #[test]
     fn queue_layout_places_reporting_at_queue_two_with_current_features() {
         let layout = BalloonQueueLayout::from_features(BALLOON_FEATURE_PAGE_REPORTING);
 
@@ -1601,7 +1795,9 @@ mod tests {
             host_page_size
         );
 
-        handler.record_balloon_deflate(&memory, guest_base, &[first_pfn]);
+        handler
+            .record_balloon_deflate(&memory, guest_base, &[first_pfn])
+            .unwrap();
         let metrics = handler.metrics();
         assert_eq!(metrics.current_fully_owned_host_granules, 0);
         assert_eq!(metrics.current_partially_owned_host_granules, 1);
@@ -1646,11 +1842,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn target_completion_coalesces_candidates_across_inflate_batches() {
+        let base_memory = GuestMemory::anonymous(0x4000).unwrap();
+        let host_page_size = base_memory.host_page_size() as u64;
+        let required_subpages = host_page_size / PAGE_SIZE;
+        let guest_base = 0x4000_0000;
+        let memory = GuestMemory::anonymous(host_page_size as usize * 4).unwrap();
+        let first_pfn = guest_base / PAGE_SIZE;
+        let mut handler = BalloonQueueHandler::new();
+
+        handler.record_balloon_inflate(
+            &memory,
+            guest_base,
+            &(0..required_subpages)
+                .map(|subpage| first_pfn + subpage)
+                .collect::<Vec<_>>(),
+        );
+        handler.record_balloon_inflate(
+            &memory,
+            guest_base,
+            &(required_subpages..required_subpages * 2)
+                .map(|subpage| first_pfn + subpage)
+                .collect::<Vec<_>>(),
+        );
+
+        assert_eq!(
+            handler.balloon_owned_reclaim_candidates(),
+            vec![PageRange {
+                start: guest_base,
+                size: host_page_size * 2,
+            }]
+        );
+    }
+
     #[derive(Debug, Default)]
     struct RecordingReclaimer {
         ranges: Mutex<Vec<PageRange>>,
+        restored_ranges: Mutex<Vec<PageRange>>,
         authorities: Mutex<Vec<ReclaimAuthority>>,
         hard_zero: bool,
+        reusable: bool,
+        fail_restore: bool,
     }
 
     impl GuestMemoryReclaimer for RecordingReclaimer {
@@ -1669,10 +1902,119 @@ mod tests {
             ReclaimReport {
                 discard_advised_bytes: reclaimed_bytes,
                 soft_reclaimed_bytes,
+                reusable_reclaimed_bytes: if self.reusable
+                    && authority == ReclaimAuthority::BalloonOwned
+                {
+                    reclaimed_bytes
+                } else {
+                    0
+                },
                 hard_decommitted_bytes,
                 ..ReclaimReport::default()
             }
         }
+
+        fn restore_ranges(
+            &self,
+            _memory: &GuestMemory,
+            _guest_base: u64,
+            ranges: &[PageRange],
+        ) -> RestoreReport {
+            self.restored_ranges
+                .lock()
+                .unwrap()
+                .extend_from_slice(ranges);
+            let bytes = ranges.iter().map(|range| range.size).sum();
+            if self.fail_restore {
+                RestoreReport {
+                    restored_bytes: 0,
+                    failed_bytes: bytes,
+                }
+            } else {
+                RestoreReport {
+                    restored_bytes: bytes,
+                    failed_bytes: 0,
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reusable_balloon_memory_is_restored_before_deflate_returns_guest_ownership() {
+        let guest_base = 0x4000_0000;
+        let base_memory = GuestMemory::anonymous(0x4000).unwrap();
+        let host_page_size = base_memory.host_page_size() as u64;
+        let required_subpages = host_page_size / PAGE_SIZE;
+        let memory = GuestMemory::anonymous(host_page_size as usize * 2).unwrap();
+        let first_pfn = guest_base / PAGE_SIZE;
+        let pfns = (0..required_subpages)
+            .map(|subpage| first_pfn + subpage)
+            .collect::<Vec<_>>();
+        let reclaimer = Arc::new(RecordingReclaimer {
+            reusable: true,
+            ..RecordingReclaimer::default()
+        });
+        let mut handler = BalloonQueueHandler::with_reclaimer(reclaimer.clone());
+
+        let candidates = handler.record_balloon_inflate(&memory, guest_base, &pfns);
+        handler.reclaim_balloon_owned_ranges(&memory, guest_base, candidates);
+        let reclaimed = handler.metrics();
+        assert_eq!(reclaimed.reusable_reclaimed_bytes, host_page_size);
+        assert_eq!(reclaimed.current_balloon_reusable_bytes, host_page_size);
+
+        handler
+            .record_balloon_deflate(&memory, guest_base, &[first_pfn])
+            .unwrap();
+
+        let restored = handler.metrics();
+        assert_eq!(restored.reusable_restored_bytes, host_page_size);
+        assert_eq!(restored.current_balloon_reusable_bytes, 0);
+        assert_eq!(restored.reuse_failures, 0);
+        assert_eq!(
+            reclaimer.restored_ranges.lock().unwrap().as_slice(),
+            &[PageRange {
+                start: guest_base,
+                size: host_page_size,
+            }]
+        );
+        let ledger = handler.memory_ledger_summary(memory.len() as u64, host_page_size);
+        assert!(ledger.ok);
+        assert_eq!(ledger.discarded_soft_bytes, 0);
+        assert_eq!(ledger.guest_owned_bytes, memory.len() as u64);
+    }
+
+    #[test]
+    fn reusable_restore_failure_keeps_the_balloon_granule_owned() {
+        let guest_base = 0x4000_0000;
+        let base_memory = GuestMemory::anonymous(0x4000).unwrap();
+        let host_page_size = base_memory.host_page_size() as u64;
+        let required_subpages = host_page_size / PAGE_SIZE;
+        let memory = GuestMemory::anonymous(host_page_size as usize * 2).unwrap();
+        let first_pfn = guest_base / PAGE_SIZE;
+        let pfns = (0..required_subpages)
+            .map(|subpage| first_pfn + subpage)
+            .collect::<Vec<_>>();
+        let reclaimer = Arc::new(RecordingReclaimer {
+            reusable: true,
+            fail_restore: true,
+            ..RecordingReclaimer::default()
+        });
+        let mut handler = BalloonQueueHandler::with_reclaimer(reclaimer);
+
+        let candidates = handler.record_balloon_inflate(&memory, guest_base, &pfns);
+        handler.reclaim_balloon_owned_ranges(&memory, guest_base, candidates);
+        let error = handler
+            .record_balloon_deflate(&memory, guest_base, &[first_pfn])
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BalloonError::ReusableRestoreFailed { bytes } if bytes == host_page_size
+        ));
+        let metrics = handler.metrics();
+        assert_eq!(metrics.reuse_failures, 1);
+        assert_eq!(metrics.current_balloon_reusable_bytes, host_page_size);
+        assert_eq!(metrics.current_balloon_owned_bytes, host_page_size);
     }
 
     #[test]

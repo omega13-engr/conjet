@@ -452,11 +452,18 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
     public var balloonReportedFreeMiB: Int?
     public var balloonReportedFreeReclaimedMiB: Int?
     public var balloonSoftReclaimedMiB: Int?
+    public var balloonReusableReclaimedMiB: Int?
+    public var balloonReusableRestoredMiB: Int?
+    public var balloonCurrentReusableMiB: Int?
+    public var balloonZeroSweptMiB: Int?
+    public var balloonZeroSweepFailedMiB: Int?
     public var balloonHardDecommittedMiB: Int?
     public var balloonOwnedReclaimedMiB: Int?
     public var balloonReportInFlightReclaimedMiB: Int?
     public var balloonReclaimFailures: UInt64?
+    public var balloonReuseFailures: UInt64?
     public var balloonMalformedReports: UInt64?
+    public var balloonMustTellHostReady: Bool?
     public var balloonPageReportingReady: Bool?
     public var balloonFreePageHintReady: Bool?
     public var memoryLedger: ConjetMemoryLedgerStatus?
@@ -503,11 +510,18 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         balloonReportedFreeMiB: Int? = nil,
         balloonReportedFreeReclaimedMiB: Int? = nil,
         balloonSoftReclaimedMiB: Int? = nil,
+        balloonReusableReclaimedMiB: Int? = nil,
+        balloonReusableRestoredMiB: Int? = nil,
+        balloonCurrentReusableMiB: Int? = nil,
+        balloonZeroSweptMiB: Int? = nil,
+        balloonZeroSweepFailedMiB: Int? = nil,
         balloonHardDecommittedMiB: Int? = nil,
         balloonOwnedReclaimedMiB: Int? = nil,
         balloonReportInFlightReclaimedMiB: Int? = nil,
         balloonReclaimFailures: UInt64? = nil,
+        balloonReuseFailures: UInt64? = nil,
         balloonMalformedReports: UInt64? = nil,
+        balloonMustTellHostReady: Bool? = nil,
         balloonPageReportingReady: Bool? = nil,
         balloonFreePageHintReady: Bool? = nil,
         memoryLedger: ConjetMemoryLedgerStatus? = nil,
@@ -553,11 +567,18 @@ public struct ConjetMemoryRuntimeStatus: Codable, Equatable, Sendable {
         self.balloonReportedFreeMiB = balloonReportedFreeMiB
         self.balloonReportedFreeReclaimedMiB = balloonReportedFreeReclaimedMiB
         self.balloonSoftReclaimedMiB = balloonSoftReclaimedMiB
+        self.balloonReusableReclaimedMiB = balloonReusableReclaimedMiB
+        self.balloonReusableRestoredMiB = balloonReusableRestoredMiB
+        self.balloonCurrentReusableMiB = balloonCurrentReusableMiB
+        self.balloonZeroSweptMiB = balloonZeroSweptMiB
+        self.balloonZeroSweepFailedMiB = balloonZeroSweepFailedMiB
         self.balloonHardDecommittedMiB = balloonHardDecommittedMiB
         self.balloonOwnedReclaimedMiB = balloonOwnedReclaimedMiB
         self.balloonReportInFlightReclaimedMiB = balloonReportInFlightReclaimedMiB
         self.balloonReclaimFailures = balloonReclaimFailures
+        self.balloonReuseFailures = balloonReuseFailures
         self.balloonMalformedReports = balloonMalformedReports
+        self.balloonMustTellHostReady = balloonMustTellHostReady
         self.balloonPageReportingReady = balloonPageReportingReady
         self.balloonFreePageHintReady = balloonFreePageHintReady
         self.memoryLedger = memoryLedger

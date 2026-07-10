@@ -149,7 +149,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertFalse(parsed.memoryPolicy.lazyRuntimeServices)
         XCTAssertTrue(parsed.memoryPolicy.lazyNetworkHelpers)
         XCTAssertTrue(parsed.memoryPolicy.automaticIdleMemoryReclaim)
-        XCTAssertEqual(parsed.memoryPolicy.idleMemoryReclaimTargetMiB, 1024)
+        XCTAssertEqual(parsed.memoryPolicy.idleMemoryReclaimTargetMiB, 512)
         XCTAssertTrue(parsed.memoryPolicy.dynamicMemoryEnabled)
         XCTAssertEqual(parsed.memoryPolicy.dynamicMemoryMinimumMiB, 512)
         XCTAssertEqual(parsed.memoryPolicy.dynamicMemoryShrinkCooldownSeconds, 0)
@@ -161,8 +161,8 @@ final class ConfigTests: XCTestCase {
         let policy = ConjetConfig(memoryMiB: 8192, memoryProfile: .balanced).memoryPolicy
 
         XCTAssertTrue(policy.automaticIdleMemoryReclaim)
-        XCTAssertEqual(noPolicy.idleMemoryReclaimTargetMiB, 1024)
-        XCTAssertEqual(policy.idleMemoryReclaimTargetMiB, 1024)
+        XCTAssertEqual(noPolicy.idleMemoryReclaimTargetMiB, 512)
+        XCTAssertEqual(policy.idleMemoryReclaimTargetMiB, 512)
         XCTAssertEqual(policy.reclaimIdleHelpersAfterSeconds, 0)
         XCTAssertEqual(policy.idleMemoryReclaimDwellSeconds, 0)
         XCTAssertTrue(policy.dynamicMemoryEnabled)
@@ -175,13 +175,13 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(ConjetConfig(memoryMiB: 8192, memoryProfile: .performance).memoryPolicy.idleMemoryReclaimTargetMiB, 2048)
         XCTAssertEqual(ConjetConfig(memoryMiB: 8192, memoryProfile: .performance).memoryPolicy.dynamicMemoryShrinkStepMiB, 1024)
         XCTAssertEqual(ConjetConfig(memoryMiB: 8192, memoryProfile: .eco).memoryPolicy.dynamicMemoryMinimumMiB, noPolicy.dynamicMemoryMinimumMiB)
-        XCTAssertEqual(ConjetConfig(memoryMiB: 8192, memoryProfile: .eco).memoryPolicy.idleMemoryReclaimTargetMiB, 768)
+        XCTAssertEqual(ConjetConfig(memoryMiB: 8192, memoryProfile: .eco).memoryPolicy.idleMemoryReclaimTargetMiB, 512)
         XCTAssertEqual(ConjetConfig(memoryMiB: 8192, memoryProfile: .eco).memoryPolicy.dynamicMemoryShrinkStepMiB, 256)
     }
 
     func testDynamicMemoryPolicyScalesWithConfiguredMemory() throws {
         let compact = ConjetConfig(memoryMiB: 4096, memoryProfile: .noPolicy).memoryPolicy
-        XCTAssertEqual(compact.idleMemoryReclaimTargetMiB, 1024)
+        XCTAssertEqual(compact.idleMemoryReclaimTargetMiB, 512)
         XCTAssertEqual(compact.dynamicMemoryMinimumMiB, 512)
         XCTAssertEqual(compact.dynamicMemoryBaseOverheadMiB, 0)
         XCTAssertEqual(compact.dynamicMemoryHeadroomMiB, 256)
@@ -198,7 +198,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(defaultSized.dynamicMemoryShrinkStepMiB, 512)
 
         let large = ConjetConfig(memoryMiB: 16_384, memoryProfile: .noPolicy).memoryPolicy
-        XCTAssertEqual(large.idleMemoryReclaimTargetMiB, 1024)
+        XCTAssertEqual(large.idleMemoryReclaimTargetMiB, 512)
         XCTAssertEqual(large.dynamicMemoryMinimumMiB, 512)
         XCTAssertEqual(large.dynamicMemoryBaseOverheadMiB, 0)
         XCTAssertEqual(large.dynamicMemoryHeadroomMiB, 256)

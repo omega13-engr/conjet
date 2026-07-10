@@ -338,6 +338,13 @@ before_rss="$(jq -r '.host_memory.resident_bytes // 0' "$CONTROL_BEFORE")"
 after_rss="$(jq -r '.host_memory.resident_bytes // 0' "$CONTROL_AFTER")"
 reported_free_reclaimed="$(jq -r '.balloon.reported_free_reclaimed_bytes // 0' "$CONTROL_AFTER")"
 balloon_reclaimed="$(jq -r '.balloon.reclaimed_bytes // 0' "$CONTROL_AFTER")"
+reusable_reclaimed="$(jq -r '.balloon.reusable_reclaimed_bytes // 0' "$CONTROL_AFTER")"
+current_balloon_reusable="$(jq -r '.balloon.current_balloon_reusable_bytes // 0' "$CONTROL_AFTER")"
+hard_decommitted="$(jq -r '.balloon.hard_decommitted_bytes // 0' "$CONTROL_AFTER")"
+current_balloon_decommitted="$(jq -r '.balloon.current_balloon_decommitted_bytes // 0' "$CONTROL_AFTER")"
+reuse_failures="$(jq -r '.balloon.reuse_failures // 0' "$CONTROL_AFTER")"
+zero_swept="$(jq -r '.balloon.zero_swept_bytes // 0' "$CONTROL_AFTER")"
+zero_sweep_failed="$(jq -r '.balloon.zero_sweep_failed_bytes // 0' "$CONTROL_AFTER")"
 target_after="$(jq -r '.target_mib' "$CONTROL_AFTER")"
 memory_ledger_ok="$(jq -r '.memory_ledger.ok // false' "$CONTROL_AFTER")"
 shared_memory_regions="$(awk '$1 == "shared" && $2 == "memory" { print $NF }' "$VMMAP_AFTER" | tail -1)"
@@ -372,6 +379,13 @@ jq -n \
   --argjson rss_drop_mib "$rss_drop_mib" \
   --argjson reported_free_reclaimed "$reported_free_reclaimed" \
   --argjson balloon_reclaimed "$balloon_reclaimed" \
+  --argjson reusable_reclaimed "$reusable_reclaimed" \
+  --argjson current_balloon_reusable "$current_balloon_reusable" \
+  --argjson hard_decommitted "$hard_decommitted" \
+  --argjson current_balloon_decommitted "$current_balloon_decommitted" \
+  --argjson reuse_failures "$reuse_failures" \
+  --argjson zero_swept "$zero_swept" \
+  --argjson zero_sweep_failed "$zero_sweep_failed" \
   --argjson min_footprint_drop_mib "$MIN_FOOTPRINT_DROP_MIB" \
   --argjson footprint_over_target_mib "$footprint_over_target_mib" \
   --argjson max_footprint_over_target_mib "$MAX_FOOTPRINT_OVER_TARGET_MIB" \
@@ -383,6 +397,10 @@ jq -n \
     ok: (
       $target_after == $target_mib and
       $balloon_reclaimed > 0 and
+      ($reusable_reclaimed > 0 or $hard_decommitted > 0) and
+      $current_balloon_decommitted > 0 and
+      $reuse_failures == 0 and
+      $zero_sweep_failed == 0 and
       $memory_ledger_ok and
       ($min_footprint_drop_mib == 0 or $footprint_drop_mib >= $min_footprint_drop_mib) and
       $footprint_over_target_mib <= $max_footprint_over_target_mib and
@@ -405,7 +423,14 @@ jq -n \
     },
     balloon: {
       reclaimed_bytes: $balloon_reclaimed,
-      reported_free_reclaimed_bytes: $reported_free_reclaimed
+      reported_free_reclaimed_bytes: $reported_free_reclaimed,
+      reusable_reclaimed_bytes: $reusable_reclaimed,
+      current_balloon_reusable_bytes: $current_balloon_reusable,
+      hard_decommitted_bytes: $hard_decommitted,
+      current_balloon_decommitted_bytes: $current_balloon_decommitted,
+      reuse_failures: $reuse_failures,
+      zero_swept_bytes: $zero_swept,
+      zero_sweep_failed_bytes: $zero_sweep_failed
     },
     memory_ledger_ok: $memory_ledger_ok,
     shared_memory_regions: $shared_memory_regions,

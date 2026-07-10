@@ -1539,11 +1539,18 @@ final class DynamicMemoryManagerTests: XCTestCase {
                     balloonReclaimedBytes: UInt64(768 * 1024 * 1024),
                     balloonReportedFreeReclaimedBytes: UInt64(256 * 1024 * 1024),
                     balloonSoftReclaimedBytes: UInt64(128 * 1024 * 1024),
+                    balloonReusableReclaimedBytes: UInt64(512 * 1024 * 1024),
+                    balloonReusableRestoredBytes: UInt64(256 * 1024 * 1024),
+                    balloonCurrentReusableBytes: UInt64(256 * 1024 * 1024),
+                    balloonZeroSweptBytes: UInt64(512 * 1024 * 1024),
+                    balloonZeroSweepFailedBytes: 0,
                     balloonHardDecommittedBytes: UInt64(640 * 1024 * 1024),
                     balloonOwnedReclaimedBytes: UInt64(384 * 1024 * 1024),
                     balloonReportInFlightReclaimedBytes: UInt64(384 * 1024 * 1024),
                     balloonReclaimFailures: 2,
+                    balloonReuseFailures: 0,
                     balloonMalformedReports: 3,
+                    balloonMustTellHostReady: true,
                     balloonPageReportingReady: true,
                     balloonFreePageHintReady: false,
                     memoryLedger: ConjetMemoryLedgerStatus(
@@ -1586,11 +1593,18 @@ final class DynamicMemoryManagerTests: XCTestCase {
         XCTAssertEqual(status.balloonReclaimedMiB, 768)
         XCTAssertEqual(status.balloonReportedFreeReclaimedMiB, 256)
         XCTAssertEqual(status.balloonSoftReclaimedMiB, 128)
+        XCTAssertEqual(status.balloonReusableReclaimedMiB, 512)
+        XCTAssertEqual(status.balloonReusableRestoredMiB, 256)
+        XCTAssertEqual(status.balloonCurrentReusableMiB, 256)
+        XCTAssertEqual(status.balloonZeroSweptMiB, 512)
+        XCTAssertEqual(status.balloonZeroSweepFailedMiB, 0)
         XCTAssertEqual(status.balloonHardDecommittedMiB, 640)
         XCTAssertEqual(status.balloonOwnedReclaimedMiB, 384)
         XCTAssertEqual(status.balloonReportInFlightReclaimedMiB, 384)
         XCTAssertEqual(status.balloonReclaimFailures, 2)
+        XCTAssertEqual(status.balloonReuseFailures, 0)
         XCTAssertEqual(status.balloonMalformedReports, 3)
+        XCTAssertEqual(status.balloonMustTellHostReady, true)
         XCTAssertEqual(status.balloonPageReportingReady, true)
         XCTAssertEqual(status.balloonFreePageHintReady, false)
         XCTAssertEqual(status.memoryLedger?.guestVisibleBytes, UInt64(8192 * 1024 * 1024))
