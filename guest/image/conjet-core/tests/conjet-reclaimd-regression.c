@@ -197,6 +197,57 @@ static void test_stopped_service_reclaim_releases_hot_cache_reserve(void) {
     );
 }
 
+static void test_idle_daemon_reclaim_uses_small_cache_floor(void) {
+    char root[4096];
+    make_test_root(root, sizeof(root), "conjet-reclaimd-daemon-idle");
+
+    char build[4096];
+    char service[4096];
+    test_join_path(build, sizeof(build), root, "conjet-build.slice");
+    test_join_path(service, sizeof(service), root, "conjet-services.slice");
+    test_make_dir(build);
+    test_make_dir(service);
+
+    struct memcg_stat stat;
+    memset(&stat, 0, sizeof(stat));
+    stat.inactive_file = DAEMON_RESERVE_BYTES + 16ULL * 1024ULL * 1024ULL;
+
+    write_cgroup_events(build, true);
+    write_cgroup_events(service, false);
+    require_false("active build is not idle daemon reclaim", daemon_idle_reclaim_allowed(build, service));
+    require_u64(
+        "active build keeps daemon reserve",
+        daemon_reclaim_reserve(build, service),
+        DAEMON_RESERVE_BYTES
+    );
+
+    write_cgroup_events(build, false);
+    require_true("empty build and service allow idle daemon reclaim", daemon_idle_reclaim_allowed(build, service));
+    require_u64(
+        "idle daemon reserve",
+        daemon_reclaim_reserve(build, service),
+        DAEMON_IDLE_RESERVE_BYTES
+    );
+    require_u64(
+        "idle daemon releases old cache reserve",
+        reclaim_candidate(&stat, DAEMON_CAP_BYTES, daemon_reclaim_reserve(build, service)),
+        stat.inactive_file - DAEMON_IDLE_RESERVE_BYTES
+    );
+
+    char build_events[4096];
+    test_join_path(build_events, sizeof(build_events), build, "cgroup.events");
+    if (unlink(build_events) != 0 || rmdir(build) != 0) {
+        fprintf(stderr, "failed to remove idle build cgroup: %s\n", strerror(errno));
+        exit(1);
+    }
+    require_u64(
+        "absent idle build cgroup stays idle",
+        daemon_reclaim_reserve(build, service),
+        DAEMON_IDLE_RESERVE_BYTES
+    );
+    require_true("absent build keeps idle daemon reclaim", daemon_idle_reclaim_allowed(build, service));
+}
+
 static void test_syncfs_gate_uses_dirty_writeback_threshold_and_path(void) {
     struct memcg_stat stat;
     memset(&stat, 0, sizeof(stat));
@@ -296,6 +347,7 @@ int main(void) {
     test_reclaim_target_stats_include_prefixed_build_and_service_siblings();
     test_default_build_cgroup_path_tracks_daemon_scoped_build_workers();
     test_stopped_service_reclaim_releases_hot_cache_reserve();
+    test_idle_daemon_reclaim_uses_small_cache_floor();
     test_syncfs_gate_uses_dirty_writeback_threshold_and_path();
     test_drop_caches_gate_defaults_off_and_accepts_enable_values();
     test_scoped_reclaim_config_requires_service_path_and_bytes();

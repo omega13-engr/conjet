@@ -41,6 +41,18 @@ static void require_contains(const char *name, const char *haystack, size_t hays
     }
 }
 
+static void test_vsock_peer_requires_host_cid(void) {
+    struct sockaddr_vm peer;
+    memset(&peer, 0, sizeof(peer));
+    peer.svm_family = AF_VSOCK;
+    peer.svm_cid = VMADDR_CID_HOST;
+    require_int("host vsock peer", is_host_vsock_peer(&peer, sizeof(peer)), 1);
+
+    peer.svm_cid = VMADDR_CID_ANY;
+    require_int("non-host vsock peer", is_host_vsock_peer(&peer, sizeof(peer)), 0);
+    require_int("short peer address", is_host_vsock_peer(&peer, sizeof(peer) - 1), 0);
+}
+
 struct proxy_thread_args {
     int client;
     const uint8_t *first;
@@ -890,6 +902,7 @@ static void test_handle_docker_proxy_keeps_streaming_logs_upstream_open_after_cl
 }
 
 int main(void) {
+    test_vsock_peer_requires_host_cid();
     test_decodes_single_chunk();
     test_decodes_multiple_chunks();
     test_rejects_truncated_chunk();

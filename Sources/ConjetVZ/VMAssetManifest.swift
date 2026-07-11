@@ -326,9 +326,7 @@ public struct VMImageStore: Sendable {
         "CONFIG_EPOLL",
         "CONFIG_PROC_FS",
         "CONFIG_SYSFS",
-        "CONFIG_DEBUG_FS",
-        "CONFIG_PRINTK",
-        "CONFIG_MAGIC_SYSRQ"
+        "CONFIG_PRINTK"
     ]
 
     public static let requiredJetstreamKernelBuiltIns = dockerDirectKernelRequiredBuiltIns

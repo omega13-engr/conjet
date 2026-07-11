@@ -262,6 +262,10 @@ required_config_builtins() {
   awk -F= '/^CONFIG_[A-Za-z0-9_]+=y$/ { print $1 }' "${config_fragment}"
 }
 
+required_config_disabled() {
+  sed -n 's/^# \(CONFIG_[A-Za-z0-9_]*\) is not set$/\1/p' "${config_fragment}"
+}
+
 validate_required_config_builtins() {
   local missing=0
   local option
@@ -273,6 +277,22 @@ validate_required_config_builtins() {
       missing=1
     fi
   done < <(required_config_builtins)
+  if [ "${missing}" -ne 0 ]; then
+    exit 65
+  fi
+}
+
+validate_required_config_disabled() {
+  local missing=0
+  local option
+  while IFS= read -r option; do
+    if ! grep -q "^# ${option} is not set$" "${source_dir}/.config"; then
+      local actual
+      actual="$(grep -E "^(# )?${option}(=| is not set)" "${source_dir}/.config" || true)"
+      echo "error: kernel .config did not keep required disabled ${option} (actual: ${actual:-missing})" >&2
+      missing=1
+    fi
+  done < <(required_config_disabled)
   if [ "${missing}" -ne 0 ]; then
     exit 65
   fi
@@ -337,6 +357,7 @@ fi
 
 configure_kernel
 validate_required_config_builtins
+validate_required_config_disabled
 
 if [ "${validate_config_only}" = true ]; then
   printf 'Conjet kernel config OK for %s profile=%s: %s/.config\n' "${kernel_version}" "${kernel_profile}" "${source_dir}"

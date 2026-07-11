@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{
@@ -12,7 +13,8 @@ use std::time::{Duration, Instant};
 use crate::arch::aarch64;
 use crate::devices::balloon::{
     self, BalloonMetrics, BalloonQueueHandler, BalloonRestoreMode, GuestMemoryReclaimer,
-    MemoryLedgerSummary, PageRange, ReclaimAuthority, ReclaimReport, RestoreReport,
+    IdleBackingCompactionReport, MemoryLedgerSummary, PageRange, ReclaimAuthority, ReclaimReport,
+    RestoreReport,
 };
 use crate::devices::block::{BlockQueueHandler, RawBlockDevice};
 use crate::devices::bus::{MmioDevice, MmioError};
@@ -39,11 +41,18 @@ use crate::vmm::vstate::VmState;
 
 const HOST_RECLAIM_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RETAINED_CONSOLE_BYTES: usize = 256 * 1024;
-const DEFAULT_CORE_IDLE_TARGET_MIB: u64 = 512;
+// Leave room for the Linux/Docker control plane and fixed VMM overhead so an
+// otherwise idle Core returns below the host-side 700 MiB operating budget.
+// Docker transport activity always restores configured capacity before work.
+const DEFAULT_CORE_IDLE_TARGET_MIB: u64 = 448;
 const DEFAULT_CORE_IDLE_QUIET_DWELL: Duration = Duration::from_secs(8);
 const DEFAULT_CORE_IDLE_RECLAIM_SETTLE_DWELL: Duration = Duration::from_secs(2);
+const DEFAULT_CORE_IDLE_BACKING_COMPACTION_DWELL: Duration = Duration::from_secs(2);
+const DEFAULT_CORE_IDLE_BACKING_COMPACTION_RETRY_DWELL: Duration = Duration::from_millis(250);
 const DEFAULT_CORE_IDLE_RETRY_DWELL: Duration = Duration::from_secs(20);
 const CORE_IDLE_WORKLOAD_NOISE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_MEMORY_CONTROL_REQUEST_BYTES: usize = 4 * 1024;
+const MEMORY_CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HvfBootReport {
@@ -162,6 +171,9 @@ struct CoreMemoryControllerMetrics {
     transport_activity_events: u64,
     transport_quiet_transitions: u64,
     transport_quiet_reclaims: u64,
+    idle_backing_compactions: u64,
+    idle_backing_hard_decommitted_bytes: u64,
+    idle_backing_compaction_failures: u64,
     last_reason: Option<String>,
     last_error: Option<String>,
 }
@@ -182,6 +194,9 @@ impl Default for CoreMemoryControllerMetrics {
             transport_activity_events: 0,
             transport_quiet_transitions: 0,
             transport_quiet_reclaims: 0,
+            idle_backing_compactions: 0,
+            idle_backing_hard_decommitted_bytes: 0,
+            idle_backing_compaction_failures: 0,
             last_reason: None,
             last_error: None,
         }
@@ -225,6 +240,7 @@ struct CoreIdleMemoryController {
     runtime_ready: bool,
     idle_deadline: Option<Instant>,
     idle_probe: Option<mpsc::Receiver<Result<GuestMemorySnapshot, String>>>,
+    idle_backing_compaction_deadline: Option<Instant>,
     last_docker_transport_activity: Option<Instant>,
     docker_transport_active: bool,
 }
@@ -248,6 +264,7 @@ impl CoreIdleMemoryController {
             runtime_ready: false,
             idle_deadline: None,
             idle_probe: None,
+            idle_backing_compaction_deadline: None,
             last_docker_transport_activity: None,
             docker_transport_active: false,
         }
@@ -290,6 +307,7 @@ impl CoreIdleMemoryController {
         }
         self.idle_deadline = None;
         self.idle_probe = None;
+        self.idle_backing_compaction_deadline = None;
         let mut metrics = shared
             .core_memory
             .lock()
@@ -527,6 +545,7 @@ impl CoreIdleMemoryController {
     fn record_target_applied(
         &mut self,
         transition: CoreMemoryTargetTransition,
+        now: Instant,
         shared: &SharedBootState,
     ) {
         let target_mib = self.target_mib(transition);
@@ -552,8 +571,79 @@ impl CoreIdleMemoryController {
                     "guest idle; reduced target to {} MiB",
                     self.policy.target_mib
                 ));
+                // Keep reusable backing while Docker is active for fast capacity
+                // restoration. Once the guest itself has confirmed idle and the
+                // balloon reaches its target, convert it to zero backing so
+                // macOS releases the retained working-set footprint promptly.
+                self.idle_backing_compaction_deadline =
+                    Some(now + DEFAULT_CORE_IDLE_BACKING_COMPACTION_DWELL);
             }
         }
+    }
+
+    fn poll_idle_backing_compaction(&mut self, now: Instant) -> bool {
+        if self.requested_target_mib > self.policy.target_mib
+            || self.docker_transport_active
+            || !self
+                .idle_backing_compaction_deadline
+                .is_some_and(|deadline| now >= deadline)
+        {
+            return false;
+        }
+        self.idle_backing_compaction_deadline = None;
+        true
+    }
+
+    fn defer_idle_backing_compaction(&mut self, now: Instant) {
+        self.idle_backing_compaction_deadline =
+            Some(now + DEFAULT_CORE_IDLE_BACKING_COMPACTION_RETRY_DWELL);
+    }
+
+    fn record_idle_backing_compaction(
+        &mut self,
+        report: IdleBackingCompactionReport,
+        shared: &SharedBootState,
+    ) {
+        let mut metrics = shared
+            .core_memory
+            .lock()
+            .expect("core memory controller mutex poisoned");
+        if report.hard_decommitted_bytes > 0 {
+            metrics.idle_backing_compactions = metrics.idle_backing_compactions.saturating_add(1);
+            metrics.idle_backing_hard_decommitted_bytes = metrics
+                .idle_backing_hard_decommitted_bytes
+                .saturating_add(report.hard_decommitted_bytes);
+            metrics.last_reason = Some(format!(
+                "guest idle; hard-decommitted {} MiB of balloon backing",
+                report.hard_decommitted_bytes / 1024 / 1024
+            ));
+            metrics.last_error = None;
+        }
+        if report.failed_bytes > 0 {
+            metrics.idle_backing_compaction_failures = metrics
+                .idle_backing_compaction_failures
+                .saturating_add(report.failed_bytes);
+            metrics.last_error = Some(format!(
+                "failed to hard-decommit {} MiB of reusable balloon backing",
+                report.failed_bytes / 1024 / 1024
+            ));
+        }
+    }
+
+    fn record_idle_backing_compaction_error(
+        &mut self,
+        now: Instant,
+        error: String,
+        shared: &SharedBootState,
+    ) {
+        self.defer_idle_backing_compaction(now);
+        let mut metrics = shared
+            .core_memory
+            .lock()
+            .expect("core memory controller mutex poisoned");
+        metrics.idle_backing_compaction_failures =
+            metrics.idle_backing_compaction_failures.saturating_add(1);
+        metrics.last_error = Some(error);
     }
 
     fn record_target_error(
@@ -818,6 +908,41 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
                         std::process::abort();
                     }
                 }
+            }
+        }
+        report
+    }
+
+    fn hard_decommit_reusable_ranges(
+        &self,
+        memory: &GuestMemory,
+        guest_base: u64,
+        ranges: &[PageRange],
+    ) -> ReclaimReport {
+        let mut report = ReclaimReport::default();
+        for range in ranges {
+            let Ok(size) = usize::try_from(range.size) else {
+                report.discard_failed_bytes += range.size;
+                continue;
+            };
+            if memory
+                .validate_host_page_aligned(guest_base, range.start, size)
+                .is_err()
+            {
+                report.discard_failed_bytes += range.size;
+                continue;
+            }
+            // The balloon handler only calls this for fully balloon-owned,
+            // already-unmapped GPA ranges. Replacing the retained reusable
+            // host mapping with fresh anonymous zero backing is therefore safe
+            // and makes the idle footprint deterministic without consulting
+            // guest-owned pages.
+            match memory.decommit_zero_at(guest_base, range.start, size) {
+                Ok(_) => {
+                    report.discard_advised_bytes += range.size;
+                    report.hard_decommitted_bytes += range.size;
+                }
+                Err(_) => report.discard_failed_bytes += range.size,
             }
         }
         report
@@ -1570,6 +1695,26 @@ impl HvfBootRunner {
                         "core.idleTarget",
                         shared.clone(),
                     );
+                }
+            }
+            if core_memory_controller.poll_idle_backing_compaction(now) {
+                match compact_idle_balloon_backing(&shared, self.plan.ram_base) {
+                    Ok(None) => core_memory_controller.defer_idle_backing_compaction(now),
+                    Ok(Some(report)) => {
+                        core_memory_controller.record_idle_backing_compaction(report, &shared);
+                        if report.hard_decommitted_bytes > 0 {
+                            schedule_guest_memory_reclaim(
+                                memory_reclaim_socket_path.clone(),
+                                "core.idleBackingCompacted",
+                                shared.clone(),
+                            );
+                        }
+                        if report.failed_bytes > 0 {
+                            core_memory_controller.defer_idle_backing_compaction(now);
+                        }
+                    }
+                    Err(error) => core_memory_controller
+                        .record_idle_backing_compaction_error(now, error, &shared),
                 }
             }
             match poll_host_net_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices) {
@@ -2563,6 +2708,8 @@ fn spawn_memory_control_socket(
         std::fs::remove_file(&socket_path).map_err(|error| error.to_string())?;
     }
     let listener = UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| error.to_string())?;
     listener
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
@@ -2609,13 +2756,22 @@ fn handle_memory_control_stream(
     devices: &[VirtioMmioDevicePlan],
     configured_memory_mib: u64,
 ) {
-    let mut line = String::new();
+    let _ = stream.set_read_timeout(Some(MEMORY_CONTROL_READ_TIMEOUT));
     let response = match stream.try_clone() {
         Ok(clone) => {
             let mut reader = BufReader::new(clone);
-            match reader.read_line(&mut line) {
+            let mut request = Vec::new();
+            match reader
+                .by_ref()
+                .take((MAX_MEMORY_CONTROL_REQUEST_BYTES + 1) as u64)
+                .read_until(b'\n', &mut request)
+            {
                 Ok(0) => memory_control_error("empty request", configured_memory_mib),
-                Ok(_) => match serde_json::from_str::<MemoryControlRequest>(&line) {
+                Ok(_) if request.len() > MAX_MEMORY_CONTROL_REQUEST_BYTES => memory_control_error(
+                    &format!("request exceeds {MAX_MEMORY_CONTROL_REQUEST_BYTES} byte limit"),
+                    configured_memory_mib,
+                ),
+                Ok(_) => match serde_json::from_slice::<MemoryControlRequest>(&request) {
                     Ok(request) => handle_memory_control_request(
                         request,
                         shared,
@@ -2714,6 +2870,63 @@ fn set_balloon_target_bytes(
     Ok(())
 }
 
+/// Converts already-detached reusable balloon ranges only after every balloon
+/// device has actually reached the idle target. This keeps the fast reusable
+/// path while Docker is active, then returns the retained host footprint once
+/// the guest has proven idle.
+fn compact_idle_balloon_backing(
+    shared: &SharedBootState,
+    guest_base: u64,
+) -> Result<Option<IdleBackingCompactionReport>, String> {
+    let mut vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
+    let balloon_bases = vm_state.devices.balloon.keys().copied().collect::<Vec<_>>();
+    if balloon_bases.is_empty() {
+        return Err("virtio-balloon device is not registered".to_string());
+    }
+
+    for base in &balloon_bases {
+        let target_pages = vm_state
+            .mmio_bus
+            .virtio_mut_at(*base)
+            .and_then(|transport| {
+                transport
+                    .configuration_bytes()
+                    .get(..4)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u32::from_le_bytes)
+            })
+            .ok_or_else(|| format!("virtio-balloon device at 0x{base:x} is unavailable"))?;
+        let actual_pages = vm_state
+            .devices
+            .balloon
+            .get(base)
+            .map(|handler| handler.metrics().actual_pages.min(u64::from(u32::MAX)) as u32)
+            .ok_or_else(|| format!("balloon handler at 0x{base:x} is unavailable"))?;
+        if actual_pages < target_pages {
+            return Ok(None);
+        }
+    }
+
+    let memory = &vm_state.memory as *const GuestMemory;
+    let mut total = IdleBackingCompactionReport::default();
+    for base in balloon_bases {
+        let Some(handler) = vm_state.devices.balloon.get_mut(&base) else {
+            continue;
+        };
+        let report = handler.hard_decommit_reusable_balloon_backing(
+            // `memory` belongs to the same locked VmState and the mutable
+            // handler borrow cannot move or invalidate it.
+            unsafe { &*memory },
+            guest_base,
+        );
+        total.hard_decommitted_bytes = total
+            .hard_decommitted_bytes
+            .saturating_add(report.hard_decommitted_bytes);
+        total.failed_bytes = total.failed_bytes.saturating_add(report.failed_bytes);
+    }
+    Ok(Some(total))
+}
+
 fn apply_core_memory_target_transition(
     controller: &mut CoreIdleMemoryController,
     transition: CoreMemoryTargetTransition,
@@ -2733,7 +2946,7 @@ fn apply_core_memory_target_transition(
         target_mib.saturating_mul(1024 * 1024),
     ) {
         Ok(()) => {
-            controller.record_target_applied(transition, shared);
+            controller.record_target_applied(transition, now, shared);
             let ids = vcpu_ids.lock().expect("vCPU id mutex poisoned").clone();
             let _ = exit_vcpus(&ids);
             true
@@ -3751,6 +3964,34 @@ mod tests {
                 .duration_since(now),
             DEFAULT_CORE_IDLE_RECLAIM_SETTLE_DWELL
         );
+    }
+
+    #[test]
+    fn idle_backing_compaction_waits_for_a_quiet_idle_target() {
+        let now = Instant::now();
+        let mut controller = CoreIdleMemoryController::new(
+            CoreIdleMemoryPolicy {
+                enabled: true,
+                target_mib: 512,
+                quiet_dwell: Duration::from_secs(8),
+                retry_dwell: Duration::from_secs(20),
+            },
+            8192,
+            512,
+        );
+        controller.idle_backing_compaction_deadline = Some(now);
+        controller.docker_transport_active = true;
+        assert!(!controller.poll_idle_backing_compaction(now));
+        assert!(controller.idle_backing_compaction_deadline.is_some());
+
+        controller.docker_transport_active = false;
+        assert!(controller.poll_idle_backing_compaction(now));
+        assert!(controller.idle_backing_compaction_deadline.is_none());
+
+        controller.defer_idle_backing_compaction(now);
+        assert!(!controller.poll_idle_backing_compaction(now));
+        assert!(controller
+            .poll_idle_backing_compaction(now + DEFAULT_CORE_IDLE_BACKING_COMPACTION_RETRY_DWELL));
     }
 
     #[test]

@@ -540,6 +540,34 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn decommit_zero_replaces_reusable_backing_without_refaulting_it() {
+        let guest_base = 0x4000_0000;
+        let page_size = page_size();
+        let memory = GuestMemory::anonymous(page_size * 2).unwrap();
+        let guest_address = guest_base + page_size as u64;
+        memory
+            .write_at(guest_base, guest_address, &[0x5a; 64])
+            .unwrap();
+        memory
+            .advise_reusable_at(guest_base, guest_address, page_size)
+            .unwrap();
+
+        memory
+            .decommit_zero_at(guest_base, guest_address, page_size)
+            .unwrap();
+
+        assert_eq!(
+            resident_pages_at(&memory, guest_base, guest_address, page_size),
+            0
+        );
+        assert_eq!(
+            memory.read_at(guest_base, guest_address, 64).unwrap(),
+            vec![0; 64]
+        );
+    }
+
     #[test]
     fn advise_zero_at_discards_existing_contents_without_moving_the_mapping() {
         let page_size = page_size();

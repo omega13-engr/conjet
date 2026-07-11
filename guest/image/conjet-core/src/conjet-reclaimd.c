@@ -24,6 +24,8 @@
 #define BUILD_RESERVE_BYTES (64ULL * 1024ULL * 1024ULL)
 #define SERVICE_RESERVE_BYTES (128ULL * 1024ULL * 1024ULL)
 #define DAEMON_RESERVE_BYTES (128ULL * 1024ULL * 1024ULL)
+#define DAEMON_IDLE_RESERVE_BYTES (32ULL * 1024ULL * 1024ULL)
+#define IDLE_DAEMON_RECLAIM_SETTLE_MILLIS 500L
 #define SLAB_CAP_BYTES (256ULL * 1024ULL * 1024ULL)
 #define LOW_PROGRESS_BYTES (4ULL * 1024ULL * 1024ULL)
 #define NO_PROGRESS_LIMIT 2
@@ -210,6 +212,29 @@ static uint64_t service_reclaim_reserve(const char *service_cgroup) {
     // reclaimable slab have no service-latency value, so do not keep the normal
     // hot-service reserve after a Docker stop.
     return 0;
+}
+
+static bool cgroup_is_empty_or_absent(const char *cgroup) {
+    bool populated = true;
+    int rc = read_cgroup_populated(cgroup, &populated);
+    return rc == ENOENT || (rc == 0 && !populated);
+}
+
+static bool daemon_idle_reclaim_allowed(const char *build_cgroup, const char *service_cgroup) {
+    return cgroup_is_empty_or_absent(build_cgroup)
+        && cgroup_is_empty_or_absent(service_cgroup);
+}
+
+static uint64_t daemon_reclaim_reserve(const char *build_cgroup, const char *service_cgroup) {
+    // Docker itself remains active after `docker stop`, but its clean inactive
+    // file cache no longer has a service-start latency benefit once both the
+    // build and service cgroup hierarchies are empty. Keep a small daemon cache
+    // floor for control-plane responsiveness while returning the old hot-cache
+    // reserve to the guest immediately.
+    if (daemon_idle_reclaim_allowed(build_cgroup, service_cgroup)) {
+        return DAEMON_IDLE_RESERVE_BYTES;
+    }
+    return DAEMON_RESERVE_BYTES;
 }
 
 static uint64_t reclaim_candidate(const struct memcg_stat *stat, uint64_t cap, uint64_t reserve) {
@@ -500,10 +525,30 @@ static int reclaim_all_targets(const char *build_cgroup,
     if (rc != 0) {
         return rc;
     }
+    uint64_t daemon_reserve = daemon_reclaim_reserve(build_cgroup, service_cgroup);
+    bool daemon_idle = daemon_reserve == DAEMON_IDLE_RESERVE_BYTES;
+    rc = reclaim_one_cgroup(
+        daemon_cgroup,
+        DAEMON_CAP_BYTES,
+        daemon_reserve,
+        summary
+    );
+    if (rc != 0 || !daemon_idle || stop_requested) {
+        return rc;
+    }
+
+    // Cgroup page-cache ownership can settle a short time after Docker has
+    // stopped the last service. Retry only the daemon's clean-cache reclaim in
+    // that confirmed-idle state so a newly charged inactive range cannot keep
+    // the host VMM footprint elevated until a later Docker request.
+    sleep_millis(IDLE_DAEMON_RECLAIM_SETTLE_MILLIS);
+    if (stop_requested) {
+        return ECANCELED;
+    }
     return reclaim_one_cgroup(
         daemon_cgroup,
         DAEMON_CAP_BYTES,
-        DAEMON_RESERVE_BYTES,
+        DAEMON_IDLE_RESERVE_BYTES,
         summary
     );
 }

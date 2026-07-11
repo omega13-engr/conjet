@@ -16,6 +16,9 @@ struct sockaddr_vm {
 #ifndef VMADDR_CID_ANY
 #define VMADDR_CID_ANY 0xffffffffU
 #endif
+#ifndef VMADDR_CID_HOST
+#define VMADDR_CID_HOST 2U
+#endif
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
 #endif
@@ -161,6 +164,12 @@ static struct target *g_targets = NULL;
 
 static int connect_unix_socket(const char *path);
 static int connect_tcp_target(const char *host, uint16_t port);
+
+static int is_host_vsock_peer(const struct sockaddr_vm *peer, socklen_t peer_len) {
+    return peer_len >= sizeof(*peer) &&
+           peer->svm_family == AF_VSOCK &&
+           peer->svm_cid == VMADDR_CID_HOST;
+}
 
 #ifdef CONJET_NETD_UNIT_TEST
 static const char *g_conjet_netd_test_docker_socket_path = NULL;
@@ -2987,12 +2996,19 @@ int main(int argc, char **argv) {
     }
     fprintf(stderr, "conjet-netd: listening on VSOCK port %d\n", CONJET_NETD_PORT);
     while (1) {
-        int client = accept(listener, NULL, NULL);
+        struct sockaddr_vm peer;
+        socklen_t peer_len = sizeof(peer);
+        memset(&peer, 0, sizeof(peer));
+        int client = accept(listener, (struct sockaddr *)&peer, &peer_len);
         if (client < 0) {
             if (errno == EINTR) {
                 continue;
             }
             perror("accept");
+            continue;
+        }
+        if (!is_host_vsock_peer(&peer, peer_len)) {
+            close(client);
             continue;
         }
         struct client_args *args = calloc(1, sizeof(*args));

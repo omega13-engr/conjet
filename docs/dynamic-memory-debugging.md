@@ -9,6 +9,7 @@ Docker/cgroup memory drops
   -> virtio-balloon reports disposable pages
   -> Jetstream validates GPA ranges
   -> Jetstream detaches and marks whole balloon-owned host granules reusable
+  -> verified idle converts that detached backing to zero-filled host mappings
   -> macOS Conjet Core RSS/footprint drops
 ```
 
@@ -26,9 +27,11 @@ must remain resident because detaching it would revoke memory Linux still owns.
 
 The Docker and fast direct kernels therefore use 16 KiB ARM64 Linux pages. Each
 balloon allocation is reported as four adjacent 4 KiB PFNs, giving the VMM a
-whole host granule that it can detach, mark reusable immediately, and restore
-before guest ownership is returned. This is a compatibility requirement for
-near-baseline idle memory after large builds, not a best-effort reclaim policy.
+whole host granule that it can detach and mark reusable immediately. After the
+guest has reached a verified idle target, Jetstream converts only those
+detached, balloon-owned granules to zero backing; it restores that backing
+before guest ownership is returned. This keeps active reuse fast while making
+post-build and post-stop idle memory deterministic.
 
 ## Controller Ownership
 
@@ -37,7 +40,7 @@ VMM. macOS-side code only checks the guest and VMM telemetry endpoints; it does
 not set a balloon target or run a competing reclaim policy.
 
 After runtime readiness, Jetstream waits for a quiet dwell, verifies the guest
-snapshot, and then reduces its own target to the 512 MiB idle floor. Workload
+snapshot, and then reduces its own target to the 448 MiB idle floor. Workload
 start is recognized from Docker API requests, framed TCP payloads, or verified
 build-progress output when a client transport does not expose its request path.
 Any Docker transport-byte progress also restores configured capacity, so opaque
@@ -51,10 +54,14 @@ populated, container or service working set is at least 64 MiB, disk-backed
 swap is in use, or full memory PSI is elevated. Build workers are sibling
 scopes beneath the Docker daemon slice; the guest metrics and reclaimer resolve
 that location directly.
+When both build and service hierarchies are empty, the guest also lowers the
+Docker daemon's clean-cache reserve to a small control-plane floor and retries
+that scoped reclaim after a short settle interval. It never reclaims anonymous
+daemon memory or uses a global cache drop.
 Once the idle target is applied, the controller disarms its probe state until a
 new workload is observed.
 
-The 512 MiB target is guest capacity, not an absolute host-process number.
+The 448 MiB target is guest capacity, not an absolute host-process number.
 Activity Monitor also charges the VMM executable, Hypervisor framework state,
 device queues, and the Linux/Docker idle working set. Validate the target,
 page-ledger residency, zero partial granules, and final physical footprint
@@ -78,6 +85,8 @@ reported_free_bytes
 reported_free_reclaimed_bytes
 soft_reclaimed_bytes
 hard_decommitted_bytes
+idle_hard_decommitted_bytes
+idle_hard_decommit_failures
 balloon_owned_reclaimed_bytes
 report_inflight_reclaimed_bytes
 reclaim_failures
@@ -267,7 +276,7 @@ build-support/run-chum-mem-memory-trace.sh \
   --skip-api-forward \
   --pre-import-idle-seconds 20 \
   --post-import-settle-seconds 90 \
-  --expect-core-idle-target-mib 512 \
+  --expect-core-idle-target-mib 448 \
   --expect-core-workload-expansions 1 \
   --require-core-capacity-during-import \
   --max-core-post-idle-probes 1 \
@@ -289,7 +298,7 @@ build-support/run-chum-mem-memory-trace.sh \
   --skip-api-forward \
   --pre-import-idle-seconds 15 \
   --post-import-settle-seconds 45 \
-  --expect-core-idle-target-mib 512 \
+  --expect-core-idle-target-mib 448 \
   --expect-core-workload-expansions 1 \
   --max-final-physical-footprint-mib 1024
 ```
@@ -305,7 +314,7 @@ CONJET_MEM_DISABLE_MADV_FREE=1
 CONJET_MEM_DISABLE_BALLOON=1
 CONJET_MEM_DISABLE_PAGE_REPORTING=1
 CONJET_MEM_DISABLE_CORE_IDLE_CONTROLLER=1
-CONJET_MEM_CORE_IDLE_TARGET_MIB=512
+CONJET_MEM_CORE_IDLE_TARGET_MIB=448
 CONJET_MEM_CORE_IDLE_DWELL_MS=8000
 ```
 

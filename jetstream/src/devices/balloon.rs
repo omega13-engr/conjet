@@ -112,6 +112,8 @@ pub struct BalloonMetrics {
     pub soft_reclaimed_bytes: u64,
     pub reusable_reclaimed_bytes: u64,
     pub reusable_restored_bytes: u64,
+    pub idle_hard_decommitted_bytes: u64,
+    pub idle_hard_decommit_failures: u64,
     pub zero_swept_bytes: u64,
     pub zero_sweep_failed_bytes: u64,
     pub hard_decommitted_bytes: u64,
@@ -213,6 +215,14 @@ pub struct ReclaimReport {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RestoreReport {
     pub restored_bytes: u64,
+    pub failed_bytes: u64,
+}
+
+/// Result of converting detached reusable balloon backing to a deterministic
+/// zero-filled mapping after the guest has reached a stable idle target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdleBackingCompactionReport {
+    pub hard_decommitted_bytes: u64,
     pub failed_bytes: u64,
 }
 
@@ -413,6 +423,22 @@ impl MemoryLedger {
         }
     }
 
+    fn promote_soft_discarded_to_hard(&mut self, ranges: &[PageRange]) -> u64 {
+        let mut promoted = 0u64;
+        for index in self.indices_for_ranges(ranges) {
+            let entry = &mut self.entries[index];
+            if entry.backing != BackingState::SoftDiscarded {
+                continue;
+            }
+            entry.backing = BackingState::HardDecommittedZero;
+            self.cumulative_hard_decommitted_bytes = self
+                .cumulative_hard_decommitted_bytes
+                .saturating_add(self.host_page_size);
+            promoted = promoted.saturating_add(self.host_page_size);
+        }
+        promoted
+    }
+
     fn summary(&self, guest_size: u64, host_page_size: u64) -> MemoryLedgerSummary {
         let guest_visible_bytes = if self.guest_size == 0 {
             guest_size
@@ -527,6 +553,22 @@ pub trait GuestMemoryReclaimer: std::fmt::Debug + Send + Sync {
         RestoreReport {
             restored_bytes: ranges.iter().map(|range| range.size).sum(),
             failed_bytes: 0,
+        }
+    }
+
+    /// Converts a range whose guest mapping is already detached and whose host
+    /// backing is reusable into hard-decommitted zero backing. Implementations
+    /// must be all-or-nothing per supplied range so the balloon ownership
+    /// tracker can preserve a correct restore mode.
+    fn hard_decommit_reusable_ranges(
+        &self,
+        _memory: &GuestMemory,
+        _guest_base: u64,
+        ranges: &[PageRange],
+    ) -> ReclaimReport {
+        ReclaimReport {
+            discard_failed_bytes: ranges.iter().map(|range| range.size).sum(),
+            ..ReclaimReport::default()
         }
     }
 }
@@ -946,6 +988,30 @@ impl BalloonQueueHandler {
         )
     }
 
+    fn reusable_balloon_owned_ranges(&self) -> Vec<PageRange> {
+        coalesce_ranges(
+            self.balloon_host_granules
+                .ballooned_subpages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, _)| {
+                    (self.balloon_host_granules.fully_owned(index)
+                        && self.balloon_host_granules.decommitted(index)
+                        && self.balloon_host_granules.reusable(index))
+                    .then(|| {
+                        self.balloon_host_granules
+                            .start_for_index(index)
+                            .map(|start| PageRange {
+                                start,
+                                size: self.balloon_host_granules.host_page_size,
+                            })
+                    })
+                    .flatten()
+                })
+                .collect(),
+        )
+    }
+
     fn ensure_balloon_tracking(&mut self, memory: &GuestMemory, guest_base: u64) -> bool {
         match self.balloon_host_granules.ensure(memory, guest_base) {
             Some(reset) => {
@@ -1041,6 +1107,69 @@ impl BalloonQueueHandler {
                     .mark_decommitted(index, reusable, hard_decommitted);
             }
         }
+    }
+
+    /// Strongly releases reusable balloon backing only after the Core has
+    /// already verified the guest idle target. The guest mapping remains
+    /// detached throughout, so a later deflate restores it through the normal
+    /// hard-decommit path before Linux regains ownership.
+    pub fn hard_decommit_reusable_balloon_backing(
+        &mut self,
+        memory: &GuestMemory,
+        guest_base: u64,
+    ) -> IdleBackingCompactionReport {
+        self.memory_ledger.ensure(memory, guest_base);
+        let Some(reclaimer) = self.reclaimer.clone() else {
+            let failed_bytes = self
+                .reusable_balloon_owned_ranges()
+                .iter()
+                .map(|range| range.size)
+                .sum();
+            self.metrics.idle_hard_decommit_failures = self
+                .metrics
+                .idle_hard_decommit_failures
+                .saturating_add(failed_bytes);
+            return IdleBackingCompactionReport {
+                failed_bytes,
+                ..IdleBackingCompactionReport::default()
+            };
+        };
+
+        let mut total = IdleBackingCompactionReport::default();
+        for range in self.reusable_balloon_owned_ranges() {
+            for chunk in balloon_reclaim_chunks(range) {
+                let report = reclaimer.hard_decommit_reusable_ranges(
+                    memory,
+                    guest_base,
+                    std::slice::from_ref(&chunk),
+                );
+                if report.hard_decommitted_bytes == chunk.size {
+                    let promoted = self
+                        .memory_ledger
+                        .promote_soft_discarded_to_hard(std::slice::from_ref(&chunk));
+                    if promoted == chunk.size {
+                        self.mark_balloon_range_decommitted(chunk, false, true);
+                        self.metrics.hard_decommitted_bytes = self
+                            .metrics
+                            .hard_decommitted_bytes
+                            .saturating_add(chunk.size);
+                        self.metrics.idle_hard_decommitted_bytes = self
+                            .metrics
+                            .idle_hard_decommitted_bytes
+                            .saturating_add(chunk.size);
+                        total.hard_decommitted_bytes =
+                            total.hard_decommitted_bytes.saturating_add(chunk.size);
+                        continue;
+                    }
+                }
+                total.failed_bytes = total.failed_bytes.saturating_add(chunk.size);
+                self.metrics.idle_hard_decommit_failures = self
+                    .metrics
+                    .idle_hard_decommit_failures
+                    .saturating_add(chunk.size);
+            }
+        }
+        total
     }
 
     fn record_balloon_deflate(
@@ -2104,9 +2233,11 @@ mod tests {
         restored_ranges: Mutex<Vec<PageRange>>,
         restore_modes: Mutex<Vec<BalloonRestoreMode>>,
         authorities: Mutex<Vec<ReclaimAuthority>>,
+        idle_hard_decommit_ranges: Mutex<Vec<PageRange>>,
         hard_zero: bool,
         reusable: bool,
         fail_restore: bool,
+        fail_idle_hard_decommit: bool,
     }
 
     impl GuestMemoryReclaimer for RecordingReclaimer {
@@ -2162,6 +2293,31 @@ mod tests {
                 }
             }
         }
+
+        fn hard_decommit_reusable_ranges(
+            &self,
+            _memory: &GuestMemory,
+            _guest_base: u64,
+            ranges: &[PageRange],
+        ) -> ReclaimReport {
+            self.idle_hard_decommit_ranges
+                .lock()
+                .unwrap()
+                .extend_from_slice(ranges);
+            let bytes = ranges.iter().map(|range| range.size).sum();
+            if self.fail_idle_hard_decommit {
+                ReclaimReport {
+                    discard_failed_bytes: bytes,
+                    ..ReclaimReport::default()
+                }
+            } else {
+                ReclaimReport {
+                    discard_advised_bytes: bytes,
+                    hard_decommitted_bytes: bytes,
+                    ..ReclaimReport::default()
+                }
+            }
+        }
     }
 
     #[test]
@@ -2206,6 +2362,59 @@ mod tests {
         assert!(ledger.ok);
         assert_eq!(ledger.discarded_soft_bytes, 0);
         assert_eq!(ledger.guest_owned_bytes, memory.len() as u64);
+    }
+
+    #[test]
+    fn idle_compaction_converts_reusable_balloon_backing_before_deflate() {
+        let guest_base = 0x4000_0000;
+        let base_memory = GuestMemory::anonymous(0x4000).unwrap();
+        let host_page_size = base_memory.host_page_size() as u64;
+        let required_subpages = host_page_size / PAGE_SIZE;
+        let memory = GuestMemory::anonymous(host_page_size as usize * 2).unwrap();
+        let first_pfn = guest_base / PAGE_SIZE;
+        let pfns = (0..required_subpages)
+            .map(|subpage| first_pfn + subpage)
+            .collect::<Vec<_>>();
+        let reclaimer = Arc::new(RecordingReclaimer {
+            reusable: true,
+            ..RecordingReclaimer::default()
+        });
+        let mut handler = BalloonQueueHandler::with_reclaimer(reclaimer.clone());
+
+        let candidates = handler.record_balloon_inflate(&memory, guest_base, &pfns);
+        handler.reclaim_balloon_owned_ranges(&memory, guest_base, candidates);
+        let compacted = handler.hard_decommit_reusable_balloon_backing(&memory, guest_base);
+        assert_eq!(compacted.hard_decommitted_bytes, host_page_size);
+        assert_eq!(compacted.failed_bytes, 0);
+
+        let metrics = handler.metrics();
+        assert_eq!(metrics.current_balloon_reusable_bytes, 0);
+        assert_eq!(metrics.idle_hard_decommitted_bytes, host_page_size);
+        assert_eq!(metrics.idle_hard_decommit_failures, 0);
+        let ledger = handler.memory_ledger_summary(memory.len() as u64, host_page_size);
+        assert!(ledger.ok);
+        assert_eq!(ledger.discarded_soft_bytes, 0);
+        assert_eq!(ledger.discarded_hard_zero_bytes, host_page_size);
+        assert_eq!(ledger.cumulative_hard_decommitted_bytes, host_page_size);
+
+        handler
+            .record_balloon_deflate(&memory, guest_base, &[first_pfn])
+            .unwrap();
+        assert_eq!(
+            reclaimer.restore_modes.lock().unwrap().as_slice(),
+            &[BalloonRestoreMode::HardDecommitted]
+        );
+        assert_eq!(
+            reclaimer
+                .idle_hard_decommit_ranges
+                .lock()
+                .unwrap()
+                .as_slice(),
+            &[PageRange {
+                start: guest_base,
+                size: host_page_size,
+            }]
+        );
     }
 
     #[test]

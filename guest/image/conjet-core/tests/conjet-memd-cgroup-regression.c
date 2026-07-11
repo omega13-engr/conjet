@@ -33,6 +33,18 @@ static void require_contains(const char *name, const char *haystack, const char 
     }
 }
 
+static void test_vsock_peer_requires_host_cid(void) {
+    struct sockaddr_vm peer;
+    memset(&peer, 0, sizeof(peer));
+    peer.svm_family = AF_VSOCK;
+    peer.svm_cid = VMADDR_CID_HOST;
+    require_int("host vsock peer", is_host_vsock_peer(&peer, sizeof(peer)), 1);
+
+    peer.svm_cid = VMADDR_CID_ANY;
+    require_int("non-host vsock peer", is_host_vsock_peer(&peer, sizeof(peer)), 0);
+    require_int("short peer address", is_host_vsock_peer(&peer, sizeof(peer) - 1), 0);
+}
+
 static void require_string(const char *name, const char *actual, const char *expected) {
     if (strcmp(actual, expected) != 0) {
         fprintf(stderr, "%s: expected %s, got %s\n", name, expected, actual);
@@ -165,6 +177,12 @@ static void test_service_cgroup_memory_stat_is_exported(void) {
     write_file(build, "memory.current", "0\n");
     write_file(build, "cgroup.events", "populated 0\nfrozen 0\n");
     write_file(daemon, "memory.current", "222\n");
+    write_file(daemon, "cgroup.events", "populated 1\nfrozen 0\n");
+    write_file(
+        daemon,
+        "memory.stat",
+        "anon 101\ninactive_file 77\nslab_reclaimable 11\n"
+    );
     write_file(service, "memory.current", "4096\n");
     write_file(service, "cgroup.events", "populated 0\nfrozen 0\n");
     write_file(
@@ -182,6 +200,12 @@ static void test_service_cgroup_memory_stat_is_exported(void) {
     memset(&metrics, 0, sizeof(metrics));
     read_configured_cgroup_metrics(&metrics);
     require_u64("daemon current", metrics.daemon_cgroup_memory_current, 222);
+    require_u64("daemon working set", metrics.daemon_cgroup_working_set, 134);
+    require_u64("daemon anon", metrics.daemon_cgroup_anon, 101);
+    require_u64("daemon inactive file", metrics.daemon_cgroup_inactive_file, 77);
+    require_u64("daemon slab reclaimable", metrics.daemon_cgroup_slab_reclaimable, 11);
+    require_int("daemon populated", metrics.daemon_cgroup_populated, 1);
+    require_int("daemon population known", metrics.daemon_cgroup_population_known, 1);
     require_u64("service current", metrics.service_cgroup_memory_current, 4096);
     require_u64("service working set", metrics.service_cgroup_working_set, 3697);
     require_int("service populated", metrics.service_cgroup_populated, 0);
@@ -196,6 +220,9 @@ static void test_service_cgroup_memory_stat_is_exported(void) {
 
     char body[4096];
     metrics_json(&metrics, body, sizeof(body));
+    require_contains("daemon working set JSON", body, "\"daemon_cgroup_working_set\":134");
+    require_contains("daemon inactive file JSON", body, "\"daemon_cgroup_inactive_file\":77");
+    require_contains("daemon populated JSON", body, "\"daemon_cgroup_populated\":true");
     require_contains("service inactive file JSON", body, "\"service_cgroup_inactive_file\":333");
     require_contains("service file JSON", body, "\"service_cgroup_file\":222");
     require_contains("service anon JSON", body, "\"service_cgroup_anon\":111");
@@ -418,6 +445,7 @@ static void test_residual_service_reclaim_request_validation_is_root_scoped(void
 }
 
 int main(void) {
+    test_vsock_peer_requires_host_cid();
     test_build_snapshot_aggregates_prefixed_sibling_memory_without_false_activity();
     test_default_build_cgroup_path_tracks_daemon_scoped_build_workers();
     test_service_cgroup_memory_stat_is_exported();

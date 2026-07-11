@@ -66,6 +66,9 @@ static int inotify_add_watch(int fd, const char *path, uint32_t mask) {
 #ifndef VMADDR_CID_ANY
 #define VMADDR_CID_ANY 0xffffffffU
 #endif
+#ifndef VMADDR_CID_HOST
+#define VMADDR_CID_HOST 2U
+#endif
 
 #define CONJET_MEMD_PORT 2376
 #define MAX_CGROUP_DEPTH 8
@@ -103,6 +106,12 @@ struct memory_metrics {
     uint64_t container_memory_oom_kill_events;
     uint64_t build_cgroup_memory_current;
     uint64_t daemon_cgroup_memory_current;
+    uint64_t daemon_cgroup_working_set;
+    uint64_t daemon_cgroup_anon;
+    uint64_t daemon_cgroup_inactive_file;
+    uint64_t daemon_cgroup_slab_reclaimable;
+    bool daemon_cgroup_populated;
+    bool daemon_cgroup_population_known;
     uint64_t service_cgroup_memory_current;
     uint64_t service_cgroup_working_set;
     uint64_t service_cgroup_anon;
@@ -187,6 +196,12 @@ static void close_fd(int fd) {
     if (fd >= 0) {
         close(fd);
     }
+}
+
+static bool is_host_vsock_peer(const struct sockaddr_vm *peer, socklen_t peer_len) {
+    return peer_len >= sizeof(*peer) &&
+           peer->svm_family == AF_VSOCK &&
+           peer->svm_cid == VMADDR_CID_HOST;
 }
 
 static int write_full(int fd, const void *data, size_t len) {
@@ -372,6 +387,8 @@ static uint64_t read_cgroup_current(const char *cgroup) {
     return read_uint_file(path);
 }
 
+static bool read_cgroup_populated_known(const char *cgroup, bool *known);
+
 static void add_service_cgroup_memory_stat(const char *cgroup, struct memory_metrics *metrics) {
     char path[4096];
     int written = snprintf(path, sizeof(path), "%s/memory.stat", cgroup);
@@ -408,6 +425,31 @@ static void add_service_cgroup_memory_stat(const char *cgroup, struct memory_met
             metrics->service_cgroup_slab_reclaimable +
             metrics->service_cgroup_slab_unreclaimable;
     }
+}
+
+static void add_daemon_cgroup_memory_stat(const char *cgroup, struct memory_metrics *metrics) {
+    char path[4096];
+    int written = snprintf(path, sizeof(path), "%s/memory.stat", cgroup);
+    if (written <= 0 || (size_t)written >= sizeof(path)) {
+        return;
+    }
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return;
+    }
+    char key[128];
+    unsigned long long value = 0;
+    while (fscanf(f, "%127s %llu", key, &value) == 2) {
+        uint64_t bytes = (uint64_t)value;
+        if (strcmp(key, "anon") == 0) {
+            metrics->daemon_cgroup_anon += bytes;
+        } else if (strcmp(key, "inactive_file") == 0) {
+            metrics->daemon_cgroup_inactive_file += bytes;
+        } else if (strcmp(key, "slab_reclaimable") == 0) {
+            metrics->daemon_cgroup_slab_reclaimable += bytes;
+        }
+    }
+    fclose(f);
 }
 
 static bool read_cgroup_populated_known(const char *cgroup, bool *known) {
@@ -724,6 +766,20 @@ static void read_configured_cgroup_metrics(struct memory_metrics *metrics) {
     metrics->build_cgroup_memory_current = build_snapshot.memory_current;
     metrics->build_workload_detected = build_snapshot.populated;
     metrics->daemon_cgroup_memory_current = read_cgroup_current(daemon_cgroup);
+    add_daemon_cgroup_memory_stat(daemon_cgroup, metrics);
+    metrics->daemon_cgroup_populated = read_cgroup_populated_known(
+        daemon_cgroup,
+        &metrics->daemon_cgroup_population_known
+    );
+    uint64_t daemon_reclaimable = saturating_add_u64(
+        metrics->daemon_cgroup_inactive_file,
+        metrics->daemon_cgroup_slab_reclaimable
+    );
+    if (daemon_reclaimable > metrics->daemon_cgroup_memory_current) {
+        daemon_reclaimable = metrics->daemon_cgroup_memory_current;
+    }
+    metrics->daemon_cgroup_working_set =
+        saturating_sub_u64(metrics->daemon_cgroup_memory_current, daemon_reclaimable);
     metrics->service_cgroup_memory_current = read_cgroup_current(service_cgroup);
     add_service_cgroup_memory_stat(service_cgroup, metrics);
     metrics->service_cgroup_populated = read_cgroup_populated_known(
@@ -885,6 +941,12 @@ static void metrics_json(const struct memory_metrics *metrics, char *body, size_
         "\"container_memory_oom_kill_events\":%llu,"
         "\"build_cgroup_memory_current\":%llu,"
         "\"daemon_cgroup_memory_current\":%llu,"
+        "\"daemon_cgroup_working_set\":%llu,"
+        "\"daemon_cgroup_anon\":%llu,"
+        "\"daemon_cgroup_inactive_file\":%llu,"
+        "\"daemon_cgroup_slab_reclaimable\":%llu,"
+        "\"daemon_cgroup_populated\":%s,"
+        "\"daemon_cgroup_population_known\":%s,"
         "\"service_cgroup_memory_current\":%llu,"
         "\"service_cgroup_working_set\":%llu,"
         "\"service_cgroup_anon\":%llu,\"service_cgroup_file\":%llu,"
@@ -923,6 +985,12 @@ static void metrics_json(const struct memory_metrics *metrics, char *body, size_
         (unsigned long long)metrics->container_memory_oom_kill_events,
         (unsigned long long)metrics->build_cgroup_memory_current,
         (unsigned long long)metrics->daemon_cgroup_memory_current,
+        (unsigned long long)metrics->daemon_cgroup_working_set,
+        (unsigned long long)metrics->daemon_cgroup_anon,
+        (unsigned long long)metrics->daemon_cgroup_inactive_file,
+        (unsigned long long)metrics->daemon_cgroup_slab_reclaimable,
+        metrics->daemon_cgroup_populated ? "true" : "false",
+        metrics->daemon_cgroup_population_known ? "true" : "false",
         (unsigned long long)metrics->service_cgroup_memory_current,
         (unsigned long long)metrics->service_cgroup_working_set,
         (unsigned long long)metrics->service_cgroup_anon,
@@ -1740,12 +1808,19 @@ int main(int argc, char **argv) {
         fclose(ready);
     }
     while (1) {
-        int client = accept(server, NULL, NULL);
+        struct sockaddr_vm peer;
+        socklen_t peer_len = sizeof(peer);
+        memset(&peer, 0, sizeof(peer));
+        int client = accept(server, (struct sockaddr *)&peer, &peer_len);
         if (client < 0) {
             if (errno == EINTR) {
                 continue;
             }
             break;
+        }
+        if (!is_host_vsock_peer(&peer, peer_len)) {
+            close_fd(client);
+            continue;
         }
         pthread_t thread;
         if (pthread_create(&thread, NULL, client_thread, (void *)(intptr_t)client) == 0) {

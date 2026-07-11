@@ -499,20 +499,27 @@ sample_trace() {
   local control_file="$QA_ROOT/control-sample.json"
   local metrics_file="$QA_ROOT/guest-memory-sample.json"
   local slices_file="$QA_ROOT/service-slices-sample.json"
+  local reclaim_status_file="$QA_ROOT/guest-reclaim-status-sample.json"
   control_request '{"command":"metrics"}' >"$control_file" 2>/dev/null || return 0
   http_unix_get "$MEMORY_SOCKET" "/conjet-memory-metrics" >"$metrics_file" 2>/dev/null || return 0
   if ! http_unix_get "$MEMORY_SOCKET" "/conjet-memory-service-slices" >"$slices_file" 2>/dev/null ||
     ! jq -e 'type == "object" and (.slices | type == "array")' "$slices_file" >/dev/null 2>&1; then
     printf '{"version":1,"slices":[],"source":"unavailable"}\n' >"$slices_file"
   fi
+  if ! http_unix_get "$MEMORY_SOCKET" "/conjet-memory-reclaim/status" >"$reclaim_status_file" 2>/dev/null ||
+    ! jq -e 'type == "object"' "$reclaim_status_file" >/dev/null 2>&1; then
+    printf '{}\n' >"$reclaim_status_file"
+  fi
   jq -c -n \
     --arg stage "$stage" \
     --slurpfile control "$control_file" \
     --slurpfile metrics "$metrics_file" \
     --slurpfile slices "$slices_file" \
+    --slurpfile reclaim_status "$reclaim_status_file" \
     '($control[0] // {}) as $control |
      ($metrics[0] // {}) as $metrics |
      ($slices[0] // {"slices":[]}) as $slices |
+     ($reclaim_status[0] // {}) as $reclaim_status |
      {
        timestamp: (now | todateiso8601),
        stage: $stage,
@@ -535,6 +542,11 @@ sample_trace() {
        },
        guest: {
          container_memory_current: ($metrics.container_memory_current // 0),
+         daemon_cgroup_memory_current: ($metrics.daemon_cgroup_memory_current // 0),
+         daemon_cgroup_working_set: ($metrics.daemon_cgroup_working_set // 0),
+         daemon_cgroup_inactive_file: ($metrics.daemon_cgroup_inactive_file // 0),
+         daemon_cgroup_populated: ($metrics.daemon_cgroup_populated // false),
+         daemon_cgroup_population_known: ($metrics.daemon_cgroup_population_known // false),
          service_cgroup_memory_current: ($metrics.service_cgroup_memory_current // 0),
          service_cgroup_working_set: ($metrics.service_cgroup_working_set // 0),
          service_cgroup_populated: ($metrics.service_cgroup_populated // false),
@@ -576,6 +588,9 @@ sample_trace() {
         transport_activity_events: ($control.core_memory.transport_activity_events // 0),
         transport_quiet_transitions: ($control.core_memory.transport_quiet_transitions // 0),
         transport_quiet_reclaims: ($control.core_memory.transport_quiet_reclaims // 0),
+        idle_backing_compactions: ($control.core_memory.idle_backing_compactions // 0),
+        idle_backing_hard_decommitted_bytes: ($control.core_memory.idle_backing_hard_decommitted_bytes // 0),
+        idle_backing_compaction_failures: ($control.core_memory.idle_backing_compaction_failures // 0),
         last_reason: ($control.core_memory.last_reason // null),
          last_error: ($control.core_memory.last_error // null)
        },
@@ -584,7 +599,8 @@ sample_trace() {
          successes: ($control.event_reclaim.successes // 0),
          errors: ($control.event_reclaim.errors // 0),
          last_reason: ($control.event_reclaim.last_reason // null),
-         last_error: ($control.event_reclaim.last_error // null)
+         last_error: ($control.event_reclaim.last_error // null),
+         guest_status: $reclaim_status
        },
        host: {
          resident_bytes: ($control.host_memory.resident_bytes // 0),
@@ -796,6 +812,9 @@ jq -s \
     max_core_transport_activity_events: ([.[].core_memory.transport_activity_events] | max // 0),
     max_core_transport_quiet_transitions: ([.[].core_memory.transport_quiet_transitions] | max // 0),
     max_core_transport_quiet_reclaims: ([.[].core_memory.transport_quiet_reclaims] | max // 0),
+    max_core_idle_backing_compactions: ([.[].core_memory.idle_backing_compactions] | max // 0),
+    max_core_idle_backing_hard_decommitted_bytes: ([.[].core_memory.idle_backing_hard_decommitted_bytes] | max // 0),
+    max_core_idle_backing_compaction_failures: ([.[].core_memory.idle_backing_compaction_failures] | max // 0),
     max_event_reclaim_requests: ([.[].event_reclaim.requests] | max // 0),
     max_event_reclaim_successes: ([.[].event_reclaim.successes] | max // 0),
     max_event_reclaim_errors: ([.[].event_reclaim.errors] | max // 0)

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::Shutdown;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -398,6 +399,10 @@ impl HostUnixVsockBridge {
             std::fs::create_dir_all(parent)?;
         }
         let listener = UnixListener::bind(&socket_path)?;
+        // The listener is a host-side capability boundary. Do not inherit a
+        // permissive umask and accidentally expose the Docker/memory bridge to
+        // another local account.
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let state = Arc::new(Mutex::new(HostUnixVsockBridgeState::new(
             guest_port,
@@ -634,6 +639,14 @@ impl HostUnixVsockBridgeState {
     }
 
     fn handle_guest_packet(&mut self, packet: VsockPacket) -> bool {
+        // The guest controls every field in a virtio-vsock frame. Bind a frame
+        // to this bridge before using its port as a host-side stream key.
+        if packet.src_cid != DEFAULT_GUEST_CID
+            || packet.dst_cid != HOST_CID
+            || packet.src_port != self.guest_port
+        {
+            return false;
+        }
         let host_port = packet.dst_port;
         match packet.op {
             OP_RESPONSE | OP_CREDIT_UPDATE => {
@@ -1765,6 +1778,34 @@ mod tests {
         frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         frame.extend_from_slice(payload);
         frame
+    }
+
+    #[test]
+    fn bridge_rejects_forged_guest_packet_identity() {
+        let (_client, server) = UnixStream::pair().unwrap();
+        let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
+        bridge.accept_stream(server);
+        bridge.pending_guest_packets.clear();
+
+        let mut forged = VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID + 1,
+            src_port: DOCKER_BRIDGE_PORT,
+            dst_port: 49_152,
+            op: OP_CREDIT_UPDATE,
+            flags: 0,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: Vec::new(),
+        };
+        assert!(!bridge.handle_guest_packet(forged.clone()));
+
+        forged.dst_cid = HOST_CID;
+        forged.src_port = DOCKER_BRIDGE_PORT + 1;
+        assert!(!bridge.handle_guest_packet(forged.clone()));
+
+        forged.src_port = DOCKER_BRIDGE_PORT;
+        assert!(bridge.handle_guest_packet(forged));
     }
 
     #[test]

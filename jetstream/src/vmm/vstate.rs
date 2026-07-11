@@ -110,6 +110,8 @@ impl DeviceRuntimeState {
                 total.soft_reclaimed_bytes += metrics.soft_reclaimed_bytes;
                 total.reusable_reclaimed_bytes += metrics.reusable_reclaimed_bytes;
                 total.reusable_restored_bytes += metrics.reusable_restored_bytes;
+                total.idle_hard_decommitted_bytes += metrics.idle_hard_decommitted_bytes;
+                total.idle_hard_decommit_failures += metrics.idle_hard_decommit_failures;
                 total.zero_swept_bytes += metrics.zero_swept_bytes;
                 total.zero_sweep_failed_bytes += metrics.zero_sweep_failed_bytes;
                 total.hard_decommitted_bytes += metrics.hard_decommitted_bytes;
