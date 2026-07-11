@@ -42,12 +42,15 @@ start is recognized from Docker API requests, framed TCP payloads, or verified
 build-progress output when a client transport does not expose its request path.
 Any Docker transport-byte progress also restores configured capacity, so opaque
 BuildKit sessions cannot remain at the idle floor while they compile. After
-transport becomes quiet, Jetstream first asks the guest to reclaim caches, then
-repeats the quiet-state verification before shrinking. It defers a shrink
-when the daemon-scoped build cgroup is populated, container or service working
-set is at least 64 MiB, disk-backed swap is in use, or full memory PSI is
-elevated. Build workers are sibling scopes beneath the Docker daemon slice;
-the guest metrics and reclaimer resolve that location directly.
+transport becomes quiet, Jetstream queues a guest cache reclaim and waits a
+short settle interval before the next quiet-state verification. A populated
+service hierarchy retains its hot-cache reserve; a hierarchy the kernel reports
+as empty releases that reserve so a stopped Docker service cannot keep the VM
+at its active target. It defers a shrink when the daemon-scoped build cgroup is
+populated, container or service working set is at least 64 MiB, disk-backed
+swap is in use, or full memory PSI is elevated. Build workers are sibling
+scopes beneath the Docker daemon slice; the guest metrics and reclaimer resolve
+that location directly.
 Once the idle target is applied, the controller disarms its probe state until a
 new workload is observed.
 
@@ -274,6 +277,22 @@ build-support/run-chum-mem-memory-trace.sh \
 `--require-core-capacity-during-import` is a regression gate for reclaim
 thrash: after a Docker workload expands capacity, every import-stage sample
 must retain the configured target until the client command exits.
+
+To validate the stopped-service path, let the harness start the isolated
+Compose services, then stop them through the same scratch Docker socket:
+
+```sh
+build-support/run-chum-mem-memory-trace.sh \
+  --manifest /path/to/isolated-manifest.json \
+  --import-command true \
+  --stop-compose-after-import \
+  --skip-api-forward \
+  --pre-import-idle-seconds 15 \
+  --post-import-settle-seconds 45 \
+  --expect-core-idle-target-mib 512 \
+  --expect-core-workload-expansions 1 \
+  --max-final-physical-footprint-mib 1024
+```
 
 ## Runtime Flags
 

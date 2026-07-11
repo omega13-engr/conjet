@@ -166,6 +166,52 @@ static int read_memcg_stat(const char *cgroup, struct memcg_stat *out) {
     return 0;
 }
 
+static int read_cgroup_populated(const char *cgroup, bool *populated) {
+    if (populated == NULL) {
+        return EINVAL;
+    }
+    // Treat an unreadable event file as active. Reclaiming a stopped service
+    // aggressively is safe, but only after the kernel has explicitly reported
+    // that the hierarchy is empty.
+    *populated = true;
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/cgroup.events", cgroup);
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return errno;
+    }
+    char key[128];
+    unsigned long long value = 0;
+    bool found = false;
+    while (fscanf(f, "%127s %llu", key, &value) == 2) {
+        if (strcmp(key, "populated") == 0) {
+            *populated = value != 0;
+            found = true;
+            break;
+        }
+    }
+    if (ferror(f)) {
+        int saved = errno == 0 ? EIO : errno;
+        fclose(f);
+        return saved;
+    }
+    if (fclose(f) != 0) {
+        return errno;
+    }
+    return found ? 0 : EIO;
+}
+
+static uint64_t service_reclaim_reserve(const char *service_cgroup) {
+    bool populated = true;
+    if (read_cgroup_populated(service_cgroup, &populated) != 0 || populated) {
+        return SERVICE_RESERVE_BYTES;
+    }
+    // No process remains in this hierarchy. Its inactive file cache and
+    // reclaimable slab have no service-latency value, so do not keep the normal
+    // hot-service reserve after a Docker stop.
+    return 0;
+}
+
 static uint64_t reclaim_candidate(const struct memcg_stat *stat, uint64_t cap, uint64_t reserve) {
     uint64_t dirty = saturating_add_u64(stat->file_dirty, stat->file_writeback);
     uint64_t clean_inactive = saturating_sub_u64(stat->inactive_file, dirty);
@@ -448,7 +494,7 @@ static int reclaim_all_targets(const char *build_cgroup,
     rc = reclaim_cgroup_with_prefixed_siblings(
         service_cgroup,
         SERVICE_CAP_BYTES,
-        SERVICE_RESERVE_BYTES,
+        service_reclaim_reserve(service_cgroup),
         summary
     );
     if (rc != 0) {

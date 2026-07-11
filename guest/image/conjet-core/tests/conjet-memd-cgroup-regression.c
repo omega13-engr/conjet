@@ -166,6 +166,7 @@ static void test_service_cgroup_memory_stat_is_exported(void) {
     write_file(build, "cgroup.events", "populated 0\nfrozen 0\n");
     write_file(daemon, "memory.current", "222\n");
     write_file(service, "memory.current", "4096\n");
+    write_file(service, "cgroup.events", "populated 0\nfrozen 0\n");
     write_file(
         service,
         "memory.stat",
@@ -182,6 +183,9 @@ static void test_service_cgroup_memory_stat_is_exported(void) {
     read_configured_cgroup_metrics(&metrics);
     require_u64("daemon current", metrics.daemon_cgroup_memory_current, 222);
     require_u64("service current", metrics.service_cgroup_memory_current, 4096);
+    require_u64("service working set", metrics.service_cgroup_working_set, 3697);
+    require_int("service populated", metrics.service_cgroup_populated, 0);
+    require_int("service population known", metrics.service_cgroup_population_known, 1);
     require_u64("service anon", metrics.service_cgroup_anon, 111);
     require_u64("service file", metrics.service_cgroup_file, 222);
     require_u64("service inactive_file", metrics.service_cgroup_inactive_file, 333);
@@ -196,6 +200,9 @@ static void test_service_cgroup_memory_stat_is_exported(void) {
     require_contains("service file JSON", body, "\"service_cgroup_file\":222");
     require_contains("service anon JSON", body, "\"service_cgroup_anon\":111");
     require_contains("service slab JSON", body, "\"service_cgroup_slab\":555");
+    require_contains("service working set JSON", body, "\"service_cgroup_working_set\":3697");
+    require_contains("service populated JSON", body, "\"service_cgroup_populated\":false");
+    require_contains("service population known JSON", body, "\"service_cgroup_population_known\":true");
 
     unsetenv("CONJET_RECLAIM_BUILD_CGROUP");
     unsetenv("CONJET_RECLAIM_DAEMON_CGROUP");

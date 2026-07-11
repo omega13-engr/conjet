@@ -104,6 +104,7 @@ struct memory_metrics {
     uint64_t build_cgroup_memory_current;
     uint64_t daemon_cgroup_memory_current;
     uint64_t service_cgroup_memory_current;
+    uint64_t service_cgroup_working_set;
     uint64_t service_cgroup_anon;
     uint64_t service_cgroup_file;
     uint64_t service_cgroup_inactive_file;
@@ -111,6 +112,8 @@ struct memory_metrics {
     uint64_t service_cgroup_slab;
     uint64_t service_cgroup_slab_reclaimable;
     uint64_t service_cgroup_slab_unreclaimable;
+    bool service_cgroup_populated;
+    bool service_cgroup_population_known;
     double psi_some_avg10;
     double psi_full_avg10;
     int active_workloads;
@@ -407,7 +410,10 @@ static void add_service_cgroup_memory_stat(const char *cgroup, struct memory_met
     }
 }
 
-static bool read_cgroup_populated(const char *cgroup) {
+static bool read_cgroup_populated_known(const char *cgroup, bool *known) {
+    if (known != NULL) {
+        *known = false;
+    }
     char path[4096];
     int written = snprintf(path, sizeof(path), "%s/cgroup.events", cgroup);
     if (written <= 0 || (size_t)written >= sizeof(path)) {
@@ -423,11 +429,18 @@ static bool read_cgroup_populated(const char *cgroup) {
     while (fscanf(f, "%127s %llu", key, &value) == 2) {
         if (strcmp(key, "populated") == 0) {
             populated = value != 0;
+            if (known != NULL) {
+                *known = true;
+            }
             break;
         }
     }
     fclose(f);
     return populated;
+}
+
+static bool read_cgroup_populated(const char *cgroup) {
+    return read_cgroup_populated_known(cgroup, NULL);
 }
 
 static uint64_t saturating_add_u64(uint64_t lhs, uint64_t rhs);
@@ -713,6 +726,19 @@ static void read_configured_cgroup_metrics(struct memory_metrics *metrics) {
     metrics->daemon_cgroup_memory_current = read_cgroup_current(daemon_cgroup);
     metrics->service_cgroup_memory_current = read_cgroup_current(service_cgroup);
     add_service_cgroup_memory_stat(service_cgroup, metrics);
+    metrics->service_cgroup_populated = read_cgroup_populated_known(
+        service_cgroup,
+        &metrics->service_cgroup_population_known
+    );
+    uint64_t reclaimable = saturating_add_u64(
+        metrics->service_cgroup_inactive_file,
+        metrics->service_cgroup_slab_reclaimable
+    );
+    if (reclaimable > metrics->service_cgroup_memory_current) {
+        reclaimable = metrics->service_cgroup_memory_current;
+    }
+    metrics->service_cgroup_working_set =
+        saturating_sub_u64(metrics->service_cgroup_memory_current, reclaimable);
 }
 
 static void read_meminfo(struct memory_metrics *metrics) {
@@ -860,11 +886,14 @@ static void metrics_json(const struct memory_metrics *metrics, char *body, size_
         "\"build_cgroup_memory_current\":%llu,"
         "\"daemon_cgroup_memory_current\":%llu,"
         "\"service_cgroup_memory_current\":%llu,"
+        "\"service_cgroup_working_set\":%llu,"
         "\"service_cgroup_anon\":%llu,\"service_cgroup_file\":%llu,"
         "\"service_cgroup_inactive_file\":%llu,\"service_cgroup_active_file\":%llu,"
         "\"service_cgroup_slab\":%llu,"
         "\"service_cgroup_slab_reclaimable\":%llu,"
         "\"service_cgroup_slab_unreclaimable\":%llu,"
+        "\"service_cgroup_populated\":%s,"
+        "\"service_cgroup_population_known\":%s,"
         "\"psi_some_avg10\":%.2f,\"psi_full_avg10\":%.2f,"
         "\"active_workloads\":%d,\"build_workload_detected\":%s,"
         "\"source\":\"conjet-memd\"}\n",
@@ -895,6 +924,7 @@ static void metrics_json(const struct memory_metrics *metrics, char *body, size_
         (unsigned long long)metrics->build_cgroup_memory_current,
         (unsigned long long)metrics->daemon_cgroup_memory_current,
         (unsigned long long)metrics->service_cgroup_memory_current,
+        (unsigned long long)metrics->service_cgroup_working_set,
         (unsigned long long)metrics->service_cgroup_anon,
         (unsigned long long)metrics->service_cgroup_file,
         (unsigned long long)metrics->service_cgroup_inactive_file,
@@ -902,6 +932,8 @@ static void metrics_json(const struct memory_metrics *metrics, char *body, size_
         (unsigned long long)metrics->service_cgroup_slab,
         (unsigned long long)metrics->service_cgroup_slab_reclaimable,
         (unsigned long long)metrics->service_cgroup_slab_unreclaimable,
+        metrics->service_cgroup_populated ? "true" : "false",
+        metrics->service_cgroup_population_known ? "true" : "false",
         metrics->psi_some_avg10,
         metrics->psi_full_avg10,
         metrics->active_workloads,

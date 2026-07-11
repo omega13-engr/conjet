@@ -41,6 +41,7 @@ const HOST_RECLAIM_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RETAINED_CONSOLE_BYTES: usize = 256 * 1024;
 const DEFAULT_CORE_IDLE_TARGET_MIB: u64 = 512;
 const DEFAULT_CORE_IDLE_QUIET_DWELL: Duration = Duration::from_secs(8);
+const DEFAULT_CORE_IDLE_RECLAIM_SETTLE_DWELL: Duration = Duration::from_secs(2);
 const DEFAULT_CORE_IDLE_RETRY_DWELL: Duration = Duration::from_secs(20);
 const CORE_IDLE_WORKLOAD_NOISE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -160,6 +161,7 @@ struct CoreMemoryControllerMetrics {
     idle_probes: u64,
     transport_activity_events: u64,
     transport_quiet_transitions: u64,
+    transport_quiet_reclaims: u64,
     last_reason: Option<String>,
     last_error: Option<String>,
 }
@@ -179,6 +181,7 @@ impl Default for CoreMemoryControllerMetrics {
             idle_probes: 0,
             transport_activity_events: 0,
             transport_quiet_transitions: 0,
+            transport_quiet_reclaims: 0,
             last_reason: None,
             last_error: None,
         }
@@ -342,16 +345,29 @@ impl CoreIdleMemoryController {
         self.note_workload_started(shared)
     }
 
-    fn poll_docker_transport_quiet(&mut self, now: Instant, shared: &SharedBootState) {
+    fn finish_docker_transport_quiet(&mut self, now: Instant) -> bool {
+        self.docker_transport_active = false;
+        self.last_docker_transport_activity = None;
+        if !self.runtime_ready || self.requested_target_mib <= self.policy.target_mib {
+            return false;
+        }
+        // Give the guest reclaimer a short head start. A stop request can finish
+        // before container cgroups become empty, so probing immediately would
+        // race the cache reclaim that follows the quiet transition.
+        self.idle_deadline = Some(now + DEFAULT_CORE_IDLE_RECLAIM_SETTLE_DWELL);
+        self.idle_probe = None;
+        true
+    }
+
+    fn poll_docker_transport_quiet(&mut self, now: Instant, shared: &SharedBootState) -> bool {
         if !self.docker_transport_active
             || !self
                 .last_docker_transport_activity
                 .is_some_and(|last| now.duration_since(last) >= self.policy.quiet_dwell)
         {
-            return;
+            return false;
         }
-        self.docker_transport_active = false;
-        self.last_docker_transport_activity = None;
+        let should_reclaim = self.finish_docker_transport_quiet(now);
         {
             let mut metrics = shared
                 .core_memory
@@ -360,22 +376,20 @@ impl CoreIdleMemoryController {
             metrics.transport_quiet_transitions =
                 metrics.transport_quiet_transitions.saturating_add(1);
         }
-        if !self.runtime_ready || self.requested_target_mib <= self.policy.target_mib {
-            return;
+        if !should_reclaim {
+            return false;
         }
-        // The transport was already quiet for `quiet_dwell`, so starting a
-        // second dwell here would delay the initial return to idle by twice
-        // the configured interval. Verify the guest immediately instead.
-        self.idle_deadline = Some(now);
-        self.idle_probe = None;
         let mut metrics = shared
             .core_memory
             .lock()
             .expect("core memory controller mutex poisoned");
         metrics.pending_idle_probe = true;
         metrics.idle_probe_inflight = false;
-        metrics.last_reason = Some("docker transport quiet; verifying guest idle".to_string());
+        metrics.transport_quiet_reclaims = metrics.transport_quiet_reclaims.saturating_add(1);
+        metrics.last_reason =
+            Some("docker transport quiet; reclaiming guest caches before idle probe".to_string());
         metrics.last_error = None;
+        true
     }
 
     fn poll(
@@ -575,27 +589,43 @@ struct GuestMemorySnapshot {
     #[serde(default)]
     service_cgroup_memory_current: u64,
     #[serde(default)]
+    service_cgroup_working_set: u64,
+    #[serde(default)]
+    service_cgroup_populated: bool,
+    #[serde(default)]
+    service_cgroup_population_known: bool,
+    #[serde(default)]
     disk_swap_used: u64,
     #[serde(default)]
     psi_full_avg10: f64,
 }
 
 impl GuestMemorySnapshot {
+    fn service_memory_for_idle_gate(&self) -> u64 {
+        if self.service_cgroup_population_known && !self.service_cgroup_populated {
+            return self.service_cgroup_working_set;
+        }
+        self.service_cgroup_memory_current
+    }
+
     fn allows_idle_target(&self) -> bool {
         !self.build_workload_detected
             && self.container_memory_current < CORE_IDLE_WORKLOAD_NOISE_BYTES
-            && self.service_cgroup_memory_current < CORE_IDLE_WORKLOAD_NOISE_BYTES
+            && self.service_memory_for_idle_gate() < CORE_IDLE_WORKLOAD_NOISE_BYTES
             && self.disk_swap_used == 0
             && self.psi_full_avg10 <= 0.05
     }
 
     fn idle_block_reason(&self) -> String {
         format!(
-            "active_workloads={} build={} containers={} services={} disk_swap={} psi_full={:.2}",
+            "active_workloads={} build={} containers={} services={} service_working_set={} service_populated={} service_population_known={} disk_swap={} psi_full={:.2}",
             self.active_workloads,
             self.build_workload_detected,
             self.container_memory_current,
             self.service_cgroup_memory_current,
+            self.service_cgroup_working_set,
+            self.service_cgroup_populated,
+            self.service_cgroup_population_known,
             self.disk_swap_used,
             self.psi_full_avg10
         )
@@ -1513,7 +1543,13 @@ impl HvfBootRunner {
                 );
                 core_memory_controller.note_workload_finished(now, &shared);
             }
-            core_memory_controller.poll_docker_transport_quiet(now, &shared);
+            if core_memory_controller.poll_docker_transport_quiet(now, &shared) {
+                schedule_guest_memory_reclaim(
+                    memory_reclaim_socket_path.clone(),
+                    "docker.transportQuiet",
+                    shared.clone(),
+                );
+            }
             if let Some(transition) =
                 core_memory_controller.poll(now, &memory_reclaim_socket_path, &shared)
             {
@@ -3599,6 +3635,9 @@ mod tests {
             build_workload_detected: false,
             container_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
             service_cgroup_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
+            service_cgroup_working_set: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
+            service_cgroup_populated: true,
+            service_cgroup_population_known: true,
             disk_swap_used: 0,
             psi_full_avg10: 0.05,
         };
@@ -3621,6 +3660,24 @@ mod tests {
             ..quiet
         };
         assert!(!service.allows_idle_target());
+
+        let stopped_service_cache = GuestMemorySnapshot {
+            service_cgroup_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES * 2,
+            service_cgroup_working_set: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
+            service_cgroup_populated: false,
+            service_cgroup_population_known: true,
+            ..quiet
+        };
+        assert!(stopped_service_cache.allows_idle_target());
+
+        let unknown_service_population = GuestMemorySnapshot {
+            service_cgroup_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES * 2,
+            service_cgroup_working_set: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
+            service_cgroup_populated: false,
+            service_cgroup_population_known: false,
+            ..quiet
+        };
+        assert!(!unknown_service_population.allows_idle_target());
 
         let swap = GuestMemorySnapshot {
             disk_swap_used: 4096,
@@ -3665,6 +3722,35 @@ mod tests {
         let mut settled = controller;
         settled.requested_target_mib = 512;
         assert!(settled.idle_target_reached());
+    }
+
+    #[test]
+    fn quiet_transport_arms_guest_reclaim_settle_before_idle_probe() {
+        let now = Instant::now();
+        let mut controller = CoreIdleMemoryController::new(
+            CoreIdleMemoryPolicy {
+                enabled: true,
+                target_mib: 512,
+                quiet_dwell: Duration::from_secs(8),
+                retry_dwell: Duration::from_secs(20),
+            },
+            8192,
+            8192,
+        );
+        controller.runtime_ready = true;
+        controller.docker_transport_active = true;
+        controller.last_docker_transport_activity = Some(now);
+
+        assert!(controller.finish_docker_transport_quiet(now));
+        assert!(!controller.docker_transport_active);
+        assert!(controller.last_docker_transport_activity.is_none());
+        assert_eq!(
+            controller
+                .idle_deadline
+                .expect("quiet transition arms an idle deadline")
+                .duration_since(now),
+            DEFAULT_CORE_IDLE_RECLAIM_SETTLE_DWELL
+        );
     }
 
     #[test]

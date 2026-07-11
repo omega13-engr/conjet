@@ -39,6 +39,7 @@ Options:
   --timeout-seconds N          Readiness timeout (default: 900)
   --skip-compose-up            Do not run docker compose up before import
   --reset-compose-volumes      Remove isolated Compose containers and volumes first
+  --stop-compose-after-import  Run docker compose stop after the workload and trace idle return
   --skip-api-forward           Do not proxy localhost API traffic into guest Docker
   --skip-sign                  Do not ad-hoc sign VMM with debug entitlements
   -h, --help                   Show this help
@@ -79,6 +80,7 @@ CPUS=4
 TIMEOUT_SECONDS=900
 RUN_COMPOSE_UP=1
 RESET_COMPOSE_VOLUMES=0
+STOP_COMPOSE_AFTER_IMPORT=0
 RUN_API_FORWARD=1
 SIGN_VMM=1
 
@@ -166,6 +168,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --reset-compose-volumes)
       RESET_COMPOSE_VOLUMES=1
+      shift
+      ;;
+    --stop-compose-after-import)
+      STOP_COMPOSE_AFTER_IMPORT=1
       shift
       ;;
     --skip-api-forward)
@@ -339,6 +345,7 @@ PID_FILE="$QA_ROOT/conjet-core.pid"
 TRACE_JSONL="$QA_ROOT/chum-mem-memory-trace.jsonl"
 SUMMARY_JSON="$QA_ROOT/chum-mem-memory-trace-summary.json"
 COMPOSE_LOG="$QA_ROOT/chum-mem-compose.log"
+COMPOSE_STOP_LOG="$QA_ROOT/chum-mem-compose-stop.log"
 IMPORT_LOG="$QA_ROOT/chum-mem-import.log"
 API_FORWARD_LOG="$QA_ROOT/chum-mem-api-forward.log"
 VMMAP_FINAL="$QA_ROOT/conjet-core-vmmap-final.txt"
@@ -346,7 +353,7 @@ FOOTPRINT_FINAL="$QA_ROOT/conjet-core-footprint-final.txt"
 TRACE_STOP="$QA_ROOT/trace.stop"
 
 mkdir -p "$RUN_DIR" "$(dirname -- "$SERIAL_LOG")"
-rm -f "$DOCKER_SOCKET" "$MEMORY_SOCKET" "$CONTROL_SOCKET" "$STDOUT_LOG" "$STDERR_LOG" "$TRACE_JSONL" "$SUMMARY_JSON" "$TRACE_STOP"
+rm -f "$DOCKER_SOCKET" "$MEMORY_SOCKET" "$CONTROL_SOCKET" "$STDOUT_LOG" "$STDERR_LOG" "$TRACE_JSONL" "$SUMMARY_JSON" "$COMPOSE_STOP_LOG" "$TRACE_STOP"
 
 VMM_PID=""
 SAMPLER_PID=""
@@ -526,6 +533,13 @@ sample_trace() {
          some_avg10: ($metrics.psi_some_avg10 // 0),
          full_avg10: ($metrics.psi_full_avg10 // 0)
        },
+       guest: {
+         container_memory_current: ($metrics.container_memory_current // 0),
+         service_cgroup_memory_current: ($metrics.service_cgroup_memory_current // 0),
+         service_cgroup_working_set: ($metrics.service_cgroup_working_set // 0),
+         service_cgroup_populated: ($metrics.service_cgroup_populated // false),
+         service_cgroup_population_known: ($metrics.service_cgroup_population_known // false)
+       },
        balloon: {
          actual_pages: ($control.balloon.actual_pages // 0),
          inflate_pages: ($control.balloon.inflate_pages // 0),
@@ -561,8 +575,16 @@ sample_trace() {
         idle_probes: ($control.core_memory.idle_probes // 0),
         transport_activity_events: ($control.core_memory.transport_activity_events // 0),
         transport_quiet_transitions: ($control.core_memory.transport_quiet_transitions // 0),
+        transport_quiet_reclaims: ($control.core_memory.transport_quiet_reclaims // 0),
         last_reason: ($control.core_memory.last_reason // null),
          last_error: ($control.core_memory.last_error // null)
+       },
+       event_reclaim: {
+         requests: ($control.event_reclaim.requests // 0),
+         successes: ($control.event_reclaim.successes // 0),
+         errors: ($control.event_reclaim.errors // 0),
+         last_reason: ($control.event_reclaim.last_reason // null),
+         last_error: ($control.event_reclaim.last_error // null)
        },
        host: {
          resident_bytes: ($control.host_memory.resident_bytes // 0),
@@ -622,6 +644,20 @@ import_rc=0
 wait "$SAMPLER_PID" >/dev/null 2>&1 || true
 SAMPLER_PID=""
 sample_trace "import-finished"
+compose_stop_rc=0
+if [ "$STOP_COMPOSE_AFTER_IMPORT" -eq 1 ]; then
+  rm -f "$TRACE_STOP"
+  sample_loop "compose-stop" &
+  SAMPLER_PID=$!
+  (
+    cd "$CHUM_MEM_DIR"
+    docker compose stop
+  ) >"$COMPOSE_STOP_LOG" 2>&1 || compose_stop_rc=$?
+  : >"$TRACE_STOP"
+  wait "$SAMPLER_PID" >/dev/null 2>&1 || true
+  SAMPLER_PID=""
+  sample_trace "compose-stopped"
+fi
 if [ "$POST_IMPORT_SETTLE_SECONDS" -gt 0 ]; then
   rm -f "$TRACE_STOP"
   sample_loop "post-import-idle" &
@@ -651,6 +687,10 @@ REQUIRE_CORE_CAPACITY_DURING_IMPORT_JSON=false
 if [ "$REQUIRE_CORE_CAPACITY_DURING_IMPORT" -eq 1 ]; then
   REQUIRE_CORE_CAPACITY_DURING_IMPORT_JSON=true
 fi
+STOP_COMPOSE_AFTER_IMPORT_JSON=false
+if [ "$STOP_COMPOSE_AFTER_IMPORT" -eq 1 ]; then
+  STOP_COMPOSE_AFTER_IMPORT_JSON=true
+fi
 MAX_FINAL_PHYSICAL_FOOTPRINT_MIB_JSON="null"
 if [ -n "$MAX_FINAL_PHYSICAL_FOOTPRINT_MIB" ]; then
   MAX_FINAL_PHYSICAL_FOOTPRINT_MIB_JSON="$MAX_FINAL_PHYSICAL_FOOTPRINT_MIB"
@@ -661,6 +701,7 @@ jq -s \
   --arg trace_jsonl "$TRACE_JSONL" \
   --arg import_log "$IMPORT_LOG" \
   --arg compose_log "$COMPOSE_LOG" \
+  --arg compose_stop_log "$COMPOSE_STOP_LOG" \
   --arg api_forward_log "$API_FORWARD_LOG" \
   --arg vmmap_final "$VMMAP_FINAL" \
   --arg footprint_final "$FOOTPRINT_FINAL" \
@@ -669,6 +710,8 @@ jq -s \
   --argjson max_core_post_idle_probes "$MAX_CORE_POST_IDLE_PROBES_JSON" \
   --argjson expected_core_workload_expansions "$EXPECTED_CORE_WORKLOAD_EXPANSIONS_JSON" \
   --argjson require_core_capacity_during_import "$REQUIRE_CORE_CAPACITY_DURING_IMPORT_JSON" \
+  --argjson stop_compose_after_import "$STOP_COMPOSE_AFTER_IMPORT_JSON" \
+  --argjson compose_stop_exit_code "$compose_stop_rc" \
   --argjson configured_memory_mib "$MEMORY_MIB" \
   --argjson max_final_physical_footprint_mib "$MAX_FINAL_PHYSICAL_FOOTPRINT_MIB_JSON" \
   '($expected_core_idle_target_mib == null or
@@ -703,15 +746,18 @@ jq -s \
       $final_physical_footprint_bytes <= ($max_final_physical_footprint_mib * 1024 * 1024))
       as $final_physical_footprint_ok |
    {
-    ok: ($import_exit_code == 0 and length > 0 and $core_idle_target_ok and $core_post_idle_probe_budget_ok and $core_workload_expansion_ok and $core_capacity_during_import_ok and $final_physical_footprint_ok),
+    ok: ($import_exit_code == 0 and $compose_stop_exit_code == 0 and length > 0 and $core_idle_target_ok and $core_post_idle_probe_budget_ok and $core_workload_expansion_ok and $core_capacity_during_import_ok and $final_physical_footprint_ok),
     qa_root: $qa_root,
     trace_jsonl: $trace_jsonl,
     import_log: $import_log,
     compose_log: $compose_log,
+    compose_stop_log: $compose_stop_log,
     api_forward_log: $api_forward_log,
     vmmap_final: $vmmap_final,
     footprint_final: $footprint_final,
     import_exit_code: $import_exit_code,
+    stop_compose_after_import: $stop_compose_after_import,
+    compose_stop_exit_code: $compose_stop_exit_code,
     expected_core_idle_target_mib: $expected_core_idle_target_mib,
     core_idle_target_ok: $core_idle_target_ok,
     max_core_post_idle_probes: $max_core_post_idle_probes,
@@ -748,12 +794,19 @@ jq -s \
     max_core_idle_deferrals: ([.[].core_memory.idle_deferrals] | max // 0),
     max_core_idle_probes: ([.[].core_memory.idle_probes] | max // 0),
     max_core_transport_activity_events: ([.[].core_memory.transport_activity_events] | max // 0),
-    max_core_transport_quiet_transitions: ([.[].core_memory.transport_quiet_transitions] | max // 0)
+    max_core_transport_quiet_transitions: ([.[].core_memory.transport_quiet_transitions] | max // 0),
+    max_core_transport_quiet_reclaims: ([.[].core_memory.transport_quiet_reclaims] | max // 0),
+    max_event_reclaim_requests: ([.[].event_reclaim.requests] | max // 0),
+    max_event_reclaim_successes: ([.[].event_reclaim.successes] | max // 0),
+    max_event_reclaim_errors: ([.[].event_reclaim.errors] | max // 0)
   }' "$TRACE_JSONL" >"$SUMMARY_JSON"
 
 cat "$SUMMARY_JSON"
 if [ "$import_rc" -ne 0 ]; then
   exit "$import_rc"
+fi
+if [ "$compose_stop_rc" -ne 0 ]; then
+  exit "$compose_stop_rc"
 fi
 if ! jq -e '.ok == true' "$SUMMARY_JSON" >/dev/null; then
   exit 1

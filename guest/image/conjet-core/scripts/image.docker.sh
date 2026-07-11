@@ -43,7 +43,7 @@ builder_id="$(docker create \
     --privileged \
     --platform "linux/${ARCH}" \
     --workdir /build \
-    "${builder_cgroup_args[@]}" \
+    "${builder_cgroup_args[@]+"${builder_cgroup_args[@]}"}" \
     --env "ARCH=${ARCH}" \
     --env "OS_ARCH=${OS_ARCH}" \
     --env "UBUNTU_VERSION=${UBUNTU_VERSION}" \

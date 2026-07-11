@@ -96,6 +96,10 @@ static void write_memcg_files(const char *dir,
     test_write_file(dir, "memory.stat", body);
 }
 
+static void write_cgroup_events(const char *dir, bool populated) {
+    test_write_file(dir, "cgroup.events", populated ? "populated 1\n" : "populated 0\n");
+}
+
 static void make_test_root(char *root, size_t root_len, const char *prefix) {
     const char *tmpdir = getenv("TMPDIR");
     if (tmpdir == NULL || tmpdir[0] == '\0') {
@@ -157,6 +161,39 @@ static void test_default_build_cgroup_path_tracks_daemon_scoped_build_workers(vo
         "default build cgroup path",
         DEFAULT_BUILD_CGROUP_PATH,
         "/sys/fs/cgroup/conjet.slice/conjet-daemons.slice/conjet-build.slice"
+    );
+}
+
+static void test_stopped_service_reclaim_releases_hot_cache_reserve(void) {
+    char root[4096];
+    make_test_root(root, sizeof(root), "conjet-reclaimd-service-stop");
+
+    char service[4096];
+    test_join_path(service, sizeof(service), root, "conjet-services.slice");
+    test_make_dir(service);
+
+    struct memcg_stat stat;
+    memset(&stat, 0, sizeof(stat));
+    stat.inactive_file = SERVICE_RESERVE_BYTES + 16ULL * 1024ULL * 1024ULL;
+
+    write_cgroup_events(service, true);
+    require_u64(
+        "running service reserve",
+        service_reclaim_reserve(service),
+        SERVICE_RESERVE_BYTES
+    );
+    require_u64(
+        "running service keeps cache reserve",
+        reclaim_candidate(&stat, SERVICE_CAP_BYTES, service_reclaim_reserve(service)),
+        16ULL * 1024ULL * 1024ULL
+    );
+
+    write_cgroup_events(service, false);
+    require_u64("stopped service reserve", service_reclaim_reserve(service), 0);
+    require_u64(
+        "stopped service releases cache reserve",
+        reclaim_candidate(&stat, SERVICE_CAP_BYTES, service_reclaim_reserve(service)),
+        stat.inactive_file
     );
 }
 
@@ -258,6 +295,7 @@ static void test_scoped_reclaim_config_requires_service_path_and_bytes(void) {
 int main(void) {
     test_reclaim_target_stats_include_prefixed_build_and_service_siblings();
     test_default_build_cgroup_path_tracks_daemon_scoped_build_workers();
+    test_stopped_service_reclaim_releases_hot_cache_reserve();
     test_syncfs_gate_uses_dirty_writeback_threshold_and_path();
     test_drop_caches_gate_defaults_off_and_accepts_enable_values();
     test_scoped_reclaim_config_requires_service_path_and_bytes();
