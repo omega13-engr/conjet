@@ -5,9 +5,9 @@ usage() {
   cat >&2 <<'USAGE'
 usage: run-rust-vmm-memory-qa.sh --manifest PATH [options]
 
-Boot an isolated Rust HVF Conjet Core VM, exercise the live memory-control
-socket, and record host RSS/physical-footprint evidence before and after a
-balloon shrink.
+Boot an isolated Rust HVF Conjet Core VM, observe its Jetstream-owned idle
+policy through the read-only memory-control socket, and record host
+RSS/physical-footprint evidence before and after an automatic balloon shrink.
 
 Required:
   --manifest PATH              VM asset manifest for scratch/isolated assets
@@ -17,7 +17,7 @@ Options:
   --qa-root DIR                Artifact directory (default: mktemp under /Volumes/ExternalSSD/dev_workspace/tmp)
   --memory-mib N               Configured guest memory MiB (default: 8192)
   --cpus N                     vCPU count (default: 4)
-  --target-mib N               Live target MiB after shrink (default: 4096)
+  --target-mib N               Automatic idle target MiB (default: 448)
   --timeout-seconds N          Readiness timeout (default: 600)
   --settle-seconds N           Seconds to wait after shrink (default: 45)
   --min-footprint-drop-mib N   Optional required footprint drop (default: 0)
@@ -45,7 +45,7 @@ VMM=""
 QA_ROOT=""
 MEMORY_MIB=8192
 CPUS=4
-TARGET_MIB=4096
+TARGET_MIB=448
 TIMEOUT_SECONDS=600
 SETTLE_SECONDS=45
 MIN_FOOTPRINT_DROP_MIB=0
@@ -215,7 +215,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-nohup "$VMM" boot \
+CONJET_MEM_CORE_IDLE_TARGET_MIB="$TARGET_MIB" nohup "$VMM" boot \
   --manifest "$MANIFEST" \
   --memory-mib "$MEMORY_MIB" \
   --cpus "$CPUS" \
@@ -318,10 +318,6 @@ wait_for_docker_ping "$DOCKER_PING"
 
 GUEST_METRICS_BEFORE="$QA_ROOT/guest-memory-before.json"
 wait_for_guest_metrics "$GUEST_METRICS_BEFORE"
-
-CONTROL_SET="$QA_ROOT/control-set-target.json"
-control_request "{\"command\":\"set_target_mib\",\"target_mib\":$TARGET_MIB}" >"$CONTROL_SET"
-jq -e '.ok == true' "$CONTROL_SET" >/dev/null
 
 sleep "$SETTLE_SECONDS"
 

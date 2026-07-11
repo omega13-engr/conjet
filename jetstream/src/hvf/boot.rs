@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -43,14 +44,42 @@ const HOST_RECLAIM_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RETAINED_CONSOLE_BYTES: usize = 256 * 1024;
 // Leave room for the Linux/Docker control plane and fixed VMM overhead so an
 // otherwise idle Core returns below the host-side 700 MiB operating budget.
-// Docker transport activity always restores configured capacity before work.
+// Bulk Docker work restores configured capacity; populated services converge
+// on a guarded working-set target without changing the stopped-idle floor.
 const DEFAULT_CORE_IDLE_TARGET_MIB: u64 = 448;
 const DEFAULT_CORE_IDLE_QUIET_DWELL: Duration = Duration::from_secs(8);
 const DEFAULT_CORE_IDLE_RECLAIM_SETTLE_DWELL: Duration = Duration::from_secs(2);
 const DEFAULT_CORE_IDLE_BACKING_COMPACTION_DWELL: Duration = Duration::from_secs(2);
 const DEFAULT_CORE_IDLE_BACKING_COMPACTION_RETRY_DWELL: Duration = Duration::from_millis(250);
 const DEFAULT_CORE_IDLE_RETRY_DWELL: Duration = Duration::from_secs(20);
+const CORE_IDLE_SENTINEL_DWELL: Duration = Duration::from_secs(1);
 const CORE_IDLE_WORKLOAD_NOISE_BYTES: u64 = 64 * 1024 * 1024;
+const CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+const CORE_CONTAINER_ZRAM_SWAP_BUDGET_BYTES: u64 = 8 * 1024 * 1024;
+const DEFAULT_CORE_SERVICE_MIN_TARGET_MIB: u64 = 2048;
+const DEFAULT_CORE_SERVICE_LEARNING_DWELL: Duration = Duration::from_secs(30);
+const DEFAULT_CORE_SERVICE_PROBE_DWELL: Duration = Duration::from_secs(5);
+const DEFAULT_CORE_SERVICE_STABILIZATION_DWELL: Duration = Duration::from_secs(10);
+const CORE_SERVICE_CONVERGENCE_POLL_DWELL: Duration = Duration::from_secs(1);
+const CORE_SERVICE_PRESSURE_WATCHDOG_DWELL: Duration = Duration::from_secs(1);
+const CORE_SERVICE_SHRINK_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(30);
+const CORE_SERVICE_EXPANSION_CONVERGENCE_RETRY_DWELL: Duration = Duration::from_secs(5);
+const DEFAULT_CORE_SERVICE_SHRINK_STEP_MIB: u64 = 256;
+const DEFAULT_CORE_SERVICE_HEADROOM_MIB: u64 = 512;
+const DEFAULT_CORE_SERVICE_COOLDOWN_DWELL: Duration = Duration::from_secs(120);
+const CORE_SERVICE_TARGET_QUANTUM_MIB: u64 = 128;
+const CORE_SERVICE_AVAILABLE_RESERVE_MIB: u64 = 512;
+const CORE_SERVICE_REFAULT_MIN_BYTES: u64 = 8 * 1024 * 1024;
+const CORE_SERVICE_REFAULT_RATIO_DENOMINATOR: u64 = 50;
+const CORE_SERVICE_MAX_LEARNED_HEADROOM_MIB: u64 = 1024;
+const CORE_SERVICE_PSI_SOME_LIMIT: f64 = 1.0;
+const CORE_SERVICE_PSI_FULL_LIMIT: f64 = 0.05;
+const CORE_SERVICE_GLOBAL_PSI_SOME_LIMIT: f64 = 5.0;
+const CORE_SERVICE_GLOBAL_PSI_FULL_LIMIT: f64 = 0.5;
+const CORE_SERVICE_SAMPLE_WINDOW: usize = 6;
+const CORE_RESTORE_RETRY_DWELL: Duration = Duration::from_millis(250);
+const MIB_BYTES: u64 = 1024 * 1024;
+const MAX_GUEST_MEMORY_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_MEMORY_CONTROL_REQUEST_BYTES: usize = 4 * 1024;
 const MEMORY_CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -134,6 +163,7 @@ struct SharedBootState {
     stages: Mutex<Vec<HvfBootStage>>,
     event_reclaim: Mutex<EventReclaimMetrics>,
     core_memory: Mutex<CoreMemoryControllerMetrics>,
+    allow_balloon_hard_decommit_fallback: Arc<AtomicBool>,
     event_reclaim_inflight: AtomicBool,
     event_reclaim_pending: AtomicBool,
     stop_reason: Mutex<Option<String>>,
@@ -168,12 +198,31 @@ struct CoreMemoryControllerMetrics {
     idle_shrinks: u64,
     idle_deferrals: u64,
     idle_probes: u64,
+    idle_sentinel_probes: u64,
     transport_activity_events: u64,
     transport_quiet_transitions: u64,
     transport_quiet_reclaims: u64,
     idle_backing_compactions: u64,
     idle_backing_hard_decommitted_bytes: u64,
     idle_backing_compaction_failures: u64,
+    service_min_target_mib: u64,
+    service_desired_target_mib: u64,
+    service_learning: bool,
+    service_cooldown: bool,
+    service_probes: u64,
+    service_shrinks: u64,
+    service_expansions: u64,
+    service_feedback_passes: u64,
+    service_feedback_deferrals: u64,
+    service_convergence_waits: u64,
+    service_convergence_timeouts: u64,
+    service_stabilization_waits: u64,
+    service_watchdog_probes: u64,
+    service_watchdog_expansions: u64,
+    service_generation_resets: u64,
+    service_refault_bytes: u64,
+    service_learned_headroom_mib: u64,
+    restore_retries: u64,
     last_reason: Option<String>,
     last_error: Option<String>,
 }
@@ -191,12 +240,31 @@ impl Default for CoreMemoryControllerMetrics {
             idle_shrinks: 0,
             idle_deferrals: 0,
             idle_probes: 0,
+            idle_sentinel_probes: 0,
             transport_activity_events: 0,
             transport_quiet_transitions: 0,
             transport_quiet_reclaims: 0,
             idle_backing_compactions: 0,
             idle_backing_hard_decommitted_bytes: 0,
             idle_backing_compaction_failures: 0,
+            service_min_target_mib: 0,
+            service_desired_target_mib: 0,
+            service_learning: false,
+            service_cooldown: false,
+            service_probes: 0,
+            service_shrinks: 0,
+            service_expansions: 0,
+            service_feedback_passes: 0,
+            service_feedback_deferrals: 0,
+            service_convergence_waits: 0,
+            service_convergence_timeouts: 0,
+            service_stabilization_waits: 0,
+            service_watchdog_probes: 0,
+            service_watchdog_expansions: 0,
+            service_generation_resets: 0,
+            service_refault_bytes: 0,
+            service_learned_headroom_mib: 0,
+            restore_retries: 0,
             last_reason: None,
             last_error: None,
         }
@@ -204,14 +272,21 @@ impl Default for CoreMemoryControllerMetrics {
 }
 
 #[derive(Debug, Clone)]
-struct CoreIdleMemoryPolicy {
+struct CoreMemoryPolicy {
     enabled: bool,
     target_mib: u64,
     quiet_dwell: Duration,
     retry_dwell: Duration,
+    service_min_target_mib: u64,
+    service_learning_dwell: Duration,
+    service_probe_dwell: Duration,
+    service_stabilization_dwell: Duration,
+    service_shrink_step_mib: u64,
+    service_headroom_mib: u64,
+    service_cooldown_dwell: Duration,
 }
 
-impl CoreIdleMemoryPolicy {
+impl CoreMemoryPolicy {
     fn from_environment(configured_memory_mib: u64) -> Self {
         let minimum_target_mib = 256.min(configured_memory_mib);
         let target_mib = environment_u64("CONJET_MEM_CORE_IDLE_TARGET_MIB")
@@ -222,41 +297,159 @@ impl CoreIdleMemoryPolicy {
                 .unwrap_or(DEFAULT_CORE_IDLE_QUIET_DWELL.as_millis() as u64)
                 .max(1),
         );
+        let service_min_target_mib = environment_u64("CONJET_MEM_CORE_SERVICE_MIN_TARGET_MIB")
+            .unwrap_or(DEFAULT_CORE_SERVICE_MIN_TARGET_MIB)
+            .clamp(target_mib, configured_memory_mib);
+        let service_learning_dwell = Duration::from_millis(
+            environment_u64("CONJET_MEM_CORE_SERVICE_LEARNING_MS")
+                .unwrap_or(DEFAULT_CORE_SERVICE_LEARNING_DWELL.as_millis() as u64)
+                .max(1),
+        );
+        let service_probe_dwell = Duration::from_millis(
+            environment_u64("CONJET_MEM_CORE_SERVICE_PROBE_MS")
+                .unwrap_or(DEFAULT_CORE_SERVICE_PROBE_DWELL.as_millis() as u64)
+                .max(1),
+        );
+        let service_shrink_step_mib = environment_u64("CONJET_MEM_CORE_SERVICE_SHRINK_STEP_MIB")
+            .unwrap_or(DEFAULT_CORE_SERVICE_SHRINK_STEP_MIB)
+            .clamp(
+                CORE_SERVICE_TARGET_QUANTUM_MIB,
+                configured_memory_mib.max(1),
+            );
+        let service_headroom_mib = environment_u64("CONJET_MEM_CORE_SERVICE_HEADROOM_MIB")
+            .unwrap_or(DEFAULT_CORE_SERVICE_HEADROOM_MIB)
+            .min(configured_memory_mib);
         Self {
             enabled: configured_memory_mib > target_mib
                 && !debug_flags::enabled("CONJET_MEM_DISABLE_CORE_IDLE_CONTROLLER"),
             target_mib,
             quiet_dwell,
             retry_dwell: DEFAULT_CORE_IDLE_RETRY_DWELL,
+            service_min_target_mib,
+            service_learning_dwell,
+            service_probe_dwell,
+            service_stabilization_dwell: DEFAULT_CORE_SERVICE_STABILIZATION_DWELL,
+            service_shrink_step_mib,
+            service_headroom_mib,
+            service_cooldown_dwell: DEFAULT_CORE_SERVICE_COOLDOWN_DWELL,
         }
     }
 }
 
 #[derive(Debug)]
-struct CoreIdleMemoryController {
-    policy: CoreIdleMemoryPolicy,
+struct CoreMemoryController {
+    policy: CoreMemoryPolicy,
     configured_memory_mib: u64,
     requested_target_mib: u64,
     runtime_ready: bool,
     idle_deadline: Option<Instant>,
-    idle_probe: Option<mpsc::Receiver<Result<GuestMemorySnapshot, String>>>,
+    idle_probe: Option<GuestMemoryProbe>,
     idle_backing_compaction_deadline: Option<Instant>,
     last_docker_transport_activity: Option<Instant>,
     docker_transport_active: bool,
+    docker_transport_tracks_bytes: bool,
+    classified_workload_streams_active: bool,
+    docker_activity_generation: u64,
+    service_learning_deadline: Option<Instant>,
+    service_cooldown_deadline: Option<Instant>,
+    last_guest_snapshot: Option<GuestMemorySnapshot>,
+    service_samples: VecDeque<GuestMemorySnapshot>,
+    service_adjustment: Option<ServiceCapacityAdjustment>,
+    service_watchdog_deadline: Option<Instant>,
+    service_learned_headroom_mib: u64,
+    pending_restore_retry_deadline: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuestMemoryProbeKind {
+    Idle,
+    ServiceWatchdog,
+}
+
+#[derive(Debug)]
+struct GuestMemoryProbe {
+    kind: GuestMemoryProbeKind,
+    receiver: mpsc::Receiver<(u64, Result<GuestMemorySnapshot, String>)>,
+}
+
+impl GuestMemoryProbe {
+    fn try_recv_for(
+        &self,
+        expected_kind: GuestMemoryProbeKind,
+    ) -> Option<Result<(u64, Result<GuestMemorySnapshot, String>), mpsc::TryRecvError>> {
+        (self.kind == expected_kind).then(|| self.receiver.try_recv())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ServiceCapacityAdjustment {
+    previous_target_mib: u64,
+    target_mib: u64,
+    baseline: Option<GuestMemorySnapshot>,
+    applied_at: Instant,
+    next_convergence_observation_at: Instant,
+    converged_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceAdjustmentReadiness {
+    WaitingForConvergence,
+    Stabilizing,
+    Ready,
+}
+
+impl ServiceCapacityAdjustment {
+    fn needs_convergence_observation(&self, now: Instant) -> bool {
+        self.converged_at.is_none()
+            && (now >= self.next_convergence_observation_at || now >= self.convergence_deadline())
+    }
+
+    fn convergence_deadline(&self) -> Instant {
+        let dwell = if self.target_mib >= self.previous_target_mib {
+            CORE_SERVICE_EXPANSION_CONVERGENCE_RETRY_DWELL
+        } else {
+            CORE_SERVICE_SHRINK_CONVERGENCE_TIMEOUT
+        };
+        self.applied_at + dwell
+    }
+
+    fn observe(
+        &mut self,
+        now: Instant,
+        balloon_target_converged: Option<bool>,
+        stabilization_dwell: Duration,
+    ) -> ServiceAdjustmentReadiness {
+        let converged_at = match self.converged_at {
+            Some(converged_at) => converged_at,
+            None => {
+                if balloon_target_converged != Some(true) {
+                    if balloon_target_converged == Some(false) {
+                        self.next_convergence_observation_at =
+                            now + CORE_SERVICE_CONVERGENCE_POLL_DWELL;
+                    }
+                    return ServiceAdjustmentReadiness::WaitingForConvergence;
+                }
+                self.converged_at = Some(now);
+                return ServiceAdjustmentReadiness::Stabilizing;
+            }
+        };
+        if now.duration_since(converged_at) < stabilization_dwell {
+            ServiceAdjustmentReadiness::Stabilizing
+        } else {
+            ServiceAdjustmentReadiness::Ready
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CoreMemoryTargetTransition {
     RestoreConfigured,
+    AdjustService(u64),
     ReduceToIdle,
 }
 
-impl CoreIdleMemoryController {
-    fn new(
-        policy: CoreIdleMemoryPolicy,
-        configured_memory_mib: u64,
-        initial_target_mib: u64,
-    ) -> Self {
+impl CoreMemoryController {
+    fn new(policy: CoreMemoryPolicy, configured_memory_mib: u64, initial_target_mib: u64) -> Self {
         Self {
             policy,
             configured_memory_mib,
@@ -267,6 +460,17 @@ impl CoreIdleMemoryController {
             idle_backing_compaction_deadline: None,
             last_docker_transport_activity: None,
             docker_transport_active: false,
+            docker_transport_tracks_bytes: false,
+            classified_workload_streams_active: false,
+            docker_activity_generation: 0,
+            service_learning_deadline: None,
+            service_cooldown_deadline: None,
+            last_guest_snapshot: None,
+            service_samples: VecDeque::with_capacity(CORE_SERVICE_SAMPLE_WINDOW),
+            service_adjustment: None,
+            service_watchdog_deadline: None,
+            service_learned_headroom_mib: 0,
+            pending_restore_retry_deadline: None,
         }
     }
 
@@ -276,8 +480,14 @@ impl CoreIdleMemoryController {
             idle_target_mib: self.policy.target_mib,
             current_target_mib: self.requested_target_mib,
             quiet_dwell_ms: self.policy.quiet_dwell.as_millis() as u64,
+            service_min_target_mib: self.policy.service_min_target_mib,
             ..CoreMemoryControllerMetrics::default()
         }
+    }
+
+    fn should_observe_balloon_convergence(&self, now: Instant) -> bool {
+        self.service_adjustment
+            .is_some_and(|adjustment| adjustment.needs_convergence_observation(now))
     }
 
     fn note_runtime_ready(&mut self, now: Instant, shared: &SharedBootState) {
@@ -286,6 +496,7 @@ impl CoreIdleMemoryController {
         }
         self.runtime_ready = true;
         if self.idle_target_reached() {
+            self.idle_deadline = Some(now + CORE_IDLE_SENTINEL_DWELL);
             return;
         }
         self.idle_deadline = Some(now + self.policy.quiet_dwell);
@@ -300,14 +511,27 @@ impl CoreIdleMemoryController {
 
     fn note_workload_started(
         &mut self,
+        now: Instant,
         shared: &SharedBootState,
     ) -> Option<CoreMemoryTargetTransition> {
         if !self.policy.enabled {
             return None;
         }
+        self.last_docker_transport_activity = Some(now);
+        self.docker_transport_active = true;
+        self.docker_transport_tracks_bytes = false;
+        self.classified_workload_streams_active = true;
+        self.docker_activity_generation = self.docker_activity_generation.wrapping_add(1);
         self.idle_deadline = None;
         self.idle_probe = None;
         self.idle_backing_compaction_deadline = None;
+        self.service_learning_deadline = None;
+        self.service_cooldown_deadline = None;
+        self.last_guest_snapshot = None;
+        self.service_samples.clear();
+        let capacity_transition_inflight = self.service_adjustment.is_some();
+        self.service_adjustment = None;
+        self.service_watchdog_deadline = None;
         let mut metrics = shared
             .core_memory
             .lock()
@@ -316,7 +540,8 @@ impl CoreIdleMemoryController {
         metrics.idle_probe_inflight = false;
         metrics.last_reason = Some("docker workload active".to_string());
         metrics.last_error = None;
-        if self.requested_target_mib >= self.configured_memory_mib {
+        if self.requested_target_mib >= self.configured_memory_mib && !capacity_transition_inflight
+        {
             return None;
         }
         metrics.last_reason = Some(format!(
@@ -326,7 +551,22 @@ impl CoreIdleMemoryController {
         Some(CoreMemoryTargetTransition::RestoreConfigured)
     }
 
-    fn note_workload_finished(&mut self, now: Instant, shared: &SharedBootState) {
+    fn note_workload_finished(
+        &mut self,
+        now: Instant,
+        workload_streams_still_active: bool,
+        shared: &SharedBootState,
+    ) {
+        if workload_streams_still_active {
+            self.classified_workload_streams_active = true;
+            self.docker_transport_active = true;
+            self.docker_transport_tracks_bytes = false;
+        } else {
+            self.classified_workload_streams_active = false;
+            self.docker_transport_active = false;
+            self.docker_transport_tracks_bytes = false;
+            self.last_docker_transport_activity = None;
+        }
         if !self.policy.enabled
             || !self.runtime_ready
             || self.requested_target_mib <= self.policy.target_mib
@@ -351,8 +591,6 @@ impl CoreIdleMemoryController {
         if !self.policy.enabled {
             return None;
         }
-        self.last_docker_transport_activity = Some(now);
-        self.docker_transport_active = true;
         {
             let mut metrics = shared
                 .core_memory
@@ -360,11 +598,53 @@ impl CoreIdleMemoryController {
                 .expect("core memory controller mutex poisoned");
             metrics.transport_activity_events = metrics.transport_activity_events.saturating_add(1);
         }
-        self.note_workload_started(shared)
+        if !self.observe_docker_transport_bytes(now) {
+            return None;
+        }
+        let mut metrics = shared
+            .core_memory
+            .lock()
+            .expect("core memory controller mutex poisoned");
+        metrics.pending_idle_probe = false;
+        if self.idle_probe.is_none() {
+            metrics.idle_probe_inflight = false;
+        }
+        None
+    }
+
+    fn observe_docker_transport_bytes(&mut self, now: Instant) -> bool {
+        if self.classified_workload_streams_active {
+            // A classified stream is authoritative until VSOCK reports that
+            // its active workload count reached zero. Byte silence is expected
+            // for interactive and long-running operations and must not demote it.
+            self.docker_transport_active = true;
+            return true;
+        }
+        // Aggregate Docker socket bytes do not identify their stream. Do not
+        // let benign ping/list/inspect/events traffic arm the quiet heuristic
+        // or indefinitely defer service convergence. Bytes may only refresh a
+        // stream that an explicit opaque-stream classifier armed beforehand.
+        if !self.docker_transport_active || !self.docker_transport_tracks_bytes {
+            return false;
+        }
+        self.last_docker_transport_activity = Some(now);
+        self.idle_deadline = None;
+        if self
+            .idle_probe
+            .as_ref()
+            .is_some_and(|probe| probe.kind == GuestMemoryProbeKind::Idle)
+        {
+            self.idle_probe = None;
+        }
+        true
     }
 
     fn finish_docker_transport_quiet(&mut self, now: Instant) -> bool {
+        if self.classified_workload_streams_active {
+            return false;
+        }
         self.docker_transport_active = false;
+        self.docker_transport_tracks_bytes = false;
         self.last_docker_transport_activity = None;
         if !self.runtime_ready || self.requested_target_mib <= self.policy.target_mib {
             return false;
@@ -378,7 +658,9 @@ impl CoreIdleMemoryController {
     }
 
     fn poll_docker_transport_quiet(&mut self, now: Instant, shared: &SharedBootState) -> bool {
-        if !self.docker_transport_active
+        if self.classified_workload_streams_active
+            || !self.docker_transport_active
+            || !self.docker_transport_tracks_bytes
             || !self
                 .last_docker_transport_activity
                 .is_some_and(|last| now.duration_since(last) >= self.policy.quiet_dwell)
@@ -414,10 +696,250 @@ impl CoreIdleMemoryController {
         &mut self,
         now: Instant,
         memory_socket_path: &std::path::Path,
+        balloon_target_converged: Option<bool>,
         shared: &SharedBootState,
     ) -> Option<CoreMemoryTargetTransition> {
         if !self.policy.enabled || !self.runtime_ready {
             return None;
+        }
+        if self
+            .pending_restore_retry_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.pending_restore_retry_deadline = None;
+            let mut metrics = shared
+                .core_memory
+                .lock()
+                .expect("core memory controller mutex poisoned");
+            metrics.restore_retries = metrics.restore_retries.saturating_add(1);
+            metrics.last_reason = Some("retrying configured-capacity restore".to_string());
+            return Some(CoreMemoryTargetTransition::RestoreConfigured);
+        }
+        if let Some(mut adjustment) = self.service_adjustment {
+            if adjustment.target_mib < adjustment.previous_target_mib {
+                let watchdog_result = match self.idle_probe.as_ref() {
+                    Some(probe) => {
+                        match probe.try_recv_for(GuestMemoryProbeKind::ServiceWatchdog) {
+                            Some(Ok(result)) => Some(result),
+                            Some(Err(mpsc::TryRecvError::Empty)) | None => None,
+                            Some(Err(mpsc::TryRecvError::Disconnected)) => Some((
+                                self.docker_activity_generation,
+                                Err("service pressure watchdog disconnected".to_string()),
+                            )),
+                        }
+                    }
+                    None => None,
+                };
+                if let Some((probe_generation, result)) = watchdog_result {
+                    self.idle_probe = None;
+                    self.service_watchdog_deadline =
+                        Some(now + CORE_SERVICE_PRESSURE_WATCHDOG_DWELL);
+                    shared
+                        .core_memory
+                        .lock()
+                        .expect("core memory controller mutex poisoned")
+                        .idle_probe_inflight = false;
+                    if probe_generation == self.docker_activity_generation {
+                        let snapshot = match result {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                self.service_adjustment = None;
+                                self.service_watchdog_deadline = None;
+                                self.service_cooldown_deadline =
+                                    Some(now + self.policy.service_cooldown_dwell);
+                                let mut metrics = shared
+                                    .core_memory
+                                    .lock()
+                                    .expect("core memory controller mutex poisoned");
+                                metrics.service_feedback_deferrals =
+                                    metrics.service_feedback_deferrals.saturating_add(1);
+                                metrics.last_reason = Some(
+                                    "service watchdog failed; restoring configured capacity"
+                                        .to_string(),
+                                );
+                                metrics.last_error = Some(error);
+                                return Some(CoreMemoryTargetTransition::RestoreConfigured);
+                            }
+                        };
+                        let urgent_regression = adjustment.baseline.is_some_and(|baseline| {
+                            snapshot.urgent_service_regression_since(&baseline)
+                        });
+                        if !snapshot.has_live_service_telemetry()
+                            || !snapshot.service_feedback_is_safe()
+                            || urgent_regression
+                        {
+                            self.service_adjustment = None;
+                            self.service_watchdog_deadline = None;
+                            self.service_cooldown_deadline =
+                                Some(now + self.policy.service_cooldown_dwell);
+                            let mut metrics = shared
+                                .core_memory
+                                .lock()
+                                .expect("core memory controller mutex poisoned");
+                            metrics.service_feedback_deferrals =
+                                metrics.service_feedback_deferrals.saturating_add(1);
+                            metrics.service_cooldown = true;
+                            metrics.last_reason = Some(
+                                "service pressure watchdog restored configured capacity"
+                                    .to_string(),
+                            );
+                            metrics.last_error = Some(snapshot.idle_block_reason());
+                            return Some(CoreMemoryTargetTransition::RestoreConfigured);
+                        }
+                        let desired_target_mib = snapshot.desired_service_target_mib(
+                            self.requested_target_mib,
+                            self.configured_memory_mib,
+                            &self.policy,
+                            self.service_learned_headroom_mib,
+                            snapshot.protected_runtime_working_set(),
+                        );
+                        if desired_target_mib > self.requested_target_mib {
+                            self.service_adjustment = None;
+                            self.service_watchdog_deadline = None;
+                            self.service_cooldown_deadline =
+                                Some(now + self.policy.service_cooldown_dwell);
+                            let mut metrics = shared
+                                .core_memory
+                                .lock()
+                                .expect("core memory controller mutex poisoned");
+                            metrics.service_watchdog_expansions =
+                                metrics.service_watchdog_expansions.saturating_add(1);
+                            metrics.service_cooldown = true;
+                            metrics.service_desired_target_mib = desired_target_mib;
+                            metrics.last_reason = Some(format!(
+                                "service watchdog expanded capacity to {} MiB",
+                                desired_target_mib
+                            ));
+                            metrics.last_error = None;
+                            return Some(CoreMemoryTargetTransition::AdjustService(
+                                desired_target_mib,
+                            ));
+                        }
+                    }
+                }
+                if self.idle_probe.is_none()
+                    && self
+                        .service_watchdog_deadline
+                        .is_none_or(|deadline| now >= deadline)
+                {
+                    match spawn_guest_memory_probe(
+                        memory_socket_path,
+                        self.docker_activity_generation,
+                        "jetstream-service-pressure-watchdog",
+                    ) {
+                        Ok(receiver) => {
+                            self.idle_probe = Some(GuestMemoryProbe {
+                                kind: GuestMemoryProbeKind::ServiceWatchdog,
+                                receiver,
+                            });
+                            self.service_watchdog_deadline =
+                                Some(now + CORE_SERVICE_PRESSURE_WATCHDOG_DWELL);
+                            let mut metrics = shared
+                                .core_memory
+                                .lock()
+                                .expect("core memory controller mutex poisoned");
+                            metrics.idle_probe_inflight = true;
+                            metrics.service_watchdog_probes =
+                                metrics.service_watchdog_probes.saturating_add(1);
+                            metrics.last_reason = Some(
+                                "watching service pressure during capacity change".to_string(),
+                            );
+                            metrics.last_error = None;
+                            return None;
+                        }
+                        Err(error) => {
+                            self.service_adjustment = None;
+                            self.service_watchdog_deadline = None;
+                            self.service_cooldown_deadline =
+                                Some(now + self.policy.service_cooldown_dwell);
+                            let mut metrics = shared
+                                .core_memory
+                                .lock()
+                                .expect("core memory controller mutex poisoned");
+                            metrics.service_feedback_deferrals =
+                                metrics.service_feedback_deferrals.saturating_add(1);
+                            metrics.service_cooldown = true;
+                            metrics.last_reason = Some(
+                                "failed to start service watchdog; restoring capacity".to_string(),
+                            );
+                            metrics.last_error = Some(error);
+                            return Some(CoreMemoryTargetTransition::RestoreConfigured);
+                        }
+                    }
+                }
+            }
+            if adjustment.converged_at.is_none()
+                && balloon_target_converged == Some(false)
+                && now >= adjustment.convergence_deadline()
+            {
+                self.service_adjustment = None;
+                self.service_cooldown_deadline = Some(now + self.policy.service_cooldown_dwell);
+                let mut metrics = shared
+                    .core_memory
+                    .lock()
+                    .expect("core memory controller mutex poisoned");
+                metrics.pending_idle_probe = true;
+                metrics.service_cooldown = true;
+                metrics.service_feedback_deferrals =
+                    metrics.service_feedback_deferrals.saturating_add(1);
+                metrics.service_convergence_timeouts =
+                    metrics.service_convergence_timeouts.saturating_add(1);
+                metrics.last_reason = Some(format!(
+                    "capacity transition to {} MiB did not converge; restoring configured capacity",
+                    adjustment.target_mib
+                ));
+                metrics.last_error = Some("virtio-balloon convergence timed out".to_string());
+                return Some(CoreMemoryTargetTransition::RestoreConfigured);
+            }
+            match adjustment.observe(
+                now,
+                balloon_target_converged,
+                self.policy.service_stabilization_dwell,
+            ) {
+                ServiceAdjustmentReadiness::WaitingForConvergence => {
+                    self.service_adjustment = Some(adjustment);
+                    if balloon_target_converged.is_some() {
+                        let mut metrics = shared
+                            .core_memory
+                            .lock()
+                            .expect("core memory controller mutex poisoned");
+                        metrics.pending_idle_probe = true;
+                        metrics.service_convergence_waits =
+                            metrics.service_convergence_waits.saturating_add(1);
+                        metrics.last_reason = Some(format!(
+                            "waiting {}s for balloon convergence at {} MiB",
+                            now.duration_since(adjustment.applied_at).as_secs(),
+                            adjustment.target_mib
+                        ));
+                    }
+                    return None;
+                }
+                ServiceAdjustmentReadiness::Stabilizing => {
+                    self.service_adjustment = Some(adjustment);
+                    if balloon_target_converged == Some(true) {
+                        self.idle_deadline = Some(now + self.policy.service_stabilization_dwell);
+                        let mut metrics = shared
+                            .core_memory
+                            .lock()
+                            .expect("core memory controller mutex poisoned");
+                        metrics.pending_idle_probe = true;
+                        metrics.service_stabilization_waits =
+                            metrics.service_stabilization_waits.saturating_add(1);
+                        metrics.last_reason = Some(format!(
+                            "balloon converged at {} MiB; stabilizing service feedback",
+                            adjustment.target_mib
+                        ));
+                    }
+                    return None;
+                }
+                ServiceAdjustmentReadiness::Ready => {
+                    if adjustment.target_mib >= adjustment.previous_target_mib {
+                        self.service_adjustment = None;
+                    } else {
+                        self.service_adjustment = Some(adjustment);
+                    }
+                }
+            }
         }
         // A byte-moving Docker stream is authoritative activity even when an
         // opaque BuildKit session cannot be classified by its request path.
@@ -426,69 +948,316 @@ impl CoreIdleMemoryController {
         if self.docker_transport_active {
             return None;
         }
-        // A successful idle transition is terminal until another workload is
-        // observed. Without this guard the host tick would continuously spawn
-        // read-only guest probes after already reaching the idle target.
-        if self.requested_target_mib <= self.policy.target_mib {
-            let had_pending_probe = self.idle_deadline.is_some() || self.idle_probe.is_some();
-            self.idle_deadline = None;
-            self.idle_probe = None;
-            if had_pending_probe {
-                let mut metrics = shared
-                    .core_memory
-                    .lock()
-                    .expect("core memory controller mutex poisoned");
-                metrics.pending_idle_probe = false;
-                metrics.idle_probe_inflight = false;
-            }
-            return None;
-        }
         let probe_result = match self.idle_probe.as_ref() {
-            Some(receiver) => match receiver.try_recv() {
-                Ok(result) => Some(result),
-                Err(mpsc::TryRecvError::Empty) => return None,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Some(Err("guest idle probe disconnected".to_string()))
-                }
+            Some(probe) => match probe.try_recv_for(GuestMemoryProbeKind::Idle) {
+                Some(Ok(result)) => Some(result),
+                Some(Err(mpsc::TryRecvError::Empty)) => return None,
+                Some(Err(mpsc::TryRecvError::Disconnected)) => Some((
+                    self.docker_activity_generation,
+                    Err("guest memory probe disconnected".to_string()),
+                )),
+                None => None,
             },
             None => None,
         };
-        if let Some(result) = probe_result {
+        if let Some((probe_generation, result)) = probe_result {
             self.idle_probe = None;
             let mut metrics = shared
                 .core_memory
                 .lock()
                 .expect("core memory controller mutex poisoned");
             metrics.idle_probe_inflight = false;
+            if probe_generation != self.docker_activity_generation {
+                self.idle_deadline = Some(now + self.policy.service_probe_dwell);
+                metrics.pending_idle_probe = true;
+                metrics.last_reason =
+                    Some("discarded stale guest memory probe after workload activity".to_string());
+                return None;
+            }
             match result {
                 Ok(snapshot) if snapshot.allows_idle_target() => {
-                    self.idle_deadline = None;
+                    self.service_learning_deadline = None;
+                    self.service_cooldown_deadline = None;
+                    self.service_watchdog_deadline = None;
+                    self.last_guest_snapshot = None;
+                    self.service_samples.clear();
+                    self.service_adjustment = None;
+                    self.service_learned_headroom_mib = 0;
                     metrics.pending_idle_probe = false;
+                    metrics.service_learning = false;
+                    metrics.service_cooldown = false;
+                    metrics.service_desired_target_mib = self.policy.target_mib;
+                    metrics.service_learned_headroom_mib = 0;
                     metrics.last_reason = Some(format!(
                         "guest idle; reducing target to {} MiB",
                         self.policy.target_mib
                     ));
                     metrics.last_error = None;
                     if self.requested_target_mib == self.policy.target_mib {
+                        self.idle_deadline = Some(now + CORE_IDLE_SENTINEL_DWELL);
+                        metrics.last_reason =
+                            Some("idle sentinel confirmed empty services".to_string());
                         return None;
                     }
+                    self.idle_deadline = None;
                     return Some(CoreMemoryTargetTransition::ReduceToIdle);
                 }
+                Ok(snapshot) if snapshot.has_live_service_telemetry() => {
+                    metrics.service_probes = metrics.service_probes.saturating_add(1);
+                    if !snapshot.service_feedback_is_safe() {
+                        self.service_adjustment = None;
+                        self.service_cooldown_deadline =
+                            Some(now + self.policy.service_cooldown_dwell);
+                        self.idle_deadline = Some(now + self.policy.service_probe_dwell);
+                        metrics.pending_idle_probe = true;
+                        metrics.service_cooldown = true;
+                        metrics.service_feedback_deferrals =
+                            metrics.service_feedback_deferrals.saturating_add(1);
+                        metrics.last_reason =
+                            Some("hard guest pressure restored configured capacity".to_string());
+                        metrics.last_error = Some(snapshot.idle_block_reason());
+                        if self.requested_target_mib < self.configured_memory_mib {
+                            return Some(CoreMemoryTargetTransition::RestoreConfigured);
+                        }
+                        return None;
+                    }
+
+                    if let Some(adjustment) = self.service_adjustment.take() {
+                        if adjustment.target_mib < adjustment.previous_target_mib {
+                            if let Some(baseline) = adjustment.baseline {
+                                if let Some(regression) =
+                                    snapshot.service_feedback_regression(&baseline, adjustment)
+                                {
+                                    self.service_cooldown_deadline =
+                                        Some(now + self.policy.service_cooldown_dwell);
+                                    self.idle_deadline =
+                                        Some(now + self.policy.service_probe_dwell);
+                                    metrics.pending_idle_probe = true;
+                                    metrics.service_cooldown = true;
+                                    metrics.service_feedback_deferrals =
+                                        metrics.service_feedback_deferrals.saturating_add(1);
+                                    metrics.service_refault_bytes = metrics
+                                        .service_refault_bytes
+                                        .saturating_add(regression.refault_bytes);
+                                    metrics.last_error = Some(regression.reason.clone());
+                                    match regression.kind {
+                                        ServiceFeedbackRegressionKind::HardPressure => {
+                                            metrics.last_reason = Some(
+                                                "service feedback restored configured capacity"
+                                                    .to_string(),
+                                            );
+                                            return Some(
+                                                CoreMemoryTargetTransition::RestoreConfigured,
+                                            );
+                                        }
+                                        ServiceFeedbackRegressionKind::GenerationChanged => {
+                                            self.service_samples.clear();
+                                            self.last_guest_snapshot = None;
+                                            self.service_learning_deadline = None;
+                                            self.service_learned_headroom_mib = 0;
+                                            metrics.service_generation_resets =
+                                                metrics.service_generation_resets.saturating_add(1);
+                                            metrics.service_learned_headroom_mib = 0;
+                                            metrics.service_learning = true;
+                                            metrics.last_reason = Some(
+                                                "service generation changed; relearning at configured capacity"
+                                                    .to_string(),
+                                            );
+                                            return Some(
+                                                CoreMemoryTargetTransition::RestoreConfigured,
+                                            );
+                                        }
+                                        ServiceFeedbackRegressionKind::Refault => {
+                                            let learned_mib = round_up_mib(
+                                                regression
+                                                    .refault_bytes
+                                                    .saturating_add(1024 * 1024 - 1)
+                                                    / 1024
+                                                    / 1024,
+                                                CORE_SERVICE_TARGET_QUANTUM_MIB,
+                                            )
+                                            .clamp(CORE_SERVICE_TARGET_QUANTUM_MIB, 512);
+                                            self.service_learned_headroom_mib = self
+                                                .service_learned_headroom_mib
+                                                .saturating_add(learned_mib)
+                                                .min(
+                                                    CORE_SERVICE_MAX_LEARNED_HEADROOM_MIB.min(
+                                                        (self.configured_memory_mib / 4)
+                                                            .max(CORE_SERVICE_TARGET_QUANTUM_MIB),
+                                                    ),
+                                                );
+                                            metrics.service_learned_headroom_mib =
+                                                self.service_learned_headroom_mib;
+                                            metrics.last_reason = Some(
+                                                "service refault guard restored prior capacity"
+                                                    .to_string(),
+                                            );
+                                        }
+                                        ServiceFeedbackRegressionKind::MajorFault => {
+                                            metrics.last_reason = Some(
+                                                "major-fault guard restored prior capacity without changing learned headroom"
+                                                    .to_string(),
+                                            );
+                                        }
+                                    }
+                                    let recovery_target = adjustment.previous_target_mib.max(
+                                        snapshot.desired_service_target_mib(
+                                            self.requested_target_mib,
+                                            self.configured_memory_mib,
+                                            &self.policy,
+                                            self.service_learned_headroom_mib,
+                                            snapshot.protected_runtime_working_set(),
+                                        ),
+                                    );
+                                    metrics.service_desired_target_mib = recovery_target;
+                                    return Some(CoreMemoryTargetTransition::AdjustService(
+                                        recovery_target,
+                                    ));
+                                }
+                            }
+                            metrics.service_feedback_passes =
+                                metrics.service_feedback_passes.saturating_add(1);
+                        }
+                    }
+
+                    let membership_changed = self.last_guest_snapshot.is_some_and(|previous| {
+                        previous.service_cgroup_cgroup_id != snapshot.service_cgroup_cgroup_id
+                            || previous.active_workloads != snapshot.active_workloads
+                    });
+                    if membership_changed {
+                        self.service_samples.clear();
+                        self.service_learned_headroom_mib = 0;
+                        self.service_learning_deadline =
+                            Some(now + self.policy.service_learning_dwell);
+                        metrics.service_generation_resets =
+                            metrics.service_generation_resets.saturating_add(1);
+                        metrics.service_learned_headroom_mib = 0;
+                        metrics.service_learning = true;
+                    }
+                    self.last_guest_snapshot = Some(snapshot);
+                    if self.service_samples.len() == CORE_SERVICE_SAMPLE_WINDOW {
+                        self.service_samples.pop_front();
+                    }
+                    self.service_samples.push_back(snapshot);
+
+                    let observed_working_set = self
+                        .service_samples
+                        .iter()
+                        .map(GuestMemorySnapshot::protected_runtime_working_set)
+                        .max()
+                        .unwrap_or_else(|| snapshot.protected_runtime_working_set());
+                    let desired_target_mib = snapshot.desired_service_target_mib(
+                        self.requested_target_mib,
+                        self.configured_memory_mib,
+                        &self.policy,
+                        self.service_learned_headroom_mib,
+                        observed_working_set,
+                    );
+                    metrics.service_desired_target_mib = desired_target_mib;
+                    metrics.service_learned_headroom_mib = self.service_learned_headroom_mib;
+                    if desired_target_mib > self.requested_target_mib {
+                        self.idle_deadline = Some(now + self.policy.service_probe_dwell);
+                        metrics.pending_idle_probe = true;
+                        metrics.last_reason = Some(format!(
+                            "live-service working set needs {} MiB",
+                            desired_target_mib
+                        ));
+                        metrics.last_error = None;
+                        return Some(CoreMemoryTargetTransition::AdjustService(
+                            desired_target_mib,
+                        ));
+                    }
+
+                    match self.service_learning_deadline {
+                        None => {
+                            self.service_learning_deadline =
+                                Some(now + self.policy.service_learning_dwell);
+                            self.idle_deadline = Some(now + self.policy.service_probe_dwell);
+                            metrics.pending_idle_probe = true;
+                            metrics.service_learning = true;
+                            metrics.service_cooldown = false;
+                            metrics.last_reason = Some(
+                                "live services detected; learning working set before shrink"
+                                    .to_string(),
+                            );
+                            metrics.last_error = None;
+                            return None;
+                        }
+                        Some(deadline) if now < deadline => {
+                            self.idle_deadline = Some(now + self.policy.service_probe_dwell);
+                            metrics.pending_idle_probe = true;
+                            metrics.service_learning = true;
+                            metrics.last_reason =
+                                Some("learning live-service working set".to_string());
+                            metrics.last_error = None;
+                            return None;
+                        }
+                        Some(_) => {
+                            metrics.service_learning = false;
+                        }
+                    }
+
+                    let cooling_down = self
+                        .service_cooldown_deadline
+                        .is_some_and(|deadline| now < deadline);
+                    metrics.service_cooldown = cooling_down;
+                    if desired_target_mib < self.requested_target_mib && !cooling_down {
+                        let target_mib = self
+                            .requested_target_mib
+                            .saturating_sub(self.policy.service_shrink_step_mib)
+                            .max(desired_target_mib);
+                        self.idle_deadline = Some(now + self.policy.service_probe_dwell);
+                        metrics.pending_idle_probe = true;
+                        metrics.last_reason = Some(format!(
+                            "live services stable; reducing capacity toward {} MiB",
+                            desired_target_mib
+                        ));
+                        metrics.last_error = None;
+                        return Some(CoreMemoryTargetTransition::AdjustService(target_mib));
+                    }
+
+                    self.idle_deadline = Some(now + self.policy.service_probe_dwell);
+                    metrics.pending_idle_probe = true;
+                    metrics.last_reason = Some(format!(
+                        "live services stable at {} MiB capacity",
+                        self.requested_target_mib
+                    ));
+                    metrics.last_error = None;
+                    return None;
+                }
                 Ok(snapshot) => {
+                    self.service_learning_deadline = None;
+                    self.service_samples.clear();
+                    self.last_guest_snapshot = None;
+                    self.service_adjustment = None;
                     self.idle_deadline = Some(now + self.policy.retry_dwell);
                     metrics.pending_idle_probe = true;
+                    metrics.service_learning = false;
+                    metrics.service_cooldown = false;
                     metrics.idle_deferrals = metrics.idle_deferrals.saturating_add(1);
-                    metrics.last_reason =
-                        Some("guest remains active; deferred idle target".to_string());
+                    metrics.last_reason = Some(
+                        "guest telemetry incomplete; retaining safe capacity and relearning"
+                            .to_string(),
+                    );
                     metrics.last_error = Some(snapshot.idle_block_reason());
+                    if self.requested_target_mib < self.configured_memory_mib {
+                        return Some(CoreMemoryTargetTransition::RestoreConfigured);
+                    }
                     return None;
                 }
                 Err(error) => {
+                    self.service_learning_deadline = None;
+                    self.service_samples.clear();
+                    self.last_guest_snapshot = None;
+                    self.service_adjustment = None;
                     self.idle_deadline = Some(now + self.policy.retry_dwell);
                     metrics.pending_idle_probe = true;
                     metrics.idle_deferrals = metrics.idle_deferrals.saturating_add(1);
                     metrics.last_reason = Some("guest idle probe failed; retrying".to_string());
                     metrics.last_error = Some(error);
+                    if self.requested_target_mib < self.configured_memory_mib {
+                        return Some(CoreMemoryTargetTransition::RestoreConfigured);
+                    }
                     return None;
                 }
             }
@@ -497,23 +1266,31 @@ impl CoreIdleMemoryController {
             return None;
         }
         self.idle_deadline = None;
-        let socket_path = memory_socket_path.to_path_buf();
-        let (tx, rx) = mpsc::channel();
-        match std::thread::Builder::new()
-            .name("jetstream-guest-idle-probe".to_string())
-            .spawn(move || {
-                let _ = tx.send(request_guest_memory_snapshot(&socket_path));
-            }) {
-            Ok(_) => {
-                self.idle_probe = Some(rx);
+        let probe_generation = self.docker_activity_generation;
+        let idle_sentinel = self.idle_target_reached();
+        match spawn_guest_memory_probe(
+            memory_socket_path,
+            probe_generation,
+            "jetstream-guest-memory-probe",
+        ) {
+            Ok(receiver) => {
+                self.idle_probe = Some(GuestMemoryProbe {
+                    kind: GuestMemoryProbeKind::Idle,
+                    receiver,
+                });
                 let mut metrics = shared
                     .core_memory
                     .lock()
                     .expect("core memory controller mutex poisoned");
                 metrics.pending_idle_probe = true;
                 metrics.idle_probe_inflight = true;
-                metrics.idle_probes = metrics.idle_probes.saturating_add(1);
-                metrics.last_reason = Some("probing guest idle state".to_string());
+                if idle_sentinel {
+                    metrics.idle_sentinel_probes = metrics.idle_sentinel_probes.saturating_add(1);
+                    metrics.last_reason = Some("probing idle service sentinel".to_string());
+                } else {
+                    metrics.idle_probes = metrics.idle_probes.saturating_add(1);
+                    metrics.last_reason = Some("probing guest idle state".to_string());
+                }
                 metrics.last_error = None;
             }
             Err(error) => {
@@ -525,7 +1302,7 @@ impl CoreIdleMemoryController {
                 metrics.pending_idle_probe = true;
                 metrics.idle_deferrals = metrics.idle_deferrals.saturating_add(1);
                 metrics.last_reason = Some("failed to start guest idle probe".to_string());
-                metrics.last_error = Some(error.to_string());
+                metrics.last_error = Some(error);
             }
         }
         None
@@ -534,6 +1311,10 @@ impl CoreIdleMemoryController {
     fn target_mib(&self, transition: CoreMemoryTargetTransition) -> u64 {
         match transition {
             CoreMemoryTargetTransition::RestoreConfigured => self.configured_memory_mib,
+            CoreMemoryTargetTransition::AdjustService(target_mib) => target_mib.clamp(
+                self.policy.service_min_target_mib,
+                self.configured_memory_mib,
+            ),
             CoreMemoryTargetTransition::ReduceToIdle => self.policy.target_mib,
         }
     }
@@ -549,22 +1330,79 @@ impl CoreIdleMemoryController {
         shared: &SharedBootState,
     ) {
         let target_mib = self.target_mib(transition);
+        let previous_target_mib = self.requested_target_mib;
         self.requested_target_mib = target_mib;
+        // A target change supersedes the observation associated with the old
+        // target. In particular, a convergence timeout can leave an async
+        // watchdog in flight; retaining it would block the next idle probe.
+        self.idle_probe = None;
         let mut metrics = shared
             .core_memory
             .lock()
             .expect("core memory controller mutex poisoned");
         metrics.current_target_mib = target_mib;
+        metrics.idle_probe_inflight = false;
         metrics.last_error = None;
         match transition {
             CoreMemoryTargetTransition::RestoreConfigured => {
+                self.pending_restore_retry_deadline = None;
+                self.service_watchdog_deadline = None;
+                self.service_adjustment = Some(ServiceCapacityAdjustment {
+                    previous_target_mib,
+                    target_mib,
+                    baseline: None,
+                    applied_at: now,
+                    next_convergence_observation_at: now,
+                    converged_at: None,
+                });
                 metrics.workload_expansions = metrics.workload_expansions.saturating_add(1);
                 metrics.last_reason = Some(format!(
-                    "docker transport active; restored {} MiB",
+                    "workload or pressure guard restored {} MiB",
                     self.configured_memory_mib
                 ));
             }
+            CoreMemoryTargetTransition::AdjustService(_) => {
+                metrics.pending_idle_probe = true;
+                if target_mib < previous_target_mib {
+                    self.service_watchdog_deadline =
+                        Some(now + CORE_SERVICE_PRESSURE_WATCHDOG_DWELL);
+                    self.service_adjustment = Some(ServiceCapacityAdjustment {
+                        previous_target_mib,
+                        target_mib,
+                        baseline: self.last_guest_snapshot,
+                        applied_at: now,
+                        next_convergence_observation_at: now,
+                        converged_at: None,
+                    });
+                    metrics.service_shrinks = metrics.service_shrinks.saturating_add(1);
+                    metrics.last_reason = Some(format!(
+                        "live-service capacity reduced to {} MiB with feedback guard",
+                        target_mib
+                    ));
+                } else if target_mib > previous_target_mib {
+                    self.service_watchdog_deadline = None;
+                    self.service_adjustment = Some(ServiceCapacityAdjustment {
+                        previous_target_mib,
+                        target_mib,
+                        baseline: None,
+                        applied_at: now,
+                        next_convergence_observation_at: now,
+                        converged_at: None,
+                    });
+                    metrics.service_expansions = metrics.service_expansions.saturating_add(1);
+                    metrics.last_reason = Some(format!(
+                        "live-service capacity expanded to {} MiB",
+                        target_mib
+                    ));
+                } else {
+                    self.service_adjustment = None;
+                    self.service_watchdog_deadline = None;
+                }
+            }
             CoreMemoryTargetTransition::ReduceToIdle => {
+                self.service_adjustment = None;
+                self.service_watchdog_deadline = None;
+                self.idle_deadline = Some(now + CORE_IDLE_SENTINEL_DWELL);
                 metrics.pending_idle_probe = false;
                 metrics.idle_shrinks = metrics.idle_shrinks.saturating_add(1);
                 metrics.last_reason = Some(format!(
@@ -653,22 +1491,38 @@ impl CoreIdleMemoryController {
         error: String,
         shared: &SharedBootState,
     ) {
-        if transition == CoreMemoryTargetTransition::ReduceToIdle {
-            self.idle_deadline = Some(now + self.policy.retry_dwell);
+        self.idle_probe = None;
+        match transition {
+            CoreMemoryTargetTransition::ReduceToIdle => {
+                self.idle_deadline = Some(now + self.policy.retry_dwell);
+            }
+            CoreMemoryTargetTransition::AdjustService(_) => {
+                self.idle_deadline = Some(now + self.policy.service_probe_dwell);
+                self.service_adjustment = None;
+                self.service_watchdog_deadline = None;
+            }
+            CoreMemoryTargetTransition::RestoreConfigured => {
+                self.pending_restore_retry_deadline = Some(now + CORE_RESTORE_RETRY_DWELL);
+                self.service_adjustment = None;
+                self.service_watchdog_deadline = None;
+            }
         }
         let mut metrics = shared
             .core_memory
             .lock()
             .expect("core memory controller mutex poisoned");
-        if transition == CoreMemoryTargetTransition::ReduceToIdle {
-            metrics.pending_idle_probe = true;
-            metrics.idle_deferrals = metrics.idle_deferrals.saturating_add(1);
+        metrics.idle_probe_inflight = false;
+        metrics.pending_idle_probe = true;
+        metrics.idle_deferrals = metrics.idle_deferrals.saturating_add(1);
+        if transition == CoreMemoryTargetTransition::RestoreConfigured {
+            metrics.last_reason =
+                Some("configured-capacity restore failed; retry armed".to_string());
         }
         metrics.last_error = Some(error);
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
 struct GuestMemorySnapshot {
     #[serde(default)]
     active_workloads: u64,
@@ -677,53 +1531,403 @@ struct GuestMemorySnapshot {
     #[serde(default)]
     container_memory_current: u64,
     #[serde(default)]
+    mem_available: u64,
+    #[serde(default)]
+    mem_available_known: bool,
+    #[serde(default = "default_guest_page_size_bytes")]
+    page_size_bytes: u64,
+    #[serde(default)]
+    daemon_cgroup_working_set: u64,
+    #[serde(default)]
     service_cgroup_memory_current: u64,
     #[serde(default)]
     service_cgroup_working_set: u64,
+    #[serde(default)]
+    service_cgroup_anon: u64,
+    #[serde(default)]
+    service_cgroup_shmem: u64,
+    #[serde(default)]
+    service_cgroup_sock: u64,
+    #[serde(default)]
+    service_cgroup_file_mapped: u64,
+    #[serde(default)]
+    service_cgroup_slab_unreclaimable: u64,
     #[serde(default)]
     service_cgroup_populated: bool,
     #[serde(default)]
     service_cgroup_population_known: bool,
     #[serde(default)]
+    service_cgroup_telemetry_complete: bool,
+    #[serde(default)]
+    service_cgroup_cgroup_id: u64,
+    #[serde(default)]
+    service_cgroup_file_dirty: u64,
+    #[serde(default)]
+    service_cgroup_file_writeback: u64,
+    #[serde(default)]
+    service_cgroup_workingset_refault_file: u64,
+    #[serde(default)]
+    service_cgroup_pgmajfault: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_high: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_max: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_oom: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_oom_kill: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_oom_group_kill: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_local_high: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_local_max: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_local_oom: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_local_oom_kill: u64,
+    #[serde(default)]
+    service_cgroup_memory_events_local_oom_group_kill: u64,
+    #[serde(default)]
+    service_cgroup_psi_some_avg10: f64,
+    #[serde(default)]
+    service_cgroup_psi_full_avg10: f64,
+    #[serde(default)]
     disk_swap_used: u64,
     #[serde(default)]
+    swap_total: u64,
+    #[serde(default)]
+    swap_free: u64,
+    #[serde(default)]
+    swap_telemetry_complete: bool,
+    #[serde(default)]
+    container_swap_current: u64,
+    #[serde(default)]
+    disk_swap_total: u64,
+    #[serde(default)]
+    disk_swap_free: u64,
+    #[serde(default)]
+    disk_swap_telemetry_complete: bool,
+    #[serde(default)]
+    psi_some_avg10: f64,
+    #[serde(default)]
     psi_full_avg10: f64,
+    #[serde(default)]
+    global_psi_telemetry_complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceFeedbackRegressionKind {
+    HardPressure,
+    GenerationChanged,
+    Refault,
+    MajorFault,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceFeedbackRegression {
+    kind: ServiceFeedbackRegressionKind,
+    reason: String,
+    refault_bytes: u64,
 }
 
 impl GuestMemorySnapshot {
+    fn observed_disk_swap_used(&self) -> u64 {
+        self.disk_swap_used
+            .max(self.disk_swap_total.saturating_sub(self.disk_swap_free))
+    }
+
+    fn observed_total_swap_used(&self) -> u64 {
+        self.swap_total.saturating_sub(self.swap_free)
+    }
+
+    fn global_control_telemetry_complete(&self) -> bool {
+        self.mem_available_known
+            && self.swap_telemetry_complete
+            && self.disk_swap_telemetry_complete
+            && self.global_psi_telemetry_complete
+    }
+
+    fn hard_pressure_regressed_since(&self, baseline: &Self) -> bool {
+        self.service_cgroup_memory_events_high > baseline.service_cgroup_memory_events_high
+            || self.service_cgroup_memory_events_max > baseline.service_cgroup_memory_events_max
+            || self.service_cgroup_memory_events_oom > baseline.service_cgroup_memory_events_oom
+            || self.service_cgroup_memory_events_oom_kill
+                > baseline.service_cgroup_memory_events_oom_kill
+            || self.service_cgroup_memory_events_oom_group_kill
+                > baseline.service_cgroup_memory_events_oom_group_kill
+            || self.service_cgroup_memory_events_local_high
+                > baseline.service_cgroup_memory_events_local_high
+            || self.service_cgroup_memory_events_local_max
+                > baseline.service_cgroup_memory_events_local_max
+            || self.service_cgroup_memory_events_local_oom
+                > baseline.service_cgroup_memory_events_local_oom
+            || self.service_cgroup_memory_events_local_oom_kill
+                > baseline.service_cgroup_memory_events_local_oom_kill
+            || self.service_cgroup_memory_events_local_oom_group_kill
+                > baseline.service_cgroup_memory_events_local_oom_group_kill
+            || (self.container_swap_current > CORE_CONTAINER_ZRAM_SWAP_BUDGET_BYTES
+                && self.container_swap_current > baseline.container_swap_current)
+            || self.observed_disk_swap_used() > baseline.observed_disk_swap_used()
+            || (self.observed_total_swap_used() > CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES
+                && self.observed_total_swap_used() > baseline.observed_total_swap_used())
+    }
+
+    fn service_event_counters_reset_since(&self, baseline: &Self) -> bool {
+        self.service_cgroup_memory_events_high < baseline.service_cgroup_memory_events_high
+            || self.service_cgroup_memory_events_max < baseline.service_cgroup_memory_events_max
+            || self.service_cgroup_memory_events_oom < baseline.service_cgroup_memory_events_oom
+            || self.service_cgroup_memory_events_oom_kill
+                < baseline.service_cgroup_memory_events_oom_kill
+            || self.service_cgroup_memory_events_oom_group_kill
+                < baseline.service_cgroup_memory_events_oom_group_kill
+            || self.service_cgroup_memory_events_local_high
+                < baseline.service_cgroup_memory_events_local_high
+            || self.service_cgroup_memory_events_local_max
+                < baseline.service_cgroup_memory_events_local_max
+            || self.service_cgroup_memory_events_local_oom
+                < baseline.service_cgroup_memory_events_local_oom
+            || self.service_cgroup_memory_events_local_oom_kill
+                < baseline.service_cgroup_memory_events_local_oom_kill
+            || self.service_cgroup_memory_events_local_oom_group_kill
+                < baseline.service_cgroup_memory_events_local_oom_group_kill
+    }
+
+    fn urgent_service_regression_since(&self, baseline: &Self) -> bool {
+        self.service_cgroup_cgroup_id != baseline.service_cgroup_cgroup_id
+            || self.service_cgroup_pgmajfault < baseline.service_cgroup_pgmajfault
+            || self.service_cgroup_workingset_refault_file
+                < baseline.service_cgroup_workingset_refault_file
+            || self.service_event_counters_reset_since(baseline)
+            || self.hard_pressure_regressed_since(baseline)
+            || self.service_cgroup_pgmajfault > baseline.service_cgroup_pgmajfault
+    }
+
+    fn stopped_service_pinned_bytes(&self) -> u64 {
+        self.service_cgroup_anon
+            .saturating_add(self.service_cgroup_shmem)
+            .saturating_add(self.service_cgroup_sock)
+            .saturating_add(self.service_cgroup_file_mapped)
+            .saturating_add(self.service_cgroup_file_dirty)
+            .saturating_add(self.service_cgroup_file_writeback)
+            .saturating_add(self.service_cgroup_slab_unreclaimable)
+    }
+
     fn service_memory_for_idle_gate(&self) -> u64 {
         if self.service_cgroup_population_known && !self.service_cgroup_populated {
-            return self.service_cgroup_working_set;
+            return self.stopped_service_pinned_bytes();
         }
         self.service_cgroup_memory_current
     }
 
     fn allows_idle_target(&self) -> bool {
-        !self.build_workload_detected
+        // The aggregate workload count includes the resident container runtime daemon.
+        // Service population and measured cgroup bytes are the ownership authority.
+        self.global_control_telemetry_complete()
+            && !self.build_workload_detected
+            && self.service_cgroup_population_known
+            && !self.service_cgroup_populated
             && self.container_memory_current < CORE_IDLE_WORKLOAD_NOISE_BYTES
             && self.service_memory_for_idle_gate() < CORE_IDLE_WORKLOAD_NOISE_BYTES
-            && self.disk_swap_used == 0
-            && self.psi_full_avg10 <= 0.05
+            && self.observed_disk_swap_used() == 0
+            && self.observed_total_swap_used() <= CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES
+            && self.container_swap_current <= CORE_CONTAINER_ZRAM_SWAP_BUDGET_BYTES
+            && self.psi_some_avg10 <= CORE_SERVICE_PSI_SOME_LIMIT
+            && self.psi_full_avg10 <= CORE_SERVICE_PSI_FULL_LIMIT
+    }
+
+    fn has_live_service_telemetry(&self) -> bool {
+        self.global_control_telemetry_complete()
+            && !self.build_workload_detected
+            && self.service_cgroup_telemetry_complete
+            && self.service_cgroup_population_known
+            && self.service_cgroup_populated
+            && self.service_cgroup_cgroup_id != 0
+    }
+
+    fn service_feedback_is_safe(&self) -> bool {
+        self.global_control_telemetry_complete()
+            && self.observed_disk_swap_used() == 0
+            && self.observed_total_swap_used() <= CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES
+            && self.container_swap_current <= CORE_CONTAINER_ZRAM_SWAP_BUDGET_BYTES
+            && self.psi_some_avg10 <= CORE_SERVICE_GLOBAL_PSI_SOME_LIMIT
+            && self.psi_full_avg10 <= CORE_SERVICE_GLOBAL_PSI_FULL_LIMIT
+            && self.service_cgroup_psi_some_avg10 <= CORE_SERVICE_PSI_SOME_LIMIT
+            && self.service_cgroup_psi_full_avg10 <= CORE_SERVICE_PSI_FULL_LIMIT
+    }
+
+    fn protected_runtime_working_set(&self) -> u64 {
+        let dirty_writeback = self
+            .service_cgroup_file_dirty
+            .saturating_add(self.service_cgroup_file_writeback);
+        let service_working_set = self
+            .service_cgroup_working_set
+            .saturating_add(dirty_writeback)
+            .min(self.service_cgroup_memory_current);
+        service_working_set.saturating_add(self.daemon_cgroup_working_set)
+    }
+
+    fn desired_service_target_mib(
+        &self,
+        current_target_mib: u64,
+        configured_memory_mib: u64,
+        policy: &CoreMemoryPolicy,
+        learned_headroom_mib: u64,
+        observed_working_set: u64,
+    ) -> u64 {
+        let runtime_working_set = self
+            .protected_runtime_working_set()
+            .max(observed_working_set);
+        let proportional_headroom = runtime_working_set / 2;
+        let fixed_headroom = policy.service_headroom_mib.saturating_mul(MIB_BYTES);
+        let learned_headroom = learned_headroom_mib.saturating_mul(MIB_BYTES);
+        let desired_bytes = policy
+            .target_mib
+            .saturating_mul(MIB_BYTES)
+            .saturating_add(runtime_working_set)
+            .saturating_add(proportional_headroom.max(fixed_headroom))
+            .saturating_add(learned_headroom);
+        let desired_mib = desired_bytes.saturating_add(MIB_BYTES - 1) / MIB_BYTES;
+        let desired_mib = round_up_mib(desired_mib, CORE_SERVICE_TARGET_QUANTUM_MIB)
+            .clamp(policy.service_min_target_mib, configured_memory_mib);
+
+        // Never ask Linux to surrender its final safety reserve merely because
+        // its current working-set estimate is small. MemAvailable reflects the
+        // guest's own reclaim model and keeps each step inside already-spare
+        // capacity whenever possible.
+        let safely_available_mib =
+            (self.mem_available / MIB_BYTES).saturating_sub(CORE_SERVICE_AVAILABLE_RESERVE_MIB);
+        let availability_floor = round_up_mib(
+            current_target_mib.saturating_sub(safely_available_mib),
+            CORE_SERVICE_TARGET_QUANTUM_MIB,
+        );
+        let reserve_deficit_mib = CORE_SERVICE_AVAILABLE_RESERVE_MIB
+            .saturating_sub(self.mem_available.saturating_add(MIB_BYTES - 1) / MIB_BYTES);
+        let reserve_replenishment_target = if reserve_deficit_mib == 0 {
+            0
+        } else {
+            current_target_mib.saturating_add(round_up_mib(
+                reserve_deficit_mib,
+                CORE_SERVICE_TARGET_QUANTUM_MIB,
+            ))
+        };
+        desired_mib
+            .max(availability_floor)
+            .max(reserve_replenishment_target)
+            .min(configured_memory_mib)
+    }
+
+    fn service_feedback_regression(
+        &self,
+        baseline: &Self,
+        adjustment: ServiceCapacityAdjustment,
+    ) -> Option<ServiceFeedbackRegression> {
+        if self.service_cgroup_cgroup_id != baseline.service_cgroup_cgroup_id
+            || self.service_cgroup_workingset_refault_file
+                < baseline.service_cgroup_workingset_refault_file
+            || self.service_cgroup_pgmajfault < baseline.service_cgroup_pgmajfault
+            || self.service_event_counters_reset_since(baseline)
+        {
+            return Some(ServiceFeedbackRegression {
+                kind: ServiceFeedbackRegressionKind::GenerationChanged,
+                reason: "service cgroup generation or counters changed".to_string(),
+                refault_bytes: 0,
+            });
+        }
+        if self.hard_pressure_regressed_since(baseline) {
+            return Some(ServiceFeedbackRegression {
+                kind: ServiceFeedbackRegressionKind::HardPressure,
+                reason: "memory high/max/OOM or swap growth followed service shrink".to_string(),
+                refault_bytes: 0,
+            });
+        }
+        if self.service_cgroup_pgmajfault > baseline.service_cgroup_pgmajfault {
+            return Some(ServiceFeedbackRegression {
+                kind: ServiceFeedbackRegressionKind::MajorFault,
+                reason: "major fault followed service shrink".to_string(),
+                refault_bytes: 0,
+            });
+        }
+        let refault_pages = self
+            .service_cgroup_workingset_refault_file
+            .saturating_sub(baseline.service_cgroup_workingset_refault_file);
+        let refault_bytes = refault_pages.saturating_mul(self.page_size_bytes.max(1));
+        let shrunk_bytes = adjustment
+            .previous_target_mib
+            .saturating_sub(adjustment.target_mib)
+            .saturating_mul(MIB_BYTES);
+        let refault_limit = CORE_SERVICE_REFAULT_MIN_BYTES
+            .max(shrunk_bytes / CORE_SERVICE_REFAULT_RATIO_DENOMINATOR);
+        if refault_bytes >= refault_limit {
+            return Some(ServiceFeedbackRegression {
+                kind: ServiceFeedbackRegressionKind::Refault,
+                reason: format!(
+                    "service refaulted {} MiB after capacity shrink",
+                    refault_bytes / 1024 / 1024
+                ),
+                refault_bytes,
+            });
+        }
+        None
     }
 
     fn idle_block_reason(&self) -> String {
         format!(
-            "active_workloads={} build={} containers={} services={} service_working_set={} service_populated={} service_population_known={} disk_swap={} psi_full={:.2}",
+            "active_workloads={} build={} containers={} services={} service_working_set={} stopped_service_pinned={} service_populated={} service_population_known={} service_telemetry_complete={} mem_available_known={} swap_telemetry_complete={} disk_swap_telemetry_complete={} global_psi_telemetry_complete={} total_swap={} disk_swap={} container_swap={} psi_some={:.2} psi_full={:.2}",
             self.active_workloads,
             self.build_workload_detected,
             self.container_memory_current,
             self.service_cgroup_memory_current,
             self.service_cgroup_working_set,
+            self.stopped_service_pinned_bytes(),
             self.service_cgroup_populated,
             self.service_cgroup_population_known,
-            self.disk_swap_used,
+            self.service_cgroup_telemetry_complete,
+            self.mem_available_known,
+            self.swap_telemetry_complete,
+            self.disk_swap_telemetry_complete,
+            self.global_psi_telemetry_complete,
+            self.observed_total_swap_used(),
+            self.observed_disk_swap_used(),
+            self.container_swap_current,
+            self.psi_some_avg10,
             self.psi_full_avg10
         )
     }
 }
 
+fn default_guest_page_size_bytes() -> u64 {
+    4096
+}
+
+fn round_up_mib(value: u64, quantum: u64) -> u64 {
+    if quantum == 0 {
+        return value;
+    }
+    value.saturating_add(quantum - 1) / quantum * quantum
+}
+
 fn environment_u64(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.trim().parse().ok()
+}
+
+fn spawn_guest_memory_probe(
+    socket_path: &std::path::Path,
+    probe_generation: u64,
+    thread_name: &str,
+) -> Result<mpsc::Receiver<(u64, Result<GuestMemorySnapshot, String>)>, String> {
+    let socket_path = socket_path.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name(thread_name.to_string())
+        .spawn(move || {
+            let _ = tx.send((
+                probe_generation,
+                request_guest_memory_snapshot(&socket_path),
+            ));
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(rx)
 }
 
 #[derive(Debug)]
@@ -734,6 +1938,7 @@ struct HvfGuestMemoryReclaimer {
     disable_hard_decommit: bool,
     disable_madv_free: bool,
     disable_free_reusable: bool,
+    allow_hard_decommit_fallback: Arc<AtomicBool>,
 }
 
 impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
@@ -817,7 +2022,11 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
                     }
                 }
 
-                if !self.disable_hard_decommit {
+                if should_attempt_hard_decommit_fallback(
+                    self.hard_decommit_only,
+                    self.allow_hard_decommit_fallback.load(Ordering::SeqCst),
+                    self.disable_hard_decommit,
+                ) {
                     if !guest_mapping_detached && self.vm.unmap_memory(chunk.start, size).is_ok() {
                         guest_mapping_detached = true;
                     }
@@ -958,6 +2167,14 @@ fn should_prefer_soft_reclaim(
     !hard_decommit_only
         && !disable_madv_free
         && (authority == ReclaimAuthority::ReportInFlight || disable_hard_decommit)
+}
+
+fn should_attempt_hard_decommit_fallback(
+    hard_decommit_only: bool,
+    allow_hard_decommit_fallback: bool,
+    disable_hard_decommit: bool,
+) -> bool {
+    !disable_hard_decommit && (hard_decommit_only || allow_hard_decommit_fallback)
 }
 
 fn host_reclaim_chunks(range: PageRange) -> Vec<PageRange> {
@@ -1210,6 +2427,7 @@ impl HvfBootRunner {
             }
         };
 
+        let allow_balloon_hard_decommit_fallback = Arc::new(AtomicBool::new(false));
         let memory_reclaimer: Arc<dyn GuestMemoryReclaimer> = Arc::new(HvfGuestMemoryReclaimer {
             vm: vm.clone(),
             flags: HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC,
@@ -1217,6 +2435,7 @@ impl HvfBootRunner {
             disable_hard_decommit: debug_flags::enabled("CONJET_MEM_DISABLE_HARD_DECOMMIT"),
             disable_madv_free: debug_flags::enabled("CONJET_MEM_DISABLE_MADV_FREE"),
             disable_free_reusable: debug_flags::enabled("CONJET_MEM_DISABLE_FREE_REUSABLE"),
+            allow_hard_decommit_fallback: allow_balloon_hard_decommit_fallback.clone(),
         });
         match configure_virtio_runtime(
             &self.config,
@@ -1279,8 +2498,8 @@ impl HvfBootRunner {
             .balloon_target_mib
             .unwrap_or(self.config.memory_mib)
             .min(self.config.memory_mib);
-        let core_memory_policy = CoreIdleMemoryPolicy::from_environment(self.config.memory_mib);
-        let mut core_memory_controller = CoreIdleMemoryController::new(
+        let core_memory_policy = CoreMemoryPolicy::from_environment(self.config.memory_mib);
+        let mut core_memory_controller = CoreMemoryController::new(
             core_memory_policy,
             self.config.memory_mib,
             initial_target_mib,
@@ -1295,6 +2514,7 @@ impl HvfBootRunner {
             stages: Mutex::new(Vec::new()),
             event_reclaim: Mutex::new(EventReclaimMetrics::default()),
             core_memory: Mutex::new(core_memory_metrics),
+            allow_balloon_hard_decommit_fallback,
             event_reclaim_inflight: AtomicBool::new(false),
             event_reclaim_pending: AtomicBool::new(false),
             stop_reason: Mutex::new(None),
@@ -1389,9 +2609,6 @@ impl HvfBootRunner {
             match spawn_memory_control_socket(
                 socket_path.clone(),
                 shared.clone(),
-                gic.clone(),
-                vcpu_ids.clone(),
-                self.virtio_devices.clone(),
                 self.config.memory_mib,
             ) {
                 Ok(handle) => {
@@ -1626,11 +2843,13 @@ impl HvfBootRunner {
                 docker_phase_metrics.workload_started > last_docker_workload_started_events;
             let workload_active = docker_phase_metrics.active_workload_streams > 0
                 && last_active_docker_workload_streams == 0;
+            let workload_became_inactive = docker_phase_metrics.active_workload_streams == 0
+                && last_active_docker_workload_streams > 0;
             if transport_activity || workload_started || workload_active {
-                let transition = if transport_activity {
-                    core_memory_controller.note_docker_transport_activity(now, &shared)
+                let transition = if workload_started || workload_active {
+                    core_memory_controller.note_workload_started(now, &shared)
                 } else {
-                    core_memory_controller.note_workload_started(&shared)
+                    core_memory_controller.note_docker_transport_activity(now, &shared)
                 };
                 if let Some(transition) = transition {
                     let _ = apply_core_memory_target_transition(
@@ -1666,7 +2885,13 @@ impl HvfBootRunner {
                     "docker.workloadFinished",
                     shared.clone(),
                 );
-                core_memory_controller.note_workload_finished(now, &shared);
+                core_memory_controller.note_workload_finished(
+                    now,
+                    docker_phase_metrics.active_workload_streams > 0,
+                    &shared,
+                );
+            } else if workload_became_inactive {
+                core_memory_controller.note_workload_finished(now, false, &shared);
             }
             if core_memory_controller.poll_docker_transport_quiet(now, &shared) {
                 schedule_guest_memory_reclaim(
@@ -1675,9 +2900,15 @@ impl HvfBootRunner {
                     shared.clone(),
                 );
             }
-            if let Some(transition) =
-                core_memory_controller.poll(now, &memory_reclaim_socket_path, &shared)
-            {
+            let balloon_target_converged = core_memory_controller
+                .should_observe_balloon_convergence(now)
+                .then(|| core_balloon_target_converged(&shared));
+            if let Some(transition) = core_memory_controller.poll(
+                now,
+                &memory_reclaim_socket_path,
+                balloon_target_converged,
+                &shared,
+            ) {
                 let reduced_to_idle = transition == CoreMemoryTargetTransition::ReduceToIdle;
                 let applied = apply_core_memory_target_transition(
                     &mut core_memory_controller,
@@ -2659,6 +3890,18 @@ enum MemoryControlRequest {
     SetTargetMib { target_mib: u64 },
 }
 
+fn memory_control_target_mutation_error(request: &MemoryControlRequest) -> Option<String> {
+    match request {
+        MemoryControlRequest::Metrics => None,
+        MemoryControlRequest::SetTargetBytes { target_bytes } => Some(format!(
+            "target mutation is disabled; Jetstream owns automatic memory policy (requested {target_bytes} bytes)"
+        )),
+        MemoryControlRequest::SetTargetMib { target_mib } => Some(format!(
+            "target mutation is disabled; Jetstream owns automatic memory policy (requested {target_mib} MiB)"
+        )),
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct MemoryControlResponse {
     ok: bool,
@@ -2696,9 +3939,6 @@ struct HostMemoryFootprint {
 fn spawn_memory_control_socket(
     socket_path: PathBuf,
     shared: Arc<SharedBootState>,
-    gic: Arc<Gic>,
-    vcpu_ids: Arc<Mutex<Vec<u64>>>,
-    devices: Vec<VirtioMmioDevicePlan>,
     configured_memory_mib: u64,
 ) -> Result<MemoryControlSocket, String> {
     if let Some(parent) = socket_path.parent() {
@@ -2723,14 +3963,7 @@ fn spawn_memory_control_socket(
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
-                        handle_memory_control_stream(
-                            stream,
-                            &shared,
-                            &gic,
-                            &vcpu_ids,
-                            &devices,
-                            configured_memory_mib,
-                        );
+                        handle_memory_control_stream(stream, &shared, configured_memory_mib);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(25));
@@ -2751,9 +3984,6 @@ fn spawn_memory_control_socket(
 fn handle_memory_control_stream(
     mut stream: UnixStream,
     shared: &SharedBootState,
-    gic: &Gic,
-    vcpu_ids: &Arc<Mutex<Vec<u64>>>,
-    devices: &[VirtioMmioDevicePlan],
     configured_memory_mib: u64,
 ) {
     let _ = stream.set_read_timeout(Some(MEMORY_CONTROL_READ_TIMEOUT));
@@ -2772,15 +4002,12 @@ fn handle_memory_control_stream(
                     configured_memory_mib,
                 ),
                 Ok(_) => match serde_json::from_slice::<MemoryControlRequest>(&request) {
-                    Ok(request) => handle_memory_control_request(
-                        request,
-                        shared,
-                        gic,
-                        vcpu_ids,
-                        devices,
-                        configured_memory_mib,
-                    )
-                    .unwrap_or_else(|error| memory_control_error(&error, configured_memory_mib)),
+                    Ok(request) => {
+                        handle_memory_control_request(request, shared, configured_memory_mib)
+                            .unwrap_or_else(|error| {
+                                memory_control_error(&error, configured_memory_mib)
+                            })
+                    }
                     Err(error) => memory_control_error(
                         &format!("invalid request: {error}"),
                         configured_memory_mib,
@@ -2804,32 +4031,12 @@ fn handle_memory_control_stream(
 fn handle_memory_control_request(
     request: MemoryControlRequest,
     shared: &SharedBootState,
-    gic: &Gic,
-    vcpu_ids: &Arc<Mutex<Vec<u64>>>,
-    devices: &[VirtioMmioDevicePlan],
     configured_memory_mib: u64,
 ) -> Result<MemoryControlResponse, String> {
-    match request {
-        MemoryControlRequest::Metrics => memory_control_snapshot(shared, configured_memory_mib),
-        MemoryControlRequest::SetTargetBytes { target_bytes } => {
-            set_balloon_target_bytes(shared, gic, devices, configured_memory_mib, target_bytes)?;
-            let ids = vcpu_ids.lock().expect("vCPU id mutex poisoned").clone();
-            let _ = exit_vcpus(&ids);
-            memory_control_snapshot(shared, configured_memory_mib)
-        }
-        MemoryControlRequest::SetTargetMib { target_mib } => {
-            set_balloon_target_bytes(
-                shared,
-                gic,
-                devices,
-                configured_memory_mib,
-                target_mib.saturating_mul(1024 * 1024),
-            )?;
-            let ids = vcpu_ids.lock().expect("vCPU id mutex poisoned").clone();
-            let _ = exit_vcpus(&ids);
-            memory_control_snapshot(shared, configured_memory_mib)
-        }
+    if let Some(error) = memory_control_target_mutation_error(&request) {
+        return Err(error);
     }
+    memory_control_snapshot(shared, configured_memory_mib)
 }
 
 fn set_balloon_target_bytes(
@@ -2928,7 +4135,7 @@ fn compact_idle_balloon_backing(
 }
 
 fn apply_core_memory_target_transition(
-    controller: &mut CoreIdleMemoryController,
+    controller: &mut CoreMemoryController,
     transition: CoreMemoryTargetTransition,
     now: Instant,
     shared: &SharedBootState,
@@ -2938,6 +4145,10 @@ fn apply_core_memory_target_transition(
     configured_memory_mib: u64,
 ) -> bool {
     let target_mib = controller.target_mib(transition);
+    let previous_hard_fallback = shared.allow_balloon_hard_decommit_fallback.swap(
+        transition == CoreMemoryTargetTransition::ReduceToIdle,
+        Ordering::SeqCst,
+    );
     match set_balloon_target_bytes(
         shared,
         gic,
@@ -2952,6 +4163,14 @@ fn apply_core_memory_target_transition(
             true
         }
         Err(error) => {
+            let fallback_after_error = if transition == CoreMemoryTargetTransition::ReduceToIdle {
+                previous_hard_fallback
+            } else {
+                false
+            };
+            shared
+                .allow_balloon_hard_decommit_fallback
+                .store(fallback_after_error, Ordering::SeqCst);
             controller.record_target_error(transition, now, error, shared);
             false
         }
@@ -2977,6 +4196,32 @@ fn balloon_free_page_hint_cmd_id(transport: &crate::devices::virtio::VirtioMmioD
             .try_into()
             .expect("free page hint command id field is 4 bytes"),
     )
+}
+
+fn core_balloon_target_converged(shared: &SharedBootState) -> bool {
+    let mut vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
+    refresh_balloon_transport_metrics(&mut vm_state);
+    let balloon_bases = vm_state.devices.balloon.keys().copied().collect::<Vec<_>>();
+    !balloon_bases.is_empty()
+        && balloon_bases.into_iter().all(|base| {
+            let actual_pages = vm_state
+                .devices
+                .balloon
+                .get(&base)
+                .map(|handler| handler.metrics().actual_pages);
+            let target_pages = vm_state
+                .mmio_bus
+                .virtio_mut_at(base)
+                .and_then(|transport| {
+                    transport
+                        .configuration_bytes()
+                        .get(..4)
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .map(u32::from_le_bytes)
+                })
+                .map(u64::from);
+            actual_pages.is_some() && actual_pages == target_pages
+        })
 }
 
 fn balloon_target_pages(configured_memory_mib: u64, target_bytes: u64) -> u32 {
@@ -3173,7 +4418,7 @@ fn request_guest_memory_reclaim(
     stream.write_all(request.as_bytes())?;
     let mut response = Vec::new();
     let mut buffer = [0u8; 1024];
-    while response.len() < 16 * 1024 {
+    while response.len() < MAX_GUEST_MEMORY_RESPONSE_BYTES {
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => {
@@ -3243,7 +4488,7 @@ fn request_guest_memory_snapshot(
         .map_err(|error| error.to_string())?;
     let mut response = Vec::new();
     let mut buffer = [0u8; 1024];
-    while response.len() < 16 * 1024 {
+    while response.len() < MAX_GUEST_MEMORY_RESPONSE_BYTES {
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => {
@@ -3265,6 +4510,12 @@ fn request_guest_memory_snapshot(
     }
     if response.is_empty() {
         return Err("guest memory metrics returned an empty response".to_string());
+    }
+    if !http_response_body_complete(&response) {
+        return Err(format!(
+            "guest memory metrics response was incomplete after {} bytes",
+            response.len()
+        ));
     }
     if http_response_status(&response) != Some(200) {
         return Err("guest memory metrics returned a non-200 response".to_string());
@@ -3672,6 +4923,32 @@ pub fn default_virtio_plan(config: &JetstreamConfig) -> Vec<VirtioMmioDevicePlan
 mod tests {
     use super::*;
 
+    fn test_core_memory_policy(target_mib: u64) -> CoreMemoryPolicy {
+        CoreMemoryPolicy {
+            enabled: true,
+            target_mib,
+            quiet_dwell: Duration::from_secs(8),
+            retry_dwell: Duration::from_secs(20),
+            service_min_target_mib: 2048,
+            service_learning_dwell: Duration::from_secs(30),
+            service_probe_dwell: Duration::from_secs(5),
+            service_stabilization_dwell: Duration::from_secs(10),
+            service_shrink_step_mib: 256,
+            service_headroom_mib: 512,
+            service_cooldown_dwell: Duration::from_secs(120),
+        }
+    }
+
+    fn complete_global_memory_snapshot() -> GuestMemorySnapshot {
+        GuestMemorySnapshot {
+            mem_available_known: true,
+            swap_telemetry_complete: true,
+            disk_swap_telemetry_complete: true,
+            global_psi_telemetry_complete: true,
+            ..GuestMemorySnapshot::default()
+        }
+    }
+
     #[test]
     fn balloon_target_pages_encodes_guest_target_as_ballooned_pages() {
         assert_eq!(balloon_target_pages(8192, 8192 * 1024 * 1024), 0);
@@ -3707,6 +4984,24 @@ mod tests {
             .unwrap(),
             MemoryControlRequest::SetTargetMib { target_mib: 4096 }
         ));
+    }
+
+    #[test]
+    fn memory_control_rejects_legacy_target_mutation() {
+        let metrics = MemoryControlRequest::Metrics;
+        assert!(memory_control_target_mutation_error(&metrics).is_none());
+
+        for request in [
+            MemoryControlRequest::SetTargetBytes {
+                target_bytes: 4_294_967_296,
+            },
+            MemoryControlRequest::SetTargetMib { target_mib: 4096 },
+        ] {
+            let error = memory_control_target_mutation_error(&request)
+                .expect("legacy target mutations must be rejected");
+            assert!(error.contains("target mutation is disabled"));
+            assert!(error.contains("Jetstream owns automatic memory policy"));
+        }
     }
 
     #[test]
@@ -3844,17 +5139,31 @@ mod tests {
     #[test]
     fn guest_memory_snapshot_allows_only_quiet_low_working_set_state() {
         let quiet = GuestMemorySnapshot {
-            active_workloads: 1,
+            active_workloads: 0,
             build_workload_detected: false,
             container_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
             service_cgroup_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
             service_cgroup_working_set: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
-            service_cgroup_populated: true,
+            service_cgroup_populated: false,
             service_cgroup_population_known: true,
             disk_swap_used: 0,
             psi_full_avg10: 0.05,
+            ..complete_global_memory_snapshot()
         };
         assert!(quiet.allows_idle_target());
+
+        let runtime_infrastructure_only = GuestMemorySnapshot {
+            active_workloads: 1,
+            ..quiet
+        };
+        assert!(runtime_infrastructure_only.allows_idle_target());
+
+        let lightweight_live_service = GuestMemorySnapshot {
+            active_workloads: 1,
+            service_cgroup_populated: true,
+            ..quiet
+        };
+        assert!(!lightweight_live_service.allows_idle_target());
 
         let build = GuestMemorySnapshot {
             build_workload_detected: true,
@@ -3870,18 +5179,26 @@ mod tests {
 
         let service = GuestMemorySnapshot {
             service_cgroup_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES,
+            service_cgroup_working_set: CORE_IDLE_WORKLOAD_NOISE_BYTES,
+            service_cgroup_anon: CORE_IDLE_WORKLOAD_NOISE_BYTES,
             ..quiet
         };
         assert!(!service.allows_idle_target());
 
         let stopped_service_cache = GuestMemorySnapshot {
             service_cgroup_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES * 2,
-            service_cgroup_working_set: CORE_IDLE_WORKLOAD_NOISE_BYTES - 1,
+            service_cgroup_working_set: CORE_IDLE_WORKLOAD_NOISE_BYTES * 2,
             service_cgroup_populated: false,
             service_cgroup_population_known: true,
             ..quiet
         };
         assert!(stopped_service_cache.allows_idle_target());
+
+        let stopped_service_pinned = GuestMemorySnapshot {
+            service_cgroup_anon: CORE_IDLE_WORKLOAD_NOISE_BYTES,
+            ..stopped_service_cache
+        };
+        assert!(!stopped_service_pinned.allows_idle_target());
 
         let unknown_service_population = GuestMemorySnapshot {
             service_cgroup_memory_current: CORE_IDLE_WORKLOAD_NOISE_BYTES * 2,
@@ -3898,6 +5215,49 @@ mod tests {
         };
         assert!(!swap.allows_idle_target());
 
+        let derived_swap = GuestMemorySnapshot {
+            disk_swap_total: 8192,
+            disk_swap_free: 4096,
+            swap_total: 16384,
+            swap_free: 12288,
+            ..quiet
+        };
+        assert_eq!(derived_swap.observed_disk_swap_used(), 4096);
+        assert_eq!(derived_swap.observed_total_swap_used(), 4096);
+        assert!(!derived_swap.allows_idle_target());
+
+        let bounded_control_plane_zram = GuestMemorySnapshot {
+            swap_total: CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES * 2,
+            swap_free: CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES,
+            ..quiet
+        };
+        assert!(bounded_control_plane_zram.allows_idle_target());
+
+        let excessive_control_plane_zram = GuestMemorySnapshot {
+            swap_total: CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES * 2,
+            swap_free: CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES - 1,
+            ..quiet
+        };
+        assert!(!excessive_control_plane_zram.allows_idle_target());
+
+        let bounded_container_zram = GuestMemorySnapshot {
+            container_swap_current: CORE_CONTAINER_ZRAM_SWAP_BUDGET_BYTES,
+            ..quiet
+        };
+        assert!(bounded_container_zram.allows_idle_target());
+
+        let container_swap = GuestMemorySnapshot {
+            container_swap_current: CORE_CONTAINER_ZRAM_SWAP_BUDGET_BYTES + 1,
+            ..quiet
+        };
+        assert!(!container_swap.allows_idle_target());
+
+        let reclaim_stalled = GuestMemorySnapshot {
+            psi_some_avg10: CORE_SERVICE_PSI_SOME_LIMIT + 0.01,
+            ..quiet
+        };
+        assert!(!reclaim_stalled.allows_idle_target());
+
         let stalled = GuestMemorySnapshot {
             psi_full_avg10: 0.06,
             ..quiet
@@ -3907,16 +5267,7 @@ mod tests {
 
     #[test]
     fn core_memory_controller_uses_configured_capacity_and_idle_floor() {
-        let controller = CoreIdleMemoryController::new(
-            CoreIdleMemoryPolicy {
-                enabled: true,
-                target_mib: 512,
-                quiet_dwell: Duration::from_secs(8),
-                retry_dwell: Duration::from_secs(20),
-            },
-            8192,
-            8192,
-        );
+        let controller = CoreMemoryController::new(test_core_memory_policy(512), 8192, 8192);
 
         let metrics = controller.metrics();
         assert!(metrics.enabled);
@@ -3940,16 +5291,7 @@ mod tests {
     #[test]
     fn quiet_transport_arms_guest_reclaim_settle_before_idle_probe() {
         let now = Instant::now();
-        let mut controller = CoreIdleMemoryController::new(
-            CoreIdleMemoryPolicy {
-                enabled: true,
-                target_mib: 512,
-                quiet_dwell: Duration::from_secs(8),
-                retry_dwell: Duration::from_secs(20),
-            },
-            8192,
-            8192,
-        );
+        let mut controller = CoreMemoryController::new(test_core_memory_policy(512), 8192, 8192);
         controller.runtime_ready = true;
         controller.docker_transport_active = true;
         controller.last_docker_transport_activity = Some(now);
@@ -3967,18 +5309,61 @@ mod tests {
     }
 
     #[test]
+    fn classified_workload_stream_survives_byte_silence() {
+        let now = Instant::now();
+        let mut controller = CoreMemoryController::new(test_core_memory_policy(512), 8192, 8192);
+        controller.runtime_ready = true;
+        controller.classified_workload_streams_active = true;
+        controller.docker_transport_active = true;
+        controller.docker_transport_tracks_bytes = false;
+        controller.last_docker_transport_activity = Some(now - Duration::from_secs(60));
+
+        assert!(!controller.finish_docker_transport_quiet(now));
+        assert!(controller.classified_workload_streams_active);
+        assert!(controller.docker_transport_active);
+        assert!(!controller.docker_transport_tracks_bytes);
+
+        assert!(controller.observe_docker_transport_bytes(now));
+        assert!(controller.classified_workload_streams_active);
+        assert!(controller.docker_transport_active);
+        assert!(!controller.docker_transport_tracks_bytes);
+    }
+
+    #[test]
+    fn repeated_benign_transport_bytes_do_not_arm_quiet_tracking() {
+        let now = Instant::now();
+        let mut controller = CoreMemoryController::new(test_core_memory_policy(512), 8192, 8192);
+        controller.runtime_ready = true;
+        let idle_deadline = now + Duration::from_secs(5);
+        controller.idle_deadline = Some(idle_deadline);
+
+        assert!(!controller.observe_docker_transport_bytes(now));
+        assert!(!controller.observe_docker_transport_bytes(now + Duration::from_secs(1)));
+        assert!(!controller.docker_transport_active);
+        assert!(!controller.docker_transport_tracks_bytes);
+        assert!(controller.last_docker_transport_activity.is_none());
+        assert_eq!(controller.idle_deadline, Some(idle_deadline));
+    }
+
+    #[test]
+    fn explicitly_tracked_opaque_transport_refreshes_its_quiet_deadline() {
+        let now = Instant::now();
+        let mut controller = CoreMemoryController::new(test_core_memory_policy(512), 8192, 8192);
+        controller.runtime_ready = true;
+        controller.docker_transport_active = true;
+        controller.docker_transport_tracks_bytes = true;
+        controller.last_docker_transport_activity = Some(now - Duration::from_secs(30));
+
+        assert!(controller.observe_docker_transport_bytes(now));
+        assert!(controller.docker_transport_active);
+        assert!(controller.docker_transport_tracks_bytes);
+        assert_eq!(controller.last_docker_transport_activity, Some(now));
+    }
+
+    #[test]
     fn idle_backing_compaction_waits_for_a_quiet_idle_target() {
         let now = Instant::now();
-        let mut controller = CoreIdleMemoryController::new(
-            CoreIdleMemoryPolicy {
-                enabled: true,
-                target_mib: 512,
-                quiet_dwell: Duration::from_secs(8),
-                retry_dwell: Duration::from_secs(20),
-            },
-            8192,
-            512,
-        );
+        let mut controller = CoreMemoryController::new(test_core_memory_policy(512), 8192, 512);
         controller.idle_backing_compaction_deadline = Some(now);
         controller.docker_transport_active = true;
         assert!(!controller.poll_idle_backing_compaction(now));
@@ -3992,6 +5377,411 @@ mod tests {
         assert!(!controller.poll_idle_backing_compaction(now));
         assert!(controller
             .poll_idle_backing_compaction(now + DEFAULT_CORE_IDLE_BACKING_COMPACTION_RETRY_DWELL));
+    }
+
+    #[test]
+    fn live_service_target_tracks_working_set_with_conservative_headroom() {
+        let snapshot = GuestMemorySnapshot {
+            mem_available: 6 * 1024 * 1024 * 1024,
+            daemon_cgroup_working_set: 300 * 1024 * 1024,
+            service_cgroup_memory_current: 900 * 1024 * 1024,
+            service_cgroup_working_set: 600 * 1024 * 1024,
+            service_cgroup_populated: true,
+            service_cgroup_population_known: true,
+            service_cgroup_telemetry_complete: true,
+            service_cgroup_cgroup_id: 42,
+            ..complete_global_memory_snapshot()
+        };
+        let policy = test_core_memory_policy(448);
+
+        assert!(snapshot.has_live_service_telemetry());
+        assert_eq!(
+            snapshot.desired_service_target_mib(
+                8192,
+                8192,
+                &policy,
+                0,
+                snapshot.protected_runtime_working_set(),
+            ),
+            2560
+        );
+    }
+
+    #[test]
+    fn live_service_target_never_consumes_guest_available_reserve() {
+        let snapshot = GuestMemorySnapshot {
+            mem_available: 600 * 1024 * 1024,
+            service_cgroup_memory_current: 256 * 1024 * 1024,
+            service_cgroup_working_set: 128 * 1024 * 1024,
+            service_cgroup_populated: true,
+            service_cgroup_population_known: true,
+            service_cgroup_telemetry_complete: true,
+            service_cgroup_cgroup_id: 42,
+            ..complete_global_memory_snapshot()
+        };
+        let policy = test_core_memory_policy(448);
+
+        assert_eq!(
+            snapshot.desired_service_target_mib(
+                8192,
+                8192,
+                &policy,
+                0,
+                snapshot.protected_runtime_working_set(),
+            ),
+            8192
+        );
+    }
+
+    #[test]
+    fn live_service_target_expands_to_replenish_available_reserve() {
+        let snapshot = GuestMemorySnapshot {
+            mem_available: 400 * 1024 * 1024,
+            service_cgroup_memory_current: 256 * 1024 * 1024,
+            service_cgroup_working_set: 128 * 1024 * 1024,
+            service_cgroup_populated: true,
+            service_cgroup_population_known: true,
+            service_cgroup_telemetry_complete: true,
+            service_cgroup_cgroup_id: 42,
+            ..complete_global_memory_snapshot()
+        };
+        let policy = test_core_memory_policy(448);
+
+        assert_eq!(
+            snapshot.desired_service_target_mib(
+                2048,
+                8192,
+                &policy,
+                0,
+                snapshot.protected_runtime_working_set(),
+            ),
+            2176
+        );
+    }
+
+    #[test]
+    fn missing_global_telemetry_blocks_service_capacity_reduction() {
+        let complete = GuestMemorySnapshot {
+            mem_available: 4 * 1024 * 1024 * 1024,
+            service_cgroup_memory_current: 512 * 1024 * 1024,
+            service_cgroup_working_set: 384 * 1024 * 1024,
+            service_cgroup_populated: true,
+            service_cgroup_population_known: true,
+            service_cgroup_telemetry_complete: true,
+            service_cgroup_cgroup_id: 42,
+            ..complete_global_memory_snapshot()
+        };
+        assert!(complete.global_control_telemetry_complete());
+        assert!(complete.has_live_service_telemetry());
+        assert!(complete.service_feedback_is_safe());
+
+        for (field, incomplete) in [
+            (
+                "mem_available_known",
+                GuestMemorySnapshot {
+                    mem_available_known: false,
+                    ..complete
+                },
+            ),
+            (
+                "swap_telemetry_complete",
+                GuestMemorySnapshot {
+                    swap_telemetry_complete: false,
+                    ..complete
+                },
+            ),
+            (
+                "disk_swap_telemetry_complete",
+                GuestMemorySnapshot {
+                    disk_swap_telemetry_complete: false,
+                    ..complete
+                },
+            ),
+            (
+                "global_psi_telemetry_complete",
+                GuestMemorySnapshot {
+                    global_psi_telemetry_complete: false,
+                    ..complete
+                },
+            ),
+        ] {
+            assert!(
+                !incomplete.global_control_telemetry_complete(),
+                "missing {field} must make global telemetry incomplete"
+            );
+            assert!(
+                !incomplete.has_live_service_telemetry(),
+                "missing {field} must block live-service shrink"
+            );
+            assert!(
+                !incomplete.service_feedback_is_safe(),
+                "missing {field} must fail watchdog feedback closed"
+            );
+        }
+
+        let infrastructure_psi_blip = GuestMemorySnapshot {
+            psi_some_avg10: 0.13,
+            psi_full_avg10: 0.13,
+            service_cgroup_psi_some_avg10: 0.0,
+            service_cgroup_psi_full_avg10: 0.0,
+            ..complete
+        };
+        assert!(infrastructure_psi_blip.service_feedback_is_safe());
+
+        let sustained_global_pressure = GuestMemorySnapshot {
+            psi_full_avg10: CORE_SERVICE_GLOBAL_PSI_FULL_LIMIT + 0.01,
+            ..infrastructure_psi_blip
+        };
+        assert!(!sustained_global_pressure.service_feedback_is_safe());
+
+        let service_pressure = GuestMemorySnapshot {
+            psi_full_avg10: 0.0,
+            service_cgroup_psi_full_avg10: CORE_SERVICE_PSI_FULL_LIMIT + 0.01,
+            ..infrastructure_psi_blip
+        };
+        assert!(!service_pressure.service_feedback_is_safe());
+
+        let legacy_snapshot = serde_json::from_str::<GuestMemorySnapshot>(
+            r#"{"mem_available":4294967296,"swap_total":0,"swap_free":0,"psi_some_avg10":0.0,"psi_full_avg10":0.0}"#,
+        )
+        .unwrap();
+        assert!(!legacy_snapshot.global_control_telemetry_complete());
+    }
+
+    #[test]
+    fn service_adjustment_waits_for_convergence_and_stabilization() {
+        let applied_at = Instant::now();
+        let mut adjustment = ServiceCapacityAdjustment {
+            previous_target_mib: 4096,
+            target_mib: 3840,
+            baseline: None,
+            applied_at,
+            next_convergence_observation_at: applied_at,
+            converged_at: None,
+        };
+        assert!(adjustment.needs_convergence_observation(applied_at));
+        assert_eq!(
+            adjustment.convergence_deadline(),
+            applied_at + CORE_SERVICE_SHRINK_CONVERGENCE_TIMEOUT
+        );
+        assert_eq!(
+            adjustment.observe(applied_at, Some(false), Duration::from_secs(10)),
+            ServiceAdjustmentReadiness::WaitingForConvergence
+        );
+        assert!(!adjustment.needs_convergence_observation(
+            applied_at + CORE_SERVICE_CONVERGENCE_POLL_DWELL - Duration::from_millis(1)
+        ));
+        assert!(adjustment
+            .needs_convergence_observation(applied_at + CORE_SERVICE_CONVERGENCE_POLL_DWELL));
+        let converged_at = applied_at + Duration::from_secs(30);
+        assert_eq!(
+            adjustment.observe(converged_at, Some(true), Duration::from_secs(10)),
+            ServiceAdjustmentReadiness::Stabilizing
+        );
+        assert_eq!(
+            adjustment.observe(
+                converged_at + Duration::from_secs(9),
+                None,
+                Duration::from_secs(10),
+            ),
+            ServiceAdjustmentReadiness::Stabilizing
+        );
+        assert_eq!(
+            adjustment.observe(
+                converged_at + Duration::from_secs(10),
+                None,
+                Duration::from_secs(10),
+            ),
+            ServiceAdjustmentReadiness::Ready
+        );
+
+        let same_target_restore = ServiceCapacityAdjustment {
+            previous_target_mib: 8192,
+            target_mib: 8192,
+            baseline: None,
+            applied_at,
+            next_convergence_observation_at: applied_at,
+            converged_at: None,
+        };
+        assert_eq!(
+            same_target_restore.convergence_deadline(),
+            applied_at + CORE_SERVICE_EXPANSION_CONVERGENCE_RETRY_DWELL
+        );
+
+        let deadline = adjustment.convergence_deadline();
+        adjustment.converged_at = None;
+        adjustment.next_convergence_observation_at = deadline + Duration::from_secs(60);
+        assert!(
+            adjustment.needs_convergence_observation(deadline),
+            "the convergence deadline must force one final device observation"
+        );
+    }
+
+    #[test]
+    fn service_watchdog_cannot_consume_an_idle_feedback_probe() {
+        let (tx, rx) = mpsc::channel();
+        tx.send((7, Ok(GuestMemorySnapshot::default()))).unwrap();
+        let probe = GuestMemoryProbe {
+            kind: GuestMemoryProbeKind::Idle,
+            receiver: rx,
+        };
+
+        assert!(probe
+            .try_recv_for(GuestMemoryProbeKind::ServiceWatchdog)
+            .is_none());
+        let (generation, result) = probe
+            .try_recv_for(GuestMemoryProbeKind::Idle)
+            .expect("idle probe kind should match")
+            .expect("idle result should remain queued");
+        assert_eq!(generation, 7);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn active_service_mode_disables_hard_decommit_fallback() {
+        assert!(!should_attempt_hard_decommit_fallback(false, false, false));
+        assert!(should_attempt_hard_decommit_fallback(false, true, false));
+        assert!(should_attempt_hard_decommit_fallback(true, false, false));
+        assert!(!should_attempt_hard_decommit_fallback(true, true, true));
+    }
+
+    #[test]
+    fn live_service_feedback_uses_guest_page_size_for_refault_guard() {
+        let baseline = GuestMemorySnapshot {
+            page_size_bytes: 16 * 1024,
+            service_cgroup_cgroup_id: 42,
+            service_cgroup_telemetry_complete: true,
+            service_cgroup_population_known: true,
+            service_cgroup_populated: true,
+            ..complete_global_memory_snapshot()
+        };
+        let stable = GuestMemorySnapshot {
+            service_cgroup_workingset_refault_file: 100,
+            ..baseline
+        };
+        let adjustment = ServiceCapacityAdjustment {
+            previous_target_mib: 8192,
+            target_mib: 7680,
+            baseline: Some(baseline),
+            applied_at: Instant::now(),
+            next_convergence_observation_at: Instant::now(),
+            converged_at: Some(Instant::now()),
+        };
+        assert!(stable
+            .service_feedback_regression(&baseline, adjustment)
+            .is_none());
+
+        let refaulting = GuestMemorySnapshot {
+            service_cgroup_workingset_refault_file: 700,
+            ..baseline
+        };
+        let regression = refaulting
+            .service_feedback_regression(&baseline, adjustment)
+            .expect("16 KiB refault pages should cross the feedback budget");
+        assert_eq!(regression.kind, ServiceFeedbackRegressionKind::Refault);
+        assert_eq!(regression.refault_bytes, 700 * 16 * 1024);
+    }
+
+    #[test]
+    fn live_service_feedback_observes_hierarchical_memory_events() {
+        let baseline = GuestMemorySnapshot {
+            service_cgroup_cgroup_id: 42,
+            service_cgroup_telemetry_complete: true,
+            service_cgroup_population_known: true,
+            service_cgroup_populated: true,
+            ..complete_global_memory_snapshot()
+        };
+        let pressured = GuestMemorySnapshot {
+            service_cgroup_memory_events_high: 1,
+            ..baseline
+        };
+        let now = Instant::now();
+        let adjustment = ServiceCapacityAdjustment {
+            previous_target_mib: 4096,
+            target_mib: 3840,
+            baseline: Some(baseline),
+            applied_at: now,
+            next_convergence_observation_at: now,
+            converged_at: Some(now),
+        };
+        let regression = pressured
+            .service_feedback_regression(&baseline, adjustment)
+            .expect("hierarchical memory.high event must fail the shrink");
+        assert_eq!(regression.kind, ServiceFeedbackRegressionKind::HardPressure);
+
+        let independently_pressured = GuestMemorySnapshot {
+            service_cgroup_memory_events_high: 100,
+            service_cgroup_memory_events_local_high: 1,
+            ..baseline
+        };
+        let independent_baseline = GuestMemorySnapshot {
+            service_cgroup_memory_events_high: 100,
+            ..baseline
+        };
+        let regression = independently_pressured
+            .service_feedback_regression(&independent_baseline, adjustment)
+            .expect("a local event increment must not be masked by a larger hierarchical count");
+        assert_eq!(regression.kind, ServiceFeedbackRegressionKind::HardPressure);
+        assert!(independently_pressured.urgent_service_regression_since(&independent_baseline));
+
+        let bounded_control_plane_zram = GuestMemorySnapshot {
+            swap_total: 1024 * 1024 * 1024,
+            swap_free: 1024 * 1024 * 1024 - CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES,
+            ..baseline
+        };
+        assert!(bounded_control_plane_zram.service_feedback_is_safe());
+        assert!(bounded_control_plane_zram
+            .service_feedback_regression(&baseline, adjustment)
+            .is_none());
+
+        let swapping = GuestMemorySnapshot {
+            swap_total: 1024 * 1024 * 1024,
+            swap_free: 1024 * 1024 * 1024 - CORE_CONTROL_PLANE_ZRAM_SWAP_BUDGET_BYTES - 4096,
+            ..baseline
+        };
+        let regression = swapping
+            .service_feedback_regression(&baseline, adjustment)
+            .expect("swap growth beyond the control-plane budget must fail the shrink");
+        assert_eq!(regression.kind, ServiceFeedbackRegressionKind::HardPressure);
+
+        let disk_swap_only = GuestMemorySnapshot {
+            disk_swap_used: 4096,
+            ..baseline
+        };
+        let regression = disk_swap_only
+            .service_feedback_regression(&baseline, adjustment)
+            .expect("disk swap growth must fail even without aggregate swap telemetry");
+        assert_eq!(regression.kind, ServiceFeedbackRegressionKind::HardPressure);
+
+        let bounded_container_zram = GuestMemorySnapshot {
+            container_swap_current: CORE_CONTAINER_ZRAM_SWAP_BUDGET_BYTES,
+            ..baseline
+        };
+        assert!(bounded_container_zram.service_feedback_is_safe());
+
+        let preexisting_container_swap = GuestMemorySnapshot {
+            container_swap_current: CORE_CONTAINER_ZRAM_SWAP_BUDGET_BYTES + 4096,
+            ..baseline
+        };
+        assert!(
+            !preexisting_container_swap.service_feedback_is_safe(),
+            "existing container swap must block another capacity reduction"
+        );
+    }
+
+    #[test]
+    fn live_service_transition_is_clamped_above_stopped_idle_floor() {
+        let mut controller = CoreMemoryController::new(test_core_memory_policy(448), 8192, 8192);
+        assert_eq!(
+            controller.target_mib(CoreMemoryTargetTransition::AdjustService(512)),
+            2048
+        );
+        assert_eq!(
+            controller.target_mib(CoreMemoryTargetTransition::AdjustService(4096)),
+            4096
+        );
+        controller.requested_target_mib = 2048;
+        assert!(!controller.idle_target_reached());
     }
 
     #[test]

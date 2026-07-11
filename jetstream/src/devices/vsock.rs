@@ -1726,7 +1726,67 @@ fn docker_workload_request_detected(payload: &[u8]) -> bool {
         return false;
     };
     let mut parts = request_line.split_whitespace();
-    matches!(parts.next(), Some("POST")) && parts.next().is_some_and(docker_path_is_workload)
+    let Some(method) = parts.next() else {
+        return false;
+    };
+    parts
+        .next()
+        .is_some_and(|path| docker_request_is_workload(method, path))
+}
+
+fn docker_request_is_workload(method: &str, path: &str) -> bool {
+    if method == "GET" {
+        return docker_path_is_bulk_read(path);
+    }
+    if method == "POST" && docker_path_is_workload(path) {
+        return true;
+    }
+    match method {
+        "PUT" | "PATCH" => true,
+        "POST" => !docker_path_is_control_or_release(path),
+        _ => false,
+    }
+}
+
+fn docker_path_is_bulk_read(path: &str) -> bool {
+    let path_only = path.split_once('?').map_or(path, |(path, _)| path);
+    let components = path_only
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    matches!(
+        components.as_slice(),
+        ["images", "get"]
+            | ["containers", _, "export" | "archive"]
+            | [_, "images", "get"]
+            | [_, "containers", _, "export" | "archive"]
+    )
+}
+
+fn docker_path_is_control_or_release(path: &str) -> bool {
+    let path_only = path.split_once('?').map_or(path, |(path, _)| path);
+    let components = path_only
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    matches!(
+        components.as_slice(),
+        ["auth" | "grpc" | "session"]
+            | [_, "auth" | "grpc" | "session"]
+            | [
+                "containers",
+                _,
+                "stop" | "kill" | "pause" | "wait" | "attach" | "resize"
+            ]
+            | [
+                _,
+                "containers",
+                _,
+                "stop" | "kill" | "pause" | "wait" | "attach" | "resize"
+            ]
+            | ["exec", _, "resize"]
+            | [_, "exec", _, "resize"]
+    )
 }
 
 fn docker_path_is_workload(path: &str) -> bool {
@@ -1736,8 +1796,22 @@ fn docker_path_is_workload(path: &str) -> bool {
         .filter(|component| !component.is_empty())
         .collect::<Vec<_>>();
     match components.as_slice() {
-        ["build"] | ["images", "create"] => true,
-        [version, "build"] | [version, "images", "create"] => version.starts_with('v'),
+        ["build"]
+        | ["images", "create"]
+        | ["images", "load"]
+        | ["containers", "create"]
+        | ["containers", _, "start"]
+        | ["containers", _, "restart"]
+        | ["containers", _, "unpause"]
+        | ["exec", _, "start"] => true,
+        [version, "build"]
+        | [version, "images", "create"]
+        | [version, "images", "load"]
+        | [version, "containers", "create"]
+        | [version, "containers", _, "start"]
+        | [version, "containers", _, "restart"]
+        | [version, "containers", _, "unpause"]
+        | [version, "exec", _, "start"] => version.starts_with('v'),
         _ => false,
     }
 }
@@ -2340,6 +2414,82 @@ mod tests {
 
         assert_eq!(bridge.active_docker_workload_streams(), 1);
         assert_eq!(bridge.docker_workload_started_events(), 1);
+    }
+
+    #[test]
+    fn capacity_workload_paths_cover_image_load_and_service_start() {
+        for path in [
+            "/build",
+            "/v1.52/images/create?fromImage=alpine",
+            "/v1.52/images/load?quiet=1",
+            "/v1.52/containers/create?name=api",
+            "/v1.52/containers/abc/start",
+            "/v1.52/containers/abc/restart",
+            "/v1.52/containers/abc/unpause",
+            "/v1.52/exec/abc/start",
+        ] {
+            assert!(
+                docker_path_is_workload(path),
+                "expected workload path: {path}"
+            );
+        }
+        for (method, path) in [
+            ("PUT", "/v1.52/containers/abc/archive?path=/tmp"),
+            ("POST", "/v1.52/commit?container=abc"),
+            ("POST", "/v1.52/images/example/push"),
+            ("POST", "/v1.52/plugins/pull?remote=example"),
+            ("GET", "/images/get?names=example"),
+            ("GET", "/v1.52/images/get?names=example"),
+            ("GET", "/v1.52/containers/abc/export"),
+            ("GET", "/v1.52/containers/abc/archive?path=/tmp"),
+        ] {
+            assert!(
+                docker_request_is_workload(method, path),
+                "expected mutating workload request: {method} {path}"
+            );
+        }
+        for path in [
+            "/v1.52/containers/abc/stop",
+            "/v1.52/containers/abc/kill",
+            "/v1.52/containers/abc/pause",
+            "/v1.52/containers/abc/wait",
+            "/v1.52/containers/abc/attach?stream=1",
+            "/v1.52/containers/abc/resize?h=40&w=120",
+            "/v1.52/exec/abc/resize?h=40&w=120",
+            "/v1.52/session",
+            "/v1.52/auth",
+            "/grpc",
+        ] {
+            assert!(
+                !docker_request_is_workload("POST", path),
+                "expected control or capacity-release request: POST {path}"
+            );
+        }
+        assert!(!docker_request_is_workload("GET", "/v1.52/containers/json"));
+        assert!(!docker_request_is_workload("GET", "/v1.52/build"));
+        for path in [
+            "/_ping",
+            "/v1.52/containers/json",
+            "/v1.52/containers/abc/json",
+            "/v1.52/containers/abc/logs?stdout=1",
+            "/v1.52/events",
+        ] {
+            assert!(
+                !docker_request_is_workload("GET", path),
+                "expected benign GET request: {path}"
+            );
+        }
+        for path in [
+            "/_ping",
+            "/v1.52/containers/json",
+            "/v1.52/containers/abc/json",
+            "/v1.52/events",
+        ] {
+            assert!(
+                !docker_path_is_workload(path),
+                "expected control-only path: {path}"
+            );
+        }
     }
 
     #[test]

@@ -37,35 +37,133 @@ post-build and post-stop idle memory deterministic.
 
 Jetstream is the sole owner of balloon-target transitions for the direct-kernel
 VMM. macOS-side code only checks the guest and VMM telemetry endpoints; it does
-not set a balloon target or run a competing reclaim policy.
+not set a balloon target or run a competing reclaim policy. The production
+memory-control socket is metrics-only and rejects legacy target-mutation
+requests so an observer cannot desynchronize the automatic controller.
 
-After runtime readiness, Jetstream waits for a quiet dwell, verifies the guest
-snapshot, and then reduces its own target to the 448 MiB idle floor. Workload
-start is recognized from Docker API requests, framed TCP payloads, or verified
-build-progress output when a client transport does not expose its request path.
-Any Docker transport-byte progress also restores configured capacity, so opaque
-BuildKit sessions cannot remain at the idle floor while they compile. After
-transport becomes quiet, Jetstream queues a guest cache reclaim and waits a
-short settle interval before the next quiet-state verification. A populated
-service hierarchy retains its hot-cache reserve; a hierarchy the kernel reports
-as empty releases that reserve so a stopped Docker service cannot keep the VM
-at its active target. It defers a shrink when the daemon-scoped build cgroup is
-populated, container or service working set is at least 64 MiB, disk-backed
-swap is in use, or full memory PSI is elevated. Build workers are sibling
-scopes beneath the Docker daemon slice; the guest metrics and reclaimer resolve
-that location directly.
+After runtime readiness, Jetstream waits for a quiet dwell and verifies a guest
+snapshot. A confirmed empty build and service hierarchy may reach the 448 MiB
+stopped-idle floor. A populated service hierarchy instead enters a guarded
+running-service state described below. Bulk builds, image load/save, container
+archive/export streams, and explicit create/start/restart/unpause lifecycle
+requests restore configured capacity immediately. Ordinary ping, list, inspect,
+log, and event traffic does not pin a running service at maximum capacity.
+After bulk transport becomes quiet, Jetstream queues a guest cache reclaim and
+waits a short settle interval before its next memory probe.
+
+A hierarchy the kernel reports as empty releases its cache reserve so a stopped
+Docker service cannot keep the VM at an active target. Jetstream defers the
+stopped-idle transition while the daemon-scoped build cgroup is populated,
+container or service working set is at least 64 MiB, disk-backed swap is in
+use, or full memory PSI is elevated. Build workers are sibling scopes beneath
+the Docker daemon slice; guest metrics and the reclaimer resolve that location
+directly.
+The aggregate cgroup workload count is diagnostic rather than an idle
+authority because it also observes the resident container-runtime daemon.
+The kernel's service-population bit plus measured service and container bytes
+remain the fail-closed ownership signal.
+For an unpopulated service hierarchy, clean active/inactive file cache and
+reclaimable slab are reclaim candidates rather than a live working set. The
+stopped-idle safety gate counts only anonymous, shared-memory, socket, mapped,
+dirty/writeback, and unreclaimable-slab bytes. This lets the balloon and MGLRU
+discard clean cache left by a stopped database without treating those pages as
+executing service demand.
 When both build and service hierarchies are empty, the guest also lowers the
 Docker daemon's clean-cache reserve to a small control-plane floor and retries
 that scoped reclaim after a short settle interval. It never reclaims anonymous
 daemon memory or uses a global cache drop.
-Once the idle target is applied, the controller disarms its probe state until a
-new workload is observed.
+Once the idle target is applied, the controller replaces the normal probe loop
+with a one-second lightweight service-population sentinel. This catches a
+guest-originated service restart even when no new host Docker request crosses
+the bridge; it does not run a second balloon policy.
 
 The 448 MiB target is guest capacity, not an absolute host-process number.
 Activity Monitor also charges the VMM executable, Hypervisor framework state,
 device queues, and the Linux/Docker idle working set. Validate the target,
 page-ledger residency, zero partial granules, and final physical footprint
 together rather than treating one displayed number as the guest allocation.
+
+## Running-Service Controller
+
+Low host pressure does not mean cached guest pages are cold. Linux intentionally
+keeps file cache when memory is available, and Jetstream may release host
+backing only after Linux has transferred ownership through virtio ballooning or
+free-page reporting. The controller therefore classifies growth before acting:
+
+```text
+anonymous or shared memory growth -> application working set; preserve it
+active file growth               -> hot cache; preserve it
+clean inactive file growth       -> reclaim candidate, subject to feedback
+socket growth                    -> network memory; do not treat as file cache
+flat guest usage + host growth   -> investigate VMM backing/page reporting
+```
+
+For populated services, Jetstream learns for 30 seconds and then computes a
+middle target from the service and daemon working sets:
+
+```text
+runtime = service_working_set + daemon_working_set
+headroom = max(512 MiB, runtime / 2) + learned_refault_headroom
+desired = round_up_128_MiB(448 MiB + runtime + headroom)
+desired = clamp(desired, 2048 MiB, configured_capacity)
+```
+
+`MemAvailable` adds a second floor so one step never consumes the guest's final
+512 MiB reserve. Capacity grows immediately when the measured working set needs
+it and shrinks by at most 256 MiB. Jetstream first observes balloon convergence
+at a throttled one-second cadence, then waits ten seconds before collecting the
+feedback sample. A shrink that cannot converge within 30 seconds restores
+configured capacity; an expansion is reasserted after five seconds until it
+converges. While a shrink is converging or stabilizing, a separate one-second
+watchdog checks urgent pressure, swap, major-fault, cgroup-generation, and
+working-set growth signals so the controller can expand before the ordinary
+feedback sample is due.
+
+After every shrink, Jetstream checks the guest page size, file-refault delta,
+major faults, hierarchical cgroup high/max/OOM events, global and service
+memory PSI, disk-backed swap, and container or aggregate compressed swap above
+their budgets. Refault of
+at least 8 MiB or two percent of
+the preceding shrink restores the prior target, raises learned headroom, and
+starts a two-minute cooldown. Learned headroom is capped at the smaller of
+1 GiB and one quarter of configured capacity, and resets when service cgroup
+membership changes. Missing, stale, reset, or incomplete telemetry fails safe:
+the controller restores configured capacity. This includes explicit validity
+for MemAvailable, total swap, disk-backed swap, and global PSI; a legitimate
+zero remains distinguishable from an unreadable or malformed source.
+
+The resident runtime daemon can leave a small amount of cold control-plane
+anonymous memory in compressed RAM after the stopped-idle transition. That is
+not disk I/O and must not cause a restore loop. Jetstream therefore permits at
+most 64 MiB of aggregate compressed control-plane swap and at most 8 MiB in
+container cgroups, while still requiring zero disk-backed swap. The smaller
+container allowance covers cold startup residue only; any service major fault,
+a refault regression, either budget being exceeded, or rising PSI restores
+capacity. The live harness samples the whole settle window and enforces the
+same bounds.
+
+Running-service feedback keeps service-local PSI stricter than VM-wide PSI.
+Service `some`/`full` avg10 limits remain 1.0%/0.05%; the VM-wide safety
+ceilings are 5.0%/0.5%. This prevents a short reclaim stall in the Docker
+daemon or another control-plane task from pinning configured capacity when the
+service cgroup has zero pressure, no fault/refault growth, and adequate
+`MemAvailable`. Stopped-idle admission retains the stricter VM-wide limits.
+
+The production kernel enables Multi-Gen LRU so normal cgroup and balloon
+reclaim use the kernel's recency and refault model. Debugfs generation controls,
+page-owner tracking, idle-PFN scans, and access-monitor-driven pageout are not
+production reclaim authority. They may be used in an isolated diagnostic image,
+but only virtio ownership transitions authorize host decommit.
+
+This design bounds cold-cache growth without imposing a hard container memory
+limit. It cannot safely make a running database's anonymous/shared buffers
+disappear, and no controller can guarantee that every evicted cache page will
+remain unused. The 512 MiB reserve absorbs ordinary bursts; an abrupt anonymous
+allocation larger than that reserve can still encounter reclaim before the
+next guest sample. A future guest-originated pressure notification can provide
+an immediate expansion path while leaving this guarded loop shrink-only.
+Release qualification therefore gates host-footprint slope, pressure/event
+counters, and service p95/p99 latency together.
 
 ## Current Debug Surface
 
@@ -303,6 +401,44 @@ build-support/run-chum-mem-memory-trace.sh \
   --max-final-physical-footprint-mib 1024
 ```
 
+For a populated-service run, keep the probe inside the isolated API container.
+The host-side API helper itself uses Docker transport and would contaminate the
+controller signal:
+
+```sh
+build-support/run-chum-mem-memory-trace.sh \
+  --manifest /path/to/fresh-isolated-manifest.json \
+  --import-command true \
+  --skip-api-forward \
+  --internal-ready-probe \
+  --post-import-settle-seconds 600 \
+  --expect-core-workload-expansions 1 \
+  --expect-core-service-shrinks 1 \
+  --max-final-core-target-mib 3072 \
+  --max-final-physical-footprint-mib 3072 \
+  --min-ready-probe-samples 540 \
+  --max-final-half-footprint-slope-mib-per-min 32 \
+  --max-service-pgmajfault-delta 5 \
+  --max-service-psi-full-total-delta-us 1000 \
+  --require-mglru \
+  --memory-mib 8192
+```
+
+Compare fresh baseline and candidate disks. Require zero request/OOM failures,
+no full-PSI or major-fault regression beyond the explicit budgets, equivalent
+tail latency, and a flat final-half physical-footprint slope. The internal `/ready` request is a
+database-backed availability and latency canary, not a throughput benchmark;
+use a separate representative load for throughput claims. The harness rejects
+missing samples, incomplete service telemetry, disabled MGLRU, balloon target
+non-convergence, swap/PSI/event regressions, active-service hard decommit, and
+configured target, footprint, or latency thresholds. Hierarchical and local
+cgroup event counters are checked independently, including group OOM kills;
+the live-service window also requires a stable cgroup identity and rejects
+counter resets. Major-fault and full-PSI gates compare cumulative counters
+across the entire settle window rather than only the final rolling averages.
+The example budgets at most five lazy major faults and 1 ms of cumulative full
+service stall; tail latency, event counters, and rolling PSI must still pass.
+
 ## Runtime Flags
 
 Implemented Jetstream flags:
@@ -316,6 +452,11 @@ CONJET_MEM_DISABLE_PAGE_REPORTING=1
 CONJET_MEM_DISABLE_CORE_IDLE_CONTROLLER=1
 CONJET_MEM_CORE_IDLE_TARGET_MIB=448
 CONJET_MEM_CORE_IDLE_DWELL_MS=8000
+CONJET_MEM_CORE_SERVICE_MIN_TARGET_MIB=2048
+CONJET_MEM_CORE_SERVICE_LEARNING_MS=30000
+CONJET_MEM_CORE_SERVICE_PROBE_MS=5000
+CONJET_MEM_CORE_SERVICE_SHRINK_STEP_MIB=256
+CONJET_MEM_CORE_SERVICE_HEADROOM_MIB=512
 ```
 
 Use these for focused validation:
@@ -343,3 +484,11 @@ CONJET_MEM_VERIFY=1
 CONJET_MEM_POISON=1
 CONJET_MEM_DUMP_REJECTS=1
 ```
+
+## Primary Kernel References
+
+- [Linux 6.12 cgroup v2 memory controller](https://docs.kernel.org/6.12/admin-guide/cgroup-v2.html)
+- [Linux pressure stall information](https://docs.kernel.org/accounting/psi.html)
+- [Linux 6.12 Multi-Gen LRU](https://docs.kernel.org/6.12/admin-guide/mm/multigen_lru.html)
+- [Linux idle-page tracking](https://docs.kernel.org/admin-guide/mm/idle_page_tracking.html)
+- [Virtio 1.3 balloon and free-page reporting](https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.html)

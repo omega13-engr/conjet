@@ -280,6 +280,8 @@ public struct VMImageStore: Sendable {
         "CONFIG_CGROUP_DEVICE",
         "CONFIG_CPUSETS",
         "CONFIG_MEMCG",
+        "CONFIG_LRU_GEN",
+        "CONFIG_LRU_GEN_ENABLED",
         "CONFIG_BLK_CGROUP",
         "CONFIG_CGROUP_SCHED",
         "CONFIG_FAIR_GROUP_SCHED",
