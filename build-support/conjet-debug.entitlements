@@ -4,8 +4,6 @@
 <dict>
   <key>com.apple.security.get-task-allow</key>
   <true/>
-  <key>com.apple.security.virtualization</key>
-  <true/>
   <key>com.apple.security.hypervisor</key>
   <true/>
 </dict>

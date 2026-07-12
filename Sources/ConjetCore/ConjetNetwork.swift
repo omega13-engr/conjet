@@ -452,7 +452,7 @@ public struct ConjetNetworkStatus: Codable, Equatable, Sendable {
         failedForwards: Int = 0,
         conflictCount: Int = 0,
         staleForwards: Int = 0,
-        vmNetworkMode: String = "vz-nat",
+        vmNetworkMode: String = "hvf-nat",
         turboAvailable: Bool = false,
         turboEnabled: Bool = false,
         lastReconcileAt: Date? = nil,
@@ -529,7 +529,7 @@ public struct ConjetNetworkStatus: Codable, Equatable, Sendable {
         self.failedForwards = try container.decodeIfPresent(Int.self, forKey: .failedForwards) ?? 0
         self.conflictCount = try container.decodeIfPresent(Int.self, forKey: .conflictCount) ?? 0
         self.staleForwards = try container.decodeIfPresent(Int.self, forKey: .staleForwards) ?? 0
-        self.vmNetworkMode = try container.decodeIfPresent(String.self, forKey: .vmNetworkMode) ?? "vz-nat"
+        self.vmNetworkMode = try container.decodeIfPresent(String.self, forKey: .vmNetworkMode) ?? "hvf-nat"
         self.turboAvailable = try container.decodeIfPresent(Bool.self, forKey: .turboAvailable) ?? false
         self.turboEnabled = try container.decodeIfPresent(Bool.self, forKey: .turboEnabled) ?? false
         self.lastReconcileAt = try container.decodeIfPresent(Date.self, forKey: .lastReconcileAt)

@@ -1,236 +1,39 @@
 # Runtime Progress
 
-Current implemented runtime path:
+Conjet has one VM backend: Jetstream, the Rust VMM built directly on macOS
+Hypervisor.framework (HVF). The release runtime no longer includes its legacy
+backend.
 
-1. `conjet vm fetch-fedora` downloads Fedora PXE `vmlinuz` and `initrd.img`.
-2. `conjet vm fetch-alpine` downloads Alpine netboot `vmlinuz-virt`,
-   `initramfs-virt`, and `modloop-virt`.
-3. `VMImageStore` creates sparse raw root/data disks and records the boot
-   artifact kind in the VM manifest.
-4. `conjet vm validate` rejects compressed ARM64 EFI zboot assets before they
-   reach `VZLinuxBootLoader`.
-5. `conjet vm build-initramfs --init PATH` packages a supplied static Linux
-   `/init` binary into a gzip-compressed `newc` initramfs.
-6. `conjet vm import-efi-disk --image PATH` imports a full EFI-bootable
-   distro/cloud image as a raw VZ boot disk and records an EFI variable store.
-7. `conjet vm build-cloud-init-seed` creates a NoCloud `cidata` ISO whose
-   payload installs and starts Docker inside the guest, emits serial markers,
-   and copies bootstrap logs into the host bootstrap share when VirtioFS mounts.
-8. The cloud-init payload installs a guest VSOCK bridge from port 2375 to
-   `/var/run/docker.sock`.
-9. Conjet Core can validate assets and attempt VZ VM start/stop through the
-   control socket.
-10. After VM start, Conjet Core owns `~/.conjet/run/docker.sock` and forwards
-    Docker API byte streams to guest VSOCK port 2375.
-11. `conjet run IMAGE [CMD...]` targets `~/.conjet/run/docker.sock` only.
-12. `guest/image/conjet-core` builds a Conjet-owned Ubuntu rootfs directly in a
-    partitioned `.raw.gz` disk artifact with Docker and the guest VSOCK bridge
-    baked in, without downloading an Ubuntu cloud image.
-13. `conjet vm fetch-conjet-core --image PATH.raw.gz` imports that compressed
-    raw artifact directly, without the cloud-init Docker seed.
-14. `conjet start` now performs first-run VM setup automatically by resolving
-    the newest stable `conjet-core-vX.Y.Z` GitHub release, selecting the
-    host-architecture image and matching Conjet Linux kernel asset, verifying
-    checksums when present, importing them, and then starting the daemon and VM.
-15. `.github/workflows/conjet-core-image.yml` builds and publishes separate
-    Conjet Core image releases for `aarch64` and `x86_64`.
+Current implemented path:
 
-Observed smoke-test results on 2026-05-29:
+1. `conjet start` resolves the latest compatible Conjet Core root disk and
+   matching direct ARM64 Linux kernel, verifies checksums, and imports them.
+2. `conjetd` starts Jetstream with the direct kernel, root disk, persistent
+   data disk, virtio-net, VSOCK, and virtio-balloon/page-reporting devices.
+3. Conjet Core starts Docker and exposes its API through the guest VSOCK
+   control bridge to the host Unix socket.
+4. Docker image, container, BuildKit, and volume state stays on the persistent
+   Linux data disk.
+5. Jetstream owns dynamic-memory policy and reclaims only complete native host
+   granules authorized by balloon ownership or page-reporting ranges.
+6. The ARM64 guest kernel uses 4 KiB pages for x86-64 user-mode compatibility;
+   Jetstream still tracks all 4 KiB PFNs composing a native host granule before
+   reclaiming it.
+7. Conjet Core registers a pinned static QEMU linux-user x86-64 interpreter
+   with `binfmt_misc` flags `POF`. Translation starts only for x86-64 ELF
+   processes; ARM64 executables remain native.
+8. A small downstream QEMU patch selects stable CoreCLR JIT defaults for
+   translated .NET workloads while honoring explicit container overrides.
 
-- Unsigned debug `Conjet Core` fails VZ validation due missing
-  `com.apple.security.virtualization`.
-- `build-support/sign-debug.sh` fixes that validation failure.
-- Adding `com.apple.vm.networking` to an ad-hoc debug signature causes macOS to
-  kill the process immediately, so it is not part of the debug path.
-- Alpine latest-stable aarch64 `vmlinuz-virt` and Fedora 43 aarch64
-  `pxeboot/vmlinuz` both identify as compressed ARM64 EFI zboot applications.
-- Conjet now classifies those assets as
-  `linux-arm64-compressed-efi-zboot` and rejects them before VM start, instead
-  of surfacing an opaque `VZErrorDomain Code=1` from Virtualization.framework.
-- The initramfs builder produces a gzip-valid archive from a supplied static
-  `/init`; this is host-side packaging only, not a container runtime guest yet.
-- The EFI import path is validated with local raw-image smoke inputs and unit
-  tests, including a QCOW2 image with an `.img` suffix and explicit boot-disk
-  expansion.
-- The cloud-init seed builder produces an ISO containing Docker bootstrap
-  commands, serial/bootstrap-share diagnostics, and a Python VSOCK-to-Docker
-  bridge.
-- The host Docker socket bridge is unit-tested for socket ownership and
-  no-guest HTTP 503 behavior.
-- Early signed debug builds validated the VZ EFI/cloud-init path. Current
-  release images are built through the Conjet Core rootfs builder instead of
-  the removed prebuilt distro-image fetch command.
-- `CONJET_HOME=/tmp/conjet-ubuntu.rG7eOg .build/debug/conjet run hello-world --json`
-  completed successfully through the Conjet socket with exit code 0.
-- The Conjet Core builder and `.raw.gz` import path have been added. The builder
-  follows the colima-core shape but emits a Conjet-specific Ubuntu minimal image
-  with Docker and the VSOCK bridge preinstalled.
-- `conjet start` is now the user-facing first-run path instead of requiring a
-  separate manual image fetch command.
-- `conjet start` and `conjet vm start` now create or update Docker context
-  `conjet`, point it at `~/.conjet/run/docker.sock`, and make it current.
+Validation gates for the current runtime are:
 
-Observed progress on 2026-05-30:
+- direct HVF boot with the release kernel and rootfs artifacts;
+- native ARM64 and `linux/amd64` Docker execution;
+- Node.js, GCC/Clang, Java, Python, and .NET/MSBuild amd64 build workloads;
+- the CodeChum interactive-checkers Compose build;
+- native exec benchmarking with x86 binfmt enabled and disabled;
+- dynamic-memory controller, balloon feature, and memory-ledger checks with no
+  unauthorized, pinned, or guest-owned reclaim.
 
-- Conjet profiles and `CONJET_HOME` are implemented for isolated state roots,
-  sockets, VM assets, logs, and Docker contexts.
-- Conjet now exposes `/Users` to the guest with VZ VirtioFS directory sharing
-  when `enable_host_mounts = true`; `/Volumes` requires explicit
-  `enable_removable_host_mounts = true` opt-in.
-- The Conjet Core image scripts and cloud-init seed mount `conjethostusers` and
-  `conjethostvolumes` inside the guest. Existing images can be repaired at
-  startup by `HostShareMounter`, which enters the guest host namespace through
-  Docker and mounts the VirtioFS tags.
-- A live smoke test on the default profile confirmed Docker bind mounts through
-  Conjet can read `/Users/sly/Workspace/Personal/conjet/README.md` from an
-  Alpine container.
-- `conjet project run [--path PATH] IMAGE [CMD...]` was added as the first
-  product-facing ConjetFS fast path: it syncs host-authoritative project files
-  into the project volume and runs the container from `/workspace`.
-- ConjetFS sync is now incremental after the first push. The profile manifest
-  stores file signatures, later pushes stage only changed host-authoritative
-  files, and `conjet sync status` reports dirty/clean state from changed and
-  removed paths.
-- `conjet sync watch`, `conjet sync repair`, and `conjet sync export` were
-  added. Watch now uses a host-side FSEvents stream by default, with
-  `--poll --interval N` retained as a conservative fallback; export is explicit
-  so generated artifacts can be copied back without turning dependency/build
-  churn into host-synced state.
-- A smoke test confirmed `conjet project run --path /tmp/conjet-project-run-smoke
-  alpine:3.20 sh -c 'test -f package.json && pwd'` ran from `/workspace`.
-- `swift test` passes 63 tests, including ConjetFS coverage for unchanged
-  incremental sync, modified-file dirty detection, removed-file cleanup, and
-  explicit artifact export.
-- A live smoke test initialized a temporary ConjetFS project, pushed it into a
-  Conjet Docker volume, verified clean `sync status`, ran `sync watch --once`,
-  created `/workspace/dist/out.txt` inside the VM-native volume, and exported
-  `dist` back to macOS with `conjet sync export`.
-- A live FSEvents smoke test initialized a temporary ConjetFS project on the
-  external SSD-backed Conjet profile, ran `conjet sync watch --debounce 0.1`,
-  edited `src/index.js` on macOS, and verified the Conjet Docker volume
-  contained the changed file while `conjet sync status` returned clean.
-- `conjetfs-hot-reload` now benchmarks the FSEvents-backed watch path instead
-  of calling `sync` directly after the edit. A Conjet-only live sample at
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260530-fsevents-hot-reload/conjetfs-hot-reload.json`
-  exited 0 with `hot_reload_seconds = 0.479`, `watch_sync_seconds = 0.343`, and
-  `watch_event_paths = 1`.
-- ReferenceRuntime 2.1.3 is installed and exposes Docker context `reference-runtime`. A
-  watcher-focused smoke report was written to
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260530-reference-runtime-smoke/hot-reload-contexts.json`.
-  `container-start` passed on Conjet, ReferenceRuntime, and Colima. The in-container
-  `fs.watch` bind-mount probe passed on ReferenceRuntime but timed out on Conjet and
-  Colima, while `conjetfs-hot-reload` passed on all three contexts. This keeps
-  the direct bind watcher gap visible and proves why the ConjetFS path is the
-  current fast/hot-reload path.
-- A repeated 3-sample hot-reload matrix was written to
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260530-reference-runtime-hot-reload-3x/hot-reload-contexts.json`.
-  ConjetFS hot reload had 0 failures on all three contexts: Conjet P50/P95
-  `0.425/0.428s`, ReferenceRuntime P50/P95 `0.471/0.475s`, and Colima P50/P95
-  `0.443/0.448s`. Direct bind `fs.watch` still timed out on Conjet and Colima
-  and passed on ReferenceRuntime with P50/P95 `0.133/0.200s`.
-- A 3-iteration benchmark report was generated at
-  `benchmarks/reports/docker-conjetfs-contexts-20260530-090525.md` on an Apple M1 Pro
-  with AC power and nominal thermals. All 72 benchmark samples exited 0. Conjet
-  beat Colima P50 on the measured bind npm, bind pnpm, bind Cargo, ConjetFS npm,
-  ConjetFS pnpm, ConjetFS Cargo, copy-node-modules, named-volume IO, tmpfs IO,
-  volume npm, volume pnpm, and volume Cargo workloads in that run.
-- A hot reload report was generated at
-  `benchmarks/reports/docker-hot-reload-contexts-20260530-112320.md` on battery power
-  and nominal thermals. All 12 samples exited 0. Conjet and Colima were nearly
-  tied on direct bind hot reload P50, while the ConjetFS path measured lower
-  P50 than Colima in that run.
-- Short idle process samples were added through `conjet-bench` idle sampling. The first
-  5-second local sample showed Conjet at 0.000 percent mean matched CPU and
-  Colima at 18.800 percent mean matched CPU, but this is not a release-grade
-  power result.
-- `conjet-bench` power sampling was added as the release-path power probe. It wraps
-  noninteractive `powermetrics`, parses power rails plus matched process
-  energy/wakeup signals when present, and preserves permission failures as
-  benchmark failures instead of hiding missing evidence.
-- A local standalone benchmark power smoke confirmed structured output on permission failure:
-  exit code 1, `powermetrics must be invoked as the superuser`, and machine
-  profile metadata captured.
-- `conjet-bench gate` was added as the faster-than-ReferenceRuntime claim verifier. It
-  accepts raw JSON reports, requires the release workload matrix to include
-  Conjet plus ReferenceRuntime and tuned Colima, enforces minimum sample counts and zero
-  failures, and rejects the claim unless Conjet P50/P95 is at or below each
-  baseline for each required workload or metric. Hot-reload rules now compare
-  the `hot_reload_seconds` metric directly.
-- A local gate smoke generated one raw JSON Conjet idle report and confirmed
-  `conjet-bench gate` exits nonzero with `passed=false` and missing benchmark
-  requirements instead of allowing an under-evidenced claim.
-- `conjet-bench run` was added as the production evidence
-  orchestrator. It collects Docker workload samples, idle CPU samples, and
-  `powermetrics` power samples for the requested contexts, writes
-  `docker.json`, per-runtime idle/power reports, `all-results.json`,
-  `all-results.md`, `gate.json`, and `gate.md`, then exits nonzero unless the
-  same claim gate passes.
-- Unit coverage now verifies that the release-gate runner writes all expected
-  artifacts and still fails when ReferenceRuntime evidence is not collected.
-
-Observed progress on 2026-05-31:
-
-- Conjet, ReferenceRuntime, and Colima state were moved onto the external SSD-backed
-  `/Volumes/ExternalSSD/dev_worskpace` path for same-storage benchmarking.
-  `~/.reference-runtime` is a symlink into the external SSD, `CONJET_HOME` points at
-  `/Volumes/ExternalSSD/dev_worskpace/.conjet`, and `COLIMA_HOME` points at
-  `/Volumes/ExternalSSD/dev_worskpace/.colima`.
-- The Docker benchmark suite now uses a global fast path: keep source-visible
-  host paths read-mostly, place write-heavy dependency/build outputs on native
-  Linux storage, warm shared build substrates, and use the ConjetFS
-  sync-to-volume path for edit/build loops. This is a filesystem and runtime
-  topology strategy, not a package-manager-specific optimization.
-- The process runner now captures child stdout/stderr through temporary files
-  instead of pipes. This avoids pipe descriptor failures and pipe backpressure
-  during long benchmark matrices with hundreds of Docker child processes.
-- A fresh 30-iteration warm Conjet-vs-ReferenceRuntime matrix was written to
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-reference-runtime-30x-v3.json`.
-  The gate report is
-  `/Volumes/ExternalSSD/dev_worskpace/conjet-bench-reports/20260531-global-reference-runtime-30x-v3-gate.md`.
-- That gate passed every configured non-power workload against ReferenceRuntime. The
-  current run uses interleaved measured samples by iteration, so the second
-  runtime no longer gets a systematic host-cache ordering advantage:
-  container start, image build, copy-heavy layers, npm, pnpm, Cargo, bind
-  mounts, native volumes, named-volume IO, tmpfs IO, ConjetFS fast paths,
-  hot-reload latency, and compose-up. Representative P50/P95 ratios were
-  `container-start=0.239/0.225`, `image-build=0.128/0.119`,
-  `copy-node-modules=0.084/0.083`, `npm-install=0.333/0.386`,
-  `pnpm-install=0.399/0.416`, `cargo-build=0.212/0.236`,
-  `hot-reload-fast-path=0.547/0.404`, and `compose-up=0.181/0.172`.
-- The same interleaved harness exposed remaining tuned-Colima noise: the
-  latest Colima full gate passed nearly all non-power rules, but raw
-  `pnpm-install` and one `volume-pnpm-install` ratio still missed on small
-  P95/P50 deltas under five-sample nearest-rank P95. The ConjetFS/native-volume
-  fast paths remained comfortably ahead. This is not part of the ReferenceRuntime
-  verdict, but it stays open as a harness/runtime stabilization item.
-- `conjet-bench` active energy sampling was added for active energy-to-solution evidence. It
-  runs a workload while sampling `powermetrics`, records workload duration,
-  sample duration, workload/power exit codes, and estimated combined/CPU joules
-  when power rails are available.
-- The release gate now includes `container-start-energy-sample` whenever power
-  evidence is enabled. It runs a fixed container-start loop under active
-  `powermetrics` sampling, writes per-runtime `energy-*.json` artifacts, and
-  gates on `energy_to_solution_joules_estimate`.
-- Local `bench energy` smoke tests proved structured output and workload
-  execution, but macOS denied `powermetrics` both without sudo and with
-  `sudo -n` because no cached sudo credential was available. Therefore the
-  wall-time claim against ReferenceRuntime is currently proven by the gate, while the
-  active energy-to-solution claim remains blocked on privileged power sampling.
-
-Next required work:
-
-- Run `bench power` and `bench energy` under configured noninteractive
-  `powermetrics` for Conjet, ReferenceRuntime, and tuned Colima.
-- Run `bench release-gate` with power enabled and publish the failed or passed
-  gate result as a release artifact.
-- Add guest-side inotify/fanotify replay from the FSEvents watch stream once
-  correctness and interruption handling are specified.
-- Investigate the remaining Colima outliers and rerun under controlled thermal,
-  power, and cache conditions.
-- Add Docker Desktop to the same repeated benchmark matrix if it remains a
-  release comparison target.
-- Add release signing or attestation after the `.sha512sum` release flow is
-  stable.
-- Replace Docker-package bootstrap with a tighter runtime stack containing
-  containerd, runc, BuildKit, and the guest bridge once Conjet's Docker API
-  surface no longer needs dockerd.
+Generated rootfs metadata records the x86 emulation engine, version, and binfmt
+flags. `/etc/conjet/release` records the same information inside the guest.

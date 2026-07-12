@@ -168,7 +168,7 @@ final class DaemonProtocolTests: XCTestCase {
     func testHVFSmokeResultRoundTrip() throws {
         let result = ConjetHVFSmokeResult(
             ok: true,
-            frameworkLinked: true,
+            hypervisorAvailable: true,
             appleSilicon: true,
             architecture: "arm64",
             entitlementStatus: ConjetHVFEntitlementStatus(
@@ -204,7 +204,7 @@ final class DaemonProtocolTests: XCTestCase {
         {
           "backend": "hvf-experimental",
           "ok": false,
-          "frameworkLinked": true,
+          "hypervisorAvailable": true,
           "appleSilicon": true,
           "architecture": "arm64",
           "requiredEntitlement": "com.apple.security.hypervisor",

@@ -3,7 +3,7 @@
 This directory builds the Conjet-owned Linux guest root filesystem. It uses an
 Ubuntu rootfs bootstrapped directly inside the privileged build container, turns
 it into a Conjet appliance, and pairs it with the Conjet Linux kernel for
-Virtualization.framework/HVF boot.
+Jetstream/HVF boot.
 
 The output is intentionally Conjet-specific:
 
@@ -34,13 +34,33 @@ The output is intentionally Conjet-specific:
   `memory.reclaim` jobs after Docker/build activity. These signals are policy
   inputs only; Jetstream may reclaim host backing only for virtio-balloon-owned
   pages or in-flight virtio-balloon page-reporting ranges.
-- DHCP networkd/netplan fallback for the VZ NAT interface.
+- DHCP networkd/netplan fallback for the Jetstream virtio-net interface.
 - Cloud-init disabled by default to avoid first-boot datasource waits.
 - `vsock`, `virtio_balloon`, `virtiofs`, and `zram` modules requested on boot.
 - `conjet-init-ready.service`, which waits for the Docker VSOCK bridge, sends
   binary `CONTROL_READY` and `PROCESS_STARTED` records to the host readiness
   VSOCK port, and still writes `CONJET_INIT_READY` to the serial console for
   debug and legacy Jetstream/HVF managed start readiness.
+- On-demand x86-64 Linux execution through a pinned, statically linked QEMU
+  linux-user interpreter registered with `binfmt_misc` flags `POF`. Native
+  ARM64 execution never starts QEMU. The Conjet QEMU patch selects stable
+  CoreCLR JIT defaults so Node.js, .NET/MSBuild, compilers, and ordinary amd64
+  container entrypoints work without Dockerfile changes.
+
+## x86-64 Containers
+
+Conjet Core advertises `linux/amd64` alongside its native `linux/arm64`
+platform. Select amd64 explicitly when an image is multi-platform:
+
+```sh
+docker run --rm --platform linux/amd64 alpine uname -m
+DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose build
+```
+
+Translation is process-local and starts only for an x86-64 ELF executable.
+Native ARM64 containers remain on the direct execution path. Cross-compiling
+to amd64 is still preferred for CPU-heavy release builds; executing amd64 code
+necessarily costs more CPU than native ARM64 code.
 
 ## Build
 

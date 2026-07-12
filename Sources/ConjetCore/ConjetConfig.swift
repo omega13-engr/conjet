@@ -73,16 +73,10 @@ public enum ConjetContainerRuntimeKind: String, Codable, CaseIterable, Sendable 
 }
 
 public enum ConjetVMBackend: String, Codable, CaseIterable, Sendable {
-    case vz
     case hvfExperimental = "hvf-experimental"
 
     public var displayName: String {
-        switch self {
-        case .vz:
-            return "VZ Rosetta fallback"
-        case .hvfExperimental:
-            return "Jetstream HVF primary"
-        }
+        "Jetstream HVF"
     }
 
     public var isExperimental: Bool {
@@ -90,38 +84,23 @@ public enum ConjetVMBackend: String, Codable, CaseIterable, Sendable {
     }
 
     public var startSupported: Bool {
-        switch self {
-        case .vz, .hvfExperimental:
-            return true
-        }
+        true
     }
 
     public var appleVirtualMachineServiceExpected: Bool {
-        self == .vz
+        false
     }
 
-    public var rosettaPolicy: String {
-        switch self {
-        case .vz:
-            return "available through Virtualization.framework when installed"
-        case .hvfExperimental:
-            return "arm64-only until public Rosetta support exists outside VZ"
-        }
+    public var x86EmulationPolicy: String {
+        "x86_64 Linux userspace runs through on-demand Conjet Core emulation"
     }
 
     public var performanceLane: String {
-        switch self {
-        case .vz:
-            return "compatibility"
-        case .hvfExperimental:
-            return "jetstream"
-        }
+        "jetstream"
     }
 
     public static func parse(_ value: String) -> ConjetVMBackend? {
         switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "vz", "virtualization", "virtualization-framework":
-            return .vz
         case "hvf", "hypervisor", "hypervisor-framework", "hvf-experimental", "jetstream", "jetstream-hvf":
             return .hvfExperimental
         default:
@@ -130,7 +109,7 @@ public enum ConjetVMBackend: String, Codable, CaseIterable, Sendable {
     }
 
     public static var allowedValuesDescription: String {
-        "vz or hvf-experimental"
+        "hvf-experimental"
     }
 }
 
@@ -141,7 +120,7 @@ public struct ConjetVMBackendSelectionStatus: Codable, Equatable, Sendable {
     public var requiresCoreRestart: Bool
     public var startSupported: Bool
     public var appleVirtualMachineServiceExpected: Bool
-    public var rosettaPolicy: String
+    public var x86EmulationPolicy: String
     public var performanceLane: String
     public var message: String
 
@@ -152,15 +131,13 @@ public struct ConjetVMBackendSelectionStatus: Codable, Equatable, Sendable {
         self.requiresCoreRestart = active != nil && active != selected
         self.startSupported = effective.startSupported
         self.appleVirtualMachineServiceExpected = effective.appleVirtualMachineServiceExpected
-        self.rosettaPolicy = effective.rosettaPolicy
+        self.x86EmulationPolicy = effective.x86EmulationPolicy
         self.performanceLane = effective.performanceLane
 
         if requiresCoreRestart {
             self.message = "Conjet Core is still running with \(effective.rawValue); restart Conjet Core to use \(selected.rawValue)."
-        } else if effective == .hvfExperimental {
-            self.message = "Jetstream HVF is selected as the primary Conjet Core backend. Direct-kernel guest start is available for the custom VMM lane."
         } else {
-            self.message = "VZ backend is selected as the Rosetta and compatibility fallback."
+            self.message = "Jetstream HVF is the Conjet Core backend. Direct-kernel guest start and on-demand x86_64 userspace emulation are available."
         }
     }
 }
@@ -501,7 +478,6 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     public var runtime: String
     public var vmBackend: ConjetVMBackend
     public var quietStopMinutes: Int
-    public var enableRosetta: Bool
     public var enableHostMounts: Bool
     public var enableRemovableHostMounts: Bool
     public var socketPath: String?
@@ -526,7 +502,6 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         runtime: String = "docker",
         vmBackend: ConjetVMBackend,
         quietStopMinutes: Int = 30,
-        enableRosetta: Bool = true,
         enableHostMounts: Bool = true,
         enableRemovableHostMounts: Bool = false,
         socketPath: String? = nil,
@@ -550,7 +525,6 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         self.runtime = runtime
         self.vmBackend = vmBackend
         self.quietStopMinutes = quietStopMinutes
-        self.enableRosetta = enableRosetta
         self.enableHostMounts = enableHostMounts
         self.enableRemovableHostMounts = enableRemovableHostMounts
         self.socketPath = socketPath
@@ -575,7 +549,6 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         kernelImagePath: String? = nil,
         runtime: String = "docker",
         quietStopMinutes: Int = 30,
-        enableRosetta: Bool = true,
         enableHostMounts: Bool = true,
         enableRemovableHostMounts: Bool = false,
         socketPath: String? = nil,
@@ -600,7 +573,6 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             runtime: runtime,
             vmBackend: .hvfExperimental,
             quietStopMinutes: quietStopMinutes,
-            enableRosetta: enableRosetta,
             enableHostMounts: enableHostMounts,
             enableRemovableHostMounts: enableRemovableHostMounts,
             socketPath: socketPath,
@@ -646,7 +618,6 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         case runtime
         case vmBackend
         case quietStopMinutes
-        case enableRosetta
         case enableHostMounts
         case enableRemovableHostMounts
         case socketPath
@@ -683,7 +654,6 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             runtime: runtime.rawValue,
             vmBackend: try container.decodeIfPresent(ConjetVMBackend.self, forKey: .vmBackend) ?? defaults.vmBackend,
             quietStopMinutes: try container.decodeIfPresent(Int.self, forKey: .quietStopMinutes) ?? defaults.quietStopMinutes,
-            enableRosetta: try container.decodeIfPresent(Bool.self, forKey: .enableRosetta) ?? defaults.enableRosetta,
             enableHostMounts: try container.decodeIfPresent(Bool.self, forKey: .enableHostMounts) ?? defaults.enableHostMounts,
             enableRemovableHostMounts: try container.decodeIfPresent(Bool.self, forKey: .enableRemovableHostMounts) ?? defaults.enableRemovableHostMounts,
             socketPath: try container.decodeIfPresent(String.self, forKey: .socketPath) ?? defaults.socketPath,
@@ -850,7 +820,6 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         }
         lines.append("runtime = \"\(escapeTOML(runtime))\"")
         lines.append("backend = \"\(vmBackend.rawValue)\"")
-        lines.append("enable_rosetta = \(enableRosetta)")
         lines.append("enable_host_mounts = \(enableHostMounts)")
         lines.append("enable_removable_host_mounts = \(enableRemovableHostMounts)")
         lines.append("")
@@ -937,7 +906,9 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                 }
                 config.vmBackend = backend
             case "vm.enable_rosetta":
-                config.enableRosetta = try parseBool(value, key: key)
+                // Legacy VZ setting. Accepted as a no-op so existing profiles
+                // migrate cleanly to the HVF-only backend.
+                _ = try parseBool(value, key: key)
             case "vm.enable_host_mounts":
                 config.enableHostMounts = try parseBool(value, key: key)
             case "vm.enable_removable_host_mounts":

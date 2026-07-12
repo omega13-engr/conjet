@@ -50,7 +50,7 @@ Reports must keep the per-sample JSONL files, `all-results.json`, and
 - whether rootfs/image preparation was excluded from the measured launch path;
 - bytes copied before T3, mapped memory bytes, and loaded artifact bytes when
   available;
-- whether the run used HVF or VZ and whether the binary readiness path or
+- the HVF backend version and whether the binary readiness path or
   serial debug readiness path satisfied T4.
 
 Cache-state labels are mandatory:

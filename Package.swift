@@ -39,7 +39,6 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio")
             ],
             linkerSettings: [
-                .linkedFramework("Virtualization", .when(platforms: [.macOS])),
                 .linkedFramework("vmnet", .when(platforms: [.macOS]))
             ]
         ),

@@ -84,31 +84,21 @@ public enum DockerCLIResolver {
 public struct DockerRunExecutor: Sendable {
     public var dockerCLIPath: String?
     public var socketPath: String
-    public var requestedBackend: ConjetVMBackend
-    public var rosettaAvailable: Bool
     private let runner: DockerProcessRunner
 
     public init(
         dockerCLIPath: String? = nil,
         socketPath: String,
-        requestedBackend: ConjetVMBackend = .hvfExperimental,
-        rosettaAvailable: Bool = HostCapabilities.detect().rosettaLinuxSupportLikelyAvailable,
         runner: @escaping DockerProcessRunner = ProcessRunner.run
     ) {
         self.dockerCLIPath = dockerCLIPath
         self.socketPath = socketPath
-        self.requestedBackend = requestedBackend
-        self.rosettaAvailable = rosettaAvailable
         self.runner = runner
     }
 
     public func run(image: String, command: [String], platform: String? = nil) throws -> DockerRunResult {
         let dockerHost = "unix://\(socketPath)"
-        let route = DockerRunPlatformRoute.resolve(
-            platform: platform,
-            requestedBackend: requestedBackend,
-            rosettaAvailable: rosettaAvailable
-        )
+        let route = DockerRunPlatformRoute.resolve(platform: platform)
         if !route.supported || route.fallbackUsed {
             return DockerRunResult(
                 image: image,
@@ -145,7 +135,7 @@ public struct DockerRunExecutor: Sendable {
 
 private func dockerRunPlatformRejectionMessage(_ route: DockerRunPlatformRoute) -> String {
     if route.fallbackUsed {
-        return "\(route.message). Switch Conjet to the VZ backend before running linux/amd64 workloads, or use linux/arm64 on Conjet Core Rust HVF."
+        return "\(route.message). Use linux/amd64 or linux/arm64 on the Conjet Core HVF backend."
     }
     return route.message
 }
@@ -156,11 +146,7 @@ private struct DockerRunPlatformRoute: Equatable, Sendable {
     var fallbackUsed: Bool
     var message: String
 
-    static func resolve(
-        platform: String?,
-        requestedBackend: ConjetVMBackend,
-        rosettaAvailable: Bool
-    ) -> DockerRunPlatformRoute {
+    static func resolve(platform: String?) -> DockerRunPlatformRoute {
         guard let platform, !platform.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return DockerRunPlatformRoute(dockerPlatformArgument: nil, supported: true, fallbackUsed: false, message: "native platform")
         }
@@ -168,23 +154,12 @@ private struct DockerRunPlatformRoute: Equatable, Sendable {
         case "linux/arm64", "linux/arm64/v8", "arm64", "aarch64":
             return DockerRunPlatformRoute(dockerPlatformArgument: "linux/arm64", supported: true, fallbackUsed: false, message: "linux/arm64 supported")
         case "linux/amd64", "amd64", "x86_64":
-            if requestedBackend == .hvfExperimental {
-                return DockerRunPlatformRoute(
-                    dockerPlatformArgument: nil,
-                    supported: false,
-                    fallbackUsed: true,
-                    message: "linux/amd64 requires VZ fallback with Rosetta"
-                )
-            }
-            guard rosettaAvailable else {
-                return DockerRunPlatformRoute(
-                    dockerPlatformArgument: nil,
-                    supported: false,
-                    fallbackUsed: false,
-                    message: "linux/amd64 requires Rosetta support, but Rosetta support was not detected"
-                )
-            }
-            return DockerRunPlatformRoute(dockerPlatformArgument: "linux/amd64", supported: true, fallbackUsed: false, message: "linux/amd64 supported by VZ Rosetta")
+            return DockerRunPlatformRoute(
+                dockerPlatformArgument: "linux/amd64",
+                supported: true,
+                fallbackUsed: false,
+                message: "linux/amd64 supported by Conjet Core x86_64 emulation"
+            )
         default:
             return DockerRunPlatformRoute(
                 dockerPlatformArgument: nil,

@@ -8,8 +8,7 @@ public struct HostCapabilities: Codable, Equatable, Sendable {
     public var cpuBrand: String
     public var memoryBytes: UInt64
     public var isAppleSilicon: Bool
-    public var virtualizationFrameworkAvailable: Bool
-    public var rosettaLinuxSupportLikelyAvailable: Bool
+    public var hypervisorFrameworkAvailable: Bool
     public var lowPowerModeEnabled: Bool
     public var thermalState: String
     public var requiredEntitlements: [String]
@@ -23,12 +22,10 @@ public struct HostCapabilities: Codable, Equatable, Sendable {
             cpuBrand: sysctlString("machdep.cpu.brand_string") ?? "unknown",
             memoryBytes: sysctlUInt64("hw.memsize") ?? 0,
             isAppleSilicon: architecture == "arm64",
-            virtualizationFrameworkAvailable: virtualizationFrameworkAvailable(),
-            rosettaLinuxSupportLikelyAvailable: rosettaLinuxSupportLikelyAvailable(),
+            hypervisorFrameworkAvailable: hypervisorFrameworkAvailable(),
             lowPowerModeEnabled: lowPowerModeEnabled(),
             thermalState: thermalState(),
             requiredEntitlements: [
-                "com.apple.security.virtualization",
                 "com.apple.security.hypervisor"
             ]
         )
@@ -71,18 +68,12 @@ public struct HostCapabilities: Codable, Equatable, Sendable {
         return value
     }
 
-    private static func virtualizationFrameworkAvailable() -> Bool {
-        #if canImport(Virtualization)
+    private static func hypervisorFrameworkAvailable() -> Bool {
+        #if canImport(Hypervisor)
         return true
         #else
         return false
         #endif
-    }
-
-    private static func rosettaLinuxSupportLikelyAvailable() -> Bool {
-        let manager = FileManager.default
-        return manager.fileExists(atPath: "/Library/Apple/usr/libexec/oah")
-            || manager.fileExists(atPath: "/Library/Apple/usr/share/rosetta")
     }
 
     private static func lowPowerModeEnabled() -> Bool {

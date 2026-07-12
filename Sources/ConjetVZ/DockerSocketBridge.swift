@@ -2,10 +2,6 @@ import ConjetCore
 import Darwin
 import Foundation
 
-#if canImport(Virtualization)
-@preconcurrency import Virtualization
-#endif
-
 public struct GuestBridgeCapabilities: Equatable, Sendable {
     public var version: Int
     public var lazyUpstream: Bool
@@ -1821,83 +1817,6 @@ private func writeAll(_ data: Data, to fd: Int32) -> Bool {
     }
 }
 
-#if canImport(Virtualization)
-public final class VZGuestConnectionConnector: GuestConnectionConnector, @unchecked Sendable {
-    private let socketDevice: VZVirtioSocketDevice
-    private let queue: DispatchQueue
-    private let port: UInt32
-    private let timeoutSeconds: Double
-
-    public init(
-        socketDevice: VZVirtioSocketDevice,
-        queue: DispatchQueue,
-        port: UInt32 = ConjetRuntimePorts.dockerVsockPort,
-        timeoutSeconds: Double = 5
-    ) {
-        self.socketDevice = socketDevice
-        self.queue = queue
-        self.port = port
-        self.timeoutSeconds = timeoutSeconds
-    }
-
-    public func connect() throws -> GuestConnection {
-        let semaphore = DispatchSemaphore(value: 0)
-        let resultBox = VZConnectionResultBox()
-        queue.async {
-            self.socketDevice.connect(toPort: self.port) { result in
-                resultBox.set(result)
-                semaphore.signal()
-            }
-        }
-
-        if semaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut {
-            throw ConjetError.unavailable("timed out connecting to guest VSOCK port \(port)")
-        }
-
-        switch resultBox.get() {
-        case .success(let connection):
-            let holder = VZConnectionHolder(connection)
-            return GuestConnection(fileDescriptor: connection.fileDescriptor) {
-                holder.close()
-            }
-        case .failure(let error):
-            throw ConjetError.unavailable("failed to connect to guest VSOCK port \(port): \(error)")
-        case .none:
-            throw ConjetError.unavailable("guest VSOCK connection completed without a result")
-        }
-    }
-}
-
-private final class VZConnectionResultBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var result: Result<VZVirtioSocketConnection, Error>?
-
-    func set(_ result: Result<VZVirtioSocketConnection, Error>) {
-        lock.lock()
-        self.result = result
-        lock.unlock()
-    }
-
-    func get() -> Result<VZVirtioSocketConnection, Error>? {
-        lock.lock()
-        let value = result
-        lock.unlock()
-        return value
-    }
-}
-
-private final class VZConnectionHolder: @unchecked Sendable {
-    private let connection: VZVirtioSocketConnection
-
-    init(_ connection: VZVirtioSocketConnection) {
-        self.connection = connection
-    }
-
-    func close() {
-        connection.close()
-    }
-}
-#endif
 
 private func copyBytes(
     from sourceFD: Int32,

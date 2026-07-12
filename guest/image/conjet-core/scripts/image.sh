@@ -16,6 +16,9 @@ ROOT_DISK_GB="${ROOT_DISK_GB:-16}"
 RUNTIME="${RUNTIME:-docker}"
 DOCKER_PACKAGE="${DOCKER_PACKAGE:-docker.io}"
 CONJET_CORE_VERSION="${CONJET_CORE_VERSION:-1.0.0}"
+QEMU_X86_64_VERSION="${QEMU_X86_64_VERSION:-11.0.2}"
+QEMU_X86_64_SOURCE_URL="${QEMU_X86_64_SOURCE_URL:-https://download.qemu.org/qemu-11.0.2.tar.xz}"
+QEMU_X86_64_SOURCE_SHA256="${QEMU_X86_64_SOURCE_SHA256:-3745f6ea88e2e87fe0dc838b2b1d4e0a770bf48e01a1d5a186842a1fff76ccf5}"
 
 case "${RUNTIME}" in
     docker|none)
@@ -46,13 +49,21 @@ log "installing host image build tools"
 apt-get update
 apt-get install -y --no-install-recommends \
     ca-certificates \
+    build-essential \
     curl \
     debootstrap \
     e2fsprogs \
     file \
     gzip \
+    libglib2.0-dev \
+    libpixman-1-dev \
     mount \
+    ninja-build \
     parted \
+    patch \
+    pkg-config \
+    python3-venv \
+    xz-utils \
     util-linux
 
 mkdir -p "${WORK_DIR}" "${OUT_DIR}" "${MOUNT_DIR}"
@@ -222,6 +233,41 @@ fi
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 CHROOT
+
+if [ "${ARCH}" = "arm64" ]; then
+    qemu_tarball="${WORK_DIR}/qemu-${QEMU_X86_64_VERSION}.tar.xz"
+    qemu_source="${WORK_DIR}/qemu-${QEMU_X86_64_VERSION}"
+    qemu_build="${WORK_DIR}/qemu-${QEMU_X86_64_VERSION}-build"
+    curl --fail --location --retry 5 --output "${qemu_tarball}" "${QEMU_X86_64_SOURCE_URL}"
+    echo "${QEMU_X86_64_SOURCE_SHA256}  ${qemu_tarball}" | sha256sum --check --strict
+    rm -rf "${qemu_source}" "${qemu_build}"
+    tar -C "${WORK_DIR}" -xf "${qemu_tarball}"
+    patch -d "${qemu_source}" -p1 \
+        <"${BUILD_DIR}/patches/qemu-linux-user-dotnet-defaults.patch"
+    mkdir -p "${qemu_build}"
+    (
+        cd "${qemu_build}"
+        "${qemu_source}/configure" \
+            --target-list=x86_64-linux-user \
+            --static \
+            --disable-system \
+            --disable-tools \
+            --disable-docs \
+            --disable-guest-agent
+        ninja -j"$(nproc)" qemu-x86_64
+    )
+    "${qemu_build}/qemu-x86_64" --version | grep -F "qemu-x86_64 version ${QEMU_X86_64_VERSION}"
+    file "${qemu_build}/qemu-x86_64" | grep -Eq 'static-pie linked|statically linked'
+    install -D -m 0755 "${qemu_build}/qemu-x86_64" \
+        "${MOUNT_DIR}/usr/libexec/conjet/qemu-x86_64"
+    install -D -m 0644 "${qemu_source}/COPYING" \
+        "${MOUNT_DIR}/usr/share/doc/conjet-qemu-x86_64/COPYING"
+    mkdir -p "${MOUNT_DIR}/usr/lib/binfmt.d"
+    cat >"${MOUNT_DIR}/usr/lib/binfmt.d/conjet-x86_64.conf" <<'BINFMT'
+:qemu-x86_64:M::\x7f\x45\x4c\x46\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\xfc\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/libexec/conjet/qemu-x86_64:POF
+BINFMT
+    rm -rf "${qemu_tarball}" "${qemu_source}" "${qemu_build}"
+fi
 
 rm -f "${MOUNT_DIR}/usr/sbin/policy-rc.d"
 
@@ -579,6 +625,27 @@ After=basic.target
 AllowIsolate=yes
 UNIT
 
+if [ "${ARCH}" = "arm64" ]; then
+    cat >"${MOUNT_DIR}/etc/systemd/system/conjet-x86-emulation.service" <<'UNIT'
+[Unit]
+Description=Conjet x86_64 userspace emulation registration
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=containerd.service docker.service conjet-init-ready.service
+ConditionPathExists=/usr/libexec/conjet/qemu-x86_64
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -ec 'mountpoint -q /proc/sys/fs/binfmt_misc || mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc'
+ExecStart=/usr/lib/systemd/systemd-binfmt
+ExecStart=/bin/sh -ec 'test -r /proc/sys/fs/binfmt_misc/qemu-x86_64; grep -q "flags:.*F" /proc/sys/fs/binfmt_misc/qemu-x86_64'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=conjet-appliance.target
+UNIT
+fi
+
 ln -sf /etc/systemd/system/conjet-appliance.target "${MOUNT_DIR}/etc/systemd/system/default.target"
 
 cat >"${MOUNT_DIR}/etc/systemd/system/conjet-boot-diagnostics.service" <<'UNIT'
@@ -735,6 +802,12 @@ arch=${OS_ARCH}
 runtime=${RUNTIME}
 docker_package=${DOCKER_PACKAGE}
 EOF_RELEASE
+if [ "${ARCH}" = "arm64" ]; then
+    cat >>"${MOUNT_DIR}/etc/conjet/release" <<EOF_X86_RELEASE
+x86_emulation=qemu-linux-user
+x86_emulation_version=${QEMU_X86_64_VERSION}
+EOF_X86_RELEASE
+fi
 
 if [ -x "${MOUNT_DIR}/usr/bin/unpigz" ]; then
     mv "${MOUNT_DIR}/usr/bin/unpigz" "${MOUNT_DIR}/usr/bin/unpigz.conjet-original" || true
@@ -795,6 +868,9 @@ if [ "${RUNTIME}" = "docker" ]; then
     enable_unit conjet-build.slice conjet-appliance.target
     enable_unit conjet-services.slice conjet-appliance.target
     enable_unit conjet-memory-setup.service conjet-appliance.target
+    if [ "${ARCH}" = "arm64" ]; then
+        enable_unit conjet-x86-emulation.service conjet-appliance.target
+    fi
     enable_unit conjet-docker-vsock.service conjet-appliance.target
     enable_unit conjet-memory.service conjet-appliance.target
     enable_unit conjet-init-ready.service conjet-appliance.target
@@ -865,6 +941,12 @@ gzip -9 -c "${RAW_IMAGE}" >"${OUT_IMAGE}"
     sha512sum "$(basename "${OUT_IMAGE}")" >"$(basename "${OUT_IMAGE}").sha512sum"
 )
 
+if [ "${ARCH}" = "arm64" ]; then
+    x86_emulation_json="{\"engine\":\"qemu-linux-user\",\"version\":\"${QEMU_X86_64_VERSION}\",\"binfmtFlags\":\"POF\"}"
+else
+    x86_emulation_json="null"
+fi
+
 cat >"${OUT_IMAGE}.json" <<EOF_JSON
 {
   "name": "conjet-core",
@@ -872,6 +954,7 @@ cat >"${OUT_IMAGE}.json" <<EOF_JSON
   "ubuntuVersion": "${UBUNTU_VERSION}",
   "architecture": "${OS_ARCH}",
   "runtime": "${RUNTIME}",
+  "x86Emulation": ${x86_emulation_json},
   "rootDiskGiB": ${ROOT_DISK_GB},
   "format": "raw.gz",
   "systemdDefaultTarget": "conjet-appliance.target",

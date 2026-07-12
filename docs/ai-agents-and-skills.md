@@ -150,7 +150,7 @@ Primary files:
 
 Use for:
 
-- macOS Virtualization.framework host work,
+- macOS Hypervisor.framework and Jetstream host work,
 - Linux guest image engineering,
 - cloud-init, initramfs, and boot diagnostics,
 - VM asset manifests and architecture handling,

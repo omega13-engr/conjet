@@ -20,18 +20,19 @@ was requested, but they are never proof that a GPA is disposable.
 
 ## Host–Guest Granule Contract
 
-On the supported ARM64 host, the VMM can detach memory only in native 16 KiB
-host granules while the virtio-balloon protocol uses 4 KiB PFNs. A 4 KiB guest
-can leave one host granule partly guest-owned after build activity; that page
-must remain resident because detaching it would revoke memory Linux still owns.
+On the supported ARM64 host, the VMM can detach memory only in complete native
+host granules while the virtio-balloon protocol uses 4 KiB PFNs. Conjet Core
+also uses 4 KiB Linux pages so x86-64 user-mode emulation remains compatible
+with runtimes such as V8. A host granule may therefore contain several guest
+PFNs.
 
-The Docker and fast direct kernels therefore use 16 KiB ARM64 Linux pages. Each
-balloon allocation is reported as four adjacent 4 KiB PFNs, giving the VMM a
-whole host granule that it can detach and mark reusable immediately. After the
-guest has reached a verified idle target, Jetstream converts only those
-detached, balloon-owned granules to zero backing; it restores that backing
-before guest ownership is returned. This keeps active reuse fast while making
-post-build and post-stop idle memory deterministic.
+Jetstream tracks ownership for every 4 KiB subpage and detaches a host granule
+only after Linux has transferred every subpage in it. A partly ballooned host
+granule remains mapped because detaching it would revoke memory Linux still
+owns. After the guest reaches a verified idle target, Jetstream converts only
+complete detached, balloon-owned granules to zero backing and restores that
+backing before guest ownership returns. This preserves the dynamic-memory
+safety contract independently of the guest page size.
 
 ## Controller Ownership
 

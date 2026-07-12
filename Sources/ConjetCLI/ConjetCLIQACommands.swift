@@ -147,7 +147,7 @@ extension ConjetCLI {
         print("  lane: \(status.performanceLane)")
         print("  start supported: \(status.startSupported ? "yes" : "no")")
         print("  Apple VM Service expected: \(status.appleVirtualMachineServiceExpected ? "yes" : "no")")
-        print("  Rosetta: \(status.rosettaPolicy)")
+        print("  x86_64 emulation: \(status.x86EmulationPolicy)")
         print("  note: \(status.message)")
     }
 

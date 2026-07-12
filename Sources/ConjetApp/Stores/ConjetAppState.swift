@@ -85,7 +85,6 @@ struct ProfileConfigDraft: Equatable {
     var runtime: String
     var vmBackend: ConjetVMBackend
     var quietStopMinutes: Int
-    var enableRosetta: Bool
     var enableHostMounts: Bool
     var enableRemovableHostMounts: Bool
     var socketPath: String
@@ -111,7 +110,6 @@ struct ProfileConfigDraft: Equatable {
         self.runtime = config.runtime
         self.vmBackend = config.vmBackend
         self.quietStopMinutes = config.quietStopMinutes
-        self.enableRosetta = config.enableRosetta
         self.enableHostMounts = config.enableHostMounts
         self.enableRemovableHostMounts = config.enableRemovableHostMounts
         self.socketPath = config.socketPath ?? ""
@@ -146,7 +144,6 @@ struct ProfileConfigDraft: Equatable {
             runtime: runtime.rawValue,
             vmBackend: vmBackend,
             quietStopMinutes: quietStopMinutes,
-            enableRosetta: enableRosetta,
             enableHostMounts: enableHostMounts,
             enableRemovableHostMounts: enableRemovableHostMounts,
             socketPath: optional(trimmed(socketPath)),

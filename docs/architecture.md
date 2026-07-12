@@ -21,8 +21,8 @@ The first implemented surface is intentionally small:
 
 ## Backend Backbone
 
-The current backend is three layers: a small macOS control plane, an Apple
-Virtualization.framework transport/storage plane, and a Linux guest runtime.
+The current backend is three layers: a small macOS control plane, the
+Jetstream Rust VMM using Hypervisor.framework (HVF), and a Linux guest runtime.
 Docker compatibility stays at the host-facing edge, while dependency, build,
 image, and container state churn stay on Linux-native storage.
 
@@ -77,9 +77,9 @@ The backbone responsibilities are:
 - Conjet Core owns the stateful host surfaces: VM lifecycle, Docker socket
   bridging, published-port forwarding, network repair, cached status, and
   orderly guest Docker quiesce on stop.
-- The VZ substrate supplies the hard isolation and low-level transport:
-  EFI-booted Conjet Core disk, separate data disk, NAT, VSOCK, serial logs, and
-  VirtioFS bootstrap/host shares.
+- Jetstream supplies hard isolation and low-level transport: direct ARM64
+  kernel boot, root/data disks, virtio-net, VSOCK, serial logs, and dynamic
+  memory devices.
 - The guest owns container runtime state. Docker, containerd, BuildKit, the
   compiled `conjet-netd` helper, the Python fallback bridge, service lifecycle
   markers, and boot diagnostics live inside Conjet Core.
@@ -137,44 +137,20 @@ superiority.
 
 ## VM Boot Substrate
 
-The VZ layer now manages:
+The Jetstream/HVF layer manages:
 
 - manifest at `~/.conjet/state/vm/manifest.json`
 - sparse raw root/data disks
 - serial log at `~/.conjet/logs/vm-serial.log`
-- bootstrap VirtioFS share at `~/.conjet/state/vm/bootstrap`
-- NAT network device
-- virtio socket device for the future guest agent
-- gzip-compressed `newc` initramfs generation from a supplied static Linux
-  `/init` binary
-- EFI disk boot through `VZEFIBootLoader` with an owned EFI variable store
-- optional cloud-init NoCloud seed ISO attached as a read-only disk
-- compressed raw EFI disk import for Conjet Core `.raw.gz` guest artifacts
+- bootstrap state at `~/.conjet/state/vm/bootstrap`
+- virtio-net and virtio socket devices
+- compressed raw root-disk import for Conjet Core `.raw.gz` guest artifacts
 - Docker API forwarding from `~/.conjet/run/docker.sock` to guest VSOCK port
   2375 after VM start
-- optional VirtioFS host shares for `/Users`, plus explicit opt-in `/Volumes`
-  sharing, exposed as `conjethostusers` and `conjethostvolumes`, so the guest
-  Docker daemon can resolve normal macOS bind-mount source paths
 
-`conjet vm fetch-fedora` and `conjet vm fetch-alpine` are boot-asset fetchers,
-not complete container-runtime images. The smoke-test blocker is now concrete:
-the downloaded Fedora and Alpine `vmlinuz` files are compressed ARM64 EFI
-zboot artifacts, while the current boot path uses `VZLinuxBootLoader`. Conjet
-records that boot artifact kind in the manifest and rejects it before calling
-Virtualization.framework.
-
-There are now two viable boot lanes:
-
-1. Direct kernel: `conjet vm init --kernel PATH --initrd PATH` uses
-   `VZLinuxBootLoader` and expects a direct ARM64 Linux `Image`/`vmlinux`.
-2. EFI disk: `conjet vm import-efi-disk --image PATH` imports a full
-   EFI-bootable distro/cloud image, converts qcow2-style inputs to raw through
-   `qemu-img`, creates an EFI variable store, and boots it through
-   `VZEFIBootLoader`.
-
-The old VZ distro-image bring-up command has been removed from the release
-path. New Conjet Core images are produced by the repository-owned builder
-instead of downloading and mutating prebuilt distro images at runtime.
+Conjet now has one production boot lane: Jetstream directly boots the matching
+ARM64 Linux `Image` with the Conjet Core raw root disk. Legacy VZ/EFI boot and
+distro-image bring-up are not compiled into the runtime.
 
 `guest/image/conjet-core` creates a partitioned raw root disk, bootstraps an
 Ubuntu rootfs directly into it, installs Docker and the guest VSOCK bridge,

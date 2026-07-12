@@ -1,0 +1,23 @@
+diff --git a/linux-user/main.c b/linux-user/main.c
+@@ -719,6 +719,21 @@
+         (void) envlist_setenv(envlist, *wrk);
+     }
+ 
++    /*
++     * CoreCLR's default dual-mapped JIT and tiering paths are not supported
++     * by linux-user. Keep translated .NET/MSBuild processes on their stable
++     * compatibility paths unless the container explicitly chose otherwise.
++     */
++    if (getenv("DOTNET_EnableWriteXorExecute") == NULL) {
++        (void) envlist_setenv(envlist, "DOTNET_EnableWriteXorExecute=0");
++    }
++    if (getenv("DOTNET_TieredCompilation") == NULL) {
++        (void) envlist_setenv(envlist, "DOTNET_TieredCompilation=0");
++    }
++    if (getenv("DOTNET_ReadyToRun") == NULL) {
++        (void) envlist_setenv(envlist, "DOTNET_ReadyToRun=0");
++    }
++
+     /* Read the stack limit from the kernel.  If it's "unlimited",
+        then we can do little else besides use the default.  */
+     {

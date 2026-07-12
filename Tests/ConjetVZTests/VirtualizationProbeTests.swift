@@ -10,7 +10,7 @@ final class VirtualizationProbeTests: XCTestCase {
 
         XCTAssertEqual(capabilities.recommendedVMType, "hvf-experimental")
         XCTAssertTrue(capabilities.notes.contains { $0.contains("Jetstream HVF") })
-        XCTAssertTrue(capabilities.notes.contains { $0.contains("Rosetta Linux workloads require the VZ fallback") })
+        XCTAssertTrue(capabilities.notes.contains { $0.contains("x86_64 Linux userspace") })
     }
 
     func testHVFExperimentalStartRejectsInvalidDirectKernelAssetsBeforeHVFCreate() throws {

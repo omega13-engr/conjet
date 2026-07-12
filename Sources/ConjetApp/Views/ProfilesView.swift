@@ -387,7 +387,6 @@ private struct ProfileConfigForm: View {
                 }
 
                 ToggleGrid {
-                    Toggle("Rosetta", isOn: $draft.enableRosetta)
                     Toggle("Host Mounts", isOn: $draft.enableHostMounts)
                     Toggle("Removable Mounts", isOn: $draft.enableRemovableHostMounts)
                 }

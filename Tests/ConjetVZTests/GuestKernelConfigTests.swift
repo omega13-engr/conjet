@@ -391,9 +391,9 @@ final class GuestKernelConfigTests: XCTestCase {
                 }
         )
 
-        XCTAssertTrue(config.contains("CONFIG_ARM64_16K_PAGES=y"))
-        XCTAssertTrue(config.contains("# CONFIG_ARM64_4K_PAGES is not set"))
-        XCTAssertTrue(configBuiltIns.contains("CONFIG_ARM64_16K_PAGES"))
+        XCTAssertTrue(config.contains("CONFIG_ARM64_4K_PAGES=y"))
+        XCTAssertTrue(config.contains("# CONFIG_ARM64_16K_PAGES is not set"))
+        XCTAssertTrue(configBuiltIns.contains("CONFIG_ARM64_4K_PAGES"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_OVERLAY_FS"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_BLK_DEV"))
         XCTAssertTrue(configBuiltIns.contains("CONFIG_BLK_DEV_LOOP"))
@@ -480,7 +480,7 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(dockerDirectBuiltIns.contains("CONFIG_VETH"))
         XCTAssertTrue(dockerDirectBuiltIns.contains("CONFIG_BRIDGE_NETFILTER"))
         XCTAssertTrue(dockerDirectBuiltIns.contains("CONFIG_CGROUP_BPF"))
-        XCTAssertTrue(dockerDirectBuiltIns.contains("CONFIG_ARM64_16K_PAGES"))
+        XCTAssertTrue(dockerDirectBuiltIns.contains("CONFIG_ARM64_4K_PAGES"))
     }
 
     func testPulseFastKernelConfigKeepsDirectOCISubstrateWithoutSerialOrDockerBulk() throws {
@@ -499,7 +499,7 @@ final class GuestKernelConfigTests: XCTestCase {
         )
 
         for required in [
-            "CONFIG_ARM64_16K_PAGES",
+            "CONFIG_ARM64_4K_PAGES",
             "CONFIG_OF",
             "CONFIG_BLK_DEV_INITRD",
             "CONFIG_BLK_DEV_LOOP",
@@ -537,12 +537,12 @@ final class GuestKernelConfigTests: XCTestCase {
         }
 
         XCTAssertFalse(configBuiltIns.contains("CONFIG_SERIAL_AMBA_PL011"))
-        XCTAssertTrue(config.contains("# CONFIG_ARM64_4K_PAGES is not set"))
+        XCTAssertTrue(config.contains("# CONFIG_ARM64_16K_PAGES is not set"))
         XCTAssertFalse(configBuiltIns.contains("CONFIG_SERIAL_AMBA_PL011_CONSOLE"))
         XCTAssertFalse(configBuiltIns.contains("CONFIG_BRIDGE"))
         XCTAssertFalse(configBuiltIns.contains("CONFIG_NETFILTER"))
         XCTAssertFalse(configBuiltIns.contains("CONFIG_NF_TABLES"))
-        XCTAssertFalse(configBuiltIns.contains("CONFIG_BINFMT_MISC"))
+        XCTAssertTrue(configBuiltIns.contains("CONFIG_BINFMT_MISC"))
     }
 
     func testConjetCoreImageScriptInstallsHVFReadinessMarkerUnit() throws {
@@ -571,6 +571,21 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(imageScript.contains("enable_unit conjet-services.slice conjet-appliance.target"))
         XCTAssertTrue(imageScript.contains(#""cgroup-parent": "conjet-build.slice""#))
         XCTAssertTrue(imageScript.contains(#""buildkit": true"#))
+        XCTAssertTrue(imageScript.contains("QEMU_X86_64_VERSION=\"${QEMU_X86_64_VERSION:-11.0.2}\""))
+        XCTAssertTrue(imageScript.contains("QEMU_X86_64_SOURCE_SHA256="))
+        XCTAssertTrue(imageScript.contains("qemu-linux-user-dotnet-defaults.patch"))
+        XCTAssertTrue(imageScript.contains("--target-list=x86_64-linux-user"))
+        XCTAssertTrue(imageScript.contains("--static"))
+        XCTAssertTrue(imageScript.contains("sha256sum --check --strict"))
+        XCTAssertTrue(imageScript.contains("/usr/libexec/conjet/qemu-x86_64"))
+        XCTAssertTrue(imageScript.contains("x86_emulation_version=${QEMU_X86_64_VERSION}"))
+        XCTAssertTrue(imageScript.contains(#""x86Emulation": ${x86_emulation_json}"#))
+        XCTAssertTrue(imageScript.contains("conjet-x86_64.conf"))
+        XCTAssertTrue(imageScript.contains("conjet-x86-emulation.service"))
+        XCTAssertTrue(imageScript.contains("ExecStart=/usr/lib/systemd/systemd-binfmt"))
+        XCTAssertTrue(imageScript.contains("mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc"))
+        XCTAssertTrue(imageScript.contains(#"grep -q "flags:.*F""#))
+        XCTAssertTrue(imageScript.contains("Before=containerd.service docker.service conjet-init-ready.service"))
         XCTAssertFalse(imageScript.contains("buildkit-${BUILDKIT_VERSION}.linux-${buildkit_arch}.tar.gz"))
         XCTAssertFalse(imageScript.contains("bin/buildkitd"))
         XCTAssertFalse(imageScript.contains("bin/buildctl"))
@@ -597,6 +612,21 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(imageScript.contains("systemd.unit=conjet-appliance.target"))
         XCTAssertTrue(imageScript.contains("$2 == \"/boot\" || $2 == \"/boot/\" || $2 == \"/boot/efi\" || $2 == \"/boot/efi/\""))
         XCTAssertTrue(imageScript.contains("sha512sum \"$(basename \"${OUT_IMAGE}\")\""))
+    }
+
+    func testConjetQEMUPatchUsesOverrideableDotNetCompatibilityDefaults() throws {
+        let patchURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("guest/image/conjet-core/patches/qemu-linux-user-dotnet-defaults.patch")
+        let patch = try String(contentsOf: patchURL, encoding: .utf8)
+
+        for variable in [
+            "DOTNET_EnableWriteXorExecute",
+            "DOTNET_TieredCompilation",
+            "DOTNET_ReadyToRun"
+        ] {
+            XCTAssertTrue(patch.contains("getenv(\"\(variable)\") == NULL"))
+            XCTAssertTrue(patch.contains("envlist_setenv(envlist, \"\(variable)=0\")"))
+        }
     }
 
     func testConjetMemorySetupDefaultsZramToGuestCapacityWithDiskFallback() throws {

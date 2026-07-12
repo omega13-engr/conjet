@@ -214,7 +214,7 @@ public struct Phase9KernelBuildManifest: Codable, Equatable, Sendable {
 
 public struct VMImageStore: Sendable {
     public static let dockerDirectKernelRequiredBuiltIns = [
-        "CONFIG_ARM64_16K_PAGES",
+        "CONFIG_ARM64_4K_PAGES",
         "CONFIG_OF",
         "CONFIG_BLK_DEV_INITRD",
         "CONFIG_BLK_DEV_LOOP",

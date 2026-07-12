@@ -284,9 +284,7 @@ private final class DaemonRuntime: @unchecked Sendable {
                     return response(ok: false, message: initializingMessage, status: status(state: .warmIdle), dockerRun: result)
                 }
                 let result = try DockerRunExecutor(
-                    socketPath: paths.dockerSocket.path,
-                    requestedBackend: config.vmBackend,
-                    rosettaAvailable: HostCapabilities.detect().rosettaLinuxSupportLikelyAvailable
+                    socketPath: paths.dockerSocket.path
                 )
                 .run(
                     image: image,

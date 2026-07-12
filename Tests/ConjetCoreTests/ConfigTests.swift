@@ -13,7 +13,6 @@ final class ConfigTests: XCTestCase {
             kernelImagePath: "/tmp/Image",
             runtime: "docker",
             quietStopMinutes: 12,
-            enableRosetta: false,
             enableHostMounts: false,
             enableRemovableHostMounts: true,
             socketPath: "/tmp/conjet.sock",
@@ -118,28 +117,15 @@ final class ConfigTests: XCTestCase {
     }
 
     func testVMBackendSelectionStatusReportsRestartAndHVFStartSupport() throws {
-        let pending = ConjetVMBackendSelectionStatus(selected: .hvfExperimental, active: .vz)
-
-        XCTAssertEqual(pending.effective, .vz)
-        XCTAssertTrue(pending.requiresCoreRestart)
-        XCTAssertTrue(pending.startSupported)
-        XCTAssertTrue(pending.appleVirtualMachineServiceExpected)
-
         let activeHVF = ConjetVMBackendSelectionStatus(selected: .hvfExperimental, active: .hvfExperimental)
 
         XCTAssertFalse(activeHVF.requiresCoreRestart)
         XCTAssertTrue(activeHVF.startSupported)
         XCTAssertFalse(activeHVF.appleVirtualMachineServiceExpected)
         XCTAssertEqual(activeHVF.performanceLane, "jetstream")
-        XCTAssertEqual(activeHVF.selected.displayName, "Jetstream HVF primary")
-        XCTAssertTrue(activeHVF.message.contains("Direct-kernel guest start is available"))
-
-        let activeVZ = ConjetVMBackendSelectionStatus(selected: .vz, active: .vz)
-
-        XCTAssertEqual(activeVZ.selected.displayName, "VZ Rosetta fallback")
-        XCTAssertEqual(activeVZ.performanceLane, "compatibility")
-        XCTAssertTrue(activeVZ.appleVirtualMachineServiceExpected)
-        XCTAssertTrue(activeVZ.message.contains("Rosetta"))
+        XCTAssertEqual(activeHVF.selected.displayName, "Jetstream HVF")
+        XCTAssertTrue(activeHVF.message.contains("Direct-kernel guest start"))
+        XCTAssertNil(ConjetVMBackend.parse("vz"))
     }
 
     func testNoPolicyMemoryProfileProducesBoundedDemandPolicy() throws {

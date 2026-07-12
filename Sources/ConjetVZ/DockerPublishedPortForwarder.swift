@@ -313,7 +313,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             failedForwards: failed,
             conflictCount: conflicts,
             staleForwards: stale,
-            vmNetworkMode: "vz-nat",
+            vmNetworkMode: "hvf-nat",
             turboAvailable: false,
             turboEnabled: false,
             lastReconcileAt: lastReconcileAt,

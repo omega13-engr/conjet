@@ -1839,11 +1839,10 @@ final class ConjetAppStateTests: XCTestCase {
               "cpuBrand": "Apple",
               "memoryBytes": 17179869184,
               "isAppleSilicon": true,
-              "virtualizationFrameworkAvailable": true,
-              "rosettaLinuxSupportLikelyAvailable": true,
+              "hypervisorFrameworkAvailable": true,
               "lowPowerModeEnabled": false,
               "thermalState": "nominal",
-              "requiredEntitlements": ["com.apple.security.virtualization"]
+              "requiredEntitlements": ["com.apple.security.hypervisor"]
             },
             "config": {},
             "memoryPolicy": {

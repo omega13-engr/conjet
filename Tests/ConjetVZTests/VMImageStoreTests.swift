@@ -40,7 +40,7 @@ final class VMImageStoreTests: XCTestCase {
         XCTAssertNoThrow(try store.validateManifest(manifest))
     }
 
-    func testCompressedEFIZbootKernelIsRejectedBeforeVZStart() throws {
+    func testCompressedEFIZbootKernelIsRejectedBeforeHVFStart() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("conjet-vz-test-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }

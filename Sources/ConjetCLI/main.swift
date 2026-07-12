@@ -147,8 +147,7 @@ struct ConjetCLI {
             print("  arch: \(host.architecture)")
             print("  cpu: \(host.cpuBrand)")
             print("  memory: \(host.memoryBytes / 1_048_576) MiB")
-            print("  Virtualization.framework: \(host.virtualizationFrameworkAvailable ? "available" : "unavailable")")
-            print("  Rosetta Linux support: \(host.rosettaLinuxSupportLikelyAvailable ? "likely available" : "not detected")")
+            print("  Hypervisor.framework backend: \(host.isAppleSilicon ? "available" : "unsupported architecture")")
             print("  VM backend: \(config.vmBackend.rawValue)")
             print("  low power mode: \(host.lowPowerModeEnabled ? "on" : "off")")
             print("  thermal: \(host.thermalState)")
@@ -1989,7 +1988,7 @@ struct ConjetCLI {
         }
 
         let daemonURL = try daemonExecutableURL()
-        _ = try repairDebugVirtualizationSigningIfPossible(daemonURL: daemonURL)
+        _ = try repairDebugHVFSigningIfPossible(daemonURL: daemonURL)
         let process = Process()
         process.executableURL = daemonURL
         process.arguments = ["--serve"]
@@ -5278,7 +5277,7 @@ struct ConjetCLI {
     ) throws -> DaemonResponse {
         let request = DaemonRequest(command: .vmStart, parameters: waitMode.daemonParameters)
         let response = try UnixSocketClient(socketPath: socketPath).send(request)
-        guard !response.ok, isVirtualizationEntitlementFailure(response.message) else {
+        guard !response.ok, isHVFEntitlementFailure(response.message) else {
             return response
         }
 
@@ -5289,13 +5288,13 @@ struct ConjetCLI {
             return response
         }
 
-        let repaired = try repairDebugVirtualizationSigningIfPossible(daemonURL: daemonURL)
-        guard repaired || binaryHasDebugVirtualizationEntitlements(daemonURL) else {
+        let repaired = try repairDebugHVFSigningIfPossible(daemonURL: daemonURL)
+        guard repaired || binaryHasDebugHVFEntitlement(daemonURL) else {
             return response
         }
         if !json {
             let action = repaired ? "signed it and restarting Conjet Core" : "restarting Conjet Core"
-            writeDiagnostic("debug Conjet Core was missing com.apple.security.virtualization at runtime; \(action)")
+            writeDiagnostic("debug Conjet Core was missing com.apple.security.hypervisor at runtime; \(action)")
         }
         _ = try? UnixSocketClient(socketPath: socketPath).send(DaemonRequest(command: .stop), timeoutSeconds: 5)
         waitForDaemonStop(socketPath: socketPath)
@@ -5352,18 +5351,16 @@ struct ConjetCLI {
         }
     }
 
-    private static func isVirtualizationEntitlementFailure(_ message: String) -> Bool {
+    private static func isHVFEntitlementFailure(_ message: String) -> Bool {
         let lowercased = message.lowercased()
-        return lowercased.contains("com.apple.security.virtualization")
-            || lowercased.contains("com.apple.security.hypervisor")
-            || (lowercased.contains("virtualization") && lowercased.contains("entitlement"))
+        return lowercased.contains("com.apple.security.hypervisor")
             || (lowercased.contains("hypervisor") && lowercased.contains("entitlement"))
             || lowercased.contains("jetstream boot attempt could not create an hvf vm")
             || lowercased.contains("hypervisor denied vm creation")
     }
 
     @discardableResult
-    private static func repairDebugVirtualizationSigningIfPossible(daemonURL: URL) throws -> Bool {
+    private static func repairDebugHVFSigningIfPossible(daemonURL: URL) throws -> Bool {
         guard isSwiftPMDebugExecutable(daemonURL),
               let root = repositoryRoot(containing: daemonURL)
                 ?? sourceRepositoryRoot(environment: ProcessInfo.processInfo.environment) else {
@@ -5377,7 +5374,7 @@ struct ConjetCLI {
         guard FileManager.default.isExecutableFile(atPath: daemonURL.path) else {
             return false
         }
-        guard !binaryHasDebugVirtualizationEntitlements(daemonURL) else {
+        guard !binaryHasDebugHVFEntitlement(daemonURL) else {
             return false
         }
 
@@ -5397,7 +5394,7 @@ struct ConjetCLI {
         return true
     }
 
-    private static func binaryHasDebugVirtualizationEntitlements(_ executable: URL) -> Bool {
+    private static func binaryHasDebugHVFEntitlement(_ executable: URL) -> Bool {
         guard let result = try? ProcessRunner.run("/usr/bin/codesign", [
             "-d",
             "--entitlements", ":-",
@@ -5406,8 +5403,7 @@ struct ConjetCLI {
             return false
         }
         let output = result.stdout + result.stderr
-        return output.contains("com.apple.security.virtualization")
-            && output.contains("com.apple.security.hypervisor")
+        return output.contains("com.apple.security.hypervisor")
     }
 
     private static func isSwiftPMDebugExecutable(_ executable: URL) -> Bool {

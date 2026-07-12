@@ -24,7 +24,7 @@ final class ConjetNetworkStatusTests: XCTestCase {
           "failedForwards": 0,
           "conflictCount": 0,
           "staleForwards": 0,
-          "vmNetworkMode": "vz-nat",
+          "vmNetworkMode": "hvf-nat",
           "turboAvailable": false,
           "turboEnabled": false,
           "forwards": [],

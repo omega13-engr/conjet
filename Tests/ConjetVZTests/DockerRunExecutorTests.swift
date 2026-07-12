@@ -45,14 +45,12 @@ final class DockerRunExecutorTests: XCTestCase {
         ])
     }
 
-    func testRunPlacesAmd64PlatformBeforeImageWhenVZRosettaIsAvailable() throws {
+    func testRunPlacesAmd64PlatformBeforeImageForConjetCoreEmulation() throws {
         let socket = try temporarySocketPlaceholder()
         let capture = DockerInvocationCapture()
         let result = try DockerRunExecutor(
             dockerCLIPath: "/bin/echo",
             socketPath: socket.path,
-            requestedBackend: .vz,
-            rosettaAvailable: true,
             runner: { executable, arguments in
                 capture.record(executable: executable, arguments: arguments)
                 return ProcessResult(
@@ -80,14 +78,12 @@ final class DockerRunExecutorTests: XCTestCase {
         ])
     }
 
-    func testRunRejectsAmd64OnHVFWithClearVZFallbackMessage() throws {
+    func testRunSupportsAmd64OnHVF() throws {
         let socket = try temporarySocketPlaceholder()
         let capture = DockerInvocationCapture()
         let result = try DockerRunExecutor(
             dockerCLIPath: "/bin/echo",
             socketPath: socket.path,
-            requestedBackend: .hvfExperimental,
-            rosettaAvailable: true,
             runner: { executable, arguments in
                 capture.record(executable: executable, arguments: arguments)
                 return ProcessResult(executable: executable, arguments: arguments, exitCode: 0, stdout: "", stderr: "")
@@ -95,24 +91,11 @@ final class DockerRunExecutorTests: XCTestCase {
         )
         .run(image: "alpine:3.20", command: [], platform: "linux/amd64")
 
-        XCTAssertNil(result.exitCode)
-        XCTAssertNil(capture.invocation)
-        XCTAssertTrue(result.stderrTail.contains("VZ fallback"))
-        XCTAssertTrue(result.stderrTail.contains("linux/arm64"))
-    }
-
-    func testRunRejectsAmd64WhenRosettaIsUnavailable() throws {
-        let socket = try temporarySocketPlaceholder()
-        let result = try DockerRunExecutor(
-            dockerCLIPath: "/bin/echo",
-            socketPath: socket.path,
-            requestedBackend: .vz,
-            rosettaAvailable: false
-        )
-        .run(image: "alpine:3.20", command: [], platform: "linux/amd64")
-
-        XCTAssertNil(result.exitCode)
-        XCTAssertTrue(result.stderrTail.contains("Rosetta support was not detected"))
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(capture.invocation?.arguments, [
+            "--host", "unix://\(socket.path)", "run", "--rm",
+            "--platform", "linux/amd64", "alpine:3.20"
+        ])
     }
 
     func testRunRejectsUnknownPlatformBeforeDockerInvocation() throws {
@@ -121,8 +104,6 @@ final class DockerRunExecutorTests: XCTestCase {
         let result = try DockerRunExecutor(
             dockerCLIPath: "/bin/echo",
             socketPath: socket.path,
-            requestedBackend: .vz,
-            rosettaAvailable: true,
             runner: { executable, arguments in
                 capture.record(executable: executable, arguments: arguments)
                 return ProcessResult(executable: executable, arguments: arguments, exitCode: 0, stdout: "", stderr: "")

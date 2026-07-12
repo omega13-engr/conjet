@@ -47,7 +47,7 @@ public struct ConjetHVFEntitlementStatus: Codable, Equatable, Sendable {
 public struct ConjetHVFSmokeResult: Codable, Equatable, Sendable {
     public var backend: ConjetVMBackend
     public var ok: Bool
-    public var frameworkLinked: Bool
+    public var hypervisorAvailable: Bool
     public var appleSilicon: Bool
     public var architecture: String
     public var requiredEntitlement: String
@@ -61,7 +61,7 @@ public struct ConjetHVFSmokeResult: Codable, Equatable, Sendable {
     public init(
         backend: ConjetVMBackend = .hvfExperimental,
         ok: Bool,
-        frameworkLinked: Bool,
+        hypervisorAvailable: Bool,
         appleSilicon: Bool,
         architecture: String,
         requiredEntitlement: String = "com.apple.security.hypervisor",
@@ -74,7 +74,7 @@ public struct ConjetHVFSmokeResult: Codable, Equatable, Sendable {
     ) {
         self.backend = backend
         self.ok = ok
-        self.frameworkLinked = frameworkLinked
+        self.hypervisorAvailable = hypervisorAvailable
         self.appleSilicon = appleSilicon
         self.architecture = architecture
         self.requiredEntitlement = requiredEntitlement

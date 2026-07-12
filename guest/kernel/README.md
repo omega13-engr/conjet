@@ -1,6 +1,6 @@
 # Guest Kernel
 
-Kernel work starts after the Virtualization.framework boot path is proven. The
+Kernel work targets Jetstream's direct Hypervisor.framework boot path. The
 first requirement is a Linux kernel with VirtioFS, virtio-blk, virtio-net,
 vsock, inotify/fanotify, and cgroup support.
 
@@ -26,18 +26,17 @@ manual pulse reclaim path is fallback only. Reclaim-capable kernels must keep
 `CONFIG_SWAP`, `CONFIG_ZSMALLOC`, and `CONFIG_ZRAM` enabled; the Docker profile
 also enables `CONFIG_ZRAM_WRITEBACK`.
 
-### Host-Granule Alignment
+### Guest Page Granule
 
-The ARM64 Docker and fast profiles select `CONFIG_ARM64_16K_PAGES`. The
-virtio-balloon wire format remains in 4 KiB PFNs, but the Linux driver submits
-all PFNs belonging to one Linux page together. Matching the guest allocation
-page to the native host granule prevents a post-build mix of guest-owned and
-balloon-owned subpages in one host page. That mix is safe but unreclaimable,
-and otherwise leaves an avoidable idle footprint after a large build.
+The ARM64 Docker and fast profiles select `CONFIG_ARM64_4K_PAGES`. This is
+required for broad x86-64 linux-user compatibility, including V8/Node.js
+workloads. The virtio-balloon wire format also uses 4 KiB PFNs. Jetstream keeps
+ownership and reclaim decisions aligned to complete native host pages, so a
+4 KiB guest page never grants authority to reclaim only part of a host page.
 
-The release metadata treats `CONFIG_ARM64_16K_PAGES` as a required direct
+The release metadata treats `CONFIG_ARM64_4K_PAGES` as a required direct
 kernel capability. A host must select a matching Conjet Core kernel asset
-rather than silently falling back to an older 4 KiB direct kernel.
+rather than silently accepting an incompatible 16 KiB kernel.
 
 ### Dynamic Memory Safety Contract
 
