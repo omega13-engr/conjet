@@ -26,7 +26,8 @@ public struct HostCapabilities: Codable, Equatable, Sendable {
             lowPowerModeEnabled: lowPowerModeEnabled(),
             thermalState: thermalState(),
             requiredEntitlements: [
-                "com.apple.security.hypervisor"
+                "com.apple.security.hypervisor",
+                "com.apple.security.virtualization"
             ]
         )
     }

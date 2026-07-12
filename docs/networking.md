@@ -1,5 +1,12 @@
 # Conjet Networking
 
+Jetstream uses Hypervisor.framework for VM execution and the direct `vmnet`
+shared-mode API for unprivileged NAT. Packaged Conjet binaries retain the
+`com.apple.security.virtualization` compatibility entitlement required by the
+previously working vmnet authorization path. This entitlement does not link,
+select, or restore the removed Virtualization.framework VM backend; all VM
+execution remains owned by Jetstream/HVF.
+
 ConjetNet publishes Docker ports from the Conjet VM to macOS localhost.
 
 The default policy is `secure-local`: Docker-published ports bind to

@@ -4,6 +4,9 @@
 <dict>
   <key>com.apple.security.get-task-allow</key>
   <true/>
+  <!-- Compatibility authorization for the direct vmnet shared-mode service. -->
+  <key>com.apple.security.virtualization</key>
+  <true/>
   <key>com.apple.security.hypervisor</key>
   <true/>
 </dict>

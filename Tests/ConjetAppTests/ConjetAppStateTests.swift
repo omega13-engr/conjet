@@ -1842,7 +1842,7 @@ final class ConjetAppStateTests: XCTestCase {
               "hypervisorFrameworkAvailable": true,
               "lowPowerModeEnabled": false,
               "thermalState": "nominal",
-              "requiredEntitlements": ["com.apple.security.hypervisor"]
+              "requiredEntitlements": ["com.apple.security.hypervisor", "com.apple.security.virtualization"]
             },
             "config": {},
             "memoryPolicy": {
