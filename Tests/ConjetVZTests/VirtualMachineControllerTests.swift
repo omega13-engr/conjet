@@ -3,6 +3,21 @@ import ConjetCore
 import XCTest
 
 final class VirtualMachineControllerTests: XCTestCase {
+    func testRustMemoryPolicyForwardsProfileAndPreservesExplicitOverrides() {
+        for (profile, idle, step) in [(ConjetMemoryProfile.performance, "2048", "1024"), (.balanced, "512", "512"), (.eco, "512", "256")] {
+            let config = ConjetConfig(memoryMiB: 8192, vmBackend: .hvfExperimental, memoryProfile: profile)
+            let environment = VirtualMachineController.rustMemoryEnvironment(config: config, environment: ["PATH": "/bin"])
+            XCTAssertEqual(environment["CONJET_MEM_CORE_IDLE_TARGET_MIB"], idle)
+            XCTAssertEqual(environment["CONJET_MEM_CORE_SERVICE_SHRINK_STEP_MIB"], step)
+            XCTAssertEqual(environment["CONJET_MEM_CORE_IDLE_DWELL_MS"], "1")
+            XCTAssertEqual(environment["PATH"], "/bin")
+            let overridden = VirtualMachineController.rustMemoryEnvironment(
+                config: config, environment: ["CONJET_MEM_CORE_IDLE_TARGET_MIB": "768"]
+            )
+            XCTAssertEqual(overridden["CONJET_MEM_CORE_IDLE_TARGET_MIB"], "768")
+        }
+    }
+
     func testControllerOmittedBackendDefaultsToHVF() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("conjet-vm-controller-backend-\(UUID().uuidString)", isDirectory: true)

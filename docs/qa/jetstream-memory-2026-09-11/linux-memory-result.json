@@ -1,0 +1,209 @@
+{
+  "ok": true,
+  "message": "guest requested PSCI SYSTEM_OFF",
+  "boot_plan": {
+    "ram_base": 1073741824,
+    "ram_size_bytes": 536870912,
+    "kernel_load_address": 1075838976,
+    "kernel_size_bytes": 14559240,
+    "initrd_load_address": 1342177280,
+    "initrd_size_bytes": 156701,
+    "fdt_load_address": 1325400064,
+    "fdt_maximum_size_bytes": 2097152,
+    "uart_base": 150994944,
+    "gic_base": 134217728,
+    "vcpu_count": 2,
+    "cmdline": "console=ttyAMA0 rdinit=/init panic=-1 page_reporting.report_delay_ms=25 page_reporting.page_reporting_order=2"
+  },
+  "boot_artifacts": {
+    "reset_state": {
+      "pc": 1075838976,
+      "x0": 1325400064,
+      "x1": 0,
+      "x2": 0,
+      "x3": 0,
+      "cpsr": 965
+    },
+    "loaded_ranges": [
+      {
+        "name": "kernel",
+        "guest_physical_address": 1075838976,
+        "size_bytes": 14559240
+      },
+      {
+        "name": "initramfs",
+        "guest_physical_address": 1342177280,
+        "size_bytes": 156701
+      },
+      {
+        "name": "fdt",
+        "guest_physical_address": 1325400064,
+        "size_bytes": 2090
+      }
+    ],
+    "fdt_size_bytes": 2090
+  },
+  "exit_count": 15874,
+  "console_output": "Booting Linux on physical CPU 0x0000000000 [0x610f0000]\r\nLinux version 6.12.86-conjet (root@localhost) (gcc (Alpine 14.2.0) 14.2.0, GNU ld (GNU Binutils) 2.44) #2 SMP Fri Sep 11 01:03:08 UTC 2026\r\nKASLR disabled due to lack of seed\r\nMachine model: linux,dummy-virt\r\nOF: reserved mem: Reserved memory: No reserved-memory node in the DT\r\nZone ranges:\r\n  DMA      [mem 0x0000000040000000-0x000000005fffffff]\r\n  DMA32    empty\r\n  Normal   empty\r\nMovable zone start for each node\r\nEarly memory node ranges\r\n  node   0: [mem 0x0000000040000000-0x000000005fffffff]\r\nInitmem setup node 0 [mem 0x0000000040000000-0x000000005fffffff]\r\npsci: probing for conduit method from DT.\r\npsci: PSCIv0.2 detected in firmware.\r\npsci: Using standard PSCI v0.2 function IDs\r\npsci: MIGRATE_INFO_TYPE not supported.\r\npercpu: Embedded 19 pages/cpu s47384 r0 d30440 u77824\r\nDetected PIPT I-cache on CPU0\r\nCPU features: detected: GIC system register CPU interface\r\nCPU features: detected: Spectre-v4\r\nCPU features: detected: Spectre-BHB\r\nalternatives: applying boot alternatives\r\nKernel command line: console=ttyAMA0 rdinit=/init panic=-1 page_reporting.report_delay_ms=25 page_reporting.page_reporting_order=2\r\nDentry cache hash table entries: 65536 (order: 7, 524288 bytes, linear)\r\nInode-cache hash table entries: 32768 (order: 6, 262144 bytes, linear)\r\nBuilt 1 zonelists, mobility grouping on.  Total pages: 131072\r\nmem auto-init: stack:all(zero), heap alloc:off, heap free:off\r\nsoftware IO TLB: SWIOTLB bounce buffer size adjusted to 0MB\r\nsoftware IO TLB: area num 2.\r\nsoftware IO TLB: mapped [mem 0x000000005fe7e000-0x000000005fefe000] (0MB)\r\nSLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=2, Nodes=1\r\nrcu: Hierarchical RCU implementation.\r\nrcu: \tRCU restricting CPUs from NR_CPUS=512 to nr_cpu_ids=2.\r\n\tTracing variant of Tasks RCU enabled.\r\nrcu: RCU calculated value of scheduler-enlistment delay is 25 jiffies.\r\nrcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=2\r\nRCU Tasks Trace: Setting shift to 1 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=2.\r\nNR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0\r\nGICv3: 988 SPIs implemented\r\nGICv3: 0 Extended SPIs implemented\r\nRoot IRQ handler: gic_handle_irq\r\nGICv3: GICv3 features: 16 PPIs, RSS\r\nGICv3: GICD_CTRL.DS=1, SCR_EL3.FIQ=0\r\nGICv3: CPU0: found redistributor 0 region 0:0x0000000008010000\r\nrcu: srcu_init: Setting srcu_struct sizes based on contention.\r\narch_timer: cp15 timer(s) running at 24.00MHz (virt).\r\nclocksource: arch_sys_counter: mask: 0xffffffffffffff max_cycles: 0x588fe9dc0, max_idle_ns: 440795202592 ns\r\nsched_clock: 56 bits at 24MHz, resolution 41ns, wraps every 4398046511097ns\r\nConsole: colour dummy device 80x25\r\nCalibrating delay loop (skipped), value calculated using timer frequency.. 48.00 BogoMIPS (lpj=96000)\r\npid_max: default: 32768 minimum: 301\r\nLSM: initializing lsm=capability,selinux\r\nSELinux:  Initializing.\r\nMount-cache hash table entries: 1024 (order: 1, 8192 bytes, linear)\r\nMountpoint-cache hash table entries: 1024 (order: 1, 8192 bytes, linear)\r\ncacheinfo: Unable to detect cache hierarchy for CPU 0\r\nrcu: Hierarchical SRCU implementation.\r\nrcu: \tMax phase no-delay instances is 1000.\r\nsmp: Bringing up secondary CPUs ...\r\nDetected PIPT I-cache on CPU1\r\nGICv3: CPU1: found redistributor 1 region 0:0x0000000008030000\r\nCPU1: Booted secondary processor 0x0000000001 [0x610f0000]\r\nsmp: Brought up 1 node, 2 CPUs\r\nSMP: Total of 2 processors activated.\r\nCPU: All CPU(s) started at EL1\r\nCPU features: detected: ARMv8.4 Translation Table Level\r\nCPU features: detected: Data cache clean to the PoU not required for I/D coherence\r\nCPU features: detected: CRC32 instructions\r\nCPU features: detected: Data independent timing control (DIT)\r\nCPU features: detected: RCpc load-acquire (LDAPR)\r\nCPU features: detected: Speculation barrier (SB)\r\nCPU features: detected: TLB range maintenance instructions\r\nalternatives: applying system-wide alternatives\r\nMemory: 497644K/524288K available (9536K kernel code, 906K rwdata, 2100K rodata, 1536K init, 570K bss, 24744K reserved, 0K cma-reserved)\r\ndevtmpfs: initialized\r\nclocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645041785100000 ns\r\nfutex hash table entries: 512 (order: 3, 32768 bytes, linear)\r\n29056 pages in range for non-PLT usage\r\n520576 pages in range for PLT usage\r\nNET: Registered PF_NETLINK/PF_ROUTE protocol family\r\nDMA: preallocated 128 KiB GFP_KERNEL pool for atomic allocations\r\nDMA: preallocated 128 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations\r\nDMA: preallocated 128 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations\r\naudit: initializing netlink subsys (disabled)\r\nhw-breakpoint: found 6 breakpoint and 4 watchpoint registers.\r\naudit: type=2000 audit(0.000:1): state=initialized audit_enabled=0 res=1\r\nASID allocator initialised with 256 entries\r\nSerial: AMBA PL011 UART driver\r\n9000000.pl011: ttyAMA0 at MMIO 0x9000000 (irq = 13, base_baud = 0) is a PL011 rev0\r\nprintk: legacy console [ttyAMA0] enabled\r\nHugeTLB: registered 1.00 GiB page size, pre-allocated 0 pages\r\nHugeTLB: 0 KiB vmemmap can be freed for a 1.00 GiB page\r\nHugeTLB: registered 32.0 MiB page size, pre-allocated 0 pages\r\nHugeTLB: 0 KiB vmemmap can be freed for a 32.0 MiB page\r\nHugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages\r\nHugeTLB: 0 KiB vmemmap can be freed for a 2.00 MiB page\r\nHugeTLB: registered 64.0 KiB page size, pre-allocated 0 pages\r\nHugeTLB: 0 KiB vmemmap can be freed for a 64.0 KiB page\r\nraid6: skipped pq benchmark and selected neonx8\r\nraid6: using neon recovery algorithm\r\nvgaarb: loaded\r\nclocksource: Switched to clocksource arch_sys_counter\r\nNET: Registered PF_INET protocol family\r\nIP idents hash table entries: 8192 (order: 4, 65536 bytes, linear)\r\ntcp_listen_portaddr_hash hash table entries: 256 (order: 0, 4096 bytes, linear)\r\nTable-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)\r\nTCP established hash table entries: 4096 (order: 3, 32768 bytes, linear)\r\nTCP bind hash table entries: 4096 (order: 5, 131072 bytes, linear)\r\nTCP: Hash tables configured (established 4096 bind 4096)\r\nUDP hash table entries: 256 (order: 1, 8192 bytes, linear)\r\nUDP-Lite hash table entries: 256 (order: 1, 8192 bytes, linear)\r\nNET: Registered PF_UNIX/PF_LOCAL protocol family\r\nPCI: CLS 0 bytes, default 64\r\nUnpacking initramfs...\r\nFreeing initrd memory: 152K\r\nworkingset: timestamp_bits=46 max_order=17 bucket_order=0\r\nsquashfs: version 4.0 (2009/01/31) Phillip Lougher\r\nfuse: init (API version 7.41)\r\nxor: measuring software checksum speed\r\n   8regs           : 40862 MB/sec\r\n   32regs          : 42563 MB/sec\r\n   arm64_neon      : 52355 MB/sec\r\nxor: using function: arm64_neon (52355 MB/sec)\r\nFree page reporting enabled\r\nloop: module loaded\r\nvirtio_blk virtio0: 1/0/0 default/read/poll queues\r\nvirtio_blk virtio0: [vda] 2048 512-byte logical blocks (1.05 MB/1.00 MiB)\r\nzram: Added device: zram0\r\ntun: Universal TUN/TAP device driver, 1.6\r\nIPVS: Registered protocols (TCP, UDP)\r\nIPVS: Connection hash table configured (size=4096, memory=32Kbytes)\r\nIPVS: ipvs loaded.\r\nIPVS: [rr] scheduler registered.\r\nInitializing XFRM netlink socket\r\nNET: Registered PF_INET6 protocol family\r\nSegment Routing with IPv6\r\nIn-situ OAM (IOAM) with IPv6\r\nNET: Registered PF_PACKET protocol family\r\nBridge firewalling registered\r\n8021q: 802.1Q VLAN Support v1.8\r\nsctp: Hash tables configured (bind 256/256)\r\nNET: Registered PF_VSOCK protocol family\r\nCONJET_MEMORY_REUSE_OK\r\nreboot: Power down\r\nBtrfs loaded, zoned=no, fsverity=no\r\nclk: Disabling unused clocks\r\nFreeing unused kernel memory: 1536K\r\nRun /init as init process\r\nCONJET_INIT_READY\r\n",
+  "docker_ready": false,
+  "docker_probe": null,
+  "balloon": {
+    "offered_features": 4294967329,
+    "driver_features": 4294967329,
+    "driver_ok": true,
+    "features_ok": true,
+    "must_tell_host_negotiated": true,
+    "page_reporting_negotiated": true,
+    "reporting_queue_index": 2,
+    "reporting_queue_ready": true,
+    "queue_ready": [
+      true,
+      true,
+      true,
+      false,
+      false
+    ],
+    "queue_size": [
+      256,
+      256,
+      256,
+      256,
+      256
+    ],
+    "queue_descriptor_address": [
+      1103101952,
+      1103118336,
+      1103134720,
+      0,
+      0
+    ],
+    "queue_driver_address": [
+      1103106048,
+      1103122432,
+      1103138816,
+      0,
+      0
+    ],
+    "queue_device_address": [
+      1103110144,
+      1103126528,
+      1103142912,
+      0,
+      0
+    ],
+    "reporting_guard_blocked_notifications": 0,
+    "reporting_notifications": 13,
+    "reporting_queue_notifications": 13,
+    "reporting_queue_acknowledgements": 13,
+    "reporting_queue_pending_descriptors": 0,
+    "free_page_hint_negotiated": false,
+    "free_page_hint_queue_index": null,
+    "free_page_hint_queue_ready": false,
+    "free_page_hint_notifications": 0,
+    "free_page_hint_reported_bytes": 0,
+    "free_page_hint_reclaimed_bytes": 0,
+    "free_page_hint_cmd_id": 0,
+    "actual_pages": 0,
+    "inflate_pages": 0,
+    "deflate_pages": 0,
+    "reported_free_pages": 152288,
+    "reported_free_bytes": 623771648,
+    "host_granule_eligible_bytes": 623771648,
+    "discard_advised_bytes": 623771648,
+    "discard_failed_bytes": 0,
+    "discard_skipped_bytes": 0,
+    "partial_host_granule_bytes": 0,
+    "soft_reclaimed_bytes": 0,
+    "reusable_reclaimed_bytes": 0,
+    "reusable_restored_bytes": 0,
+    "idle_hard_decommitted_bytes": 0,
+    "idle_hard_decommit_failures": 0,
+    "zero_swept_bytes": 0,
+    "zero_sweep_failed_bytes": 0,
+    "hard_decommitted_bytes": 623771648,
+    "balloon_owned_reclaimed_bytes": 0,
+    "report_inflight_reclaimed_bytes": 623771648,
+    "reclaimed_bytes": 623771648,
+    "reported_free_reclaimed_bytes": 623771648,
+    "current_balloon_owned_bytes": 0,
+    "current_fully_owned_host_granules": 0,
+    "current_partially_owned_host_granules": 0,
+    "current_balloon_decommitted_bytes": 0,
+    "current_balloon_reusable_bytes": 0,
+    "reclaim_failures": 0,
+    "reuse_failures": 0,
+    "malformed_reports": 0
+  },
+  "stages": [
+    {
+      "name": "guest-memory",
+      "ok": true,
+      "detail": "allocated 512 MiB"
+    },
+    {
+      "name": "boot-artifacts",
+      "ok": true,
+      "detail": "loaded 14718031 bytes"
+    },
+    {
+      "name": "hv_vm_create",
+      "ok": true,
+      "detail": "created transient HVF VM"
+    },
+    {
+      "name": "hv_gic_create",
+      "ok": true,
+      "detail": "created GICv3 distributor at 0x8000000 for 2 vCPU(s)"
+    },
+    {
+      "name": "hv_vm_map",
+      "ok": true,
+      "detail": "mapped RAM at 0x40000000"
+    },
+    {
+      "name": "hv_vcpu_create",
+      "ok": true,
+      "detail": "created boot vCPU; 1 secondary vCPU(s) will be created on PSCI CPU_ON"
+    },
+    {
+      "name": "hv_vcpu_set_reg",
+      "ok": true,
+      "detail": "initialized boot vCPU reset state"
+    },
+    {
+      "name": "virtio-runtime",
+      "ok": true,
+      "detail": "configured 1 block backend(s), 0 net backend(s), 1 vsock backend(s), docker socket /tmp/conjet-qa.Allxq5/.tmpDsyDZH/docker.sock, memory socket /tmp/conjet-qa.Allxq5/.tmpDsyDZH/memory.sock"
+    },
+    {
+      "name": "device-set",
+      "ok": true,
+      "detail": "registered 4 virtio-mmio transports"
+    },
+    {
+      "name": "hv_vcpu_secondary_precreate",
+      "ok": true,
+      "detail": "cpu 1 created and parked vCPU 1"
+    },
+    {
+      "name": "memory-control",
+      "ok": true,
+      "detail": "listening on /tmp/conjet-qa.Allxq5/.tmpDsyDZH/control.sock"
+    },
+    {
+      "name": "host-tick",
+      "ok": true,
+      "detail": "waking vCPUs every 25 ms"
+    },
+    {
+      "name": "psci-cpu-on",
+      "ok": true,
+      "detail": "cpu 1 entry=0x40d72420 context=0x0"
+    },
+    {
+      "name": "hv_vcpu_secondary_online",
+      "ok": true,
+      "detail": "cpu 1 vCPU 1 pc=0x40d72420 x0=0x0"
+    }
+  ]
+}

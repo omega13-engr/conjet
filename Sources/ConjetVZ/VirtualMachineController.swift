@@ -193,7 +193,8 @@ public final class VirtualMachineController {
             executable: tool.path,
             arguments: commandArguments,
             stdoutPath: stdoutPath,
-            stderrPath: stderrPath
+            stderrPath: stderrPath,
+            environment: Self.rustMemoryEnvironment(config: config)
         )
         hvfRun = managedRun
 
@@ -352,6 +353,25 @@ public final class VirtualMachineController {
         if let result = run.resultSnapshot() {
             throw ConjetError.unavailable(result.message)
         }
+    }
+
+    static func rustMemoryEnvironment(
+        config: ConjetConfig,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        let policy = config.memoryPolicy
+        var result = environment
+        // Explicit diagnostic overrides take precedence. The Rust controller
+        // retains its service reserve, learning and pressure safety limits.
+        let defaults = [
+            "CONJET_MEM_CORE_IDLE_TARGET_MIB": String(policy.idleMemoryReclaimTargetMiB),
+            "CONJET_MEM_CORE_IDLE_DWELL_MS": String(max(1, Int(policy.idleMemoryReclaimDwellSeconds * 1_000))),
+            "CONJET_MEM_CORE_SERVICE_SHRINK_STEP_MIB": String(policy.dynamicMemoryShrinkStepMiB)
+        ]
+        for (key, value) in defaults where result[key] == nil {
+            result[key] = value
+        }
+        return result
     }
 
     static func managedHVFReadinessTimeoutSeconds(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {

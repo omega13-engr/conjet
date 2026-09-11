@@ -1,0 +1,660 @@
+{
+  "date": "2026-09-11",
+  "conjet_head": "bde634b4ce05275a43e6d9b18d646439ad1a21c4",
+  "chum_mem_head": "44f433722aa4f055055c0e72806326ee4163ce27",
+  "chum_mem_status_unchanged": true,
+  "kernel_sha256": "be2e76a9e381d83d1bbb1b0478abbf1fecc0734541c29964c112b53800be24c4",
+  "vmm_sha256": "d42e36eaadb1dded0e803b1d01dc0988f703a2e4f6695b315d4de747f3c65312",
+  "guest_capabilities": "Linux conjet-core 6.12.86-conjet #2 SMP Fri Sep 11 01:03:08 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux\n17b3e7f38c3a81f3a65f8826691a9495dbbc243ee75f23ca95d1b37b2811dba8  /usr/local/sbin/conjet-reclaimd\n25\n--w------- 1 root root 4096 Sep 11 01:30 /sys/module/page_reporting/parameters/report_trigger\n0x0001\ncgroup2fs\n",
+  "configuration": {
+    "memory_mib": 8192,
+    "cpus": 4,
+    "idle_target_mib": 512,
+    "idle_dwell_ms": 1,
+    "service_shrink_step_mib": 512,
+    "fixture_project": "conjet-memory-e2e-cff133c9b5"
+  },
+  "trace": {
+    "samples": 932,
+    "control_samples": 932,
+    "ledger_failures": 0,
+    "sampling_errors": 0,
+    "max_guest_container_oom": 0,
+    "max_guest_container_oom_kill": 0
+  },
+  "returns": {
+    "build-return": {
+      "rss_drop_bytes": 924745728,
+      "before": {
+        "configured_mib": 8192,
+        "target_mib": 8192,
+        "target_pages": 0,
+        "host_memory": {
+          "resident_bytes": 2601730048,
+          "physical_footprint_bytes": 13589656200
+        },
+        "memory_ledger": {
+          "guest_visible_bytes": 8589934592,
+          "host_granule_bytes": 16384,
+          "host_granules": 524288,
+          "resident_bytes": 8589934592,
+          "guest_owned_bytes": 8589934592,
+          "pinned_bytes": 0,
+          "balloon_owned_bytes": 0,
+          "report_inflight_bytes": 0,
+          "discarded_soft_bytes": 0,
+          "discarded_hard_zero_bytes": 0,
+          "cumulative_soft_discarded_bytes": 0,
+          "cumulative_hard_decommitted_bytes": 189839130624,
+          "cumulative_balloon_authorized_bytes": 79120875520,
+          "cumulative_report_authorized_bytes": 110718255104,
+          "guest_owned_reclaimed_bytes": 0,
+          "pinned_reclaimed_bytes": 0,
+          "reclaim_without_authority_bytes": 0,
+          "report_acked_before_reclaim_bytes": 0,
+          "state_sum_mismatch_bytes": 0,
+          "ok": true
+        },
+        "balloon": {
+          "actual_pages": 0,
+          "hard_decommitted_bytes": 189839130624,
+          "reclaim_failures": 0,
+          "reuse_failures": 0,
+          "malformed_reports": 0
+        }
+      },
+      "after": {
+        "configured_mib": 8192,
+        "target_mib": 8192,
+        "target_pages": 0,
+        "host_memory": {
+          "resident_bytes": 1676984320,
+          "physical_footprint_bytes": 12597457544
+        },
+        "memory_ledger": {
+          "guest_visible_bytes": 8589934592,
+          "host_granule_bytes": 16384,
+          "host_granules": 524288,
+          "resident_bytes": 8589934592,
+          "guest_owned_bytes": 8589934592,
+          "pinned_bytes": 0,
+          "balloon_owned_bytes": 0,
+          "report_inflight_bytes": 0,
+          "discarded_soft_bytes": 0,
+          "discarded_hard_zero_bytes": 0,
+          "cumulative_soft_discarded_bytes": 0,
+          "cumulative_hard_decommitted_bytes": 190491246592,
+          "cumulative_balloon_authorized_bytes": 79120875520,
+          "cumulative_report_authorized_bytes": 111370371072,
+          "guest_owned_reclaimed_bytes": 0,
+          "pinned_reclaimed_bytes": 0,
+          "reclaim_without_authority_bytes": 0,
+          "report_acked_before_reclaim_bytes": 0,
+          "state_sum_mismatch_bytes": 0,
+          "ok": true
+        },
+        "balloon": {
+          "actual_pages": 0,
+          "hard_decommitted_bytes": 190491246592,
+          "reclaim_failures": 0,
+          "reuse_failures": 0,
+          "malformed_reports": 0
+        }
+      }
+    },
+    "cycle-1-return": {
+      "rss_drop_bytes": 330711040,
+      "before": {
+        "configured_mib": 8192,
+        "target_mib": 8192,
+        "target_pages": 0,
+        "host_memory": {
+          "resident_bytes": 1547042816,
+          "physical_footprint_bytes": 12481081992
+        },
+        "memory_ledger": {
+          "guest_visible_bytes": 8589934592,
+          "host_granule_bytes": 16384,
+          "host_granules": 524288,
+          "resident_bytes": 8589934592,
+          "guest_owned_bytes": 8589934592,
+          "pinned_bytes": 0,
+          "balloon_owned_bytes": 0,
+          "report_inflight_bytes": 0,
+          "discarded_soft_bytes": 0,
+          "discarded_hard_zero_bytes": 0,
+          "cumulative_soft_discarded_bytes": 0,
+          "cumulative_hard_decommitted_bytes": 186225328128,
+          "cumulative_balloon_authorized_bytes": 79120875520,
+          "cumulative_report_authorized_bytes": 107104452608,
+          "guest_owned_reclaimed_bytes": 0,
+          "pinned_reclaimed_bytes": 0,
+          "reclaim_without_authority_bytes": 0,
+          "report_acked_before_reclaim_bytes": 0,
+          "state_sum_mismatch_bytes": 0,
+          "ok": true
+        },
+        "balloon": {
+          "actual_pages": 0,
+          "hard_decommitted_bytes": 186225328128,
+          "reclaim_failures": 0,
+          "reuse_failures": 0,
+          "malformed_reports": 0
+        }
+      },
+      "after": {
+        "configured_mib": 8192,
+        "target_mib": 8192,
+        "target_pages": 0,
+        "host_memory": {
+          "resident_bytes": 1216331776,
+          "physical_footprint_bytes": 11945341576
+        },
+        "memory_ledger": {
+          "guest_visible_bytes": 8589934592,
+          "host_granule_bytes": 16384,
+          "host_granules": 524288,
+          "resident_bytes": 8589934592,
+          "guest_owned_bytes": 8589934592,
+          "pinned_bytes": 0,
+          "balloon_owned_bytes": 0,
+          "report_inflight_bytes": 0,
+          "discarded_soft_bytes": 0,
+          "discarded_hard_zero_bytes": 0,
+          "cumulative_soft_discarded_bytes": 0,
+          "cumulative_hard_decommitted_bytes": 186805092352,
+          "cumulative_balloon_authorized_bytes": 79120875520,
+          "cumulative_report_authorized_bytes": 107684216832,
+          "guest_owned_reclaimed_bytes": 0,
+          "pinned_reclaimed_bytes": 0,
+          "reclaim_without_authority_bytes": 0,
+          "report_acked_before_reclaim_bytes": 0,
+          "state_sum_mismatch_bytes": 0,
+          "ok": true
+        },
+        "balloon": {
+          "actual_pages": 0,
+          "hard_decommitted_bytes": 186805092352,
+          "reclaim_failures": 0,
+          "reuse_failures": 0,
+          "malformed_reports": 0
+        }
+      }
+    },
+    "cycle-2-return": {
+      "rss_drop_bytes": 543653888,
+      "before": {
+        "configured_mib": 8192,
+        "target_mib": 8192,
+        "target_pages": 0,
+        "host_memory": {
+          "resident_bytes": 1777188864,
+          "physical_footprint_bytes": 12493157000
+        },
+        "memory_ledger": {
+          "guest_visible_bytes": 8589934592,
+          "host_granule_bytes": 16384,
+          "host_granules": 524288,
+          "resident_bytes": 8589934592,
+          "guest_owned_bytes": 8589934592,
+          "pinned_bytes": 0,
+          "balloon_owned_bytes": 0,
+          "report_inflight_bytes": 0,
+          "discarded_soft_bytes": 0,
+          "discarded_hard_zero_bytes": 0,
+          "cumulative_soft_discarded_bytes": 0,
+          "cumulative_hard_decommitted_bytes": 187436843008,
+          "cumulative_balloon_authorized_bytes": 79120875520,
+          "cumulative_report_authorized_bytes": 108315967488,
+          "guest_owned_reclaimed_bytes": 0,
+          "pinned_reclaimed_bytes": 0,
+          "reclaim_without_authority_bytes": 0,
+          "report_acked_before_reclaim_bytes": 0,
+          "state_sum_mismatch_bytes": 0,
+          "ok": true
+        },
+        "balloon": {
+          "actual_pages": 0,
+          "hard_decommitted_bytes": 187436843008,
+          "reclaim_failures": 0,
+          "reuse_failures": 0,
+          "malformed_reports": 0
+        }
+      },
+      "after": {
+        "configured_mib": 8192,
+        "target_mib": 8192,
+        "target_pages": 0,
+        "host_memory": {
+          "resident_bytes": 1233534976,
+          "physical_footprint_bytes": 11946898056
+        },
+        "memory_ledger": {
+          "guest_visible_bytes": 8589934592,
+          "host_granule_bytes": 16384,
+          "host_granules": 524288,
+          "resident_bytes": 8589934592,
+          "guest_owned_bytes": 8589934592,
+          "pinned_bytes": 0,
+          "balloon_owned_bytes": 0,
+          "report_inflight_bytes": 0,
+          "discarded_soft_bytes": 0,
+          "discarded_hard_zero_bytes": 0,
+          "cumulative_soft_discarded_bytes": 0,
+          "cumulative_hard_decommitted_bytes": 188002549760,
+          "cumulative_balloon_authorized_bytes": 79120875520,
+          "cumulative_report_authorized_bytes": 108881674240,
+          "guest_owned_reclaimed_bytes": 0,
+          "pinned_reclaimed_bytes": 0,
+          "reclaim_without_authority_bytes": 0,
+          "report_acked_before_reclaim_bytes": 0,
+          "state_sum_mismatch_bytes": 0,
+          "ok": true
+        },
+        "balloon": {
+          "actual_pages": 0,
+          "hard_decommitted_bytes": 188002549760,
+          "reclaim_failures": 0,
+          "reuse_failures": 0,
+          "malformed_reports": 0
+        }
+      }
+    },
+    "cycle-3-return": {
+      "rss_drop_bytes": 537362432,
+      "before": {
+        "configured_mib": 8192,
+        "target_mib": 8192,
+        "target_pages": 0,
+        "host_memory": {
+          "resident_bytes": 1758150656,
+          "physical_footprint_bytes": 12486668936
+        },
+        "memory_ledger": {
+          "guest_visible_bytes": 8589934592,
+          "host_granule_bytes": 16384,
+          "host_granules": 524288,
+          "resident_bytes": 8589934592,
+          "guest_owned_bytes": 8589934592,
+          "pinned_bytes": 0,
+          "balloon_owned_bytes": 0,
+          "report_inflight_bytes": 0,
+          "discarded_soft_bytes": 0,
+          "discarded_hard_zero_bytes": 0,
+          "cumulative_soft_discarded_bytes": 0,
+          "cumulative_hard_decommitted_bytes": 188633284608,
+          "cumulative_balloon_authorized_bytes": 79120875520,
+          "cumulative_report_authorized_bytes": 109512409088,
+          "guest_owned_reclaimed_bytes": 0,
+          "pinned_reclaimed_bytes": 0,
+          "reclaim_without_authority_bytes": 0,
+          "report_acked_before_reclaim_bytes": 0,
+          "state_sum_mismatch_bytes": 0,
+          "ok": true
+        },
+        "balloon": {
+          "actual_pages": 0,
+          "hard_decommitted_bytes": 188633284608,
+          "reclaim_failures": 0,
+          "reuse_failures": 0,
+          "malformed_reports": 0
+        }
+      },
+      "after": {
+        "configured_mib": 8192,
+        "target_mib": 8192,
+        "target_pages": 0,
+        "host_memory": {
+          "resident_bytes": 1220788224,
+          "physical_footprint_bytes": 11945898632
+        },
+        "memory_ledger": {
+          "guest_visible_bytes": 8589934592,
+          "host_granule_bytes": 16384,
+          "host_granules": 524288,
+          "resident_bytes": 8589934592,
+          "guest_owned_bytes": 8589934592,
+          "pinned_bytes": 0,
+          "balloon_owned_bytes": 0,
+          "report_inflight_bytes": 0,
+          "discarded_soft_bytes": 0,
+          "discarded_hard_zero_bytes": 0,
+          "cumulative_soft_discarded_bytes": 0,
+          "cumulative_hard_decommitted_bytes": 189209870336,
+          "cumulative_balloon_authorized_bytes": 79120875520,
+          "cumulative_report_authorized_bytes": 110088994816,
+          "guest_owned_reclaimed_bytes": 0,
+          "pinned_reclaimed_bytes": 0,
+          "reclaim_without_authority_bytes": 0,
+          "report_acked_before_reclaim_bytes": 0,
+          "state_sum_mismatch_bytes": 0,
+          "ok": true
+        },
+        "balloon": {
+          "actual_pages": 0,
+          "hard_decommitted_bytes": 189209870336,
+          "reclaim_failures": 0,
+          "reuse_failures": 0,
+          "malformed_reports": 0
+        }
+      }
+    }
+  },
+  "idle_timeout": {
+    "ok": true,
+    "message": "ok",
+    "configured_mib": 8192,
+    "target_mib": 8192,
+    "target_pages": 0,
+    "docker_phase_events": {
+      "total": 31,
+      "request": 0,
+      "response": 31,
+      "workload_started": 172,
+      "completed_streams": 734,
+      "completed_workload_streams": 172,
+      "active_workload_streams": 0,
+      "request_bytes": 983411243,
+      "response_bytes": 8750160
+    },
+    "event_reclaim": {
+      "requests": 196,
+      "successes": 196,
+      "errors": 0,
+      "no_range_responses": 196,
+      "response_bytes": 35760,
+      "parsed_ranges": 0,
+      "parsed_range_bytes": 0,
+      "applied_range_bytes": 0,
+      "last_reason": "core.idleTarget",
+      "last_error": null
+    },
+    "core_memory": {
+      "policy_version": 1,
+      "service_shrink_step_mib": 512,
+      "service_headroom_mib": 512,
+      "service_stabilization_dwell_ms": 10000,
+      "enabled": true,
+      "idle_target_mib": 512,
+      "current_target_mib": 8192,
+      "quiet_dwell_ms": 1,
+      "pending_idle_probe": true,
+      "idle_probe_inflight": false,
+      "workload_expansions": 34,
+      "idle_shrinks": 12,
+      "idle_deferrals": 10,
+      "idle_probes": 182,
+      "idle_sentinel_probes": 686,
+      "transport_activity_events": 109820,
+      "transport_quiet_transitions": 0,
+      "transport_quiet_reclaims": 0,
+      "idle_backing_compactions": 0,
+      "idle_backing_hard_decommitted_bytes": 0,
+      "idle_backing_compaction_failures": 0,
+      "service_min_target_mib": 2048,
+      "service_desired_target_mib": 512,
+      "service_learning": false,
+      "service_cooldown": false,
+      "service_probes": 153,
+      "service_shrinks": 16,
+      "service_expansions": 0,
+      "service_feedback_passes": 14,
+      "service_feedback_deferrals": 0,
+      "service_convergence_waits": 47,
+      "service_convergence_timeouts": 0,
+      "service_stabilization_waits": 38,
+      "service_watchdog_probes": 155,
+      "service_watchdog_expansions": 0,
+      "service_generation_resets": 3,
+      "service_refault_bytes": 0,
+      "service_learned_headroom_mib": 0,
+      "restore_retries": 0,
+      "last_reason": "guest telemetry incomplete; retaining safe capacity and relearning",
+      "last_error": "active_workloads=1 build=false containers=143360 services=151552 service_working_set=143600 stopped_service_pinned=38008 service_populated=false service_population_known=true service_telemetry_complete=true mem_available_known=true swap_telemetry_complete=true disk_swap_telemetry_complete=true global_psi_telemetry_complete=true total_swap=87650304 disk_swap=0 container_swap=356352 psi_some=0.00 psi_full=0.00"
+    },
+    "balloon": {
+      "offered_features": 4294967329,
+      "driver_features": 4294967329,
+      "driver_ok": true,
+      "features_ok": true,
+      "must_tell_host_negotiated": true,
+      "page_reporting_negotiated": true,
+      "reporting_queue_index": 2,
+      "reporting_queue_ready": true,
+      "queue_ready": [
+        true,
+        true,
+        true,
+        false,
+        false
+      ],
+      "queue_size": [
+        256,
+        256,
+        256,
+        256,
+        256
+      ],
+      "queue_descriptor_address": [
+        4305715200,
+        4309319680,
+        4309336064,
+        0,
+        0
+      ],
+      "queue_driver_address": [
+        4305719296,
+        4309323776,
+        4309340160,
+        0,
+        0
+      ],
+      "queue_device_address": [
+        4305723392,
+        4309327872,
+        4309344256,
+        0,
+        0
+      ],
+      "reporting_guard_blocked_notifications": 0,
+      "reporting_notifications": 32690,
+      "reporting_queue_notifications": 32690,
+      "reporting_queue_acknowledgements": 32690,
+      "reporting_queue_pending_descriptors": 0,
+      "free_page_hint_negotiated": false,
+      "free_page_hint_queue_index": null,
+      "free_page_hint_queue_ready": false,
+      "free_page_hint_notifications": 0,
+      "free_page_hint_reported_bytes": 0,
+      "free_page_hint_reclaimed_bytes": 0,
+      "free_page_hint_cmd_id": 0,
+      "actual_pages": 0,
+      "inflate_pages": 23083017,
+      "deflate_pages": 23083017,
+      "reported_free_pages": 32668748,
+      "reported_free_bytes": 133811191808,
+      "host_granule_eligible_bytes": 227029614592,
+      "discard_advised_bytes": 227029614592,
+      "discard_failed_bytes": 0,
+      "discard_skipped_bytes": 0,
+      "partial_host_granule_bytes": 0,
+      "soft_reclaimed_bytes": 0,
+      "reusable_reclaimed_bytes": 0,
+      "reusable_restored_bytes": 0,
+      "idle_hard_decommitted_bytes": 0,
+      "idle_hard_decommit_failures": 0,
+      "zero_swept_bytes": 0,
+      "zero_sweep_failed_bytes": 0,
+      "hard_decommitted_bytes": 227029614592,
+      "balloon_owned_reclaimed_bytes": 93218422784,
+      "report_inflight_reclaimed_bytes": 133811191808,
+      "reclaimed_bytes": 227029614592,
+      "reported_free_reclaimed_bytes": 133811191808,
+      "current_balloon_owned_bytes": 0,
+      "current_fully_owned_host_granules": 0,
+      "current_partially_owned_host_granules": 0,
+      "current_balloon_decommitted_bytes": 0,
+      "current_balloon_reusable_bytes": 0,
+      "reclaim_failures": 0,
+      "reuse_failures": 0,
+      "malformed_reports": 0
+    },
+    "memory_ledger": {
+      "guest_visible_bytes": 8589934592,
+      "host_granule_bytes": 16384,
+      "host_granules": 524288,
+      "resident_bytes": 8589934592,
+      "guest_owned_bytes": 8589934592,
+      "pinned_bytes": 0,
+      "balloon_owned_bytes": 0,
+      "report_inflight_bytes": 0,
+      "discarded_soft_bytes": 0,
+      "discarded_hard_zero_bytes": 0,
+      "cumulative_soft_discarded_bytes": 0,
+      "cumulative_hard_decommitted_bytes": 227029614592,
+      "cumulative_balloon_authorized_bytes": 93218422784,
+      "cumulative_report_authorized_bytes": 133811191808,
+      "guest_owned_reclaimed_bytes": 0,
+      "pinned_reclaimed_bytes": 0,
+      "reclaim_without_authority_bytes": 0,
+      "report_acked_before_reclaim_bytes": 0,
+      "state_sum_mismatch_bytes": 0,
+      "ok": true
+    },
+    "host_memory": {
+      "resident_bytes": 561725440,
+      "physical_footprint_bytes": 815575112
+    }
+  },
+  "idle_later_observation": {
+    "configured_mib": 8192,
+    "target_mib": 512,
+    "target_pages": 1966080,
+    "host_memory": {
+      "resident_bytes": 560922624,
+      "physical_footprint_bytes": 769355560
+    },
+    "memory_ledger": {
+      "guest_visible_bytes": 8589934592,
+      "host_granule_bytes": 16384,
+      "host_granules": 524288,
+      "resident_bytes": 625197056,
+      "guest_owned_bytes": 625197056,
+      "pinned_bytes": 0,
+      "balloon_owned_bytes": 7964737536,
+      "report_inflight_bytes": 0,
+      "discarded_soft_bytes": 0,
+      "discarded_hard_zero_bytes": 7964737536,
+      "cumulative_soft_discarded_bytes": 0,
+      "cumulative_hard_decommitted_bytes": 235967561728,
+      "cumulative_balloon_authorized_bytes": 101183520768,
+      "cumulative_report_authorized_bytes": 134784040960,
+      "guest_owned_reclaimed_bytes": 0,
+      "pinned_reclaimed_bytes": 0,
+      "reclaim_without_authority_bytes": 0,
+      "report_acked_before_reclaim_bytes": 0,
+      "state_sum_mismatch_bytes": 0,
+      "ok": true
+    },
+    "balloon": {
+      "actual_pages": 1966080,
+      "hard_decommitted_bytes": 235967561728,
+      "reclaim_failures": 0,
+      "reuse_failures": 0,
+      "malformed_reports": 0
+    }
+  },
+  "results": {
+    "worker-jobs": [
+      {
+        "job_type": "build-knowledge-graph",
+        "status": "completed",
+        "count": 3,
+        "last_error": null
+      },
+      {
+        "job_type": "derive-session-memories",
+        "status": "completed",
+        "count": 3,
+        "last_error": null
+      },
+      {
+        "job_type": "reconcile-claim-state",
+        "status": "completed",
+        "count": 3,
+        "last_error": null
+      },
+      {
+        "job_type": "sync-turbovec-index",
+        "status": "completed",
+        "count": 3,
+        "last_error": null
+      }
+    ],
+    "repository-sync": {
+      "status": "SUCCESSFUL",
+      "projectId": "3663da89-7c5b-4e3e-a9d7-be49132046ec",
+      "mergedWithExisting": false,
+      "generatedAt": "2026-09-11T01:52:32.690624794Z",
+      "stats": {
+        "filesAdded": 4,
+        "filesRemoved": 0,
+        "filesUnchanged": 0,
+        "totalFiles": 4
+      },
+      "graphSummary": {
+        "nodeCount": 898,
+        "edgeCount": 4944,
+        "communityCount": 274,
+        "evidenceDistribution": {
+          "extracted": 1844,
+          "inferred": 3080,
+          "ambiguous": 20
+        }
+      },
+      "acceptedPaths": [
+        "rust/crates/chum_mem_contracts/src/lib.rs",
+        "rust/apps/api/src/main.rs",
+        "rust/apps/worker/src/main.rs",
+        "apps/web/src/index.tsx"
+      ],
+      "missingPaths": []
+    },
+    "api-continuous-check": {
+      "samples": 167,
+      "failures": 0
+    },
+    "postgres-continuous-check": {
+      "samples": 171,
+      "failures": 0
+    },
+    "canary-baseline": {
+      "value": "16384|67108864|43fbead8523e697d0a2d1b0a505209b2"
+    },
+    "canary-after-build": {
+      "value": "16384|67108864|43fbead8523e697d0a2d1b0a505209b2"
+    },
+    "canary-after-native-fixtures": {
+      "value": "16384|67108864|43fbead8523e697d0a2d1b0a505209b2"
+    },
+    "canary-after-compose-restart": {
+      "value": "16384|67108864|43fbead8523e697d0a2d1b0a505209b2"
+    },
+    "persistence-counts": {
+      "value": "3|24|12|0"
+    },
+    "remaining-qa-containers": {
+      "running": ""
+    }
+  },
+  "cleanup": {
+    "vm_exit_code": 0,
+    "remaining_qa_processes": [],
+    "removed_roots": [
+      "/tmp/conjet-qa.Allxq5",
+      "/tmp/conjet-chum-e2e.zuhvDQ"
+    ],
+    "retained_evidence_directory": "docs/qa/jetstream-memory-2026-09-11",
+    "original_chum_mem_working_tree_status_unchanged": true
+  }
+}

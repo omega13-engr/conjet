@@ -64,11 +64,40 @@ A guest physical range may be decommitted only while it is BalloonOwned, or
 while it is ReportedFree and the page-reporting descriptor remains in flight.
 ```
 
-Soft reclaim may use `MADV_FREE`; this keeps the address range valid but does
-not guarantee immediate RSS drop or deterministic zero fill. Hard reclaim may
-unmap the HVF range, remap fresh anonymous zero backing, and map it back into
-the same guest physical range; this is heavier and must be reserved for large,
-cold ranges or host pressure.
+The default release path unmaps complete authorized host granules from HVF,
+replaces their host backing with sparse anonymous zero memory, and restores
+reported ranges to the same GPA before ACK. Balloon-owned ranges remain
+detached until the MUST_TELL_HOST deflate handshake restores them. Release is
+synchronous and serialized with device processing. Mapping restoration failure
+is fatal; the VMM cannot acknowledge an inaccessible range.
+
+`CONJET_MEM_DISABLE_IMMEDIATE_RELEASE=1` selects the conservative advisory
+fallback. `MADV_FREE` preserves mappings but does not guarantee an immediate
+RSS decrease. The existing delayed idle compaction remains available for
+balloon backing on that fallback path.
+
+### Prompt, bounded reporting
+
+The builder applies `patches/0001-bounded-prompt-page-reporting.patch` to exactly
+Linux 6.12.86. It verifies both the original and patched source hashes, accepts
+an already-patched tree, and fails on other versions or unexpected edits.
+Kernel upgrades require rebasing and reviewing this patch.
+
+The patch retains upstream reporting work budgets and allocator watermarks.
+It adds `page_reporting.report_delay_ms` (10–2000 ms, upstream-compatible
+default 2000); Jetstream selects 25 ms unless the boot command line overrides
+it. A root-only `report_trigger` sysfs parameter advances a reporting pass
+after scoped reclaim and requests one coalesced drain of per-CPU free-page
+caches. Ordinary allocator reports do not drain CPU caches. Neither a short delay nor a successful request is proof
+of an end-to-end RSS deadline. Older guest kernels still work with their
+normal reporter, and older reclaim workers need not use the optional trigger.
+
+Patch validation is available through `tests/test-memory-patch.sh SOURCE_DIR`.
+The ignored Rust integration test in `jetstream/tests/linux_memory_release.rs`
+boots the resulting kernel with `tests/memory-release-init.c` as a static ARM64
+`/init`, verifies host RSS return, then checks guest reuse and retained data.
+It requires an isolated initramfs and an executable signed with the project's
+Hypervisor entitlement; it does not use Docker or production VM files.
 
 The reproducible builder is:
 

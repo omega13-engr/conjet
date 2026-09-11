@@ -343,7 +343,41 @@ static void test_scoped_reclaim_config_requires_service_path_and_bytes(void) {
     require_false("scoped reclaim rejects non-cgroup path", scoped_reclaim_config_is_valid(&config));
 }
 
+static void test_generic_reclaim_skips_live_scopes_and_shares_budget(void) {
+    char root[4096], service[4096], sibling[4096];
+    make_test_root(root, sizeof(root), "conjet-reclaimd-guard");
+    test_join_path(service, sizeof(service), root, "services");
+    test_join_path(sibling, sizeof(sibling), root, "services:docker:one");
+    test_make_dir(service);
+    test_make_dir(sibling);
+    const uint64_t mib = 1024 * 1024;
+    write_memcg_files(service, 256 * mib, 256 * mib, 0, 0, 0);
+    write_memcg_files(sibling, 256 * mib, 256 * mib, 0, 0, 0);
+    test_write_file(service, "memory.reclaim", "");
+    test_write_file(sibling, "memory.reclaim", "");
+    write_cgroup_events(service, true);
+    write_cgroup_events(sibling, true);
+    struct reclaim_summary summary = {0};
+    require_int("populated generic reclaim", reclaim_cgroup_with_prefixed_siblings(service, 64 * mib, 0, &summary), 0);
+    require_u64("live scopes preserved", summary.requested_bytes, 0);
+    require_false("populated sibling blocks daemon idle", cgroup_and_siblings_empty(service));
+
+    write_cgroup_events(service, false);
+    require_false("empty parent does not hide populated sibling", cgroup_and_siblings_empty(service));
+    write_cgroup_events(sibling, false);
+    require_true("all scopes empty", cgroup_and_siblings_empty(service));
+    require_int("bounded empty reclaim", reclaim_cgroup_with_prefixed_siblings(service, 64 * mib, 0, &summary), 0);
+    require_u64("one budget across siblings", summary.requested_bytes, 64 * mib);
+    require_u64("one reclaim chunk", summary.chunks, 1);
+
+    test_write_file(service, "cgroup.events", "invalid\n");
+    summary = (struct reclaim_summary){0};
+    require_int("unknown population", reclaim_one_cgroup_guarded(service, 64 * mib, 0, true, &summary), 0);
+    require_u64("unknown population preserves cache", summary.requested_bytes, 0);
+}
+
 int main(void) {
+    test_generic_reclaim_skips_live_scopes_and_shares_budget();
     test_reclaim_target_stats_include_prefixed_build_and_service_siblings();
     test_default_build_cgroup_path_tracks_daemon_scoped_build_workers();
     test_stopped_service_reclaim_releases_hot_cache_reserve();

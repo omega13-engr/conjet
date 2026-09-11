@@ -217,12 +217,18 @@ static uint64_t service_reclaim_reserve(const char *service_cgroup) {
 static bool cgroup_is_empty_or_absent(const char *cgroup) {
     bool populated = true;
     int rc = read_cgroup_populated(cgroup, &populated);
-    return rc == ENOENT || (rc == 0 && !populated);
+    if (rc == ENOENT) {
+        struct stat st;
+        return stat(cgroup, &st) != 0 && errno == ENOENT;
+    }
+    return rc == 0 && !populated;
 }
 
+static bool cgroup_and_siblings_empty(const char *cgroup);
+
 static bool daemon_idle_reclaim_allowed(const char *build_cgroup, const char *service_cgroup) {
-    return cgroup_is_empty_or_absent(build_cgroup)
-        && cgroup_is_empty_or_absent(service_cgroup);
+    return cgroup_and_siblings_empty(build_cgroup)
+        && cgroup_and_siblings_empty(service_cgroup);
 }
 
 static uint64_t daemon_reclaim_reserve(const char *build_cgroup, const char *service_cgroup) {
@@ -263,10 +269,25 @@ static int write_memory_reclaim(const char *cgroup, uint64_t bytes) {
     return saved;
 }
 
-static int reclaim_one_cgroup(const char *cgroup,
+static void kick_page_reporting(void) {
+    // Optional on older guest images. Reclaim remains valid if unavailable;
+    // their normal virtio reporter will observe the newly free pages later.
+    int fd = open("/sys/module/page_reporting/parameters/report_trigger", O_WRONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        ssize_t ignored = write(fd, "1\n", 2);
+        (void)ignored;
+        close(fd);
+    }
+}
+
+static int reclaim_one_cgroup_guarded(const char *cgroup,
                               uint64_t cap,
                               uint64_t reserve,
+                              bool empty_only,
                               struct reclaim_summary *summary) {
+    if (empty_only && !cgroup_is_empty_or_absent(cgroup)) {
+        return 0;
+    }
     struct memcg_stat before;
     int read_rc = read_memcg_stat(cgroup, &before);
     if (read_rc != 0) {
@@ -277,6 +298,10 @@ static int reclaim_one_cgroup(const char *cgroup,
     while (remaining != 0) {
         if (stop_requested) {
             return ECANCELED;
+        }
+        // Recheck each chunk: a new process invalidates an empty-scope cleanup.
+        if (empty_only && !cgroup_is_empty_or_absent(cgroup)) {
+            return 0;
         }
         uint64_t chunk = min_u64(remaining, RECLAIM_CHUNK_BYTES);
         struct memcg_stat pre;
@@ -313,6 +338,11 @@ static int reclaim_one_cgroup(const char *cgroup,
     return 0;
 }
 
+static int reclaim_one_cgroup(const char *cgroup, uint64_t cap, uint64_t reserve,
+                              struct reclaim_summary *summary) {
+    return reclaim_one_cgroup_guarded(cgroup, cap, reserve, false, summary);
+}
+
 static int split_parent_basename(const char *path, char *parent, size_t parent_len, const char **basename) {
     const char *slash = strrchr(path, '/');
     if (slash == NULL || slash == path || slash[1] == '\0') {
@@ -333,11 +363,43 @@ static int cgroup_name_has_prefixed_scope(const char *name, const char *prefix) 
     return strncmp(name, prefix, prefix_len) == 0 && name[prefix_len] == ':';
 }
 
+static bool cgroup_and_siblings_empty(const char *cgroup) {
+    if (!cgroup_is_empty_or_absent(cgroup)) {
+        return false;
+    }
+    char parent[4096];
+    const char *basename = NULL;
+    if (split_parent_basename(cgroup, parent, sizeof(parent), &basename) != 0) {
+        return false;
+    }
+    DIR *dir = opendir(parent);
+    if (dir == NULL) {
+        return errno == ENOENT;
+    }
+    bool empty = true;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (!cgroup_name_has_prefixed_scope(entry->d_name, basename)) {
+            continue;
+        }
+        char child[4096];
+        int length = snprintf(child, sizeof(child), "%s/%s", parent, entry->d_name);
+        if (length <= 0 || (size_t)length >= sizeof(child)
+            || !cgroup_is_empty_or_absent(child)) {
+            empty = false;
+            break;
+        }
+    }
+    closedir(dir);
+    return empty;
+}
+
 static int reclaim_cgroup_with_prefixed_siblings(const char *cgroup,
                                                  uint64_t cap,
                                                  uint64_t reserve,
                                                  struct reclaim_summary *summary) {
-    int first_error = reclaim_one_cgroup(cgroup, cap, reserve, summary);
+    uint64_t start_requested = summary->requested_bytes;
+    int first_error = reclaim_one_cgroup_guarded(cgroup, cap, reserve, true, summary);
     if (first_error != 0) {
         return first_error;
     }
@@ -354,6 +416,10 @@ static int reclaim_cgroup_with_prefixed_siblings(const char *cgroup,
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
+        uint64_t remaining = saturating_sub_u64(cap, summary->requested_bytes - start_requested);
+        if (remaining == 0) {
+            break;
+        }
         if (!cgroup_name_has_prefixed_scope(entry->d_name, basename)) {
             continue;
         }
@@ -367,7 +433,7 @@ static int reclaim_cgroup_with_prefixed_siblings(const char *cgroup,
         if (stat(child, &st) != 0 || !S_ISDIR(st.st_mode)) {
             continue;
         }
-        int rc = reclaim_one_cgroup(child, cap, 0, summary);
+        int rc = reclaim_one_cgroup_guarded(child, remaining, 0, true, summary);
         if (rc != 0) {
             closedir(dir);
             return rc;
@@ -527,9 +593,14 @@ static int reclaim_all_targets(const char *build_cgroup,
     }
     uint64_t daemon_reserve = daemon_reclaim_reserve(build_cgroup, service_cgroup);
     bool daemon_idle = daemon_reserve == DAEMON_IDLE_RESERVE_BYTES;
+    // Reclaiming the daemon parent can also reclaim its build descendants.
+    // Populated scopes belong to the feedback-aware scoped controller.
+    if (!daemon_idle) {
+        return 0;
+    }
     rc = reclaim_one_cgroup(
         daemon_cgroup,
-        DAEMON_CAP_BYTES,
+        min_u64(DAEMON_CAP_BYTES, RECLAIM_CHUNK_BYTES),
         daemon_reserve,
         summary
     );
@@ -545,9 +616,12 @@ static int reclaim_all_targets(const char *build_cgroup,
     if (stop_requested) {
         return ECANCELED;
     }
+    if (!daemon_idle_reclaim_allowed(build_cgroup, service_cgroup)) {
+        return 0;
+    }
     return reclaim_one_cgroup(
         daemon_cgroup,
-        DAEMON_CAP_BYTES,
+        min_u64(DAEMON_CAP_BYTES, RECLAIM_CHUNK_BYTES),
         DAEMON_IDLE_RESERVE_BYTES,
         summary
     );
@@ -872,6 +946,12 @@ int main(int argc, char **argv) {
         write_status_file(&summary);
         summary.drop_caches_error_number =
             run_drop_caches_path(configured_drop_caches_path());
+    }
+    // Coalesce per-CPU cache draining into one kick per completed request,
+    // rather than forcing cross-CPU work for every 64 MiB reclaim chunk.
+    // Even a zero-cache completion can follow process-exit frees in CPU caches.
+    if (rc == 0 || summary.observed_current_drop_bytes != 0) {
+        kick_page_reporting();
     }
     summary.error_number = rc;
     summary.state = rc == 0 ? "done" : (rc == ECANCELED ? "cancelled" : "error");

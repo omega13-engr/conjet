@@ -332,6 +332,10 @@ impl MemoryLedger {
                         .saturating_add(self.host_page_size);
                 }
                 entry.authority = LedgerAuthority::GuestOwned;
+                // After ACK Linux may reuse a reported page without notifying
+                // us. Count it conservatively as guest-accessible backing;
+                // cumulative release counters retain the completed operation.
+                entry.backing = BackingState::Resident;
             }
         }
     }
@@ -895,6 +899,7 @@ impl BalloonQueueHandler {
         }
 
         let mut used = Vec::with_capacity(chains.len());
+        let mut inflated_ranges = Vec::new();
         for chain in &chains {
             let pfns = match read_pfns(chain, memory, guest_base) {
                 Ok(pfns) => pfns,
@@ -912,7 +917,7 @@ impl BalloonQueueHandler {
             };
             if inflate {
                 self.metrics.inflate_pages += pfns.len() as u64;
-                self.record_balloon_inflate(memory, guest_base, &pfns);
+                inflated_ranges.extend(self.record_balloon_inflate(memory, guest_base, &pfns));
             } else {
                 self.metrics.deflate_pages += pfns.len() as u64;
                 self.record_balloon_deflate(memory, guest_base, &pfns)?;
@@ -923,17 +928,16 @@ impl BalloonQueueHandler {
             });
         }
 
-        // Replacing the anonymous backing one descriptor at a time leaves one Mach VM
-        // region per tiny reclaim. Wait until the guest reaches the requested balloon
-        // size, then replace every fully owned run in one globally coalesced pass.
-        // Page reporting still provides mapping-preserving reclaim while a workload is
-        // active, so this batching only delays the destructive zero-remap until Linux
-        // has finished transferring ownership.
-        if inflate
-            && transport.negotiated(BALLOON_FEATURE_MUST_TELL_HOST)
-            && self.balloon_target_reached(transport)
-        {
-            let reclaim_ranges = self.balloon_owned_reclaim_candidates();
+        // Coalesce the entire notification, rather than remapping per PFN or
+        // descriptor. Complete owned granules need not wait for the remaining
+        // target; MUST_TELL_HOST prevents reuse before our deflate handler.
+        if inflate && transport.negotiated(BALLOON_FEATURE_MUST_TELL_HOST) {
+            let reclaim_ranges = if self.balloon_target_reached(transport) {
+                // Also retry any earlier release that failed transiently.
+                self.balloon_owned_reclaim_candidates()
+            } else {
+                coalesce_ranges(inflated_ranges)
+            };
             self.reclaim_balloon_owned_ranges(memory, guest_base, reclaim_ranges);
         }
 
@@ -1850,7 +1854,7 @@ mod tests {
     }
 
     #[test]
-    fn balloon_reclaim_waits_until_the_requested_target_is_reached() {
+    fn balloon_target_completion_is_detected_for_retry_sweep() {
         let plan = VirtioMmioDevicePlan::new(VirtioDeviceKind::Balloon, 0);
         let transport = VirtioMmioDevice::new(plan, configuration(4, 0, 0));
         let mut handler = BalloonQueueHandler::new();
@@ -1859,6 +1863,57 @@ mod tests {
 
         handler.ballooned_pages = 4;
         assert!(handler.balloon_target_reached(&transport));
+    }
+
+    #[test]
+    fn inflate_releases_complete_granules_before_target_but_requires_tell_host() {
+        for negotiated in [true, false] {
+            let base = 0x4000_0000;
+            let memory = GuestMemory::anonymous(64 * 1024).unwrap();
+            let granule = memory.host_page_size() as u64;
+            let first_pfn = (base + granule) / PAGE_SIZE;
+            let count = granule / PAGE_SIZE;
+            // The first host page contains only queue metadata and the PFN list.
+            let queue = VirtioQueueState {
+                size: 8,
+                ready: true,
+                descriptor_address: base,
+                driver_address: base + 0x100,
+                device_address: base + 0x200,
+            };
+            memory.write(0, &(base + 0x300).to_le_bytes());
+            memory.write(8, &((count * 4) as u32).to_le_bytes());
+            memory.write(0x102, &1u16.to_le_bytes());
+            for index in 0..count {
+                memory.write(
+                    0x300 + index as usize * 4,
+                    &((first_pfn + index) as u32).to_le_bytes(),
+                );
+            }
+            let plan = VirtioMmioDevicePlan::new(VirtioDeviceKind::Balloon, 0);
+            let mut transport =
+                VirtioMmioDevice::new(plan.clone(), configuration((2 * count) as u32, 0, 0));
+            transport.driver_features = if negotiated {
+                plan.features
+            } else {
+                plan.features & !BALLOON_FEATURE_MUST_TELL_HOST
+            };
+            transport.device_status = STATUS_FEATURES_OK | STATUS_DRIVER_OK;
+            let reclaimer = Arc::new(RecordingReclaimer {
+                hard_zero: true,
+                ..RecordingReclaimer::default()
+            });
+            let mut handler = BalloonQueueHandler::with_reclaimer(reclaimer);
+            handler
+                .handle_pfn_queue(queue, &mut transport, &memory, base, true)
+                .unwrap();
+            assert!(!handler.balloon_target_reached(&transport));
+            assert_eq!(
+                handler.metrics().hard_decommitted_bytes,
+                if negotiated { granule } else { 0 }
+            );
+            assert_eq!(memory.read_le_u16(base, base + 0x202).unwrap(), 1);
+        }
     }
 
     #[test]
@@ -2559,7 +2614,8 @@ mod tests {
         assert_eq!(ledger.cumulative_balloon_authorized_bytes, 0);
         assert_eq!(ledger.cumulative_report_authorized_bytes, host_page_size);
         assert_eq!(ledger.cumulative_soft_discarded_bytes, host_page_size);
-        assert_eq!(ledger.discarded_soft_bytes, host_page_size);
+        assert_eq!(ledger.discarded_soft_bytes, 0);
+        assert_eq!(ledger.resident_bytes, memory.len() as u64);
         assert_eq!(ledger.report_inflight_bytes, 0);
         assert_eq!(ledger.report_acked_before_reclaim_bytes, 0);
         assert_eq!(ledger.reclaim_without_authority_bytes, 0);

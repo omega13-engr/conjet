@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+memory_ledger_filter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -808,6 +809,7 @@ sample_trace() {
          reuse_failures: ($control.balloon.reuse_failures // 0),
          reclaim_failures: ($control.balloon.reclaim_failures // 0)
        }),
+       memory_ledger: ($control.memory_ledger // null),
        vmm: {
          target_mib: ($control.target_mib // 0),
          target_pages: ($control.target_pages // 0)
@@ -1035,7 +1037,7 @@ if [ -n "$MAX_SERVICE_PSI_FULL_TOTAL_DELTA_US" ]; then
   MAX_SERVICE_PSI_FULL_TOTAL_DELTA_US_JSON="$MAX_SERVICE_PSI_FULL_TOTAL_DELTA_US"
 fi
 
-jq -s \
+jq -s -L "$memory_ledger_filter_dir" \
   --arg qa_root "$QA_ROOT" \
   --arg trace_jsonl "$TRACE_JSONL" \
   --arg import_log "$IMPORT_LOG" \
@@ -1078,7 +1080,8 @@ jq -s \
   --argjson service_psi_some_avg10_limit "$SERVICE_PSI_SOME_AVG10_LIMIT" \
   --argjson service_psi_full_avg10_limit "$SERVICE_PSI_FULL_AVG10_LIMIT" \
   --slurpfile ready_probe "$READY_PROBE_JSONL" \
-  'def percentile($values; $quantile):
+  'include "memory-release-ledger";
+   def percentile($values; $quantile):
      ($values | length) as $count |
      if $count == 0 then null
      else $values[((($count * $quantile) | ceil) - 1) | if . < 0 then 0 else . end]
@@ -1277,8 +1280,12 @@ jq -s \
    ($settle_stage != "live-services" or
       ($first_settle_sample != null and
        $last_settle_sample != null and
-       (($last_settle_sample.balloon.hard_decommitted_bytes // 0) ==
-        ($first_settle_sample.balloon.hard_decommitted_bytes // 0)) and
+       (if $last_settle_sample.memory_ledger != null then
+          all($settle_trace_samples[]; authorized_memory_release)
+        else
+          (($last_settle_sample.balloon.hard_decommitted_bytes // 0) ==
+           ($first_settle_sample.balloon.hard_decommitted_bytes // 0))
+        end) and
        (($last_settle_sample.balloon.idle_hard_decommitted_bytes // 0) ==
         ($first_settle_sample.balloon.idle_hard_decommitted_bytes // 0)) and
        (($last_settle_sample.core_memory.idle_backing_hard_decommitted_bytes // 0) ==

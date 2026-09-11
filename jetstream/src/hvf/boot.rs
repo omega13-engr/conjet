@@ -33,6 +33,7 @@ use crate::hvf::ffi::{
     HV_REG_PC, HV_REG_X0, HV_REG_X1, HV_REG_X2, HV_REG_X3, HV_SYS_REG_MPIDR_EL1,
 };
 use crate::hvf::gic::{Gic, GicLayout, GicMmio};
+use crate::hvf::reclaim::{release_owned, ReleaseError, ReleaseOperations};
 use crate::vmm::boot::{load_boot_artifacts, BootArtifacts, BootPlan};
 use crate::vmm::config::JetstreamConfig;
 use crate::vmm::debug_flags;
@@ -188,6 +189,10 @@ struct EventReclaimMetrics {
 /// this state, but they never need to drive the target for normal operation.
 #[derive(Debug, Clone, Serialize)]
 struct CoreMemoryControllerMetrics {
+    policy_version: u32,
+    service_shrink_step_mib: u64,
+    service_headroom_mib: u64,
+    service_stabilization_dwell_ms: u64,
     enabled: bool,
     idle_target_mib: u64,
     current_target_mib: u64,
@@ -230,6 +235,10 @@ struct CoreMemoryControllerMetrics {
 impl Default for CoreMemoryControllerMetrics {
     fn default() -> Self {
         Self {
+            policy_version: 1,
+            service_shrink_step_mib: 0,
+            service_headroom_mib: 0,
+            service_stabilization_dwell_ms: 0,
             enabled: false,
             idle_target_mib: 0,
             current_target_mib: 0,
@@ -476,6 +485,10 @@ impl CoreMemoryController {
 
     fn metrics(&self) -> CoreMemoryControllerMetrics {
         CoreMemoryControllerMetrics {
+            service_shrink_step_mib: self.policy.service_shrink_step_mib,
+            service_headroom_mib: self.policy.service_headroom_mib,
+            service_stabilization_dwell_ms: self.policy.service_stabilization_dwell.as_millis()
+                as u64,
             enabled: self.policy.enabled,
             idle_target_mib: self.policy.target_mib,
             current_target_mib: self.requested_target_mib,
@@ -716,7 +729,7 @@ impl CoreMemoryController {
             return Some(CoreMemoryTargetTransition::RestoreConfigured);
         }
         if let Some(mut adjustment) = self.service_adjustment {
-            if adjustment.target_mib < adjustment.previous_target_mib {
+            if adjustment.target_mib < self.configured_memory_mib {
                 let watchdog_result = match self.idle_probe.as_ref() {
                     Some(probe) => {
                         match probe.try_recv_for(GuestMemoryProbeKind::ServiceWatchdog) {
@@ -1380,11 +1393,12 @@ impl CoreMemoryController {
                         target_mib
                     ));
                 } else if target_mib > previous_target_mib {
-                    self.service_watchdog_deadline = None;
+                    self.service_watchdog_deadline =
+                        Some(now + CORE_SERVICE_PRESSURE_WATCHDOG_DWELL);
                     self.service_adjustment = Some(ServiceCapacityAdjustment {
                         previous_target_mib,
                         target_mib,
-                        baseline: None,
+                        baseline: self.last_guest_snapshot,
                         applied_at: now,
                         next_convergence_observation_at: now,
                         converged_at: None,
@@ -1938,7 +1952,45 @@ struct HvfGuestMemoryReclaimer {
     disable_hard_decommit: bool,
     disable_madv_free: bool,
     disable_free_reusable: bool,
+    disable_immediate_release: bool,
     allow_hard_decommit_fallback: Arc<AtomicBool>,
+}
+
+struct HvfReleaseOperations<'a> {
+    reclaimer: &'a HvfGuestMemoryReclaimer,
+    memory: &'a GuestMemory,
+    guest_base: u64,
+    address: u64,
+    host_address: *mut libc::c_void,
+    size: usize,
+}
+
+impl ReleaseOperations for HvfReleaseOperations<'_> {
+    fn detach(&mut self) -> Result<(), String> {
+        self.reclaimer
+            .vm
+            .unmap_memory(self.address, self.size)
+            .map_err(|e| e.to_string())
+    }
+
+    fn discard(&mut self) -> Result<(), String> {
+        self.memory
+            .decommit_zero_at(self.guest_base, self.address, self.size)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    fn restore_mapping(&mut self) -> Result<(), String> {
+        self.reclaimer
+            .vm
+            .map_memory(
+                self.host_address,
+                self.address,
+                self.size,
+                self.reclaimer.flags,
+            )
+            .map_err(|e| e.to_string())
+    }
 }
 
 impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
@@ -1970,10 +2022,33 @@ impl GuestMemoryReclaimer for HvfGuestMemoryReclaimer {
                         continue;
                     }
                 };
-                // Free-page reports are advisory: the guest can return the page to
-                // service without a later deflate handshake. Never detach their GPA
-                // mapping. Balloon-owned pages have the MUST_TELL_HOST ordering
-                // guarantee and may take the deterministic decommit path below.
+                // Device processing holds vm_state throughout this operation; no
+                // host device I/O retains guest pointers outside that lock. Linux
+                // isolates reported pages until ACK, and balloon pages remain
+                // owned until deflate. Restore report mappings before returning.
+                if !self.disable_immediate_release && !self.disable_hard_decommit {
+                    let mut operations = HvfReleaseOperations {
+                        reclaimer: self,
+                        memory,
+                        guest_base,
+                        address: chunk.start,
+                        host_address,
+                        size,
+                    };
+                    match release_owned(&mut operations, authority) {
+                        Ok(()) => {
+                            report.discard_advised_bytes += chunk.size;
+                            report.hard_decommitted_bytes += chunk.size;
+                            continue;
+                        }
+                        Err(ReleaseError::MappingUnavailable(error)) => {
+                            eprintln!("fatal HVF remap failure during immediate release: {error}");
+                            std::process::abort();
+                        }
+                        Err(ReleaseError::Recoverable(_)) => {}
+                    }
+                }
+                // Compatibility fallback: reports cannot stay detached after ACK.
                 if authority == ReclaimAuthority::ReportInFlight {
                     if !self.disable_madv_free
                         && memory.advise_free_at(guest_base, chunk.start, size).is_ok()
@@ -2435,6 +2510,7 @@ impl HvfBootRunner {
             disable_hard_decommit: debug_flags::enabled("CONJET_MEM_DISABLE_HARD_DECOMMIT"),
             disable_madv_free: debug_flags::enabled("CONJET_MEM_DISABLE_MADV_FREE"),
             disable_free_reusable: debug_flags::enabled("CONJET_MEM_DISABLE_FREE_REUSABLE"),
+            disable_immediate_release: debug_flags::enabled("CONJET_MEM_DISABLE_IMMEDIATE_RELEASE"),
             allow_hard_decommit_fallback: allow_balloon_hard_decommit_fallback.clone(),
         });
         match configure_virtio_runtime(
@@ -4922,6 +4998,163 @@ pub fn default_virtio_plan(config: &JetstreamConfig) -> Vec<VirtioMmioDevicePlan
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_shared(controller: &CoreMemoryController) -> SharedBootState {
+        SharedBootState {
+            vm_state: Mutex::new(VmState::new(GuestMemory::anonymous(16384).unwrap(), 1)),
+            gic_mmio: Mutex::new(GicMmio::new(GicLayout::new(1))),
+            uart: Mutex::new(Pl011Uart::default()),
+            psci: Mutex::new(PsciController::new(1).unwrap()),
+            console_output: Mutex::new(String::new()),
+            stages: Mutex::new(Vec::new()),
+            event_reclaim: Mutex::new(EventReclaimMetrics::default()),
+            core_memory: Mutex::new(controller.metrics()),
+            allow_balloon_hard_decommit_fallback: Arc::new(AtomicBool::new(false)),
+            event_reclaim_inflight: AtomicBool::new(false),
+            event_reclaim_pending: AtomicBool::new(false),
+            stop_reason: Mutex::new(None),
+            stop_requested: AtomicBool::new(false),
+        }
+    }
+
+    #[test]
+    fn partial_expansion_keeps_pressure_watchdog_active_during_stabilization() {
+        let now = Instant::now();
+        let mut controller = CoreMemoryController::new(test_core_memory_policy(448), 8192, 2048);
+        controller.runtime_ready = true;
+        let shared = test_shared(&controller);
+        controller.record_target_applied(
+            CoreMemoryTargetTransition::AdjustService(3072),
+            now,
+            &shared,
+        );
+        let temporary = tempfile::tempdir().unwrap();
+        let socket = temporary.path().join("memory.sock");
+        assert_eq!(controller.poll(now, &socket, Some(true), &shared), None);
+        assert_eq!(
+            controller.poll(
+                now + CORE_SERVICE_PRESSURE_WATCHDOG_DWELL,
+                &socket,
+                None,
+                &shared
+            ),
+            None
+        );
+        assert!(controller.idle_probe.is_some());
+        assert_eq!(
+            shared.core_memory.lock().unwrap().service_watchdog_probes,
+            1
+        );
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    #[ignore = "requires a hypervisor-entitled test executable; run serially"]
+    fn hvf_immediate_release_drops_rss_and_preserves_guest_reuse() {
+        let page = GuestMemory::anonymous(16384).unwrap().host_page_size();
+        let size = 64 * 1024 * 1024;
+        let base = 0x4000_0000;
+        let address = base + page as u64;
+        let memory = GuestMemory::anonymous(size + 2 * page).unwrap();
+        let vm = Arc::new(Vm::create().unwrap());
+        let flags = HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC;
+        vm.map_memory(memory.as_ptr(), base, memory.len(), flags)
+            .unwrap();
+        // ldr w2,[x0]; str w1,[x0]; hvc #0
+        for (index, instruction) in [0xb940_0002u32, 0xb900_0001, 0xd400_0002]
+            .iter()
+            .enumerate()
+        {
+            memory.write(index * 4, &instruction.to_le_bytes());
+        }
+        memory.write(size + page, &[0x5a]);
+        let vcpu = Vcpu::create().unwrap();
+        let reclaimer = HvfGuestMemoryReclaimer {
+            vm: vm.clone(),
+            flags,
+            hard_decommit_only: false,
+            disable_hard_decommit: false,
+            disable_madv_free: false,
+            disable_free_reusable: false,
+            disable_immediate_release: false,
+            allow_hard_decommit_fallback: Arc::new(AtomicBool::new(false)),
+        };
+        let range = PageRange {
+            start: address,
+            size: size as u64,
+        };
+        for authority in [
+            ReclaimAuthority::ReportInFlight,
+            ReclaimAuthority::BalloonOwned,
+        ] {
+            for offset in (page..page + size).step_by(page) {
+                memory.write(offset, &[0x7f]);
+            }
+            let before = host_memory_footprint().resident_bytes.unwrap();
+            let report = reclaimer.reclaim_ranges(&memory, base, &[range], authority);
+            assert_eq!(report.hard_decommitted_bytes, size as u64);
+            if authority == ReclaimAuthority::BalloonOwned {
+                let restored = reclaimer.restore_ranges(
+                    &memory,
+                    base,
+                    &[range],
+                    BalloonRestoreMode::HardDecommitted,
+                );
+                assert_eq!(restored.failed_bytes, 0);
+                assert_eq!(restored.restored_bytes, size as u64);
+            }
+            let after = host_memory_footprint().resident_bytes.unwrap();
+            assert!(
+                before.saturating_sub(after) >= size as u64 / 2,
+                "RSS did not fall after {authority:?}: before={before} after={after}"
+            );
+            vcpu.set_reg(HV_REG_X0, address).unwrap();
+            vcpu.set_reg(HV_REG_X1, 0x1234_5678).unwrap();
+            vcpu.set_reg(HV_REG_PC, base).unwrap();
+            vcpu.set_reg(HV_REG_CPSR, 0x3c5).unwrap();
+            vcpu.run().unwrap();
+            assert_eq!(vcpu.get_reg(HV_REG_X2).unwrap(), 0);
+            assert_eq!(memory.read_u32(page), 0x1234_5678);
+            assert_eq!(
+                memory
+                    .read_at(base, base + (size + page) as u64, 1)
+                    .unwrap(),
+                [0x5a]
+            );
+        }
+        // Releasing scattered granules must preserve live neighbors across
+        // repeated reuse, including when earlier releases split host mappings.
+        let fragmented: Vec<_> = (page..page + size)
+            .step_by(2 * page)
+            .map(|offset| PageRange {
+                start: base + offset as u64,
+                size: page as u64,
+            })
+            .collect();
+        for _ in 0..2 {
+            for offset in (page..page + size).step_by(page) {
+                memory.write(offset, &[0x7f]);
+            }
+            let before = host_memory_footprint().resident_bytes.unwrap();
+            let released = reclaimer.reclaim_ranges(
+                &memory,
+                base,
+                &fragmented,
+                ReclaimAuthority::ReportInFlight,
+            );
+            assert_eq!(released.hard_decommitted_bytes, size as u64 / 2);
+            let after = host_memory_footprint().resident_bytes.unwrap();
+            assert!(before.saturating_sub(after) >= size as u64 / 4);
+            for (index, offset) in (page..page + size).step_by(page).enumerate() {
+                assert_eq!(
+                    memory.read_u32(offset),
+                    if index % 2 == 0 { 0 } else { 0x7f }
+                );
+            }
+        }
+        drop(vcpu);
+        vm.unmap_memory(base, memory.len()).unwrap();
+    }
 
     fn test_core_memory_policy(target_mib: u64) -> CoreMemoryPolicy {
         CoreMemoryPolicy {

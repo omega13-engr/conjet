@@ -179,7 +179,7 @@ ERROR
     exit 69
   fi
 
-  for command_name in curl tar; do
+  for command_name in curl tar patch; do
     require_command "${command_name}"
   done
   require_gnu_make
@@ -354,6 +354,8 @@ verify_tarball
 if [ ! -d "${source_dir}" ]; then
   tar -C "${work_dir}" -xf "${tarball}"
 fi
+
+bash "${kernel_root}/scripts/apply-memory-patches.sh" "${source_dir}" "${kernel_version}"
 
 configure_kernel
 validate_required_config_builtins

@@ -8,8 +8,8 @@ Docker/cgroup memory drops
   -> Linux frees pages
   -> virtio-balloon reports disposable pages
   -> Jetstream validates GPA ranges
-  -> Jetstream detaches and marks whole balloon-owned host granules reusable
-  -> verified idle converts that detached backing to zero-filled host mappings
+  -> Jetstream detaches and replaces fully owned host granules with sparse zero backing
+  -> reported ranges are remapped before ACK; balloon ranges before deflate ACK
   -> macOS Conjet Core RSS/footprint drops
 ```
 
@@ -29,10 +29,28 @@ PFNs.
 Jetstream tracks ownership for every 4 KiB subpage and detaches a host granule
 only after Linux has transferred every subpage in it. A partly ballooned host
 granule remains mapped because detaching it would revoke memory Linux still
-owns. After the guest reaches a verified idle target, Jetstream converts only
-complete detached, balloon-owned granules to zero backing and restores that
-backing before guest ownership returns. This preserves the dynamic-memory
-safety contract independently of the guest page size.
+owns. Complete balloon-owned granules are coalesced per notification and
+released before full target convergence. In-flight page reports permit the
+same synchronous release, with their HVF mappings restored before ACK. Device
+processing retains the VM-state lock throughout; no asynchronous work may
+outlive this ownership lease. A remap failure terminates the VM instead of
+returning inaccessible memory to Linux.
+
+The pinned 6.12.86 guest patch adds a bounded reporting delay. Jetstream selects
+`page_reporting.report_delay_ms=25`; an explicit boot argument wins. The kernel
+accepts 10–2000 ms and keeps upstream allocator watermarks and work budgets.
+After a completed reclaim request, `conjet-reclaimd` writes the optional
+`report_trigger` parameter to advance the next pass and drain per-CPU free-page
+caches once. This includes successful zero-cache requests following process
+exit; ordinary allocator reports do not drain those caches. Kicks coalesce in
+the reporter and occur once per worker request, not once per chunk. Older kernels retain
+their normal reporting schedule. A 25 ms scheduling setting is not a measured
+25 ms host RSS guarantee.
+
+`CONJET_MEM_DISABLE_IMMEDIATE_RELEASE=1` restores the conservative advisory
+path for diagnosis. Reported pages then use `MADV_FREE`; balloon-owned backing
+may use the existing reusable/idle-compaction route. Advice success alone does
+not prove that RSS dropped.
 
 ## Controller Ownership
 
@@ -43,8 +61,8 @@ memory-control socket is metrics-only and rejects legacy target-mutation
 requests so an observer cannot desynchronize the automatic controller.
 
 After runtime readiness, Jetstream waits for a quiet dwell and verifies a guest
-snapshot. A confirmed empty build and service hierarchy may reach the 448 MiB
-stopped-idle floor. A populated service hierarchy instead enters a guarded
+snapshot. A confirmed empty build and service hierarchy may reach the effective
+profile's stopped-idle floor. A populated service hierarchy instead enters a guarded
 running-service state described below. Bulk builds, image load/save, container
 archive/export streams, and explicit create/start/restart/unpause lifecycle
 requests restore configured capacity immediately. Ordinary ping, list, inspect,
@@ -78,7 +96,22 @@ with a one-second lightweight service-population sentinel. This catches a
 guest-originated service restart even when no new host Docker request crosses
 the bridge; it does not run a second balloon policy.
 
-The 448 MiB target is guest capacity, not an absolute host-process number.
+Swift passes profile idle target, idle dwell, and service shrink step to Rust;
+explicit `CONJET_MEM_CORE_*` diagnostic overrides take precedence. Rust keeps
+its own safety reserve, working-set learning, and pressure gates. Its standalone
+default is 448 MiB; app defaults are 512 MiB for Balanced/Eco and 2048 MiB for
+Performance. Control telemetry exposes the effective target, dwell, shrink
+step, headroom, stabilization dwell, and policy version.
+
+Generic completion cleanup skips populated or unreadable service/build scopes
+and applies one request budget across siblings. Live-service cleanup stays in
+the feedback-aware controller. Daemon-parent cleanup requires all associated
+work scopes to be empty and is limited to one 64 MiB chunk per attempt. A new
+population observation cancels further empty-scope chunks; the kernel can
+reclaim more or less than a request, so feedback remains necessary. Reduced
+capacity remains under the pressure watchdog during partial expansion.
+
+The idle target is guest capacity, not an absolute host-process number.
 Activity Monitor also charges the VMM executable, Hypervisor framework state,
 device queues, and the Linux/Docker idle working set. Validate the target,
 page-ledger residency, zero partial granules, and final physical footprint
@@ -264,6 +297,14 @@ The current invariant is:
 Only BalloonOwned or in-flight ReportInFlight ranges may transition to
 SoftDiscarded or HardDecommittedZero.
 ```
+
+After report ACK, the ledger conservatively returns the backing label to
+`Resident`, because Linux may reuse those pages without another notification.
+That label means guest-accessible bookkeeping, not measured physical residency.
+Use cumulative authorized-release counters to establish completed work and
+host RSS/physical-footprint samples to establish physical return. Active-service
+trace validation accepts hard release only with intact ownership invariants;
+idle-only compaction must still remain inactive while services run.
 
 Future work should add a low-overhead ring-buffer event for every transition:
 
@@ -485,6 +526,15 @@ CONJET_MEM_VERIFY=1
 CONJET_MEM_POISON=1
 CONJET_MEM_DUMP_REJECTS=1
 ```
+
+## Docker Correctness Checks
+
+For a correctness-only Docker workload against an isolated VM, use
+[`run-docker-memory-e2e.py`](../build-support/run-docker-memory-e2e.py) and its
+[fixture instructions](../build-support/docker-memory-e2e/README.md). The
+[2026-09-11 chum-mem E2E report](jetstream-memory-e2e.md) records application,
+live-canary, reuse, and RSS-return checks, including the network workaround and
+the idle-capacity timeout caused by the existing zram safeguard.
 
 ## Primary Kernel References
 

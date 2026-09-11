@@ -23,7 +23,8 @@ final class ConjetCoreRustVMMRun: @unchecked Sendable {
         executable: String,
         arguments: [String],
         stdoutPath: String,
-        stderrPath: String
+        stderrPath: String,
+        environment: [String: String]? = nil
     ) throws {
         self.stdoutPath = stdoutPath
         self.stderrPath = stderrPath
@@ -49,6 +50,7 @@ final class ConjetCoreRustVMMRun: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.environment = environment
         process.standardOutput = stdoutHandle
         process.standardError = stderrHandle
         self.process = process

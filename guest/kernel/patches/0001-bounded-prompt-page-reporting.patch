@@ -1,0 +1,106 @@
+--- a/mm/page_reporting.c
++++ b/mm/page_reporting.c
+@@ -47,8 +47,32 @@
+  */
+ EXPORT_SYMBOL_GPL(page_reporting_order);
+ 
+-#define PAGE_REPORTING_DELAY	(2 * HZ)
++/* Conjet keeps upstream defaults unless the VMM selects a shorter delay. */
++static unsigned int report_delay_ms = 2000;
++
++static int report_delay_set(const char *val, const struct kernel_param *kp)
++{
++	unsigned int delay;
++	int err = kstrtouint(val, 0, &delay);
++
++	if (err)
++		return err;
++	if (delay < 10 || delay > 2000)
++		return -ERANGE;
++	WRITE_ONCE(*(unsigned int *)kp->arg, delay);
++	return 0;
++}
++
++static const struct kernel_param_ops report_delay_ops = {
++	.set = report_delay_set,
++	.get = param_get_uint,
++};
++module_param_cb(report_delay_ms, &report_delay_ops, &report_delay_ms, 0644);
++MODULE_PARM_DESC(report_delay_ms, "Page reporting coalescing delay in ms (10-2000)");
++
++#define PAGE_REPORTING_DELAY msecs_to_jiffies(READ_ONCE(report_delay_ms))
+ static struct page_reporting_dev_info __rcu *pr_dev_info __read_mostly;
++static atomic_t report_drain_requested = ATOMIC_INIT(0);
+ 
+ enum {
+ 	PAGE_REPORTING_IDLE = 0,
+@@ -78,7 +102,7 @@
+ 	/*
+ 	 * Delay the start of work to allow a sizable queue to build. For
+ 	 * now we are limiting this to running no more than once every
+-	 * couple of seconds.
++	 * configured coalescing interval.
+ 	 */
+ 	schedule_delayed_work(&prdev->work, PAGE_REPORTING_DELAY);
+ }
+@@ -321,6 +345,12 @@
+ 	 */
+ 	atomic_set(&prdev->state, state);
+ 
++	/* Explicit reclaim completion also exposes free per-CPU cached pages.
++	 * Ordinary allocator reports do not drain CPU caches.
++	 */
++	if (atomic_xchg(&report_drain_requested, 0))
++		drain_all_pages(NULL);
++
+ 	/* allocate scatterlist to store pages being reported on */
+ 	sgl = kmalloc_array(PAGE_REPORTING_CAPACITY, sizeof(*sgl), GFP_KERNEL);
+ 	if (!sgl)
+@@ -338,7 +368,7 @@
+ err_out:
+ 	/*
+ 	 * If the state has reverted back to requested then there may be
+-	 * additional pages to be processed. We will defer for 2s to allow
++	 * additional pages to be processed. We will defer for the configured interval to allow
+ 	 * more pages to accumulate.
+ 	 */
+ 	state = atomic_cmpxchg(&prdev->state, state, PAGE_REPORTING_IDLE);
+@@ -348,6 +378,38 @@
+ 
+ static DEFINE_MUTEX(page_reporting_mutex);
+ DEFINE_STATIC_KEY_FALSE(page_reporting_enabled);
++
++/* Root-only, event-driven kick after scoped reclaim; serialized with unregister. */
++static int report_trigger_set(const char *val, const struct kernel_param *kp)
++{
++	struct page_reporting_dev_info *prdev;
++	bool trigger;
++	int err = kstrtobool(val, &trigger);
++
++	if (err)
++		return err;
++	if (!trigger)
++		return -EINVAL;
++	mutex_lock(&page_reporting_mutex);
++	prdev = rcu_dereference_protected(pr_dev_info,
++			lockdep_is_held(&page_reporting_mutex));
++	if (prdev) {
++		atomic_set(&report_drain_requested, 1);
++		atomic_set(&prdev->state, PAGE_REPORTING_REQUESTED);
++		mod_delayed_work(system_wq, &prdev->work, 0);
++	} else {
++		err = -ENODEV;
++	}
++	mutex_unlock(&page_reporting_mutex);
++	return err;
++}
++
++static const struct kernel_param_ops report_trigger_ops = {
++	.set = report_trigger_set,
++};
++module_param_cb(report_trigger, &report_trigger_ops, NULL, 0200);
++MODULE_PARM_DESC(report_trigger, "Write 1 to schedule a bounded free-page reporting pass");
++
+ 
+ int page_reporting_register(struct page_reporting_dev_info *prdev)
+ {

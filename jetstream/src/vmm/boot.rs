@@ -238,10 +238,26 @@ impl BootPlan {
 }
 
 fn command_line_with_page_reporting_order(command_line: &str) -> String {
+    let command_line = command_line_with_reporting_delay(command_line);
     let Some(order) = page_reporting_order(GUEST_BALLOON_PAGE_SIZE, host_page_size()) else {
-        return command_line.to_string();
+        return command_line;
     };
-    command_line_with_page_reporting_order_value(command_line, order)
+    command_line_with_page_reporting_order_value(&command_line, order)
+}
+
+fn command_line_with_reporting_delay(command_line: &str) -> String {
+    if command_line
+        .split_whitespace()
+        .any(|token| token.starts_with("page_reporting.report_delay_ms="))
+    {
+        command_line.to_string()
+    } else {
+        // The pinned Conjet kernel bounds this setting to 10..=2000 ms.
+        // Older kernels ignore the unknown module parameter safely.
+        format!("{} page_reporting.report_delay_ms=25", command_line.trim())
+            .trim()
+            .to_string()
+    }
 }
 
 fn command_line_with_page_reporting_order_value(command_line: &str, order: u32) -> String {
@@ -308,6 +324,20 @@ mod tests {
         assert_eq!(page_reporting_order(4096, 65536), Some(4));
         assert_eq!(page_reporting_order(4096, 12288), None);
         assert_eq!(page_reporting_order(16384, 4096), None);
+    }
+
+    #[test]
+    fn reporting_delay_defaults_to_prompt_and_preserves_explicit_override() {
+        assert_eq!(
+            command_line_with_reporting_delay("console=ttyAMA0"),
+            "console=ttyAMA0 page_reporting.report_delay_ms=25"
+        );
+        let explicit = "console=ttyAMA0 page_reporting.report_delay_ms=2000";
+        assert_eq!(command_line_with_reporting_delay(explicit), explicit);
+        assert_eq!(
+            command_line_with_reporting_delay(""),
+            "page_reporting.report_delay_ms=25"
+        );
     }
 
     #[test]

@@ -1,0 +1,6 @@
+
+running 1 test
+test linux_reports_freed_pages_and_reuses_memory_without_corruption ... Linux page reporting RSS check: before=140607488, after=70434816
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.55s
