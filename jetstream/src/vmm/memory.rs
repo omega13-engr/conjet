@@ -18,6 +18,14 @@ pub enum GuestMemoryError {
     InvalidSize,
     #[error("mmap failed: {0}")]
     MapFailed(std::io::Error),
+    #[error("madvise({advice}) failed: {source}")]
+    AdviceFailed {
+        advice: libc::c_int,
+        source: std::io::Error,
+    },
+    #[cfg(target_os = "macos")]
+    #[error("backing discard could not be completed: {0}")]
+    BackingDiscard(String),
     #[error("guest memory access at 0x{guest_address:x}+{size} exceeds RAM")]
     AccessOutOfRange { guest_address: u64, size: usize },
     #[error("guest memory range at 0x{guest_address:x}+{size} is not aligned to host page size {host_page_size}")]
@@ -220,21 +228,62 @@ impl GuestMemory {
         guest_address: u64,
         size: usize,
     ) -> Result<*mut libc::c_void, GuestMemoryError> {
+        self.replace_backing_at(guest_base, guest_address, size, |address| {
+            let result = unsafe {
+                libc::mmap(
+                    address,
+                    size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    anonymous_mapping_flags() | libc::MAP_FIXED,
+                    -1,
+                    0,
+                )
+            };
+            if result == libc::MAP_FAILED {
+                Err(GuestMemoryError::MapFailed(std::io::Error::last_os_error()))
+            } else {
+                Ok(result)
+            }
+        })
+    }
+
+    fn replace_backing_at(
+        &self,
+        guest_base: u64,
+        guest_address: u64,
+        size: usize,
+        replace: impl FnOnce(*mut libc::c_void) -> Result<*mut libc::c_void, GuestMemoryError>,
+    ) -> Result<*mut libc::c_void, GuestMemoryError> {
         self.validate_host_page_aligned(guest_base, guest_address, size)?;
         let address = self.host_address_at(guest_base, guest_address, size)?;
-        let result = unsafe {
-            libc::mmap(
-                address,
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                anonymous_mapping_flags() | libc::MAP_FIXED,
-                -1,
-                0,
-            )
-        };
-        if result == libc::MAP_FAILED {
-            return Err(GuestMemoryError::MapFailed(std::io::Error::last_os_error()));
+        // The caller owns these pages and has detached their HVF mappings.
+        // MAP_FIXED alone drops task accounting, but neighboring mappings can
+        // keep the original VM object's dirty/compressed pages alive. Discard
+        // that backing first: Darwin clears compressor slots and makes resident
+        // pages clean and reusable without faulting them in or zeroing them.
+        #[cfg(target_os = "macos")]
+        if let Err(error) = self.advise_reusable_at(guest_base, guest_address, size) {
+            self.cancel_backing_discard(guest_base, guest_address, size);
+            return Err(error);
         }
+        #[cfg(target_os = "macos")]
+        if let Err(error) =
+            super::macos_memory::ensure_backing_reusable(address, size, self.host_page_size())
+        {
+            self.cancel_backing_discard(guest_base, guest_address, size);
+            return Err(GuestMemoryError::BackingDiscard(error.to_string()));
+        }
+
+        let result = match replace(address) {
+            Ok(result) => result,
+            Err(error) => {
+                // The original mapping remains on replacement failure. Undo
+                // reusability before a caller can restore HVF and ACK a report.
+                #[cfg(target_os = "macos")]
+                self.cancel_backing_discard(guest_base, guest_address, size);
+                return Err(error);
+            }
+        };
         if result != address {
             unsafe {
                 libc::munmap(result, size);
@@ -243,6 +292,14 @@ impl GuestMemory {
             std::process::abort();
         }
         Ok(result)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn cancel_backing_discard(&self, guest_base: u64, guest_address: u64, size: usize) {
+        if let Err(error) = self.advise_reuse_at(guest_base, guest_address, size) {
+            eprintln!("fatal guest backing discard rollback failed: {error}");
+            std::process::abort();
+        }
     }
 
     pub fn host_address_at(
@@ -313,7 +370,10 @@ impl GuestMemory {
         if result == 0 {
             Ok(())
         } else {
-            Err(GuestMemoryError::MapFailed(std::io::Error::last_os_error()))
+            Err(GuestMemoryError::AdviceFailed {
+                advice,
+                source: std::io::Error::last_os_error(),
+            })
         }
     }
 }
@@ -364,6 +424,108 @@ fn reusable_advice() -> libc::c_int {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn partial_decommit_discards_original_nonreusable_backing() {
+        use crate::vmm::macos_memory::nonreusable_backing_pages;
+
+        let size = 8 * 1024 * 1024;
+        let page = page_size();
+        let memory = GuestMemory::anonymous(2 * size + page).unwrap();
+        let base = 0x4000_0000;
+        memory.write(0, &[0x5a]);
+        memory.write(2 * size, &[0xa5]);
+        for _ in 0..3 {
+            for offset in (size..2 * size).step_by(page) {
+                memory.write(offset, &[0x7f]);
+            }
+            memory
+                .decommit_zero_at(base, base + size as u64, size)
+                .unwrap();
+            let retained = nonreusable_backing_pages(memory.as_ptr());
+            assert!(
+                retained <= 2,
+                "original backing retains {retained} nonreusable pages after partial decommit"
+            );
+            assert_eq!(
+                resident_pages_at(&memory, base, base + size as u64, size),
+                0
+            );
+            assert_eq!(memory.read_at(base, base, 1).unwrap(), [0x5a]);
+            assert_eq!(
+                memory.read_at(base, base + (2 * size) as u64, 1).unwrap(),
+                [0xa5]
+            );
+            assert_eq!(
+                memory.read_at(base, base + size as u64, size).unwrap(),
+                vec![0; size]
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn failed_replacement_cancels_reusability_before_returning() {
+        use crate::vmm::macos_memory::{nonreusable_backing_pages, reusable_backing_pages};
+
+        let page = page_size();
+        let memory = GuestMemory::anonymous(page * 4).unwrap();
+        for offset in (0..memory.len()).step_by(page) {
+            memory.write(offset, &[0x7f]);
+        }
+        let error = memory
+            .replace_backing_at(0, 0, memory.len(), |_| {
+                assert_eq!(nonreusable_backing_pages(memory.as_ptr()), 0);
+                Err(GuestMemoryError::MapFailed(
+                    std::io::Error::from_raw_os_error(libc::ENOMEM),
+                ))
+            })
+            .unwrap_err();
+        assert!(matches!(error, GuestMemoryError::MapFailed(_)));
+        // A restored HVF mapping must never expose still-reusable live pages.
+        // Some pages may already have been evicted while reusable, so inspect
+        // their disposition instead of assuming they all remain resident.
+        assert_eq!(
+            reusable_backing_pages(memory.as_ptr(), memory.len(), page),
+            0
+        );
+        memory.write(0, &[0x5a]);
+        assert_eq!(memory.read_at(0, 0, 1).unwrap(), [0x5a]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wired_page_cannot_be_orphaned_after_advice_succeeds() {
+        let page = page_size();
+        let memory = GuestMemory::anonymous(page * 2).unwrap();
+        memory.write(0, &[0x5a]);
+        assert_eq!(unsafe { libc::mlock(memory.as_ptr(), page) }, 0);
+        let result =
+            memory.replace_backing_at(0, 0, page, |_| panic!("wired backing reached replacement"));
+        assert_eq!(unsafe { libc::munlock(memory.as_ptr(), page) }, 0);
+        assert!(matches!(result, Err(GuestMemoryError::BackingDiscard(_))));
+        assert_eq!(memory.read_at(0, 0, 1).unwrap(), [0x5a]);
+    }
+
+    #[test]
+    fn invalid_decommit_never_replaces_backing() {
+        let page = page_size();
+        let memory = GuestMemory::anonymous(page * 2).unwrap();
+        for (address, size) in [
+            (1, page),
+            (0, 0),
+            (0, page + 1),
+            (page as u64, page * 2),
+            (u64::MAX, page),
+        ] {
+            assert!(memory
+                .replace_backing_at(0, address, size, |_| panic!(
+                    "invalid range reached replacement"
+                ))
+                .is_err());
+        }
+    }
 
     #[cfg(target_os = "macos")]
     fn resident_pages_at(

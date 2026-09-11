@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "/Users/sly/Workspace/Personal/conjet/build-support/run-docker-memory-e2e.py", line 215, in <module>
+    main()
+    ~~~~^^
+  File "/Users/sly/Workspace/Personal/conjet/build-support/run-docker-memory-e2e.py", line 211, in main
+    Suite(args).run()
+    ~~~~~~~~~~~~~~~^^
+  File "/Users/sly/Workspace/Personal/conjet/build-support/run-docker-memory-e2e.py", line 156, in run
+    self.await_return(before, f"cycle-{cycle}-return")
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/sly/Workspace/Personal/conjet/build-support/run-docker-memory-e2e.py", line 124, in await_return
+    raise AssertionError(
+    ...<3 lines>...
+        f"compressed growth={evidence['compressed_growth_bytes']}; see trace")
+AssertionError: cycle-1-return: return requires 256 MiB RSS and footprint reduction with at most 64 MiB compressed growth; RSS drop=1000521728, footprint drop=522289176, compressed growth=478248960; see trace

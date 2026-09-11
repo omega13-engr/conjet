@@ -1,0 +1,61 @@
+   Compiling jetstream v0.1.0 (/Users/sly/Workspace/Personal/conjet/jetstream)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.93s
+     Running unittests src/lib.rs (/tmp/conjet-backing-fix.ksn8hf/cargo-target/debug/deps/jetstream-2bee335263ab55ed)
+
+running 18 tests
+test vmm::boot::tests::computes_page_reporting_order_from_host_granule ... ok
+test vmm::memory::tests::advise_free_at_preserves_mapping_address ... ok
+test vmm::macos_memory::tests::reads_darwin_memory_accounting ... ok
+test vmm::debug_flags::tests::parses_enabled_values ... ok
+test vmm::memory::tests::advise_reusable_at_requires_reuse_before_guest_access ... ok
+test vmm::memory::tests::advise_zero_at_discards_existing_contents_without_moving_the_mapping ... ok
+test vmm::boot::tests::reporting_delay_defaults_to_prompt_and_preserves_explicit_override ... ok
+test vmm::boot::tests::preserves_explicit_page_reporting_order ... ok
+test vmm::boot::tests::replaces_legacy_unprefixed_page_reporting_order ... ok
+test vmm::boot::tests::appends_page_reporting_order_when_missing ... ok
+test vmm::memory::tests::decommit_zero_at_drops_host_residency_until_refaulted ... ok
+test vmm::memory::tests::decommit_zero_at_preserves_mapping_address_and_zeroes_range ... ok
+test vmm::memory::tests::decommit_zero_replaces_reusable_backing_without_refaulting_it ... ok
+test vmm::memory::tests::decommit_zero_at_preserves_neighboring_pages ... ok
+test vmm::memory::tests::failed_replacement_cancels_reusability_before_returning ... ok
+test vmm::memory::tests::invalid_decommit_never_replaces_backing ... ok
+test vmm::memory::tests::wired_page_cannot_be_orphaned_after_advice_succeeds ... ok
+test vmm::memory::tests::partial_decommit_discards_original_nonreusable_backing ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 93 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (/tmp/conjet-backing-fix.ksn8hf/cargo-target/debug/deps/jetstream-91a52967beb2ec4d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/boot_plan.rs (/tmp/conjet-backing-fix.ksn8hf/cargo-target/debug/deps/boot_plan-a502f539dbbee260)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/device_models.rs (/tmp/conjet-backing-fix.ksn8hf/cargo-target/debug/deps/device_models-e1f74c6ca9e05cc0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/docker_probe.rs (/tmp/conjet-backing-fix.ksn8hf/cargo-target/debug/deps/docker_probe-0885d9d96e14494e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/linux_memory_release.rs (/tmp/conjet-backing-fix.ksn8hf/cargo-target/debug/deps/linux_memory_release-35199ab56494b51b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/virtio_execution.rs (/tmp/conjet-backing-fix.ksn8hf/cargo-target/debug/deps/virtio_execution-744f80658dc4e4f2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s

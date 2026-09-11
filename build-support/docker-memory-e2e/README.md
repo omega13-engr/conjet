@@ -17,11 +17,16 @@ released before the build completes. A six-second hold makes the allocation
 observable to the coarse correctness sampler. A unique build argument reruns
 this stage while preserving compiler/dependency cache layers.
 
-The runner checks the ownership ledger throughout, requires an observable
-256 MiB RSS reduction after the known allocation and after the build, verifies
+The runner checks the ownership ledger throughout, requires observable
+256 MiB reductions in RSS, physical footprint, **and resident-plus-compressed
+logical memory** after the known allocation and after the build, verifies
 the live canaries, then restarts the fixtures and checks health and OOM state.
 The 60-second failure timeout is a correctness bound, **not** a claimed release
-latency. The trace records RSS and physical footprint separately. It produces no
+latency. The trace records RSS, physical footprint, task compression, and system
+compressor storage separately. Run the native/HVF original-backing regressions
+alongside this suite: task accounting can fall while old backing remains alive.
+See [host backing reclamation](../../docs/jetstream-host-backing-reclaim.md).
+The suite produces no
 benchmark percentiles, throughput, energy, or OrbStack comparison. Performance,
 warm-cache cost, and power efficiency still need separate measurements.
 

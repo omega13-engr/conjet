@@ -1,0 +1,59 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling serde_core v1.0.228
+   Compiling utf8parse v0.2.2
+   Compiling zmij v1.0.21
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle-parse v1.0.0
+   Compiling anstyle v1.0.14
+   Compiling getrandom v0.4.3
+   Compiling rustix v1.1.4
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.5
+   Compiling anstream v1.0.0
+   Compiling serde v1.0.228
+   Compiling heck v0.5.0
+   Compiling anyhow v1.0.102
+   Compiling serde_json v1.0.150
+   Compiling strsim v0.11.1
+   Compiling bitflags v2.13.0
+   Compiling clap_lex v1.1.0
+   Compiling thiserror v2.0.18
+   Compiling cfg-if v1.0.4
+   Compiling clap_builder v4.6.0
+   Compiling syn v2.0.118
+   Compiling errno v0.3.14
+   Compiling once_cell v1.21.4
+   Compiling memchr v2.8.2
+   Compiling jetstream v0.1.0 (/tmp/conjet-backing-fix.ksn8hf/before-fix/jetstream)
+   Compiling fastrand v2.4.1
+   Compiling itoa v1.0.18
+   Compiling memmap2 v0.9.10
+   Compiling tempfile v3.27.0
+   Compiling clap_derive v4.6.1
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+   Compiling clap v4.6.1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.03s
+     Running unittests src/lib.rs (/tmp/conjet-backing-fix.ksn8hf/cargo-target-before/debug/deps/jetstream-2bee335263ab55ed)
+
+running 1 test
+test vmm::memory::tests::partial_decommit_discards_original_nonreusable_backing ... FAILED
+
+failures:
+
+---- vmm::memory::tests::partial_decommit_discards_original_nonreusable_backing stdout ----
+
+thread 'vmm::memory::tests::partial_decommit_discards_original_nonreusable_backing' (9009630) panicked at jetstream/src/vmm/memory.rs:433:13:
+original backing retains 512 nonreusable pages after partial decommit
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    vmm::memory::tests::partial_decommit_discards_original_nonreusable_backing
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 109 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

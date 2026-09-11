@@ -4,5 +4,7 @@ pub mod debug_flags;
 pub mod docker_probe;
 pub mod fdt;
 pub mod machine;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_memory;
 pub mod memory;
 pub mod vstate;

@@ -1,0 +1,4 @@
+cycle 1: release, live canary, and demand-zero reuse verified
+cycle 2: release, live canary, and demand-zero reuse verified
+cycle 3: release, live canary, and demand-zero reuse verified
+Docker build release and container restart verified; no performance comparison ran

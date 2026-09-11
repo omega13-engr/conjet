@@ -1,5 +1,11 @@
 # Jetstream dynamic memory E2E — 2026-09-11
 
+**Follow-up:** these original RSS/footprint results did not establish complete
+host-backing reclamation. A partial-mapping retention defect was subsequently
+reproduced. See [host backing reclamation](jetstream-host-backing-reclaim.md) for
+the fix, stronger regression checks, and the distinction between reusable pages
+and pages physically returned to the free list.
+
 The current immediate-release VMM, patched Linux kernel, and guest reclaim worker
 completed the chum-mem application checks and the native Docker memory fixture
 suite. RSS returned while PostgreSQL, the Rust API and worker, and the Node web

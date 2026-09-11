@@ -4010,6 +4010,10 @@ struct DockerPhaseControlMetrics {
 struct HostMemoryFootprint {
     resident_bytes: Option<u64>,
     physical_footprint_bytes: Option<u64>,
+    compressed_bytes: Option<u64>,
+    reusable_bytes: Option<u64>,
+    system_compressor_bytes: Option<u64>,
+    system_compressed_logical_bytes: Option<u64>,
 }
 
 fn spawn_memory_control_socket(
@@ -4398,6 +4402,17 @@ fn memory_control_error(message: &str, configured_memory_mib: u64) -> MemoryCont
 
 #[cfg(target_os = "macos")]
 fn host_memory_footprint() -> HostMemoryFootprint {
+    use crate::vmm::macos_memory::{system_compressor, task_memory};
+
+    let mut result = HostMemoryFootprint::default();
+    if let Some(task) = task_memory() {
+        result.compressed_bytes = Some(task.compressed_bytes);
+        result.reusable_bytes = Some(task.reusable_bytes);
+    }
+    if let Some(system) = system_compressor() {
+        result.system_compressor_bytes = Some(system.physical_bytes);
+        result.system_compressed_logical_bytes = Some(system.logical_bytes);
+    }
     let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
     let rc = unsafe {
         libc::proc_pid_rusage(
@@ -4408,13 +4423,10 @@ fn host_memory_footprint() -> HostMemoryFootprint {
     };
     if rc == 0 {
         let info = unsafe { info.assume_init() };
-        HostMemoryFootprint {
-            resident_bytes: Some(info.ri_resident_size),
-            physical_footprint_bytes: Some(info.ri_phys_footprint),
-        }
-    } else {
-        HostMemoryFootprint::default()
+        result.resident_bytes = Some(info.ri_resident_size);
+        result.physical_footprint_bytes = Some(info.ri_phys_footprint);
     }
+    result
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -5045,6 +5057,72 @@ mod tests {
             shared.core_memory.lock().unwrap().service_watchdog_probes,
             1
         );
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    #[ignore = "requires a hypervisor-entitled test executable; run serially"]
+    fn hvf_partial_release_discards_original_nonreusable_backing() {
+        use crate::vmm::macos_memory::nonreusable_backing_pages;
+
+        let size = 8 * 1024 * 1024;
+        let memory = GuestMemory::anonymous(2 * size + 16384).unwrap();
+        let page = memory.host_page_size();
+        let base = 0x4000_0000;
+        let vm = Arc::new(Vm::create().unwrap());
+        let flags = HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC;
+        vm.map_memory(memory.as_ptr(), base, memory.len(), flags)
+            .unwrap();
+        let reclaimer = HvfGuestMemoryReclaimer {
+            vm: vm.clone(),
+            flags,
+            hard_decommit_only: false,
+            disable_hard_decommit: false,
+            disable_madv_free: false,
+            disable_free_reusable: false,
+            disable_immediate_release: false,
+            allow_hard_decommit_fallback: Arc::new(AtomicBool::new(false)),
+        };
+        memory.write(0, &[0x5a]);
+        memory.write(2 * size, &[0xa5]);
+        let range = PageRange {
+            start: base + size as u64,
+            size: size as u64,
+        };
+        for authority in [
+            ReclaimAuthority::ReportInFlight,
+            ReclaimAuthority::BalloonOwned,
+        ] {
+            for offset in (size..2 * size).step_by(page) {
+                memory.write(offset, &[0x7f]);
+            }
+            let report = reclaimer.reclaim_ranges(&memory, base, &[range], authority);
+            assert_eq!(report.hard_decommitted_bytes, size as u64);
+            let retained = nonreusable_backing_pages(memory.as_ptr());
+            assert!(
+                retained <= 2,
+                "original backing retains {retained} nonreusable pages after {authority:?}"
+            );
+            if authority == ReclaimAuthority::BalloonOwned {
+                let restored = reclaimer.restore_ranges(
+                    &memory,
+                    base,
+                    &[range],
+                    BalloonRestoreMode::HardDecommitted,
+                );
+                assert_eq!(restored.failed_bytes, 0);
+            }
+            assert_eq!(
+                memory.read_at(base, range.start, size).unwrap(),
+                vec![0; size]
+            );
+            assert_eq!(memory.read_at(base, base, 1).unwrap(), [0x5a]);
+            assert_eq!(
+                memory.read_at(base, base + (2 * size) as u64, 1).unwrap(),
+                [0xa5]
+            );
+        }
+        vm.unmap_memory(base, memory.len()).unwrap();
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

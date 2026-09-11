@@ -1,0 +1,8 @@
+{
+  "qa_vmm_exited": true,
+  "chum_mem_status_unchanged": true,
+  "qa_bridge_stop_requested": true,
+  "shutdown_docker_exit": 125,
+  "temporary_root_removed": true,
+  "qa_browser_tab_closed": true
+}

@@ -12,6 +12,33 @@ import time
 import uuid
 
 
+def return_evidence(before, after):
+    start, end = before["host_memory"], after["host_memory"]
+    required = ("resident_bytes", "physical_footprint_bytes", "compressed_bytes")
+    for key in required:
+        if start.get(key) is None or end.get(key) is None:
+            raise AssertionError(f"memory return requires {key}; use a VMM with Darwin backing diagnostics")
+    return {
+        "before": before,
+        "after": after,
+        "rss_drop_bytes": start["resident_bytes"] - end["resident_bytes"],
+        "footprint_drop_bytes": start["physical_footprint_bytes"] - end["physical_footprint_bytes"],
+        "compressed_growth_bytes": end["compressed_bytes"] - start["compressed_bytes"],
+        "resident_plus_compressed_drop_bytes": (
+            start["resident_bytes"] + start["compressed_bytes"]
+            - end["resident_bytes"] - end["compressed_bytes"]),
+    }
+
+
+def memory_returned(evidence, minimum):
+    # Moving dirty pages into the compressor must not satisfy an RSS-drop check.
+    # Original-object retention is covered by the native/HVF backing regression;
+    # task accounting alone cannot detect pages orphaned by MAP_FIXED.
+    return (evidence["rss_drop_bytes"] >= minimum
+            and evidence["footprint_drop_bytes"] >= minimum
+            and evidence["resident_plus_compressed_drop_bytes"] >= minimum)
+
+
 class Suite:
     def __init__(self, args):
         self.args = args
@@ -91,14 +118,17 @@ class Suite:
         minimum = self.args.minimum_return_mib * 1024 * 1024
         while True:
             after = self.metrics()
-            drop = before["host_memory"]["resident_bytes"] - after["host_memory"]["resident_bytes"]
-            if drop >= minimum:
-                evidence = {"before": before, "after": after, "rss_drop_bytes": drop}
+            evidence = return_evidence(before, after)
+            if memory_returned(evidence, minimum):
                 (self.root / (name + ".json")).write_text(json.dumps(evidence, indent=2) + "\n")
                 return
             if time.monotonic() >= deadline:
-                (self.root / (name + "-failed.json")).write_text(json.dumps({"before": before, "after": after}, indent=2))
-                raise AssertionError(f"{name}: less than {self.args.minimum_return_mib} MiB RSS returned; see trace")
+                (self.root / (name + "-failed.json")).write_text(json.dumps(evidence, indent=2))
+                raise AssertionError(
+                    f"{name}: return requires {self.args.minimum_return_mib} MiB RSS and footprint reduction "
+                    f"and net resident-plus-compressed reduction; RSS drop={evidence['rss_drop_bytes']}, "
+                    f"footprint drop={evidence['footprint_drop_bytes']}, "
+                    f"compressed growth={evidence['compressed_growth_bytes']}; see trace")
             time.sleep(2)
 
     def verify_container_states(self, name):
