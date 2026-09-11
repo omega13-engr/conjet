@@ -121,6 +121,7 @@ jobs:
             lld \
             llvm \
             make \
+            patch \
             perl \
             tar \
             xz-utils

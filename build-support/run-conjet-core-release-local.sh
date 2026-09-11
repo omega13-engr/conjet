@@ -258,6 +258,7 @@ container_id="$(docker --host "${docker_host}" create \
       lld \
       llvm \
       make \
+      patch \
       perl \
       rsync \
       tar \
@@ -321,6 +322,11 @@ fi
 container_status=0
 docker --host "${docker_host}" start -a "${container_id}" \
   | tee "${log_dir}/container-release-rehearsal.log" || container_status=$?
+
+# Retrieve the daemon's complete log after attach ends, including output a
+# local socket proxy may have dropped during the streaming connection.
+docker --host "${docker_host}" logs "${container_id}" \
+  > "${log_dir}/container-release-rehearsal-complete.log" 2>&1 || true
 
 docker --host "${docker_host}" cp "${container_id}:${container_log_dir}/." "${log_dir}" || true
 
