@@ -1,0 +1,2 @@
+Swift build and test	Test Conjet	2026-09-11T07:47:03.0490000Z Test Case '-[ConjetCoreTests.DaemonProtocolTests testHVFSmokeResultDecodesOldPayloadWithoutEntitlementStatus]' started.
+Swift build and test	Test Conjet	2026-09-11T08:01:02.7306900Z ##[error]The operation was canceled.

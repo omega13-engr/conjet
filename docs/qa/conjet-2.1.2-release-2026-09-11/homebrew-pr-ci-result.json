@@ -1,0 +1,15 @@
+{
+  "run": {
+    "id": 34576468267,
+    "event": "pull_request",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite_id": 93664469345,
+    "path": ".github/workflows/ci.yml",
+    "head_sha": "ea5c6f0c50bef5b35a0c3b198482e078d75df849"
+  },
+  "checks": {
+    "total_count": 0,
+    "check_runs": []
+  }
+}

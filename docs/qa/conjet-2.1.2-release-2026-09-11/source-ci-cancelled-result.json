@@ -1,0 +1,139 @@
+{
+  "conclusion": "cancelled",
+  "headSha": "a51f85fe66a5c636403716c7fcdf0295f1397f99",
+  "jobs": [
+    {
+      "completedAt": "2026-09-11T08:01:10Z",
+      "conclusion": "cancelled",
+      "databaseId": 103187352879,
+      "name": "Swift build and test",
+      "startedAt": "2026-09-11T07:42:34Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-11T07:42:35Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-11T07:42:34Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:42:37Z",
+          "conclusion": "success",
+          "name": "Check out repository",
+          "number": 2,
+          "startedAt": "2026-09-11T07:42:35Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:43:32Z",
+          "conclusion": "success",
+          "name": "Set up Swift",
+          "number": 3,
+          "startedAt": "2026-09-11T07:42:37Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:43:32Z",
+          "conclusion": "success",
+          "name": "Show Swift version",
+          "number": 4,
+          "startedAt": "2026-09-11T07:43:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:43:32Z",
+          "conclusion": "success",
+          "name": "Check whitespace",
+          "number": 5,
+          "startedAt": "2026-09-11T07:43:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:46:05Z",
+          "conclusion": "success",
+          "name": "Build Conjet",
+          "number": 6,
+          "startedAt": "2026-09-11T07:43:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T08:01:02Z",
+          "conclusion": "cancelled",
+          "name": "Test Conjet",
+          "number": 7,
+          "startedAt": "2026-09-11T07:46:05Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T08:01:02Z",
+          "conclusion": "skipped",
+          "name": "Stage Conjet app bundle",
+          "number": 8,
+          "startedAt": "2026-09-11T08:01:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T08:01:02Z",
+          "conclusion": "skipped",
+          "name": "Create release DMG",
+          "number": 9,
+          "startedAt": "2026-09-11T08:01:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T08:01:02Z",
+          "conclusion": "skipped",
+          "name": "Validate release DMG contents",
+          "number": 10,
+          "startedAt": "2026-09-11T08:01:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T08:01:02Z",
+          "conclusion": "skipped",
+          "name": "Validate rendered Homebrew packages",
+          "number": 11,
+          "startedAt": "2026-09-11T08:01:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T08:01:02Z",
+          "conclusion": "skipped",
+          "name": "Build benchmark package",
+          "number": 12,
+          "startedAt": "2026-09-11T08:01:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T08:01:02Z",
+          "conclusion": "skipped",
+          "name": "Test benchmark package",
+          "number": 13,
+          "startedAt": "2026-09-11T08:01:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T08:01:03Z",
+          "conclusion": "success",
+          "name": "Post Check out repository",
+          "number": 26,
+          "startedAt": "2026-09-11T08:01:02Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T08:01:06Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 27,
+          "startedAt": "2026-09-11T08:01:03Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/omega13-engr/conjet/actions/runs/34575638027/job/103187352879"
+    }
+  ],
+  "status": "completed",
+  "url": "https://github.com/omega13-engr/conjet/actions/runs/34575638027"
+}

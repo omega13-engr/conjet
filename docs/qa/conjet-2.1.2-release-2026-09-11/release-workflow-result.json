@@ -1,0 +1,222 @@
+{
+  "conclusion": "success",
+  "headSha": "a51f85fe66a5c636403716c7fcdf0295f1397f99",
+  "jobs": [
+    {
+      "completedAt": "2026-09-11T07:52:41Z",
+      "conclusion": "success",
+      "databaseId": 103187353112,
+      "name": "Build, sign, notarize DMG",
+      "startedAt": "2026-09-11T07:42:32Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-11T07:42:34Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-11T07:42:32Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:42:36Z",
+          "conclusion": "success",
+          "name": "Check out repository",
+          "number": 2,
+          "startedAt": "2026-09-11T07:42:34Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:43:47Z",
+          "conclusion": "success",
+          "name": "Set up Swift",
+          "number": 3,
+          "startedAt": "2026-09-11T07:42:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:43:47Z",
+          "conclusion": "success",
+          "name": "Show Swift version",
+          "number": 4,
+          "startedAt": "2026-09-11T07:43:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:43:48Z",
+          "conclusion": "success",
+          "name": "Resolve release metadata",
+          "number": 5,
+          "startedAt": "2026-09-11T07:43:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:47:44Z",
+          "conclusion": "success",
+          "name": "Test Conjet",
+          "number": 6,
+          "startedAt": "2026-09-11T07:43:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:47:44Z",
+          "conclusion": "success",
+          "name": "Import Developer ID certificate",
+          "number": 7,
+          "startedAt": "2026-09-11T07:47:44Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:47:44Z",
+          "conclusion": "success",
+          "name": "Report signing mode",
+          "number": 8,
+          "startedAt": "2026-09-11T07:47:44Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:20Z",
+          "conclusion": "success",
+          "name": "Stage signed Conjet app bundle",
+          "number": 9,
+          "startedAt": "2026-09-11T07:47:44Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:20Z",
+          "conclusion": "success",
+          "name": "Inspect app signature",
+          "number": 10,
+          "startedAt": "2026-09-11T07:52:20Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:36Z",
+          "conclusion": "success",
+          "name": "Create release DMG",
+          "number": 11,
+          "startedAt": "2026-09-11T07:52:20Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:36Z",
+          "conclusion": "success",
+          "name": "Finalize DMG notarization and checksum",
+          "number": 12,
+          "startedAt": "2026-09-11T07:52:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:38Z",
+          "conclusion": "success",
+          "name": "Upload release artifact",
+          "number": 13,
+          "startedAt": "2026-09-11T07:52:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:38Z",
+          "conclusion": "success",
+          "name": "Post Check out repository",
+          "number": 26,
+          "startedAt": "2026-09-11T07:52:38Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:39Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 27,
+          "startedAt": "2026-09-11T07:52:38Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/omega13-engr/conjet/actions/runs/34575638113/job/103187353112"
+    },
+    {
+      "completedAt": "2026-09-11T07:52:57Z",
+      "conclusion": "success",
+      "databaseId": 103189887616,
+      "name": "Publish GitHub release, formula, and cask",
+      "startedAt": "2026-09-11T07:52:43Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-11T07:52:44Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-11T07:52:44Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:45Z",
+          "conclusion": "success",
+          "name": "Check out repository",
+          "number": 2,
+          "startedAt": "2026-09-11T07:52:44Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:46Z",
+          "conclusion": "success",
+          "name": "Download release artifact",
+          "number": 3,
+          "startedAt": "2026-09-11T07:52:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:47Z",
+          "conclusion": "success",
+          "name": "Render Homebrew formula and cask",
+          "number": 4,
+          "startedAt": "2026-09-11T07:52:46Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:52Z",
+          "conclusion": "success",
+          "name": "Update Homebrew formula and cask",
+          "number": 5,
+          "startedAt": "2026-09-11T07:52:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:52Z",
+          "conclusion": "success",
+          "name": "Generate release notes",
+          "number": 6,
+          "startedAt": "2026-09-11T07:52:52Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:55Z",
+          "conclusion": "success",
+          "name": "Publish GitHub release",
+          "number": 7,
+          "startedAt": "2026-09-11T07:52:52Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:55Z",
+          "conclusion": "success",
+          "name": "Post Check out repository",
+          "number": 14,
+          "startedAt": "2026-09-11T07:52:55Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-11T07:52:55Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 15,
+          "startedAt": "2026-09-11T07:52:55Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/omega13-engr/conjet/actions/runs/34575638113/job/103189887616"
+    }
+  ],
+  "status": "completed",
+  "url": "https://github.com/omega13-engr/conjet/actions/runs/34575638113"
+}

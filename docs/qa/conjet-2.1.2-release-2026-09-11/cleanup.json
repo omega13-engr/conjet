@@ -1,0 +1,9 @@
+{
+  "at": "2026-09-11T08:05:31.869871+00:00",
+  "qa_root_removed": "/tmp/conjet-release-2.1.1.6oh3g_uo",
+  "qa_processes_remaining": false,
+  "qa_disk_images_mounted": false,
+  "selected_evidence_retained": "docs/qa/conjet-2.1.2-release-2026-09-11",
+  "installed_app_version_observed": "2.1.0",
+  "installed_runtime_upgraded": false
+}

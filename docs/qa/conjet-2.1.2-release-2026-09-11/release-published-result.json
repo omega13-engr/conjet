@@ -1,0 +1,67 @@
+{
+  "assets": [
+    {
+      "apiUrl": "https://api.github.com/repos/omega13-engr/conjet/releases/assets/556770535",
+      "contentType": "application/x-apple-diskimage",
+      "createdAt": "2026-09-11T07:52:53Z",
+      "digest": "sha256:8503672246d67492361e34b79ccb4f461251775293998b70b4306ed855b7ae10",
+      "downloadCount": 0,
+      "id": "RA_kwDOTEev0c4hL6Tn",
+      "label": "",
+      "name": "conjet-2.1.2-macos-arm64.dmg",
+      "size": 31457038,
+      "state": "uploaded",
+      "updatedAt": "2026-09-11T07:52:54Z",
+      "url": "https://github.com/omega13-engr/conjet/releases/download/conjet-v2.1.2/conjet-2.1.2-macos-arm64.dmg"
+    },
+    {
+      "apiUrl": "https://api.github.com/repos/omega13-engr/conjet/releases/assets/556770538",
+      "contentType": "application/octet-stream",
+      "createdAt": "2026-09-11T07:52:53Z",
+      "digest": "sha256:e27827ca82b346d65e892b769421357d5ae8356e500753fd97d8e545b8c6cf42",
+      "downloadCount": 0,
+      "id": "RA_kwDOTEev0c4hL6Tq",
+      "label": "",
+      "name": "conjet-2.1.2-macos-arm64.dmg.sha256",
+      "size": 100,
+      "state": "uploaded",
+      "updatedAt": "2026-09-11T07:52:53Z",
+      "url": "https://github.com/omega13-engr/conjet/releases/download/conjet-v2.1.2/conjet-2.1.2-macos-arm64.dmg.sha256"
+    },
+    {
+      "apiUrl": "https://api.github.com/repos/omega13-engr/conjet/releases/assets/556770536",
+      "contentType": "application/x-ruby",
+      "createdAt": "2026-09-11T07:52:53Z",
+      "digest": "sha256:1e32e0afd2d1a06e98846a10cfa8c2f33da42eca210094352f4d0f07fce05c2b",
+      "downloadCount": 0,
+      "id": "RA_kwDOTEev0c4hL6To",
+      "label": "",
+      "name": "conjet-cask.rb",
+      "size": 1785,
+      "state": "uploaded",
+      "updatedAt": "2026-09-11T07:52:53Z",
+      "url": "https://github.com/omega13-engr/conjet/releases/download/conjet-v2.1.2/conjet-cask.rb"
+    },
+    {
+      "apiUrl": "https://api.github.com/repos/omega13-engr/conjet/releases/assets/556770537",
+      "contentType": "application/x-ruby",
+      "createdAt": "2026-09-11T07:52:53Z",
+      "digest": "sha256:4287a8a231e0bdb5aef4d11fdf113ff922fdf02e5c149640d450e10dc9b77b12",
+      "downloadCount": 0,
+      "id": "RA_kwDOTEev0c4hL6Tp",
+      "label": "",
+      "name": "conjet.rb",
+      "size": 2364,
+      "state": "uploaded",
+      "updatedAt": "2026-09-11T07:52:53Z",
+      "url": "https://github.com/omega13-engr/conjet/releases/download/conjet-v2.1.2/conjet.rb"
+    }
+  ],
+  "body": "Conjet 2.1.2 fixes retained macOS memory backing after guest pages are released. Previously, replacing a mapping could lower RSS while neighboring mappings kept the old dirty or compressed backing alive.\n\nJetstream now discards the original owned backing before replacing its mapping, verifies that macOS has made it reusable or removed it, and cancels reusability on failure before restoring guest access. Memory diagnostics now expose task compression and system compressor storage. Docker memory checks require net resident-plus-compressed return alongside RSS and footprint reductions.\n\nValidation covers the native backing-retention regression, entitled HVF reuse, and isolated ChumMem Compose workloads with database canaries, allocation/free cycles, build cleanup, and restart checks. See the [implementation](https://github.com/omega13-engr/conjet/blob/conjet-v2.1.2/docs/jetstream-host-backing-reclaim.md) and [QA evidence](https://github.com/omega13-engr/conjet/blob/conjet-v2.1.2/docs/qa/jetstream-backing-2026-09-11/README.md).\n\nClean reusable pages can remain resident until macOS reuses them. System memory pressure also depends on other applications; this release makes no fixed pressure-percentage or benchmark claim.\n\nThe bundled host VMM is updated by this app release. Conjet Core guest assets remain at 1.3.0; no guest image update is required.\n\nSigning and distribution: this early release uses the documented ad-hoc signing fallback and is not Apple-notarized. The final DMG checksum and Homebrew definitions are published as release assets.\n\nRelease checks now wait for asynchronous volume-refresh commands and allow the oversized-response regression enough time to test the response-size limit. Production runtime behavior is unchanged by these test corrections.\n\nConjet v2.1.2\n\nRelease tag: conjet-v2.1.2\nCommit: a51f85fe66a5c636403716c7fcdf0295f1397f99\nWorkflow run: https://github.com/omega13-engr/conjet/actions/runs/34575638113\nHomebrew update commit: ea5c6f0c50bef5b35a0c3b198482e078d75df849\nHomebrew update PR: https://github.com/omega13-engr/conjet/pull/29\n\nAssets:\n- release-assets/conjet-2.1.2-macos-arm64/conjet-2.1.2-macos-arm64.dmg\n- release-assets/conjet-2.1.2-macos-arm64/conjet-2.1.2-macos-arm64.dmg.sha256\n- homebrew-formula/conjet.rb\n- homebrew-cask/conjet-cask.rb\n",
+  "isDraft": false,
+  "isPrerelease": false,
+  "publishedAt": "2026-09-11T07:52:55Z",
+  "tagName": "conjet-v2.1.2",
+  "targetCommitish": "a51f85fe66a5c636403716c7fcdf0295f1397f99",
+  "url": "https://github.com/omega13-engr/conjet/releases/tag/conjet-v2.1.2"
+}

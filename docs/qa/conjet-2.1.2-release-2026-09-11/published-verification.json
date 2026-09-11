@@ -1,0 +1,13 @@
+{
+  "release": "https://github.com/omega13-engr/conjet/releases/tag/conjet-v2.1.2",
+  "tag": "conjet-v2.1.2",
+  "sha256": "8503672246d67492361e34b79ccb4f461251775293998b70b4306ed855b7ae10",
+  "assets": [
+    "conjet-2.1.2-macos-arm64.dmg",
+    "conjet-2.1.2-macos-arm64.dmg.sha256",
+    "conjet-cask.rb",
+    "conjet.rb"
+  ],
+  "signature": "Executable=/private/tmp/conjet-release-2.1.1.6oh3g_uo/published-mount/Conjet.app/Contents/MacOS/Conjet\nIdentifier=dev.conjet.app\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=70319 flags=0x10002(adhoc,runtime) hashes=2191+3 location=embedded\nHash type=sha256 size=32\nCandidateCDHash sha256=e7d201f17d5dcf7de1e4c2611cb93e14b594d862\nCandidateCDHashFull sha256=e7d201f17d5dcf7de1e4c2611cb93e14b594d862b10c14af692cb9ff733083af\nHash choices=sha256\nCMSDigest=e7d201f17d5dcf7de1e4c2611cb93e14b594d862b10c14af692cb9ff733083af\nCMSDigestType=2\nCDHash=e7d201f17d5dcf7de1e4c2611cb93e14b594d862\nSignature=adhoc\nInfo.plist entries=14\nTeamIdentifier=not set\nRuntime Version=14.0.0\nSealed Resources version=2 rules=13 files=7\nInternal requirements count=0 size=12\n",
+  "checks": "DMG checksum and integrity, app and executable signatures, version, VMM entitlement, CLI/VMM help, Homebrew syntax and checksum"
+}
