@@ -1,0 +1,9 @@
+{
+  "version": "2.1.1",
+  "sha256": "b0e36b3b20be5a90b44e31b0753fc50af396ae741bf5ee204d7135eeb58bab4c",
+  "mounted_dmg_verified": true,
+  "cli_and_vmm_help": true,
+  "ruby_syntax": true,
+  "signing": "ad-hoc",
+  "notarized": false
+}

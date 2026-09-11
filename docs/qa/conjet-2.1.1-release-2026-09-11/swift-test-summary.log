@@ -1,0 +1,8 @@
+Test Suite 'conjetPackageTests.xctest' passed at 2026-09-11 14:28:56.682.
+	 Executed 419 tests, with 2 tests skipped and 0 failures (0 unexpected) in 38.943 (39.003) seconds
+Test Suite 'All tests' passed at 2026-09-11 14:28:56.682.
+	 Executed 419 tests, with 2 tests skipped and 0 failures (0 unexpected) in 38.943 (39.005) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

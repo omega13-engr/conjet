@@ -1,0 +1,2 @@
+Swift build and test	Test Conjet	2026-09-11T06:36:04.4395420Z /Users/runner/work/conjet/conjet/Tests/ConjetAppTests/ConjetAppStateTests.swift:427: error: -[ConjetAppTests.ConjetAppStateTests testPulseConnectedForegroundVolumeRefreshLoadsVisibleResourceInventory] : XCTAssertTrue failed
+Swift build and test	Test Conjet	2026-09-11T06:36:04.4397960Z /Users/runner/work/conjet/conjet/Tests/ConjetAppTests/ConjetAppStateTests.swift:428: error: -[ConjetAppTests.ConjetAppStateTests testPulseConnectedForegroundVolumeRefreshLoadsVisibleResourceInventory] : XCTAssertTrue failed

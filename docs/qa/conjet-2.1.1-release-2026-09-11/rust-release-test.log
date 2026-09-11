@@ -1,0 +1,211 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.46
+   Compiling libc v0.2.186
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+   Compiling thiserror v2.0.18
+   Compiling anyhow v1.0.102
+   Compiling serde_json v1.0.150
+   Compiling serde v1.0.228
+   Compiling heck v0.5.0
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling jetstream v0.1.0 (/private/tmp/conjet-release-2.1.1.6oh3g_uo/source/jetstream)
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling anstream v1.0.0
+   Compiling bitflags v2.13.0
+   Compiling syn v2.0.118
+   Compiling clap_lex v1.1.0
+   Compiling strsim v0.11.1
+   Compiling rustix v1.1.4
+   Compiling getrandom v0.4.3
+   Compiling errno v0.3.14
+   Compiling clap_builder v4.6.0
+   Compiling memchr v2.8.2
+   Compiling itoa v1.0.18
+   Compiling cfg-if v1.0.4
+   Compiling memmap2 v0.9.10
+   Compiling clap_derive v4.6.1
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+   Compiling fastrand v2.4.1
+   Compiling once_cell v1.21.4
+   Compiling clap v4.6.1
+   Compiling tempfile v3.27.0
+    Finished `release` profile [optimized] target(s) in 56.15s
+     Running unittests src/lib.rs (target/release/deps/jetstream-6f8bec81b391c582)
+
+running 111 tests
+test devices::balloon::tests::balloon_owned_reclaim_records_authority_and_hard_decommit_metrics ... ok
+test devices::balloon::tests::deflate_clears_balloon_host_granule_decommit_state ... ok
+test devices::balloon::tests::dense_balloon_tracker_stays_small_for_an_eight_gib_guest ... ok
+test devices::balloon::tests::free_page_hint_ranges_are_reclaimed_not_just_counted ... ok
+test devices::balloon::tests::hard_decommitted_balloon_memory_is_remapped_before_deflate_returns ... ok
+test devices::balloon::tests::balloon_target_completion_is_detected_for_retry_sweep ... ok
+test devices::balloon::tests::coalesced_balloon_reclaim_marks_each_host_granule_decommitted ... ok
+test devices::balloon::tests::coalesces_ranges_before_host_granule_filtering ... ok
+test devices::balloon::tests::configuration_encodes_target_and_actual_pages ... ok
+test devices::balloon::tests::host_granule_filtering_aligns_relative_to_guest_base ... ok
+test devices::balloon::tests::host_granule_filtering_rejects_ranges_below_guest_base ... ok
+test devices::balloon::tests::idle_compaction_converts_reusable_balloon_backing_before_deflate ... ok
+test devices::balloon::tests::reads_legacy_32_bit_balloon_pfns ... ok
+test devices::balloon::tests::rejects_unaligned_free_page_reports_without_rounding ... ok
+test devices::balloon::tests::reported_free_reclaim_records_inflight_authority_before_ack ... ok
+test devices::balloon::tests::reusable_balloon_memory_is_restored_before_deflate_returns_guest_ownership ... ok
+test devices::balloon::tests::reusable_restore_failure_keeps_the_balloon_granule_owned ... ok
+test devices::balloon::tests::skips_partial_host_granules ... ok
+test devices::balloon::tests::target_completion_coalesces_candidates_across_inflate_batches ... ok
+test devices::balloon::tests::inflate_releases_complete_granules_before_target_but_requires_tell_host ... ok
+test devices::balloon::tests::ledger_flags_reclaim_without_authority ... ok
+test devices::balloon::tests::queue_layout_accounts_for_optional_queues ... ok
+test devices::balloon::tests::queue_layout_places_reporting_at_queue_two_with_current_features ... ok
+test devices::balloon::tests::queue_layout_skips_unnamed_optional_queues ... ok
+test devices::balloon::tests::rejects_free_page_reports_outside_guest_ram ... ok
+test devices::balloon::tests::rejects_misaligned_pfn_descriptors ... ok
+test devices::balloon::tests::tracks_balloon_host_granules_across_separate_inflate_batches ... ok
+test devices::balloon::tests::transport_metrics_use_negotiated_reporting_queue_index ... ok
+test devices::vsock::tests::bridge_rejects_forged_guest_packet_identity ... ok
+test devices::vsock::tests::binary_frame_payload_http_get_does_not_trigger_docker_auto_shutdown ... ok
+test devices::vsock::tests::buildkit_markers_from_guest_response_increment_phase_counter ... ok
+test devices::vsock::tests::capacity_workload_paths_cover_image_load_and_service_start ... ok
+test devices::vsock::tests::docker_build_completion_is_a_workload_completion ... ok
+test devices::vsock::tests::chunked_response_waits_for_terminal_chunk_before_half_closing_host_client ... ok
+test devices::vsock::tests::chunked_response_decoder_tracks_large_body_without_retaining_it ... ok
+test devices::vsock::tests::docker_buildkit_session_completion_is_not_workload_completion ... ok
+test devices::vsock::tests::docker_chunked_post_waits_for_terminal_chunk_before_guest_shutdown ... ok
+test devices::vsock::tests::docker_container_create_rewrites_broad_conjet_cgroup_parent ... ok
+test devices::vsock::tests::docker_get_without_client_half_close_sends_guest_shutdown ... ok
+test devices::vsock::tests::docker_container_create_stream_rewrites_before_guest_payload ... ok
+test devices::vsock::tests::docker_phase_markers_from_host_request_do_not_trigger_reclaim_phase ... ok
+test devices::vsock::tests::docker_phase_markers_from_guest_response_increment_phase_counter ... ok
+test devices::vsock::tests::docker_grpc_upgrade_does_not_auto_shutdown_guest ... ok
+test devices::vsock::tests::docker_ping_completion_is_not_a_workload_completion ... ok
+test devices::vsock::tests::docker_post_waits_for_declared_request_body_before_guest_shutdown ... ok
+test devices::vsock::tests::docker_response_phase_stream_completion_is_workload_completion ... ok
+test devices::vsock::tests::versioned_docker_build_without_query_starts_workload ... ok
+test devices::vsock::tests::finished_docker_streams_increment_completion_counter ... ok
+test devices::vsock::tests::fragmented_binary_tcp_build_request_starts_workload_and_forwards_all_bytes ... ok
+test hvf::boot::tests::active_service_mode_disables_hard_decommit_fallback ... ok
+test hvf::boot::tests::balloon_target_pages_clamps_to_configured_guest_memory ... ok
+test devices::vsock::tests::guest_credit_advances_only_after_host_output_is_written ... ok
+test hvf::boot::tests::balloon_target_pages_encodes_guest_target_as_ballooned_pages ... ok
+test devices::vsock::tests::guest_payload_writes_to_host_and_advances_forward_count ... ok
+test devices::vsock::tests::host_half_close_is_forwarded_without_dropping_stream ... ok
+test devices::vsock::tests::transmit_notification_drains_every_pending_batch ... ok
+test hvf::boot::tests::classified_workload_stream_survives_byte_silence ... ok
+test hvf::boot::tests::core_memory_controller_uses_configured_capacity_and_idle_floor ... ok
+test hvf::boot::tests::detects_complete_guest_reclaim_http_body_from_content_length ... ok
+test hvf::boot::tests::docker_transport_bytes_include_both_stream_directions ... ok
+test hvf::boot::tests::explicitly_tracked_opaque_transport_refreshes_its_quiet_deadline ... ok
+test hvf::boot::tests::guest_memory_snapshot_allows_only_quiet_low_working_set_state ... ok
+test hvf::boot::tests::host_reclaim_chunks_bound_large_free_page_reports ... ok
+test hvf::boot::tests::hvf_immediate_release_drops_rss_and_preserves_guest_reuse ... ignored, requires a hypervisor-entitled test executable; run serially
+test hvf::boot::tests::hvf_partial_release_discards_original_nonreusable_backing ... ignored, requires a hypervisor-entitled test executable; run serially
+test hvf::boot::tests::idle_backing_compaction_waits_for_a_quiet_idle_target ... ok
+test hvf::boot::tests::live_service_feedback_observes_hierarchical_memory_events ... ok
+test hvf::boot::tests::live_service_feedback_uses_guest_page_size_for_refault_guard ... ok
+test hvf::boot::tests::live_service_target_expands_to_replenish_available_reserve ... ok
+test hvf::boot::tests::live_service_target_never_consumes_guest_available_reserve ... ok
+test hvf::boot::tests::live_service_target_tracks_working_set_with_conservative_headroom ... ok
+test hvf::boot::tests::live_service_transition_is_clamped_above_stopped_idle_floor ... ok
+test hvf::boot::tests::memory_control_rejects_guest_address_reclaim_commands ... ok
+test hvf::boot::tests::memory_control_rejects_legacy_target_mutation ... ok
+test hvf::boot::tests::memory_control_request_decodes_line_protocol_commands ... ok
+test hvf::boot::tests::memory_control_response_serializes_host_memory_footprint ... ok
+test hvf::boot::tests::memory_socket_path_falls_back_when_sibling_exceeds_unix_socket_limit ... ok
+test hvf::boot::tests::memory_socket_path_uses_docker_sibling_when_path_fits ... ok
+test hvf::boot::tests::missing_global_telemetry_blocks_service_capacity_reduction ... ok
+test hvf::boot::tests::parses_guest_reclaim_submission_from_http_response ... ok
+test hvf::boot::tests::percent_encode_reason_keeps_safe_reclaim_reason_bytes_readable ... ok
+test hvf::boot::tests::production_reclaim_separates_report_and_balloon_paths ... ok
+test hvf::boot::tests::quiet_transport_arms_guest_reclaim_settle_before_idle_probe ... ok
+test hvf::boot::tests::repeated_benign_transport_bytes_do_not_arm_quiet_tracking ... ok
+test hvf::boot::tests::service_adjustment_waits_for_convergence_and_stabilization ... ok
+test hvf::boot::tests::retained_console_output_is_bounded_on_utf8_boundaries ... ok
+test hvf::boot::tests::service_watchdog_cannot_consume_an_idle_feedback_probe ... ok
+test hvf::reclaim::tests::balloon_pages_remain_detached_until_deflate ... ok
+test hvf::reclaim::tests::failed_detach_does_not_discard_or_remap ... ok
+test hvf::reclaim::tests::failed_discard_restores_mapping_before_fallback_for_both_authorities ... ok
+test hvf::boot::tests::partial_expansion_keeps_pressure_watchdog_active_during_stabilization ... ok
+test hvf::reclaim::tests::reported_pages_are_remapped_before_success ... ok
+test hvf::reclaim::tests::failed_report_remap_is_fatal_to_the_vm ... ok
+test vmm::boot::tests::appends_page_reporting_order_when_missing ... ok
+test vmm::boot::tests::computes_page_reporting_order_from_host_granule ... ok
+test vmm::boot::tests::preserves_explicit_page_reporting_order ... ok
+test vmm::boot::tests::replaces_legacy_unprefixed_page_reporting_order ... ok
+test vmm::boot::tests::reporting_delay_defaults_to_prompt_and_preserves_explicit_override ... ok
+test vmm::debug_flags::tests::parses_enabled_values ... ok
+test vmm::macos_memory::tests::reads_darwin_memory_accounting ... ok
+test vmm::memory::tests::advise_free_at_preserves_mapping_address ... ok
+test vmm::memory::tests::failed_replacement_cancels_reusability_before_returning ... ok
+test vmm::memory::tests::invalid_decommit_never_replaces_backing ... ok
+test vmm::memory::tests::advise_reusable_at_requires_reuse_before_guest_access ... ok
+test vmm::memory::tests::advise_zero_at_discards_existing_contents_without_moving_the_mapping ... ok
+test vmm::memory::tests::decommit_zero_at_preserves_mapping_address_and_zeroes_range ... ok
+test vmm::memory::tests::decommit_zero_at_drops_host_residency_until_refaulted ... ok
+test vmm::memory::tests::wired_page_cannot_be_orphaned_after_advice_succeeds ... ok
+test vmm::memory::tests::decommit_zero_at_preserves_neighboring_pages ... ok
+test vmm::memory::tests::decommit_zero_replaces_reusable_backing_without_refaulting_it ... ok
+test vmm::memory::tests::partial_decommit_discards_original_nonreusable_backing ... ok
+
+test result: ok. 109 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src/main.rs (target/release/deps/jetstream-fd28fb43e36d9c6d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/boot_plan.rs (target/release/deps/boot_plan-eb2b55057cf84862)
+
+running 3 tests
+test builds_direct_kernel_boot_plan ... ok
+test rejects_profiles_outside_current_conjet_limits ... ok
+test validates_arm64_linux_image_magic ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/device_models.rs (target/release/deps/device_models-a453063aeb497193)
+
+running 7 tests
+test gic_mmio_models_linux_discovery_and_waker_registers ... ok
+test pl011_and_mmio_bus_route_console_bytes ... ok
+test psci_handles_version_features_and_cpu_on ... ok
+test virtio_balloon_requires_deflate_ack_before_the_guest_reuses_pages ... ok
+test virtio_mmio_exposes_modern_transport_registers ... ok
+test virtio_mmio_rejects_unsupported_features_when_features_ok_is_set ... ok
+test fdt_advertises_conjet_direct_kernel_machine ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/docker_probe.rs (target/release/deps/docker_probe-2ebbdb7f95ff14fb)
+
+running 1 test
+test docker_socket_probe_accepts_ping_response ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/linux_memory_release.rs (target/release/deps/linux_memory_release-4d2e1e8ebaa48d55)
+
+running 1 test
+test linux_reports_freed_pages_and_reuses_memory_without_corruption ... ignored, requires entitled executable, CONJET_TEST_KERNEL and CONJET_TEST_INITRD; run serially
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/virtio_execution.rs (target/release/deps/virtio_execution-06f4c5af039a2b53)
+
+running 2 tests
+test vsock_transmit_and_receive_queues_move_packets ... ok
+test block_queue_executes_write_flush_and_readback ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests jetstream
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

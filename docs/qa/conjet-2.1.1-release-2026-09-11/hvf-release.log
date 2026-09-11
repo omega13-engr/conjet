@@ -1,0 +1,7 @@
+/tmp/conjet-release-2.1.1.6oh3g_uo/source/target/release/deps/jetstream-6f8bec81b391c582: replacing existing signature
+
+running 2 tests
+test hvf::boot::tests::hvf_immediate_release_drops_rss_and_preserves_guest_reuse ... ok
+test hvf::boot::tests::hvf_partial_release_discards_original_nonreusable_backing ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 109 filtered out; finished in 0.08s
