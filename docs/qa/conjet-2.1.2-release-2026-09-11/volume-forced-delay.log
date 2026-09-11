@@ -1,0 +1,26 @@
+[0/1] Planning build
+[1/1] Compiling plugin GenerateManual
+[2/2] Compiling plugin GenerateDoccReference
+Building for debugging...
+[2/15] Write sources
+[3/15] Write swift-version--58304C5D6DBC2206.txt
+[5/7] Emitting module ConjetAppTests
+[6/7] Compiling ConjetAppTests ConjetAppStateTests.swift
+[6/8] Write Objects.LinkFileList
+[7/8] Linking conjetPackageTests
+Build complete! (3.40s)
+Test Suite 'Selected tests' started at 2026-09-11 15:39:00.396.
+Test Suite 'conjetPackageTests.xctest' started at 2026-09-11 15:39:00.397.
+Test Suite 'ConjetAppStateTests' started at 2026-09-11 15:39:00.397.
+Test Case '-[ConjetAppTests.ConjetAppStateTests testPulseConnectedForegroundVolumeRefreshLoadsVisibleResourceInventory]' started.
+Test Case '-[ConjetAppTests.ConjetAppStateTests testPulseConnectedForegroundVolumeRefreshLoadsVisibleResourceInventory]' passed (1.570 seconds).
+Test Suite 'ConjetAppStateTests' passed at 2026-09-11 15:39:01.967.
+	 Executed 1 test, with 0 failures (0 unexpected) in 1.570 (1.570) seconds
+Test Suite 'conjetPackageTests.xctest' passed at 2026-09-11 15:39:01.967.
+	 Executed 1 test, with 0 failures (0 unexpected) in 1.570 (1.570) seconds
+Test Suite 'Selected tests' passed at 2026-09-11 15:39:01.967.
+	 Executed 1 test, with 0 failures (0 unexpected) in 1.570 (1.571) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

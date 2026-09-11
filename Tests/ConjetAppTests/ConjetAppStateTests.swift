@@ -416,11 +416,20 @@ final class ConjetAppStateTests: XCTestCase {
         )
         app.setInteractiveSurfaceVisible(true)
         app.applyPulseFrameForTesting(.heartbeat(state: ConjetPulseState(highWatermark: 9, replayAvailableFrom: 1)))
+        defer { app.prepareForQuit() }
 
-        try await Task.sleep(nanoseconds: 200_000_000)
         await app.refreshAutomaticallyForTesting()
 
-        let invocations = await executor.invocations
+        // A deferred refresh may already be in flight, in which case the call
+        // above queues work and returns. Wait for its observable commands.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        var invocations = await executor.invocations
+        while !(invocations.contains { $0.arguments.contains("volume") && $0.arguments.contains("ls") }
+            && invocations.contains { $0.arguments.contains("system") && $0.arguments.contains("df") })
+            && ContinuousClock.now < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            invocations = await executor.invocations
+        }
         XCTAssertTrue(app.pulseConnected)
         XCTAssertFalse(invocations.contains { $0.arguments.contains("ps") })
         XCTAssertFalse(invocations.contains { $0.arguments.contains("images") })

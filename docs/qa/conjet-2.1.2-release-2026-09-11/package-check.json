@@ -1,0 +1,7 @@
+{
+  "version": "2.1.2",
+  "sha256": "136fa1002459289597b2438d10183157d6a77fda27330aae3307fb8c72910b1f",
+  "checks": "DMG integrity, mount, app version and signature, CLI/VMM help, Homebrew syntax",
+  "signing": "ad-hoc",
+  "notarized": false
+}

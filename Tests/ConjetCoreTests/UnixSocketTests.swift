@@ -148,9 +148,11 @@ final class UnixSocketTests: XCTestCase {
 
         XCTAssertThrowsError(try UnixSocketClient(socketPath: socket.path).send(
             DaemonRequest(command: .status),
-            timeoutSeconds: 2
+            // This tests the size limit, not throughput on a shared CI runner.
+            timeoutSeconds: 10
         )) { error in
-            XCTAssertTrue(String(describing: error).contains("daemon response exceeded"))
+            let description = String(describing: error)
+            XCTAssertTrue(description.contains("daemon response exceeded"), description)
         }
 
         _ = try UnixSocketClient(socketPath: socket.path).send(DaemonRequest(command: .stop), timeoutSeconds: 1)
