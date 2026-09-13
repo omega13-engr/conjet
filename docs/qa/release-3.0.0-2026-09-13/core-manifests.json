@@ -1,0 +1,23 @@
+{
+  "rootfs": {
+    "name": "conjet-core",
+    "version": "1.3.1",
+    "ubuntuVersion": "24.04",
+    "architecture": "aarch64",
+    "runtime": "docker",
+    "x86Emulation": {
+      "engine": "qemu-linux-user",
+      "version": "11.0.2",
+      "binfmtFlags": "POF"
+    },
+    "rootDiskGiB": 16,
+    "format": "raw.gz",
+    "systemdDefaultTarget": "conjet-appliance.target",
+    "recommendedKernelCommandLine": "console=ttyAMA0 earlycon=pl011,0x09000000 root=/dev/vda1 rw rootwait systemd.unit=conjet-appliance.target",
+    "artifact": "conjet-ubuntu-24.04-rootfs-aarch64-docker.raw.gz"
+  },
+  "kernelVersion": "6.12.86",
+  "kernelImageSha256Verified": true,
+  "appMinimumMacOS": "14.0",
+  "networkHelperMinimumMacOS": "12.0"
+}

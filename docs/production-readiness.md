@@ -11,9 +11,10 @@ The dynamic-memory implementation was not changed.
 
 **Subsequent release decision:** after receiving this report, the user explicitly
 requested committing, pushing and publishing the current implementation with
-ad-hoc signing. Conjet 3.0.0 and Core 1.3.1 are being prepared under that updated
-authorization. The failures below remain disclosed in the release notes; the
-earlier QA evidence is retained as a historical record.
+ad-hoc signing. Conjet 3.0.0 and Core 1.3.1 were published under that updated
+authorization; see the [release verification](releases/conjet-3.0.0-verification.md).
+The failures below remain disclosed in the release notes; the earlier QA evidence
+is retained as a historical record.
 
 ## Implemented
 

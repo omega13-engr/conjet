@@ -1,0 +1,13 @@
+{
+  ".github/workflows/ci.yml": "YAML and shell syntax valid",
+  ".github/workflows/release-conjet.yml": "YAML and shell syntax valid",
+  ".github/workflows/conjet-core-image.yml": "YAML and shell syntax valid",
+  "build-support/stage-macos-app.sh": "shell syntax valid",
+  "build-support/create-macos-dmg.sh": "shell syntax valid",
+  "build-support/build-network-helper.sh": "shell syntax valid",
+  "build-support/render-homebrew-formula.sh": "shell syntax valid",
+  "build-support/render-homebrew-cask.sh": "shell syntax valid",
+  "guest/image/conjet-core/scripts/image.sh": "shell syntax valid",
+  "formula": "rendered Ruby syntax valid with fixture checksum",
+  "cask": "rendered Ruby syntax valid with fixture checksum"
+}

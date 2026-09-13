@@ -1,0 +1,19 @@
+{
+  "mountedFromPublishedDMG": true,
+  "signatureChecks": [
+    "Conjet.app",
+    "bin/conjet",
+    "bin/conjetd",
+    "bin/ConjetCoreVMM/Conjet Core",
+    "bin/ConjetCoreVMM/conjet-network",
+    "Conjet.app/Contents/Resources/ConjetTools/conjet-port-helper"
+  ],
+  "bundleVersion": "3.0.0",
+  "launchDaemonBundled": true,
+  "executableSmokeChecks": [
+    "bin/conjet",
+    "bin/ConjetCoreVMM/conjet-network",
+    "bin/ConjetCoreVMM/Conjet Core"
+  ],
+  "dmgDetached": true
+}

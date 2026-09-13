@@ -1,0 +1,30 @@
+{
+  "sourceCommit": "f1df93258a21ff4dac33475e9cf4e9ef7dca7297",
+  "assets": [
+    {
+      "lane": "app",
+      "name": "conjet-3.0.0-macos-arm64.dmg",
+      "bytes": 42927551,
+      "algorithm": "sha256",
+      "digest": "abd9d29724920f957a13ac5277b2458637ee6ad89b66e45004b30c96b29b1eb6",
+      "verified": true
+    },
+    {
+      "lane": "core",
+      "name": "conjet-linux-6.12.86-aarch64-Image",
+      "bytes": 14125064,
+      "algorithm": "sha512",
+      "digest": "2cddfb3ca6d3b77f2d96453a56e627ca7c7227000d22531b9e629e9ff5faae17b06448903b3d541aeaf1fe5cf9f0e5045b9c34bbc3676e8a791486a9e808d3c2",
+      "verified": true
+    },
+    {
+      "lane": "core",
+      "name": "conjet-ubuntu-24.04-rootfs-aarch64-docker.raw.gz",
+      "bytes": 201349419,
+      "algorithm": "sha512",
+      "digest": "215e76e2111d0bce40060b2aff863a6e67c03ed6ada43b14d734110d7480b1c5a6487d3eb40ad6c53f596cc1ed49188a990180989c42ea31b98a43411fd00336",
+      "verified": true
+    }
+  ],
+  "homebrewAssetChecksumsMatchDMG": true
+}
