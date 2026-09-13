@@ -34,6 +34,23 @@ enum PortHelperError: Error, CustomStringConvertible {
     }
 }
 
+if CommandLine.arguments.dropFirst().first == "serve" {
+    do {
+        guard geteuid() == 0 else { throw ConjetError.unavailable("port service must be launched by the approved system daemon") }
+        let requirement = try PrivilegedPortService.requirement(team: PrivilegedPortService.signingTeam(), identifier: PrivilegedPortService.daemonIdentifier)
+        let delegate = PortServiceDelegate()
+        let listener = NSXPCListener(machServiceName: PrivilegedPortService.name)
+        listener.setConnectionCodeSigningRequirement(requirement)
+        listener.delegate = delegate
+        listener.resume()
+        withExtendedLifetime((listener, delegate)) { RunLoop.main.run() }
+        exit(0)
+    } catch {
+        fputs("conjet-port-helper: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
 do {
     let options = try parseOptions(Array(CommandLine.arguments.dropFirst()))
     let callbackFD = try connectUnixSocket(path: options.socketPath)
@@ -61,6 +78,28 @@ do {
 } catch {
     fputs("conjet-port-helper: \(error)\n", stderr)
     exit(1)
+}
+
+private final class PortServiceDelegate: NSObject, NSXPCListenerDelegate {
+    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        connection.exportedInterface = NSXPCInterface(with: PrivilegedPortServiceProtocol.self)
+        connection.exportedObject = PortService()
+        connection.resume()
+        return true
+    }
+}
+
+private final class PortService: NSObject, PrivilegedPortServiceProtocol {
+    func bind(address: String, port: Int, transport: String, reply: @escaping (FileHandle?, Int, String?) -> Void) {
+        do {
+            try PrivilegedPortService.validate(address: address, port: port, transport: transport)
+            let options = PortHelperOptions(socketPath: "", token: "", bindAddress: address, port: port, proto: ConjetPortProtocol(rawValue: transport)!)
+            let fd = try bindPort(options)
+            reply(FileHandle(fileDescriptor: fd, closeOnDealloc: true), 0, nil)
+        } catch {
+            reply(nil, Int((error as? PortHelperError)?.posixCode ?? 0), String(describing: error))
+        }
+    }
 }
 
 private func parseOptions(_ args: [String]) throws -> PortHelperOptions {

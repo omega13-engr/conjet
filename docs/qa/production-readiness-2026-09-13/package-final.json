@@ -1,0 +1,45 @@
+{
+  "initialExternalMountAttempt": {
+    "exitCode": 1,
+    "output": "expected   CRC32 $0DC04804\n",
+    "error": "hdiutil: attach failed - Permission denied\n"
+  },
+  "defaultReadOnlyMount": "/Volumes/Conjet 2.1.2",
+  "signatures": [
+    {
+      "path": "Conjet.app",
+      "exitCode": 0,
+      "error": ""
+    },
+    {
+      "path": "bin/conjet",
+      "exitCode": 0,
+      "error": ""
+    },
+    {
+      "path": "bin/conjetd",
+      "exitCode": 0,
+      "error": ""
+    },
+    {
+      "path": "bin/ConjetCoreVMM/Conjet Core",
+      "exitCode": 0,
+      "error": ""
+    },
+    {
+      "path": "bin/ConjetCoreVMM/conjet-network",
+      "exitCode": 0,
+      "error": ""
+    }
+  ],
+  "launchDaemonBundled": true,
+  "applicationsLink": "/Applications",
+  "bundleVersion": "2.1.2",
+  "sha256": "17e35f1c9e64e2d3d692f38a102641d85db4692692e5077549f3558052bb671a",
+  "checksumMatches": true,
+  "detach": {
+    "exitCode": 0,
+    "output": "\"disk8\" ejected.\n",
+    "error": ""
+  }
+}

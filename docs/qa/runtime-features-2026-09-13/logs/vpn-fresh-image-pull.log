@@ -1,0 +1,8 @@
+1.37: Pulling from library/busybox
+e001ca9bbec8: Pulling fs layer
+e001ca9bbec8: Verifying Checksum
+e001ca9bbec8: Download complete
+e001ca9bbec8: Pull complete
+Digest: sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+Status: Downloaded newer image for busybox:1.37
+docker.io/library/busybox:1.37

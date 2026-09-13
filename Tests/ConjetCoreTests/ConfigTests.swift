@@ -2,6 +2,17 @@ import ConjetCore
 import XCTest
 
 final class ConfigTests: XCTestCase {
+    func testNetworkEgressRoundTripsAndRejectsInvalidModes() throws {
+        XCTAssertEqual(try ConjetConfig.parseTOML("").networkEgressMode, .host)
+        for mode in ConjetNetworkEgressMode.allCases {
+            let config = ConjetConfig(networkEgressMode: mode)
+            XCTAssertEqual(try ConjetConfig.parseTOML(config.renderTOML()), config)
+            let data = try ConjetJSON.encoder(pretty: false).encode(config)
+            XCTAssertEqual(try ConjetJSON.decoder().decode(ConjetConfig.self, from: data), config)
+        }
+        XCTAssertThrowsError(try ConjetConfig.parseTOML("[network]\negress_mode = \"invalid\"\n"))
+    }
+
     func testConfigRoundTrip() throws {
         let config = ConjetConfig(
             vmCPUs: 6,

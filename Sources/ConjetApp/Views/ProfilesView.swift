@@ -407,6 +407,17 @@ private struct ProfileConfigForm: View {
             Divider()
 
             ConfigGroup("Network") {
+                FieldStack("Internet Access") {
+                    Picker("Internet Access", selection: $draft.networkEgressMode) {
+                        ForEach(ConjetNetworkEgressMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    Text("Applies at the next VM start. Host networking follows your Mac's VPN routes and DNS.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 ConfigGrid {
                     FieldStack("Bind") {
                         Picker("Bind", selection: $draft.networkBindPolicy) {

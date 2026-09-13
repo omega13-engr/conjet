@@ -19,9 +19,10 @@ use crate::devices::balloon::{
 };
 use crate::devices::block::{BlockQueueHandler, RawBlockDevice};
 use crate::devices::bus::{MmioDevice, MmioError};
-use crate::devices::net::{NetQueue, NetQueueHandler, VmnetPacketBridge};
+use crate::devices::net::{NetQueue, NetQueueHandler, NetworkPacketBridge};
 use crate::devices::pl011::Pl011Uart;
 use crate::devices::psci::{PsciAction, PsciController};
+use crate::devices::rng::RngQueueHandler;
 use crate::devices::virtio::{
     default_device_plan, VirtioDeviceKind, VirtioMmioDevice, VirtioMmioDevicePlan,
 };
@@ -3876,13 +3877,13 @@ fn configure_virtio_runtime(
                 block_count += 1;
             }
             VirtioDeviceKind::Net => {
-                let bridge = if let Some(existing) = vm_state.devices.vmnet_bridge.as_ref() {
+                let bridge = if let Some(existing) = vm_state.devices.network_bridge.as_ref() {
                     existing.clone()
                 } else {
                     let bridge = std::sync::Arc::new(std::sync::Mutex::new(
-                        VmnetPacketBridge::start_default().map_err(|error| error.to_string())?,
+                        NetworkPacketBridge::start_default().map_err(|error| error.to_string())?,
                     ));
-                    vm_state.devices.vmnet_bridge = Some(bridge.clone());
+                    vm_state.devices.network_bridge = Some(bridge.clone());
                     bridge
                 };
                 vm_state
@@ -3931,7 +3932,12 @@ fn configure_virtio_runtime(
                 };
                 vm_state.devices.balloon.insert(device.mmio_base, handler);
             }
-            VirtioDeviceKind::Rng => {}
+            VirtioDeviceKind::Rng => {
+                vm_state
+                    .devices
+                    .rng
+                    .insert(device.mmio_base, RngQueueHandler::default());
+            }
         }
     }
     Ok(format!(
@@ -4774,6 +4780,11 @@ fn execute_virtio_notification(
     let Some(transport) = vm_state.mmio_bus.virtio_mut_at(physical_address) else {
         return Ok(());
     };
+    if transport.plan.kind == VirtioDeviceKind::Rng && transport.device_status == 0 {
+        if let Some(handler) = vm_state.devices.rng.get_mut(&transport.plan.mmio_base) {
+            handler.reset();
+        }
+    }
     let notifications = transport.drain_notifications();
     if notifications.is_empty() {
         return Ok(());
@@ -4830,7 +4841,13 @@ fn execute_virtio_notification(
                         .map_err(|error| error.to_string())?;
                 }
             }
-            VirtioDeviceKind::Rng => {}
+            VirtioDeviceKind::Rng => {
+                if let Some(handler) = vm_state.devices.rng.get_mut(&base) {
+                    handler
+                        .handle_available(queue, transport, &vm_state.memory, guest_base)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
         }
     }
     Ok(())
@@ -4922,6 +4939,21 @@ fn poll_host_net_packets(
                 vm_state.devices.net.insert(base, handler);
                 continue;
             }
+            // Retry queued TX after backpressure even when the guest has no
+            // new descriptors to notify. RX and TX share the bounded host tick.
+            if let Some(tx) = transport.queue_state(NetQueue::Transmit as u32) {
+                if tx.ready {
+                    handler
+                        .handle_available(
+                            tx,
+                            NetQueue::Transmit as u32,
+                            transport,
+                            unsafe { &*memory },
+                            guest_base,
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+            }
             let used = handler
                 .handle_available(
                     queue,
@@ -5010,6 +5042,73 @@ pub fn default_virtio_plan(config: &JetstreamConfig) -> Vec<VirtioMmioDevicePlan
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rng_notification_and_device_reset_reuse_the_queue_from_zero() {
+        let guest_base = 0x4000_0000;
+        let plan = VirtioMmioDevicePlan::new(VirtioDeviceKind::Rng, 6);
+        let base = plan.mmio_base;
+        let mut state = VmState::new(GuestMemory::anonymous(16384).unwrap(), 1);
+        state
+            .mmio_bus
+            .register(VirtioMmioDevice::new(plan, vec![]))
+            .unwrap();
+        state.devices.rng.insert(base, RngQueueHandler::default());
+        for _ in 0..2 {
+            state.mmio_bus.write(base + 0x070, 0, 4).unwrap();
+            execute_virtio_notification(&mut state, guest_base, base + 0x070).unwrap();
+            for (offset, value) in [
+                (0x038, 8),
+                (0x080, guest_base + 0x100),
+                (0x090, guest_base + 0x200),
+                (0x0a0, guest_base + 0x300),
+                (0x044, 1),
+                (0x070, u64::from(crate::devices::virtio::STATUS_DRIVER_OK)),
+            ] {
+                state.mmio_bus.write(base + offset, value, 4).unwrap();
+            }
+            state
+                .memory
+                .write_at(
+                    guest_base,
+                    guest_base + 0x100,
+                    &(guest_base + 0x1000).to_le_bytes(),
+                )
+                .unwrap();
+            state
+                .memory
+                .write_le_u32(guest_base, guest_base + 0x108, 64)
+                .unwrap();
+            state
+                .memory
+                .write_le_u16(guest_base, guest_base + 0x10c, 2)
+                .unwrap();
+            state
+                .memory
+                .write_le_u16(guest_base, guest_base + 0x202, 1)
+                .unwrap();
+            state
+                .memory
+                .write_le_u16(guest_base, guest_base + 0x302, 0)
+                .unwrap();
+            state.mmio_bus.write(base + 0x050, 0, 4).unwrap();
+            execute_virtio_notification(&mut state, guest_base, base + 0x050).unwrap();
+            assert_eq!(
+                state
+                    .memory
+                    .read_le_u16(guest_base, guest_base + 0x302)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                state
+                    .memory
+                    .read_at(guest_base, guest_base + 0x308, 4)
+                    .unwrap(),
+                64u32.to_le_bytes()
+            );
+        }
+    }
 
     fn test_shared(controller: &CoreMemoryController) -> SharedBootState {
         SharedBootState {

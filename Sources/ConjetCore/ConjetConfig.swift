@@ -485,6 +485,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     public var networkBindPolicy: ConjetNetworkBindPolicy
     public var networkProxyEngine: ConjetNetworkProxyEngine
     public var networkBridgeEngine: ConjetNetworkBridgeEngine
+    public var networkEgressMode: ConjetNetworkEgressMode
     public var networkLANAllowedCIDRs: [String]
     public var networkLANAllowedPorts: [Int]
     public var energyMode: ConjetEnergyMode
@@ -509,6 +510,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkBindPolicy: ConjetNetworkBindPolicy = .secureLocal,
         networkProxyEngine: ConjetNetworkProxyEngine = .auto,
         networkBridgeEngine: ConjetNetworkBridgeEngine = .conjetNetdC,
+        networkEgressMode: ConjetNetworkEgressMode = .host,
         networkLANAllowedCIDRs: [String] = [],
         networkLANAllowedPorts: [Int] = [],
         energyMode: ConjetEnergyMode = .balanced,
@@ -532,6 +534,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         self.networkBindPolicy = networkBindPolicy
         self.networkProxyEngine = networkProxyEngine
         self.networkBridgeEngine = networkBridgeEngine
+        self.networkEgressMode = networkEgressMode
         self.networkLANAllowedCIDRs = networkLANAllowedCIDRs
         self.networkLANAllowedPorts = networkLANAllowedPorts
         self.energyMode = energyMode
@@ -556,6 +559,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         networkBindPolicy: ConjetNetworkBindPolicy = .secureLocal,
         networkProxyEngine: ConjetNetworkProxyEngine = .auto,
         networkBridgeEngine: ConjetNetworkBridgeEngine = .conjetNetdC,
+        networkEgressMode: ConjetNetworkEgressMode = .host,
         networkLANAllowedCIDRs: [String] = [],
         networkLANAllowedPorts: [Int] = [],
         energyMode: ConjetEnergyMode = .balanced,
@@ -580,6 +584,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             networkBindPolicy: networkBindPolicy,
             networkProxyEngine: networkProxyEngine,
             networkBridgeEngine: networkBridgeEngine,
+            networkEgressMode: networkEgressMode,
             networkLANAllowedCIDRs: networkLANAllowedCIDRs,
             networkLANAllowedPorts: networkLANAllowedPorts,
             energyMode: energyMode,
@@ -625,6 +630,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         case networkBindPolicy
         case networkProxyEngine
         case networkBridgeEngine
+        case networkEgressMode
         case networkLANAllowedCIDRs
         case networkLANAllowedPorts
         case energyMode
@@ -661,6 +667,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             networkBindPolicy: try container.decodeIfPresent(ConjetNetworkBindPolicy.self, forKey: .networkBindPolicy) ?? defaults.networkBindPolicy,
             networkProxyEngine: try container.decodeIfPresent(ConjetNetworkProxyEngine.self, forKey: .networkProxyEngine) ?? defaults.networkProxyEngine,
             networkBridgeEngine: try container.decodeIfPresent(ConjetNetworkBridgeEngine.self, forKey: .networkBridgeEngine) ?? defaults.networkBridgeEngine,
+            networkEgressMode: try container.decodeIfPresent(ConjetNetworkEgressMode.self, forKey: .networkEgressMode) ?? defaults.networkEgressMode,
             networkLANAllowedCIDRs: try container.decodeIfPresent([String].self, forKey: .networkLANAllowedCIDRs) ?? defaults.networkLANAllowedCIDRs,
             networkLANAllowedPorts: try container.decodeIfPresent([Int].self, forKey: .networkLANAllowedPorts) ?? defaults.networkLANAllowedPorts,
             energyMode: try container.decodeIfPresent(ConjetEnergyMode.self, forKey: .energyMode) ?? defaults.energyMode,
@@ -830,6 +837,7 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
         lines.append("bind_policy = \"\(networkBindPolicy.rawValue)\"")
         lines.append("proxy_engine = \"\(networkProxyEngine.rawValue)\"")
         lines.append("bridge_engine = \"\(networkBridgeEngine.rawValue)\"")
+        lines.append("egress_mode = \"\(networkEgressMode.rawValue)\"")
         if !networkLANAllowedCIDRs.isEmpty {
             lines.append("lan_allowed_cidrs = \"\(escapeTOML(networkLANAllowedCIDRs.joined(separator: ",")))\"")
         }
@@ -961,6 +969,11 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
                     throw ConjetError.decoding("network.bridge_engine must be auto, python-legacy, or conjet-netd-c")
                 }
                 config.networkBridgeEngine = engine
+            case "network.egress_mode":
+                guard let mode = ConjetNetworkEgressMode(rawValue: parseString(value)) else {
+                    throw ConjetError.decoding("network.egress_mode must be host or vmnet")
+                }
+                config.networkEgressMode = mode
             case "network.lan_allowed_cidrs":
                 config.networkLANAllowedCIDRs = parseCSVString(value)
             case "network.lan_allowed_ports":

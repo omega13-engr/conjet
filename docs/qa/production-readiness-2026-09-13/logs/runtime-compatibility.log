@@ -1,0 +1,3 @@
+host-bind-file-directory-rw-readonly-symlink-rename-delete: docker: Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /Volumes/ExternalSSD/dev_workspace/tmp/conjet-ready-eikwmbfn/compat-bbp4gf9v/host directory with spaces
+
+Run 'docker run --help' for more information

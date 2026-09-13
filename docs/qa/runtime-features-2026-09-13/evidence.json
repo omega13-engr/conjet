@@ -1,0 +1,20 @@
+{
+  "date": "2026-09-13",
+  "scope": "isolated QA VM and local app build; dynamic memory unchanged",
+  "egress": "host-sockets",
+  "lowPortFailures": 2,
+  "lowPortStates": {
+    "80": "requires_privileged_helper",
+    "443": "requires_privileged_helper"
+  },
+  "vpnInterface": "utun6",
+  "connectedVpnProvider": "not supplied",
+  "networkHelper": "gvisor-tap-vsock v0.8.9",
+  "kernelAndRootfs": "Conjet Core 1.3.0 cached release assets, SHA-512 verified",
+  "packagedHelperResolvedWithoutOverrides": true,
+  "benchmarksRun": false,
+  "installedAppUpdated": false,
+  "sshGlobalConfigModified": false,
+  "mountedDMGVerified": true,
+  "temporaryArtifactsCleaned": true
+}

@@ -11,6 +11,7 @@ public final class VirtualMachineController {
     private var events: [VMRuntimeEvent] = []
     private let maxEventCount = 16
     private var hvfRun: ConjetCoreRustVMMRun?
+    private var activeNetworkEgressMode: ConjetNetworkEgressMode?
 
     private var publishedPortForwarder: DockerPublishedPortForwarder?
 
@@ -19,6 +20,9 @@ public final class VirtualMachineController {
     public func status(store: VMImageStore, backend: ConjetVMBackend = .hvfExperimental) -> VMRuntimeStatus {
         if let hvfRun {
             if hvfRun.isRunning {
+                if progressSnapshot().phase == "control-ready" {
+                    reconcileDockerReadiness(eventWatcherState: publishedPortForwarder?.status().eventWatcherState)
+                }
                 return statusWithProgress(
                     store.status(state: .running, message: "\(backend.displayName) VM is running"),
                     backend: backend
@@ -43,7 +47,9 @@ public final class VirtualMachineController {
 
     public func networkStatus(config: ConjetConfig) -> ConjetNetworkStatus {
         if let publishedPortForwarder {
-            return publishedPortForwarder.status()
+            var status = publishedPortForwarder.status()
+            status.vmNetworkMode = activeNetworkEgressMode?.statusValue ?? "unavailable"
+            return status
         }
         return ConjetNetworkStatus(
             bindPolicy: config.networkBindPolicy,
@@ -52,6 +58,7 @@ public final class VirtualMachineController {
             fallbackReason: "network proxy is not running",
             eventWatcherState: "stopped",
             capabilities: ConjetNetworkCapabilities(),
+            vmNetworkMode: "unavailable",
             messages: ["network proxy is not running"]
         )
     }
@@ -59,7 +66,7 @@ public final class VirtualMachineController {
     public func repairNetwork(config: ConjetConfig) -> ConjetNetworkStatus {
         if let publishedPortForwarder {
             publishedPortForwarder.repair()
-            return publishedPortForwarder.status()
+            return networkStatus(config: config)
         }
         return networkStatus(config: config)
     }
@@ -67,7 +74,7 @@ public final class VirtualMachineController {
     public func pruneCache(config: ConjetConfig) -> ConjetNetworkStatus {
         if let publishedPortForwarder {
             publishedPortForwarder.pruneCache()
-            return publishedPortForwarder.status()
+            return networkStatus(config: config)
         }
         return networkStatus(config: config)
     }
@@ -189,12 +196,16 @@ public final class VirtualMachineController {
         if tool.path == "/usr/bin/env" {
             commandArguments.insert("jetstream", at: 0)
         }
+        let runtimeEnvironment = try Self.networkEnvironment(
+            config: config, environment: Self.rustMemoryEnvironment(config: config)
+        )
+        activeNetworkEgressMode = ConjetNetworkEgressMode(rawValue: runtimeEnvironment["CONJET_NETWORK_EGRESS"] ?? "")
         let managedRun = try ConjetCoreRustVMMRun(
             executable: tool.path,
             arguments: commandArguments,
             stdoutPath: stdoutPath,
             stderrPath: stderrPath,
-            environment: Self.rustMemoryEnvironment(config: config)
+            environment: runtimeEnvironment
         )
         hvfRun = managedRun
 
@@ -374,6 +385,19 @@ public final class VirtualMachineController {
         return result
     }
 
+    static func networkEnvironment(
+        config: ConjetConfig,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> [String: String] {
+        var result = environment
+        let requested = result["CONJET_NETWORK_EGRESS"] ?? config.networkEgressMode.rawValue
+        guard ConjetNetworkEgressMode(rawValue: requested) != nil else {
+            throw ConjetError.invalidArgument("CONJET_NETWORK_EGRESS must be host or vmnet")
+        }
+        result["CONJET_NETWORK_EGRESS"] = requested
+        return result
+    }
+
     static func managedHVFReadinessTimeoutSeconds(environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
         let keys = [
             "CONJET_JETSTREAM_HVF_READINESS_TIMEOUT_SECONDS",
@@ -528,6 +552,19 @@ public final class VirtualMachineController {
         progressLock.lock()
         defer { progressLock.unlock() }
         return (state, phase, events.last?.message, events)
+    }
+
+    func reconcileDockerReadiness(eventWatcherState: String?) {
+        // The existing event stream already proves the API answered. Avoid a new
+        // readiness poll on every status request, and never overwrite stop/error.
+        progressLock.lock()
+        defer { progressLock.unlock() }
+        guard state == .running, phase == "control-ready", eventWatcherState == "connected" else { return }
+        phase = "docker-ready"
+        events.append(VMRuntimeEvent(phase: "docker-ready", message: "Conjet Core Rust VM started; Docker API ready"))
+        if events.count > maxEventCount {
+            events.removeFirst(events.count - maxEventCount)
+        }
     }
 
     private func statusWithProgress(_ status: VMRuntimeStatus, backend: ConjetVMBackend? = nil) -> VMRuntimeStatus {

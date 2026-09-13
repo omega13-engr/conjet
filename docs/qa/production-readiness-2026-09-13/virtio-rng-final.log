@@ -1,0 +1,4 @@
+exitCode: 0
+virtio_rng.0
+rng-read-ok
+rng-reset-read-ok

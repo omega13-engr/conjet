@@ -41,6 +41,12 @@ jobs:
         with:
           swift-version: ${{ env.SWIFT_VERSION }}
 
+      - name: Set up Go for host networking
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: network-helper/go.mod
+          cache-dependency-path: network-helper/go.sum
+
       - name: Show Swift version
         run: swift --version
 
@@ -78,6 +84,12 @@ jobs:
       - name: Test Conjet
         timeout-minutes: 10
         run: swift test
+
+      - name: Test Jetstream and host networking
+        timeout-minutes: 10
+        run: |
+          cargo test --locked --manifest-path jetstream/Cargo.toml
+          go -C network-helper test -race ./...
 
       - name: Import Developer ID certificate
         id: certificate
@@ -313,6 +325,12 @@ jobs:
         run: |
           set -euo pipefail
           notes="release-notes.md"
+          curated_notes="${{ needs.build.outputs.tag }}:docs/releases/conjet-${{ needs.build.outputs.version }}.md"
+          : > "${notes}"
+          if git cat-file -e "${curated_notes}" 2>/dev/null; then
+            git show "${curated_notes}" >> "${notes}"
+            printf '\n---\n\n' >> "${notes}"
+          fi
           {
             echo "Conjet v${{ needs.build.outputs.version }}"
             echo
@@ -330,7 +348,7 @@ jobs:
             find release-assets -type f -print | sort | sed 's#^#- #'
             printf '%s\n' "- homebrew-formula/conjet.rb"
             printf '%s\n' "- homebrew-cask/conjet-cask.rb"
-          } > "${notes}"
+          } >> "${notes}"
 
       - name: Publish GitHub release
         env:

@@ -2,6 +2,15 @@ import ConjetCore
 import XCTest
 
 final class ConjetNetworkStatusTests: XCTestCase {
+    func testUnauthorizedLowPortsCountAsFailuresButPendingPortsDoNot() {
+        XCTAssertTrue(ConjetPortForwardState.requiresPrivilegedHelper.isFailure)
+        XCTAssertTrue(ConjetPortForwardState.failedAddressInUse.isFailure)
+        XCTAssertTrue(ConjetPortForwardState.failedGuestUnreachable.isFailure)
+        XCTAssertFalse(ConjetPortForwardState.pending.isFailure)
+        XCTAssertFalse(ConjetPortForwardState.reservedWaitingForTarget.isFailure)
+        XCTAssertFalse(ConjetPortForwardState.listening.isFailure)
+    }
+
     func testNetworkStatusDecodesOldDaemonPayloadWithNewModeDefaults() throws {
         let json = """
         {

@@ -1,0 +1,5 @@
+{
+  "host_https_exit": 0,
+  "guest_https_exit": 0,
+  "same_public_exit": true
+}

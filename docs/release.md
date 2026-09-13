@@ -25,17 +25,31 @@ notarizes and staples the DMG before computing the published checksum. If those
 secrets are absent, the workflow intentionally falls back to ad-hoc signing and
 publishes a non-notarized DMG for early distribution.
 
+The current major-release request explicitly permits ad-hoc signing. In that
+mode, persistent privileged-port authorization is unavailable; the existing
+sudo-authorized one-shot helper remains the fallback. After reviewing the known
+limitations, the user explicitly requested publishing the current implementation.
+Conjet 3.0.0 therefore documents the unresolved host-bind failure and unvalidated
+authorized low-port path rather than claiming full production readiness.
+
 The DMG contains:
 
 - `Conjet.app`
 - `bin/conjet`
 - `bin/conjetd`
 - `bin/ConjetCoreVMM/Conjet Core`
+- `bin/ConjetCoreVMM/conjet-network`
 - an `/Applications` alias for drag-install users
 
 The formula installs the CLI tools and a keg-local app copy. The cask installs
 `Conjet.app` into `/Applications`, which is the Homebrew-standard route for GUI
 applications.
+
+Source builds require Rust and Go 1.25 or newer alongside Swift/Xcode. The stage
+script builds the pinned host networking helper with CGO enabled for native
+macOS DNS, bundles it beside the VMM in both app copies, and signs it without
+hypervisor privileges. The helper is an app-lane artifact; this networking change
+does not require a new Core/kernel image.
 
 Production notarized releases require these repository secrets:
 

@@ -1,0 +1,35 @@
+Server:		172.31.64.1
+Address:	172.31.64.1:53
+
+Non-authoritative answer:
+
+Non-authoritative answer:
+Name:	example.com
+Address: 104.20.23.154
+Name:	example.com
+Address: 172.66.147.243
+
+Server:		172.31.64.1
+Address:	172.31.64.1:53
+
+Non-authoritative answer:
+
+Non-authoritative answer:
+Name:	registry-1.docker.io
+Address: 98.85.197.93
+Name:	registry-1.docker.io
+Address: 54.146.13.39
+Name:	registry-1.docker.io
+Address: 44.207.247.96
+Name:	registry-1.docker.io
+Address: 52.45.134.181
+Name:	registry-1.docker.io
+Address: 107.20.19.148
+Name:	registry-1.docker.io
+Address: 18.204.104.86
+Name:	registry-1.docker.io
+Address: 32.199.74.36
+Name:	registry-1.docker.io
+Address: 44.192.242.234
+
+<!doctype html><html lang="en"><head><title>Example Domain</title><link rel="icon" href="data:,"><meta name="viewport" c

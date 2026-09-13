@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
+use crate::devices::host_net::{HostNetworkSession, MAX_PENDING};
 use crate::devices::virtio::{VirtioMmioDevice, VirtioQueueState};
 use crate::devices::virtqueue::{
     read_descriptors, write_descriptors, QueueError, SplitQueueExecutor, UsedElement,
@@ -20,6 +21,10 @@ static NET_TRACE_LINES: AtomicUsize = AtomicUsize::new(0);
 pub enum NetError {
     #[error("virtio-net packet is shorter than header")]
     ShortPacket,
+    #[error("host networking failed: {0}")]
+    Host(#[from] std::io::Error),
+    #[error("unknown network egress mode: {0}; expected host or vmnet")]
+    InvalidBackend(String),
     #[error("virtio-net receive queue has no writable capacity")]
     NoReceiveCapacity,
     #[error(transparent)]
@@ -35,59 +40,66 @@ pub enum NetQueue {
 }
 
 #[derive(Debug)]
-pub struct VmnetPacketBridge {
-    session: VmnetSession,
+enum PacketBackend {
+    Vmnet(VmnetSession),
+    Host(HostNetworkSession),
+}
+
+#[derive(Debug)]
+pub struct NetworkPacketBridge {
+    session: PacketBackend,
     ingress: VecDeque<Vec<u8>>,
 }
 
-impl VmnetPacketBridge {
-    pub fn start_default() -> Result<Self, VmnetError> {
-        Ok(Self {
-            session: VmnetSession::start_shared(
+impl NetworkPacketBridge {
+    pub fn start_default() -> Result<Self, NetError> {
+        let mode = std::env::var("CONJET_NETWORK_EGRESS").unwrap_or_else(|_| "host".into());
+        let session = match mode.as_str() {
+            "host" => PacketBackend::Host(HostNetworkSession::start()?),
+            "vmnet" => PacketBackend::Vmnet(VmnetSession::start_shared(
                 "conjet-rust-jetstream-net0",
                 "02:43:4a:45:54:01",
                 "172.31.64.1",
                 "172.31.64.254",
                 "255.255.255.0",
-            )?,
+            )?),
+            _ => return Err(NetError::InvalidBackend(mode)),
+        };
+        eprintln!("jetstream-net: egress={mode}");
+        Ok(Self {
+            session,
             ingress: VecDeque::new(),
         })
     }
 
-    fn submit(&mut self, packets: &[Vec<u8>]) -> Result<(), VmnetError> {
-        let written = self.session.write_packets(packets)?;
-        trace_net(format_args!(
-            "vmnet_write requested={} written={} bytes={} first={}",
-            packets.len(),
-            written,
-            packets.iter().map(Vec::len).sum::<usize>(),
-            packets
-                .first()
-                .map(|packet| ethernet_summary(packet))
-                .unwrap_or_else(|| "none".to_string())
-        ));
-        Ok(())
+    fn transmit_capacity(&mut self) -> Result<usize, NetError> {
+        Ok(match &mut self.session {
+            PacketBackend::Vmnet(_) => TX_BATCH_LIMIT,
+            PacketBackend::Host(session) => session.transmit_capacity()?,
+        })
     }
 
-    fn poll(&mut self) -> Result<usize, VmnetError> {
-        let packets = self
-            .session
-            .read_packets(RX_BATCH_LIMIT)?
-            .into_iter()
-            .map(normalize_vmnet_payload)
-            .collect::<Vec<_>>();
-        let count = packets.len();
-        if count > 0 {
-            trace_net(format_args!(
-                "vmnet_read packets={} bytes={} first={}",
-                count,
-                packets.iter().map(Vec::len).sum::<usize>(),
-                packets
-                    .first()
-                    .map(|packet| ethernet_summary(packet))
-                    .unwrap_or_else(|| "none".to_string())
-            ));
+    fn submit(&mut self, packets: &[Vec<u8>]) -> Result<usize, NetError> {
+        Ok(match &mut self.session {
+            PacketBackend::Vmnet(session) => session.write_packets(packets)?,
+            PacketBackend::Host(session) => session.write_packets(packets)?,
+        })
+    }
+
+    fn poll(&mut self) -> Result<usize, NetError> {
+        let capacity = RX_BATCH_LIMIT.min(MAX_PENDING.saturating_sub(self.ingress.len()));
+        if capacity == 0 {
+            return Ok(0);
         }
+        let packets = match &mut self.session {
+            PacketBackend::Vmnet(session) => session
+                .read_packets(capacity)?
+                .into_iter()
+                .map(normalize_vmnet_payload)
+                .collect(),
+            PacketBackend::Host(session) => session.read_packets(capacity)?,
+        };
+        let count = packets.len();
         self.ingress.extend(packets);
         Ok(count)
     }
@@ -105,11 +117,11 @@ impl VmnetPacketBridge {
 pub struct NetQueueHandler {
     receive_executor: SplitQueueExecutor,
     transmit_executor: SplitQueueExecutor,
-    bridge: Option<Arc<Mutex<VmnetPacketBridge>>>,
+    bridge: Option<Arc<Mutex<NetworkPacketBridge>>>,
 }
 
 impl NetQueueHandler {
-    pub fn with_bridge(bridge: Arc<Mutex<VmnetPacketBridge>>) -> Self {
+    pub fn with_bridge(bridge: Arc<Mutex<NetworkPacketBridge>>) -> Self {
         Self {
             bridge: Some(bridge),
             ..Self::default()
@@ -142,11 +154,22 @@ impl NetQueueHandler {
         memory: &GuestMemory,
         guest_base: u64,
     ) -> Result<Vec<UsedElement>, NetError> {
-        let chains = self.transmit_executor.drain_available_chains(
+        let capacity = match self.bridge.as_ref() {
+            Some(bridge) => bridge
+                .lock()
+                .expect("network bridge mutex poisoned")
+                .transmit_capacity()?
+                .min(TX_BATCH_LIMIT),
+            None => TX_BATCH_LIMIT,
+        };
+        if capacity == 0 {
+            return Ok(Vec::new());
+        }
+        let chains = self.transmit_executor.peek_available_chains(
             queue,
             memory,
             guest_base,
-            Some(TX_BATCH_LIMIT),
+            Some(capacity),
         )?;
         if chains.is_empty() {
             return Ok(Vec::new());
@@ -168,12 +191,19 @@ impl NetQueueHandler {
             });
         }
 
-        if let Some(bridge) = self.bridge.as_ref() {
+        let written = if let Some(bridge) = self.bridge.as_ref() {
             bridge
                 .lock()
-                .expect("vmnet bridge mutex poisoned")
-                .submit(&packets)?;
-        }
+                .expect("network bridge mutex poisoned")
+                .submit(&packets)?
+        } else {
+            packets.len()
+        };
+        // A short vmnet write or a full helper queue must not acknowledge
+        // descriptors whose packets were never accepted by the backend.
+        used.truncate(written);
+        self.transmit_executor
+            .drain_available_chains(queue, memory, guest_base, Some(written))?;
         trace_net(format_args!(
             "virtio_net_tx packets={} bytes={} header_len={} driver_features=0x{:x}",
             packets.len(),
@@ -197,7 +227,10 @@ impl NetQueueHandler {
         guest_base: u64,
     ) -> Result<Vec<UsedElement>, NetError> {
         if let Some(bridge) = self.bridge.as_ref() {
-            bridge.lock().expect("vmnet bridge mutex poisoned").poll()?;
+            bridge
+                .lock()
+                .expect("network bridge mutex poisoned")
+                .poll()?;
         }
         let chains = self.receive_executor.peek_available_chains(
             queue,
@@ -211,7 +244,7 @@ impl NetQueueHandler {
         let Some(bridge) = self.bridge.as_ref() else {
             return Ok(Vec::new());
         };
-        let mut bridge = bridge.lock().expect("vmnet bridge mutex poisoned");
+        let mut bridge = bridge.lock().expect("network bridge mutex poisoned");
         let mut prepared = Vec::new();
         for chain in chains {
             let Some(payload) = bridge.pop() else {
@@ -325,27 +358,4 @@ fn looks_like_virtio_net_header(header: &[u8]) -> bool {
         && num_buffers <= 1024
         && (header_len == 0 || header_len >= 14)
         && (gso_size != 0 || checksum_start == 0 || checksum_offset <= 64)
-}
-
-fn ethernet_summary(packet: &[u8]) -> String {
-    if packet.len() < 14 {
-        return format!("truncated:{}", packet.len());
-    }
-    format!(
-        "dst={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} src={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ethertype=0x{:04x} len={}",
-        packet[0],
-        packet[1],
-        packet[2],
-        packet[3],
-        packet[4],
-        packet[5],
-        packet[6],
-        packet[7],
-        packet[8],
-        packet[9],
-        packet[10],
-        packet[11],
-        u16::from_be_bytes([packet[12], packet[13]]),
-        packet.len()
-    )
 }

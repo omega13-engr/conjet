@@ -1,0 +1,3 @@
+host-bind-file-directory-rw-readonly-symlink-rename-delete: docker: Error response from daemon: invalid mount config for type "bind": bind source path does not exist: $QA_ROOT/compat-zmkxbu1c/host directory with spaces
+
+Run 'docker run --help' for more information

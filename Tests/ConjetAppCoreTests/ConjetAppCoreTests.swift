@@ -534,6 +534,68 @@ final class ConjetAppCoreTests: XCTestCase {
         XCTAssertTrue(invocations.isEmpty)
     }
 
+    func testProcessRefreshCoversAllContainersWithBoundedConcurrencyAndPartialWarning() async throws {
+        let paths = try Self.makeTemporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+        let containers = (0..<17).map {
+            "{\"ID\":\"id\($0)\",\"Names\":\"worker\($0)\",\"State\":\"running\"}"
+        }.joined(separator: "\n")
+        let tracker = ProcessProbeTracker()
+        let executor = RecordingCommandExecutor { invocation in
+            if let index = invocation.arguments.firstIndex(of: "top") {
+                let id = invocation.arguments[index + 1]
+                await tracker.begin(id)
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                await tracker.end()
+                if id == "id3" {
+                    return Self.processResult(invocation, exitCode: 1, stderr: "container stopped during refresh")
+                }
+                return Self.processResult(invocation, stdout: "PID PPID USER STAT COMMAND COMMAND\n1 0 root S sleep sleep 60\n")
+            }
+            return Self.stubbedSnapshotResult(for: invocation, imageOutput: "", containerOutput: containers)
+        }
+        let snapshot = await Self.makeService(paths: paths, executor: executor).loadSnapshot(scope: .processes)
+        let peak = await tracker.peak
+        let ids = await tracker.ids
+        XCTAssertLessThanOrEqual(peak, 4)
+        XCTAssertGreaterThan(peak, 1)
+        XCTAssertEqual(Set(ids), Set((0..<17).map { "id\($0)" }))
+        XCTAssertEqual(snapshot.containerProcesses.map(\.containerID), (0..<17).filter { $0 != 3 }.map { "id\($0)" })
+        XCTAssertTrue(snapshot.warnings.contains { $0.contains("Process coverage: 16 of 17") })
+        XCTAssertTrue(snapshot.warnings.contains { $0.contains("container stopped during refresh") })
+    }
+
+    func testCancelledProcessRefreshDoesNotScheduleTheRemainingContainers() async throws {
+        let paths = try Self.makeTemporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+        let containers = (0..<30).map {
+            "{\"ID\":\"id\($0)\",\"Names\":\"worker\($0)\",\"State\":\"running\"}"
+        }.joined(separator: "\n")
+        let tracker = ProcessProbeTracker()
+        let executor = RecordingCommandExecutor { invocation in
+            if let index = invocation.arguments.firstIndex(of: "top") {
+                await tracker.begin(invocation.arguments[index + 1])
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                await tracker.end()
+                return Self.processResult(invocation, exitCode: 1, stderr: "cancelled")
+            }
+            return Self.stubbedSnapshotResult(for: invocation, imageOutput: "", containerOutput: containers)
+        }
+        let service = Self.makeService(paths: paths, executor: executor)
+        let task = Task { await service.loadSnapshot(scope: .processes) }
+        await tracker.waitForFirstBatch()
+        task.cancel()
+        let snapshot = await task.value
+        let ids = await tracker.ids
+        XCTAssertEqual(ids.count, 4)
+        XCTAssertFalse(snapshot.refreshStatus.processesSucceeded)
+        XCTAssertTrue(snapshot.containerProcesses.isEmpty)
+    }
+
     func testRunDockerDispatchesCommandWhenSocketExistsButPingIsTransientlyUnready() async throws {
         let paths = try Self.makeTemporaryConjetPaths()
         try paths.ensureBaseDirectories()
@@ -740,9 +802,9 @@ private func appCoreTestWithUnixSocketAddress<Result>(
 
 private actor RecordingCommandExecutor: CommandExecuting {
     private var recordedInvocations: [CommandInvocation] = []
-    private let handler: @Sendable (CommandInvocation) -> ProcessResult
+    private let handler: @Sendable (CommandInvocation) async -> ProcessResult
 
-    init(handler: @escaping @Sendable (CommandInvocation) -> ProcessResult) {
+    init(handler: @escaping @Sendable (CommandInvocation) async -> ProcessResult) {
         self.handler = handler
     }
 
@@ -750,6 +812,30 @@ private actor RecordingCommandExecutor: CommandExecuting {
 
     func run(_ invocation: CommandInvocation) async -> ProcessResult {
         recordedInvocations.append(invocation)
-        return handler(invocation)
+        return await handler(invocation)
+    }
+}
+
+private actor ProcessProbeTracker {
+    var ids: [String] = []
+    var peak = 0
+    private var active = 0
+    private var batchWaiter: CheckedContinuation<Void, Never>?
+
+    func begin(_ id: String) {
+        ids.append(id)
+        active += 1
+        peak = max(peak, active)
+        if ids.count == 4 {
+            batchWaiter?.resume()
+            batchWaiter = nil
+        }
+    }
+
+    func end() { active -= 1 }
+
+    func waitForFirstBatch() async {
+        guard ids.count < 4 else { return }
+        await withCheckedContinuation { batchWaiter = $0 }
     }
 }

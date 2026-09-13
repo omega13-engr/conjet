@@ -275,7 +275,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
         }
         let activeTCP = snapshot.filter { $0.protocol == .tcp && $0.state == .listening }.count
         let activeUDP = snapshot.filter { $0.protocol == .udp && $0.state == .listening }.count
-        let failed = snapshot.filter { $0.state.rawValue.hasPrefix("failed") }.count
+        let failed = snapshot.filter { $0.state.isFailure }.count
         let conflicts = snapshot.filter { $0.state == .failedConflict || $0.state == .failedAddressInUse }.count
         let stale = snapshot.filter { $0.state == .stale }.count
         let eventState = eventWatcherRunning ? "connected" : (running ? "reconnecting" : "stopped")
@@ -1831,7 +1831,7 @@ public final class DockerPublishedPortForwarder: @unchecked Sendable {
             }
             return (
                 .requiresPrivilegedHelper,
-                "Port \(port)/\(proto.rawValue) on \(bindAddress) requires the Conjet privileged port helper. Suggested fix: approve the helper with a cached sudo session or install the packaged Conjet helper. Detail: \(privilegedError)"
+                "Port \(port)/\(proto.rawValue) on \(bindAddress) requires the Conjet privileged port helper. Open Conjet → Network → Authorize Port Helper, approve it in macOS Login Items, then select Repair. Detail: \(privilegedError)"
             )
         }
         if let bindError = error as? HostPortBindError {
@@ -3415,6 +3415,19 @@ private struct PrivilegedHostPortBinder: HostPortBinder {
     private let acceptTimeoutMilliseconds: Int32 = 3_000
 
     func bind(_ request: HostPortBindRequest) throws -> BoundHostPortSocket {
+        if (try? PrivilegedPortService.signingTeam()) != nil {
+            do {
+                let fd = try PrivilegedPortService.bind(address: request.bindAddress, port: request.port, transport: request.proto.rawValue)
+                return BoundHostPortSocket(fileDescriptor: fd)
+            } catch {
+                let nsError = error as NSError
+                throw PrivilegedHostPortBindError(
+                    address: request.bindAddress, port: request.port, proto: request.proto,
+                    posixCode: nsError.domain == NSPOSIXErrorDomain ? Int32(nsError.code) : nil,
+                    detail: String(describing: error)
+                )
+            }
+        }
         guard let helperPath = helperExecutablePath() else {
             throw PrivilegedHostPortBindError(
                 address: request.bindAddress,

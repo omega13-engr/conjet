@@ -4,7 +4,11 @@ class Conjet < Formula
   url "https://github.com/omega13-engr/conjet/releases/download/conjet-v2.1.2/conjet-2.1.2-macos-arm64.dmg"
   version "2.1.2"
   sha256 "8503672246d67492361e34b79ccb4f461251775293998b70b4306ed855b7ae10"
-  head "https://github.com/omega13-engr/conjet.git", branch: "main"
+  head do
+    url "https://github.com/omega13-engr/conjet.git", branch: "main"
+    depends_on "go" => :build
+    depends_on "rust" => :build
+  end
 
   livecheck do
     url "https://github.com/omega13-engr/conjet/releases"

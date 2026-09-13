@@ -43,6 +43,10 @@ public struct CommandInvocation: Equatable, Sendable {
 }
 
 public struct CommandLogEntry: Identifiable, Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        case command
+        case terminalPreparation
+    }
     public var id: UUID
     public var label: String
     public var commandLine: String
@@ -51,6 +55,7 @@ public struct CommandLogEntry: Identifiable, Equatable, Sendable {
     public var exitCode: Int32
     public var stdout: String
     public var stderr: String
+    public var kind: Kind
 
     public init(
         id: UUID = UUID(),
@@ -60,7 +65,8 @@ public struct CommandLogEntry: Identifiable, Equatable, Sendable {
         finishedAt: Date,
         exitCode: Int32,
         stdout: String,
-        stderr: String
+        stderr: String,
+        kind: Kind = .command
     ) {
         self.id = id
         self.label = label
@@ -70,10 +76,12 @@ public struct CommandLogEntry: Identifiable, Equatable, Sendable {
         self.exitCode = exitCode
         self.stdout = stdout
         self.stderr = stderr
+        self.kind = kind
     }
 
     public var succeeded: Bool { exitCode == 0 }
     public var duration: TimeInterval { finishedAt.timeIntervalSince(startedAt) }
+    public var statusText: String { kind == .terminalPreparation ? "prepared" : (succeeded ? "success" : "failed") }
 }
 
 public protocol CommandExecuting: Sendable {

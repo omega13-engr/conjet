@@ -108,6 +108,7 @@ INSTALL
 /usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/conjet"
 /usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/conjetd"
 /usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/ConjetCoreVMM/Conjet Core"
+/usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/ConjetCoreVMM/conjet-network"
 
 /usr/bin/hdiutil create \
   -volname "Conjet ${VERSION}" \

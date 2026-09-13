@@ -1,0 +1,26 @@
+[
+  {
+    "operation": "docker compose --env-file",
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": " Container conjet-ready-chum-postgres-1 Stopping \n Container conjet-ready-chum-postgres-1 Stopped \n Container conjet-ready-chum-postgres-1 Removing \n Container conjet-ready-chum-postgres-1 Removed \n Network conjet-ready-chum_default Removing \n Volume conjet-ready-chum_postgres_data Removing \n Volume conjet-ready-chum_postgres_data Removed \n Network conjet-ready-chum_default Removed \n"
+  },
+  {
+    "operation": "docker compose --env-file",
+    "exitCode": 0,
+    "stdout": "",
+    "stderr": " Container compose-arguments-example-1 Stopping \n Container compose-arguments-example-1 Stopped \n Container compose-arguments-example-1 Removing \n Container compose-arguments-example-1 Removed \n Network compose-arguments_default Removing \n Network compose-arguments_default Removed \n"
+  },
+  {
+    "operation": "docker rm -f",
+    "exitCode": 0,
+    "stdout": "conjet-ready-worker-00\nconjet-ready-worker-01\nconjet-ready-worker-02\nconjet-ready-worker-03\nconjet-ready-worker-04\nconjet-ready-worker-05\nconjet-ready-worker-06\nconjet-ready-worker-07\nconjet-ready-worker-08\nconjet-ready-worker-09\nconjet-ready-worker-10\nconjet-ready-worker-11\nconjet-ready-worker-12\nconjet-ready-worker-13\nconjet-ready-worker-14\nconjet-ready-worker-15\nconjet-ready-web\n",
+    "stderr": ""
+  },
+  {
+    "operation": "docker volume rm",
+    "exitCode": 0,
+    "stdout": "conjet-ready-remove\nconjet-ready-keep\n",
+    "stderr": ""
+  }
+]

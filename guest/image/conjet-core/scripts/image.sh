@@ -621,6 +621,7 @@ cat >"${MOUNT_DIR}/etc/systemd/system/conjet-appliance.target" <<'UNIT'
 [Unit]
 Description=Conjet HVF container appliance
 Requires=basic.target
+Wants=systemd-user-sessions.service
 After=basic.target
 AllowIsolate=yes
 UNIT

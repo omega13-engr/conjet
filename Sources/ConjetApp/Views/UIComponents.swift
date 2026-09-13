@@ -253,7 +253,8 @@ struct MetricCard: View {
                     Text(detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .help(detail)
                 }
                 Spacer(minLength: 0)
             }
@@ -377,7 +378,7 @@ struct KeyValueRows: View {
                         .frame(width: 112, alignment: .leading)
                     Text(row.1.isEmpty ? "-" : row.1)
                         .textSelection(.enabled)
-                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .font(.callout)

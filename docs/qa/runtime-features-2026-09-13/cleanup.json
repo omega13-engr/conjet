@@ -1,0 +1,11 @@
+{
+  "qaRoot": "/Volumes/ExternalSSD/dev_workspace/tmp/conjet-features-vpn-zusst__0",
+  "qaVMStopped": true,
+  "qaHelperExited": true,
+  "qaDaemonStopped": true,
+  "qaAppStopped": true,
+  "qaContainersRemoved": 1,
+  "dmgDetached": true,
+  "userRuntimeInterrupted": false,
+  "temporaryRootRemoved": true
+}

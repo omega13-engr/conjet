@@ -1,3 +1,5 @@
+import AppKit
+import ConjetAppCore
 import ConjetCore
 import SwiftUI
 
@@ -14,10 +16,29 @@ struct ComposeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     AppCard("Project") {
-                        TextField("Directory", text: $app.composeDirectory)
-                            .textFieldStyle(.roundedBorder)
+                        HStack {
+                            TextField("Choose a Compose project directory", text: $app.composeDirectory)
+                                .textFieldStyle(.roundedBorder)
+                            Button("Choose…") { chooseDirectory() }
+                        }
+                        if let project = try? ComposeProjectSelection.resolve(app.composeDirectory) {
+                            Label(project.configurationFile.path, systemImage: "doc.text")
+                                .font(.caption)
+                                .textSelection(.enabled)
+                        } else {
+                            Text("Select a directory containing a Compose file to enable actions.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let message = app.composeValidationMessage {
+                            Text(message)
+                                .font(.callout)
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                        }
                         TextField("Up arguments", text: $app.composeArguments)
                             .textFieldStyle(.roundedBorder)
+                            .help("Quote values containing spaces. Shell variables and commands are not expanded.")
                         HStack {
                             CommandBarButton(
                                 title: lifecycleAction.title,
@@ -26,11 +47,11 @@ struct ComposeView: View {
                             ) {
                                 Task { await app.compose(lifecycleAction.action) }
                             }
-                            .disabled(app.activeCommandLabel != nil)
                             CommandBarButton(title: "PS", systemImage: "list.bullet") { Task { await app.compose("ps") } }
                             CommandBarButton(title: "Logs", systemImage: "doc.text.magnifyingglass") { Task { await app.compose("logs") } }
                             Spacer()
                         }
+                        .disabled(app.activeCommandLabel != nil || (try? ComposeProjectSelection.resolve(app.composeDirectory)) == nil)
                     }
 
                     AppCard("Recent Compose Output") {
@@ -50,6 +71,18 @@ struct ComposeView: View {
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
             .background(WorkbenchPalette.contentBackground)
+        }
+    }
+
+    private func chooseDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose Project"
+        if panel.runModal() == .OK, let directory = panel.url {
+            app.composeDirectory = directory.path
+            app.composeValidationMessage = nil
         }
     }
 

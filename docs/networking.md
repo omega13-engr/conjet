@@ -1,11 +1,42 @@
 # Conjet Networking
 
-Jetstream uses Hypervisor.framework for VM execution and the direct `vmnet`
-shared-mode API for unprivileged NAT. Packaged Conjet binaries retain the
-`com.apple.security.virtualization` compatibility entitlement required by the
-previously working vmnet authorization path. This entitlement does not link,
-select, or restore the removed Virtualization.framework VM backend; all VM
-execution remains owned by Jetstream/HVF.
+Jetstream uses Hypervisor.framework for VM execution. Internet access defaults
+to `host` networking: a bundled, unprivileged `conjet-network` process translates
+guest IPv4 TCP/UDP traffic into ordinary macOS sockets. New connections follow
+macOS routes, including full-tunnel VPN routes. Address resolution uses the
+native macOS resolver. Connecting a VPN does not require restarting the VM;
+applications may need to reconnect existing connections when routes change.
+
+The helper uses the pinned gvisor-tap-vsock stack over a private inherited Unix
+socket. It has no HTTP administration API or host listening socket. Ethernet
+queues in Jetstream are bounded and preserve partial writes under backpressure.
+VM execution, virtio devices, and guest memory remain owned by Rust Jetstream.
+
+Select **Profiles > Network > Internet Access**, or set this in the profile's
+`config.toml` before the next VM start:
+
+```toml
+[network]
+egress_mode = "host" # default; "vmnet" retains the shared NAT backend
+```
+
+`CONJET_NETWORK_EGRESS=host|vmnet` overrides the profile for a launched runtime.
+`conjet network status --json` reports the active `vmNetworkMode` as
+`host-sockets`, `hvf-nat`, or `unavailable`. The Docker event connection and bridge
+test do not prove internet reachability.
+
+`host.docker.internal` resolves to the Mac's loopback access point and
+`gateway.docker.internal` to the guest gateway. The current host backend supports
+IPv4 TCP/UDP; it does not provide external IPv6 or raw ICMP egress, automatic
+system HTTP proxy discovery, or host Ethernet bridging. Docker host networking
+still means the Linux VM. VPN software must allow the helper's ordinary host
+connections; Conjet does not edit routes, bypass VPN policy, or add public DNS
+fallbacks. If the helper fails, the VMM reports a networking error rather than
+silently switching to vmnet.
+
+The explicit `vmnet` backend retains the compatibility virtualization entitlement
+for its authorization path. This does not restore the removed
+Virtualization.framework VM backend.
 
 ConjetNet publishes Docker ports from the Conjet VM to macOS localhost.
 
@@ -69,8 +100,8 @@ status` shows the missing capability.
 
 ## Privileged Ports
 
-Ports below 1024, including 80 and 443, require macOS privilege to bind. Conjet
-first attempts the normal host bind. If macOS returns `EACCES` or `EPERM`,
+Conjet first attempts a normal host bind, including for ports 80 and 443.
+When the host requires privilege and returns `EACCES` or `EPERM`,
 Conjet invokes the bundled `conjet-port-helper` through non-interactive
 `sudo -n`, receives the already-bound socket over a private Unix socket, and
 continues proxying traffic in `conjetd`.

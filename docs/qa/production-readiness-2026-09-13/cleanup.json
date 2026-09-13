@@ -1,0 +1,11 @@
+{
+  "isolatedContainersRemaining": 0,
+  "isolatedVolumesRemaining": 0,
+  "isolatedCustomNetworksRemaining": 0,
+  "isolatedRuntimeStopped": true,
+  "qaProcessesRemaining": 0,
+  "qaDMGDetached": true,
+  "installedRuntimeStoppedOrReplaced": false,
+  "globalSSHConfigChanged": false,
+  "scratchRootRemoved": true
+}

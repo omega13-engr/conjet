@@ -5,6 +5,90 @@ import XCTest
 
 final class ConjetAppStateTests: XCTestCase {
     @MainActor
+    func testArgumentValidationPreventsComposeAndEditorSideEffects() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+        try Data("services: {}".utf8).write(to: paths.home.appendingPathComponent("compose.yaml"))
+        let executor = RecordingCommandExecutor { invocation in
+            Self.processResult(for: invocation, paths: paths)
+        }
+        let app = ConjetAppState(service: ConjetManagementService(
+            environment: ["CONJET_HOME": paths.home.path], conjetTool: Self.tool, conjetCoreTool: Self.tool,
+            dockerTool: Self.tool, includeLaunchdEnvironment: false, executor: executor
+        ))
+        app.composeDirectory = paths.home.path
+        app.composeArguments = "--detach 'unfinished"
+        await app.compose("up")
+        XCTAssertTrue(app.composeValidationMessage?.contains("unclosed quote") == true)
+        app.dockerEditorSource = "FROM alpine:3.22"
+        app.dockerEditorRunArguments = "--env 'unfinished"
+        await app.runDockerEditor()
+        let invocations = await executor.invocations
+        XCTAssertTrue(invocations.isEmpty, "Validate before running Compose or building an image")
+        XCTAssertTrue(app.commandLog.first?.stderr.contains("unclosed quote") == true)
+        XCTAssertNil(app.activeCommandLabel)
+    }
+
+    @MainActor
+    func testComposeValidatesProjectBeforeUpAndPreservesUsefulError() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+        let executor = RecordingCommandExecutor { invocation in
+            if invocation.displayName == "Compose config" {
+                return ProcessResult(executable: invocation.executable, arguments: invocation.arguments, exitCode: 1, stdout: "", stderr: "services.api.image is required")
+            }
+            return Self.processResult(for: invocation, paths: paths)
+        }
+        let app = ConjetAppState(service: ConjetManagementService(
+            environment: ["CONJET_HOME": paths.home.path], conjetTool: Self.tool, conjetCoreTool: Self.tool,
+            dockerTool: Self.tool, includeLaunchdEnvironment: false, executor: executor
+        ))
+        await app.compose("up")
+        XCTAssertNotNil(app.composeValidationMessage)
+        let before = await executor.invocations
+        XCTAssertTrue(before.isEmpty)
+        try Data("services: {api: {}}".utf8).write(to: paths.home.appendingPathComponent("compose.yaml"))
+        app.composeDirectory = paths.home.path
+        await app.compose("up")
+        XCTAssertEqual(app.composeValidationMessage, "services.api.image is required")
+        let invocations = await executor.invocations
+        XCTAssertTrue(invocations.contains { $0.arguments.contains("config") && $0.arguments.contains("--quiet") })
+        XCTAssertFalse(invocations.contains { $0.arguments.contains("up") })
+    }
+
+    @MainActor
+    func testVolumeCleanupOnlyRemovesReviewedSelectionAndKeepsInUseFailure() async throws {
+        let paths = Self.temporaryConjetPaths()
+        try paths.ensureBaseDirectories()
+        FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
+        defer { try? FileManager.default.removeItem(at: paths.rootHome) }
+        let executor = RecordingCommandExecutor { invocation in
+            if invocation.displayName == "Review unused volumes" {
+                return ProcessResult(executable: invocation.executable, arguments: invocation.arguments, exitCode: 0,
+                                     stdout: "{\"Name\":\"unused\",\"Driver\":\"local\"}\n{\"Name\":\"now-used\",\"Driver\":\"local\"}", stderr: "")
+            }
+            if invocation.arguments.suffix(2) == ["rm", "now-used"] {
+                return ProcessResult(executable: invocation.executable, arguments: invocation.arguments, exitCode: 1, stdout: "", stderr: "volume is in use")
+            }
+            return Self.processResult(for: invocation, paths: paths)
+        }
+        let app = ConjetAppState(service: ConjetManagementService(
+            environment: ["CONJET_HOME": paths.home.path], conjetTool: Self.tool, conjetCoreTool: Self.tool,
+            dockerTool: Self.tool, includeLaunchdEnvironment: false, executor: executor
+        ))
+        await app.previewUnusedVolumes()
+        XCTAssertEqual(app.volumeCleanupCandidates.map(\.name), ["now-used", "unused"])
+        await app.removeReviewedVolumes(names: ["unused", "now-used", "not-reviewed"])
+        let invocations = await executor.invocations
+        XCTAssertFalse(invocations.contains { $0.arguments.contains("prune") || $0.arguments.contains("--force") || $0.arguments.contains("not-reviewed") })
+        XCTAssertEqual(app.volumeCleanupCandidates.map(\.name), ["now-used"])
+        XCTAssertTrue(app.volumeCleanupError?.contains("volume is in use") == true)
+    }
+
+    @MainActor
     func testRunningSnapshotCompletesStartingCommandState() {
         XCTAssertEqual(
             ConjetAppState.resolvedVMState(command: .starting, snapshot: .running),
@@ -1020,6 +1104,16 @@ final class ConjetAppStateTests: XCTestCase {
         XCTAssertThrowsError(try draft.makeConfig())
     }
 
+    func testProfileConfigDraftPreservesNetworkEgressWhenSavingOtherSettings() throws {
+        var config = ConjetConfig.default
+        config.networkEgressMode = .vmnet
+        var draft = ProfileConfigDraft(profileName: "default", config: config)
+        draft.networkLANAllowedPorts = "8080"
+        XCTAssertEqual(try draft.makeConfig().networkEgressMode, .vmnet)
+        draft.networkEgressMode = .host
+        XCTAssertEqual(try draft.makeConfig().networkEgressMode, .host)
+    }
+
     @MainActor
     func testComposeGroupUpUsesProjectContextWithoutRepeatedDockerRefresh() async throws {
         let paths = Self.temporaryConjetPaths()
@@ -1578,7 +1672,7 @@ final class ConjetAppStateTests: XCTestCase {
         CMD ["sleep", "60"]
         """
         app.dockerEditorImageTag = "conjet-editor:test"
-        app.dockerEditorRunArguments = "-p 8080:80"
+        app.dockerEditorRunArguments = #"-p 8080:80 --env "GREETING=hello world""#
 
         await app.runDockerEditor()
 
@@ -1614,6 +1708,7 @@ final class ConjetAppStateTests: XCTestCase {
         XCTAssertTrue(runInvocation.arguments.contains("io.conjet.source=docker-editor"))
         XCTAssertTrue(runInvocation.arguments.contains("-p"))
         XCTAssertTrue(runInvocation.arguments.contains("8080:80"))
+        XCTAssertTrue(runInvocation.arguments.contains("GREETING=hello world"))
         XCTAssertEqual(runInvocation.arguments.last, "conjet-editor:test")
         XCTAssertNil(app.activeCommandLabel)
         XCTAssertEqual(app.commandLog.count, 2)
@@ -1772,7 +1867,9 @@ final class ConjetAppStateTests: XCTestCase {
         XCTAssertTrue(command?.commandLine.contains("exec /bin/sh") == true)
         XCTAssertNil(app.containerTerminalError)
         XCTAssertEqual(app.commandLog.first?.label, "Terminal api")
-        XCTAssertTrue(app.commandLog.first?.stdout.contains("started embedded terminal for api using /bin/sh") == true)
+        XCTAssertEqual(app.commandLog.first?.kind, .terminalPreparation)
+        XCTAssertEqual(app.commandLog.first?.statusText, "prepared")
+        XCTAssertTrue(app.commandLog.first?.stdout.contains("Prepared terminal session for api using /bin/sh") == true)
     }
 
     private static let tool = ResolvedTool(executable: "/tmp/conjet-test-tool", source: "test")

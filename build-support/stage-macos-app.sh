@@ -12,6 +12,8 @@ Options:
   --signing-identity ID            codesign identity; use "-" for ad-hoc (default: -)
   --entitlements PATH              Entitlements for conjet/conjetd/Conjet Core
   --disable-sandbox                Pass --disable-sandbox to swift build
+  --scratch-path DIR               Swift build artifacts directory
+  --rust-target-dir DIR            Rust and network helper build directory
 USAGE
 }
 
@@ -22,6 +24,8 @@ DIST_DIR="$ROOT_DIR/dist"
 SIGNING_IDENTITY="${CONJET_CODE_SIGN_IDENTITY:--}"
 ENTITLEMENTS="$ROOT_DIR/build-support/conjet-release.entitlements"
 DISABLE_SANDBOX=0
+SWIFT_SCRATCH_PATH=""
+RUST_TARGET_DIR="$ROOT_DIR/target"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -48,6 +52,14 @@ while [ "$#" -gt 0 ]; do
     --disable-sandbox)
       DISABLE_SANDBOX=1
       shift
+      ;;
+    --scratch-path)
+      SWIFT_SCRATCH_PATH="${2:?missing value for --scratch-path}"
+      shift 2
+      ;;
+    --rust-target-dir)
+      RUST_TARGET_DIR="${2:?missing value for --rust-target-dir}"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -101,6 +113,7 @@ HELPER_INFO_PLIST="$HELPER_CONTENTS/Info.plist"
 DAEMON_BINARY_NAME="conjetd"
 PORT_HELPER_BINARY_NAME="conjet-port-helper"
 VMM_BINARY_NAME="Conjet Core"
+NETWORK_BINARY_NAME="conjet-network"
 
 if [ ! -f "$ENTITLEMENTS" ]; then
   echo "entitlements file does not exist: $ENTITLEMENTS" >&2
@@ -110,6 +123,9 @@ fi
 cd "$ROOT_DIR"
 
 swift_build_args=("-c" "$CONFIGURATION")
+if [ -n "$SWIFT_SCRATCH_PATH" ]; then
+  swift_build_args+=(--scratch-path "$SWIFT_SCRATCH_PATH")
+fi
 if [ "$DISABLE_SANDBOX" -eq 1 ]; then
   swift_build_args+=("--disable-sandbox")
 fi
@@ -124,11 +140,14 @@ if [ -f "$ROOT_DIR/jetstream/Cargo.toml" ]; then
     echo "cargo is required to build bundled Jetstream Rust VMM" >&2
     exit 1
   }
-  cargo build --manifest-path "$ROOT_DIR/jetstream/Cargo.toml" --release --target-dir "$ROOT_DIR/target"
+  cargo build --manifest-path "$ROOT_DIR/jetstream/Cargo.toml" --release --target-dir "$RUST_TARGET_DIR"
+  "$ROOT_DIR/build-support/build-network-helper.sh" "$RUST_TARGET_DIR/release/$NETWORK_BINARY_NAME"
 fi
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_TOOLS" "$HELPER_MACOS" "$HELPER_TOOLS"
+mkdir -p "$APP_CONTENTS/Library/LaunchDaemons"
+/usr/bin/ditto "$ROOT_DIR/build-support/dev.conjet.port-helper.plist" "$APP_CONTENTS/Library/LaunchDaemons/dev.conjet.port-helper.plist"
 
 /usr/bin/ditto "$BUILD_DIR/$PRODUCT_NAME" "$APP_BINARY"
 /usr/bin/ditto "$BUILD_DIR/conjet" "$APP_TOOLS/conjet"
@@ -138,10 +157,12 @@ mkdir -p "$APP_MACOS" "$APP_TOOLS" "$HELPER_MACOS" "$HELPER_TOOLS"
 /usr/bin/ditto "$BUILD_DIR/conjet" "$HELPER_TOOLS/conjet"
 /usr/bin/ditto "$BUILD_DIR/$DAEMON_BINARY_NAME" "$HELPER_TOOLS/$DAEMON_BINARY_NAME"
 /usr/bin/ditto "$BUILD_DIR/$PORT_HELPER_BINARY_NAME" "$HELPER_TOOLS/$PORT_HELPER_BINARY_NAME"
-if [ -x "$ROOT_DIR/target/release/jetstream" ]; then
+if [ -x "$RUST_TARGET_DIR/release/jetstream" ]; then
   mkdir -p "$APP_VMM_TOOLS" "$HELPER_VMM_TOOLS"
-  /usr/bin/ditto "$ROOT_DIR/target/release/jetstream" "$APP_VMM_TOOLS/$VMM_BINARY_NAME"
-  /usr/bin/ditto "$ROOT_DIR/target/release/jetstream" "$HELPER_VMM_TOOLS/$VMM_BINARY_NAME"
+  /usr/bin/ditto "$RUST_TARGET_DIR/release/jetstream" "$APP_VMM_TOOLS/$VMM_BINARY_NAME"
+  /usr/bin/ditto "$RUST_TARGET_DIR/release/jetstream" "$HELPER_VMM_TOOLS/$VMM_BINARY_NAME"
+  /usr/bin/ditto "$RUST_TARGET_DIR/release/$NETWORK_BINARY_NAME" "$APP_VMM_TOOLS/$NETWORK_BINARY_NAME"
+  /usr/bin/ditto "$RUST_TARGET_DIR/release/$NETWORK_BINARY_NAME" "$HELPER_VMM_TOOLS/$NETWORK_BINARY_NAME"
 fi
 
 /usr/bin/ditto "$ROOT_DIR/Sources/ConjetApp/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
@@ -249,7 +270,11 @@ if [ "$SIGNING_IDENTITY" != "-" ]; then
 fi
 
 codesign_tool() {
-  /usr/bin/codesign "${codesign_base[@]}" --entitlements "$ENTITLEMENTS" "$1"
+  case "$(basename "$1")" in
+    conjetd) /usr/bin/codesign "${codesign_base[@]}" --identifier dev.conjet.daemon --entitlements "$ENTITLEMENTS" "$1" ;;
+    conjet-port-helper) /usr/bin/codesign "${codesign_base[@]}" --identifier dev.conjet.port-helper "$1" ;;
+    *) /usr/bin/codesign "${codesign_base[@]}" --entitlements "$ENTITLEMENTS" "$1" ;;
+  esac
 }
 
 codesign_plain() {
@@ -261,6 +286,7 @@ codesign_tool "$HELPER_TOOLS/$DAEMON_BINARY_NAME"
 codesign_tool "$HELPER_TOOLS/$PORT_HELPER_BINARY_NAME"
 if [ -x "$HELPER_VMM_TOOLS/$VMM_BINARY_NAME" ]; then
   codesign_tool "$HELPER_VMM_TOOLS/$VMM_BINARY_NAME"
+  codesign_plain "$HELPER_VMM_TOOLS/$NETWORK_BINARY_NAME"
 fi
 codesign_plain "$HELPER_BINARY"
 codesign_plain "$HELPER_BUNDLE"
@@ -269,6 +295,7 @@ codesign_tool "$APP_TOOLS/$DAEMON_BINARY_NAME"
 codesign_tool "$APP_TOOLS/$PORT_HELPER_BINARY_NAME"
 if [ -x "$APP_VMM_TOOLS/$VMM_BINARY_NAME" ]; then
   codesign_tool "$APP_VMM_TOOLS/$VMM_BINARY_NAME"
+  codesign_plain "$APP_VMM_TOOLS/$NETWORK_BINARY_NAME"
 fi
 codesign_plain "$APP_BINARY"
 codesign_plain "$APP_BUNDLE"

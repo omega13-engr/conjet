@@ -1,0 +1,22 @@
+[25/28] Compiling ConjetCoreTests ConjetCoreReleaseResolverTests.swift
+[26/28] Compiling ConjetCoreTests ConjetDockerEventsTests.swift
+[27/28] Compiling ConjetCoreTests ConjetFSTests.swift
+[27/29] Write Objects.LinkFileList
+[28/29] Linking conjetPackageTests
+Build complete! (4.13s)
+Test Suite 'Selected tests' started at 2026-09-13 14:20:28.405.
+Test Suite 'conjetPackageTests.xctest' started at 2026-09-13 14:20:28.409.
+Test Suite 'DockerSocketReadinessProbeTests' started at 2026-09-13 14:20:28.409.
+Test Case '-[ConjetCoreTests.DockerSocketReadinessProbeTests testPingWaitsForBodyWhenStatusLineArrivesSeparately]' started.
+/Users/sly/Workspace/Personal/conjet/Tests/ConjetCoreTests/DockerSocketReadinessProbeTests.swift:14: error: -[ConjetCoreTests.DockerSocketReadinessProbeTests testPingWaitsForBodyWhenStatusLineArrivesSeparately] : XCTAssertTrue failed
+Test Case '-[ConjetCoreTests.DockerSocketReadinessProbeTests testPingWaitsForBodyWhenStatusLineArrivesSeparately]' failed (0.261 seconds).
+Test Suite 'DockerSocketReadinessProbeTests' failed at 2026-09-13 14:20:28.670.
+	 Executed 1 test, with 1 failure (0 unexpected) in 0.261 (0.261) seconds
+Test Suite 'conjetPackageTests.xctest' failed at 2026-09-13 14:20:28.670.
+	 Executed 1 test, with 1 failure (0 unexpected) in 0.261 (0.261) seconds
+Test Suite 'Selected tests' failed at 2026-09-13 14:20:28.671.
+	 Executed 1 test, with 1 failure (0 unexpected) in 0.261 (0.265) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

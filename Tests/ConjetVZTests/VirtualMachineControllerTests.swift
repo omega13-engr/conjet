@@ -3,6 +3,16 @@ import ConjetCore
 import XCTest
 
 final class VirtualMachineControllerTests: XCTestCase {
+    func testNetworkEnvironmentPreservesOverridesAndRejectsUnknownBackend() throws {
+        let config = ConjetConfig(networkEgressMode: .host)
+        XCTAssertEqual(try VirtualMachineController.networkEnvironment(config: config, environment: [:])["CONJET_NETWORK_EGRESS"], "host")
+        let override = try VirtualMachineController.networkEnvironment(config: config, environment: ["CONJET_NETWORK_EGRESS": "vmnet", "PATH": "/bin"])
+        XCTAssertEqual(override["CONJET_NETWORK_EGRESS"], "vmnet")
+        XCTAssertEqual(override["PATH"], "/bin")
+        XCTAssertThrowsError(try VirtualMachineController.networkEnvironment(config: config, environment: ["CONJET_NETWORK_EGRESS": "invalid"]))
+        XCTAssertEqual(VirtualMachineController().networkStatus(config: config).vmNetworkMode, "unavailable")
+    }
+
     func testRustMemoryPolicyForwardsProfileAndPreservesExplicitOverrides() {
         for (profile, idle, step) in [(ConjetMemoryProfile.performance, "2048", "1024"), (.balanced, "512", "512"), (.eco, "512", "256")] {
             let config = ConjetConfig(memoryMiB: 8192, vmBackend: .hvfExperimental, memoryProfile: profile)

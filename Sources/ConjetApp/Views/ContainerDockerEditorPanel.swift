@@ -54,6 +54,7 @@ struct ContainerDockerEditorPanel: View {
                     TextField("Run args", text: $app.dockerEditorRunArguments)
                         .textFieldStyle(.roundedBorder)
                         .font(.caption)
+                        .help("Quote values containing spaces. Shell variables and commands are not expanded.")
                 }
 
                 if isCollapsed {

@@ -1,0 +1,7 @@
+{
+  "isolatedAppTerminationRequested": true,
+  "runtimeStop": {
+    "ok": true,
+    "message": "Conjet Core stopping; cleanup completed"
+  }
+}

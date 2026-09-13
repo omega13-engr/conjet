@@ -1,0 +1,13 @@
+qa_root=/Volumes/ExternalSSD/dev_workspace/tmp/conjet-features-vpn-zusst__0/published-ports-retry
+docker_host=unix:///Volumes/ExternalSSD/dev_workspace/tmp/conjet-features-vpn-zusst__0/home/run/docker.sock
+conjet_bin=/Volumes/ExternalSSD/dev_workspace/tmp/conjet-features-vpn-zusst__0/source/.build/debug/conjet
+conjet_home=/Volumes/ExternalSSD/dev_workspace/tmp/conjet-features-vpn-zusst__0/home
+image=python:3.13-alpine
+stress_requests=16
+stress_parallel=4
+include_low_ports=0
+note=no screenshots: this validates localhost network reachability, not a visual UI surface
+docker_run_port_58494=ok
+docker_run_port_58495=ok
+compose_port_58535=ok
+result=ok

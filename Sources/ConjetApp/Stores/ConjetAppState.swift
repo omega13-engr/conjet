@@ -92,6 +92,7 @@ struct ProfileConfigDraft: Equatable {
     var networkBindPolicy: ConjetNetworkBindPolicy
     var networkProxyEngine: ConjetNetworkProxyEngine
     var networkBridgeEngine: ConjetNetworkBridgeEngine
+    var networkEgressMode: ConjetNetworkEgressMode
     var networkLANAllowedCIDRs: String
     var networkLANAllowedPorts: String
     var energyMode: ConjetEnergyMode
@@ -117,6 +118,7 @@ struct ProfileConfigDraft: Equatable {
         self.networkBindPolicy = config.networkBindPolicy
         self.networkProxyEngine = config.networkProxyEngine
         self.networkBridgeEngine = config.networkBridgeEngine
+        self.networkEgressMode = config.networkEgressMode
         self.networkLANAllowedCIDRs = config.networkLANAllowedCIDRs.joined(separator: ", ")
         self.networkLANAllowedPorts = config.networkLANAllowedPorts.map(String.init).joined(separator: ", ")
         self.energyMode = config.energyMode
@@ -151,6 +153,7 @@ struct ProfileConfigDraft: Equatable {
             networkBindPolicy: networkBindPolicy,
             networkProxyEngine: networkProxyEngine,
             networkBridgeEngine: networkBridgeEngine,
+            networkEgressMode: networkEgressMode,
             networkLANAllowedCIDRs: listValues(from: networkLANAllowedCIDRs),
             networkLANAllowedPorts: try portValues(from: networkLANAllowedPorts),
             energyMode: energyMode,
@@ -195,6 +198,9 @@ final class ConjetAppState: ObservableObject {
 
     @Published var selectedSection: ManagementSection = .overview {
         didSet {
+            if selectedSection != oldValue {
+                snapshotTask?.cancel()
+            }
             if selectedSection != oldValue, managementUpdatesStarted {
                 scheduleDeferredRefresh()
             }
@@ -226,13 +232,18 @@ final class ConjetAppState: ObservableObject {
     @Published var pullImage = "ubuntu:24.04"
     @Published var containerTerminalDebugEnabled = false
     @Published private(set) var containerTerminalError: String?
-    @Published var composeDirectory = FileManager.default.currentDirectoryPath
+    @Published var composeDirectory = ""
+    @Published var composeValidationMessage: String?
+    @Published var volumeCleanupCandidates: [DockerVolume] = []
+    @Published var volumeCleanupError: String?
+    private var volumeCleanupSocketPath: String?
     @Published var composeArguments = "--detach"
     @Published var selectedBindPolicy: ConjetNetworkBindPolicy = .secureLocal
     @Published var selectedBridgeEngine: ConjetNetworkBridgeEngine = .auto
 
     private let service: ConjetManagementService
     private var refreshTask: Task<Void, Never>?
+    private var snapshotTask: Task<DashboardSnapshot, Never>?
     private var pulseSubscriptionTask: Task<Void, Never>?
     private var deferredRefreshTask: Task<Void, Never>?
     private var managementUpdatesStarted = false
@@ -356,7 +367,18 @@ final class ConjetAppState: ObservableObject {
                 isRefreshing = true
             }
             let scope = refreshScope(trigger: currentTrigger)
-            let latest = await service.loadSnapshot(scope: scope)
+            let service = service
+            let probe = Task { await service.loadSnapshot(scope: scope) }
+            snapshotTask = probe
+            let latest = await withTaskCancellationHandler {
+                await probe.value
+            } onCancel: {
+                probe.cancel()
+            }
+            snapshotTask = nil
+            if probe.isCancelled || Task.isCancelled {
+                continue
+            }
             let visible = Self.preservingPreviousResources(current: snapshot, latest: latest)
             completeCommandTransitionIfNeeded(actual: Self.vmState(from: visible))
             snapshot = visible
@@ -688,8 +710,21 @@ final class ConjetAppState: ObservableObject {
     }
 
     func runDockerEditor() async {
+        guard activeCommandLabel == nil else { return }
         let source = dockerEditorSource.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !source.isEmpty else { return }
+        let runArguments: [String]
+        do {
+            runArguments = try CommandArguments.parse(dockerEditorRunArguments)
+        } catch {
+            recordCommand(CommandLogEntry(
+                label: "Build Dockerfile",
+                commandLine: "validate Docker run arguments",
+                startedAt: Date(), finishedAt: Date(), exitCode: 1,
+                stdout: "", stderr: String(describing: error)
+            ))
+            return
+        }
 
         let imageTag = dockerEditorImageReference()
         let runID = Self.shortRunIdentifier()
@@ -748,7 +783,7 @@ final class ConjetAppState: ObservableObject {
                 "--detach",
                 "--name", containerName,
                 "--label", "io.conjet.source=docker-editor"
-            ] + splitArguments(dockerEditorRunArguments) + [imageTag],
+            ] + runArguments + [imageTag],
             label: "Run \(containerName)",
             timeoutSeconds: Self.dockerLongCommandTimeoutSeconds
         )
@@ -796,8 +831,9 @@ final class ConjetAppState: ObservableObject {
                 startedAt: startedAt,
                 finishedAt: Date(),
                 exitCode: 0,
-                stdout: "started embedded terminal for \(container.name) using \(command.shellPath)",
-                stderr: ""
+                stdout: "Prepared terminal session for \(container.name) using \(command.shellPath). Shell output and session exit status appear in the Terminal tab.",
+                stderr: "",
+                kind: .terminalPreparation
             ))
             return command
         } catch {
@@ -944,12 +980,80 @@ final class ConjetAppState: ObservableObject {
         }
     }
 
+    func previewUnusedVolumes() async {
+        guard activeCommandLabel == nil else { return }
+        activeCommandLabel = "Review unused volumes"
+        defer { activeCommandLabel = nil }
+        volumeCleanupCandidates = []
+        volumeCleanupError = nil
+        let socketPath = service.dockerSocketPath
+        let entry = await service.runDocker(
+            ["volume", "ls", "--filter", "dangling=true", "--format", "{{json .}}"],
+            label: "Review unused volumes", timeoutSeconds: 30
+        )
+        guard service.dockerSocketPath == socketPath else {
+            volumeCleanupError = "The active profile changed. Refresh the preview before removing volumes."
+            return
+        }
+        volumeCleanupSocketPath = socketPath
+        guard entry.succeeded else {
+            volumeCleanupError = entry.stderr.isEmpty ? entry.stdout : entry.stderr
+            recordCommand(entry)
+            return
+        }
+        volumeCleanupCandidates = DockerJSONLines.decode(DockerVolume.self, from: entry.stdout).sorted { $0.name < $1.name }
+    }
+
+    func removeReviewedVolumes(names: Set<String>) async {
+        guard activeCommandLabel == nil, !names.isEmpty else { return }
+        guard service.dockerSocketPath == volumeCleanupSocketPath else {
+            volumeCleanupError = "The active profile changed. Refresh the preview before removing volumes."
+            return
+        }
+        let selected = volumeCleanupCandidates.filter { names.contains($0.name) }
+        activeCommandLabel = "Remove reviewed volumes"
+        defer { activeCommandLabel = nil }
+        var failures: [String] = []
+        for volume in selected {
+            guard service.dockerSocketPath == volumeCleanupSocketPath else {
+                failures.append("Profile changed; remaining removals cancelled.")
+                break
+            }
+            let entry = await service.runDocker(["volume", "rm", volume.name], label: "Remove volume \(volume.name)", timeoutSeconds: 30)
+            recordCommand(entry)
+            if entry.succeeded {
+                if service.dockerSocketPath == volumeCleanupSocketPath {
+                    removeVolumeFromSnapshot(volume)
+                }
+                volumeCleanupCandidates.removeAll { $0.name == volume.name }
+            } else {
+                failures.append("\(volume.name): \(entry.stderr.isEmpty ? entry.stdout : entry.stderr)")
+            }
+        }
+        volumeCleanupError = failures.isEmpty ? nil : failures.joined(separator: "\n")
+        scheduleDeferredRefresh()
+    }
+
     func compose(_ action: String) async {
-        let directory = URL(fileURLWithPath: composeDirectory, isDirectory: true)
+        guard activeCommandLabel == nil else { return }
+        let project: ComposeProjectSelection
+        do {
+            project = try ComposeProjectSelection.resolve(composeDirectory)
+        } catch {
+            composeValidationMessage = String(describing: error)
+            return
+        }
+        composeValidationMessage = nil
+        let directory = project.directory
         let args: [String]
         switch action {
         case "up":
-            args = ["up"] + splitArguments(composeArguments)
+            do {
+                args = ["up"] + (try CommandArguments.parse(composeArguments))
+            } catch {
+                composeValidationMessage = String(describing: error)
+                return
+            }
         case "down":
             args = ["down"]
         case "ps":
@@ -960,7 +1064,15 @@ final class ConjetAppState: ObservableObject {
             return
         }
         await runAndRefresh(label: "Compose \(action)") {
-            await service.runCompose(
+            let validation = await service.runCompose(
+                ["config", "--quiet"], workingDirectory: directory,
+                label: "Compose config", timeoutSeconds: 30
+            )
+            guard validation.succeeded else {
+                self.composeValidationMessage = validation.stderr.isEmpty ? validation.stdout : validation.stderr
+                return validation
+            }
+            return await service.runCompose(
                 args,
                 workingDirectory: directory,
                 label: "Compose \(action)",
@@ -1061,16 +1173,13 @@ final class ConjetAppState: ObservableObject {
     }
 
     private func applyProfileSwitch(_ activation: ConjetProfileActivationResult) {
+        snapshotTask?.cancel()
         selectedProfileName = activation.profile
         selectedContainerID = nil
         selectedImageID = nil
         selectedVolumeID = nil
         pendingContainerSelectionName = nil
         setCommandVMState(nil)
-    }
-
-    private func splitArguments(_ text: String) -> [String] {
-        text.split(whereSeparator: \.isWhitespace).map(String.init)
     }
 
     private func dockerEditorImageReference() -> String {
@@ -1599,6 +1708,7 @@ final class ConjetAppState: ObservableObject {
     }
 
     private func stopAutoRefresh() {
+        snapshotTask?.cancel()
         refreshTask?.cancel()
         pulseSubscriptionTask?.cancel()
         deferredRefreshTask?.cancel()

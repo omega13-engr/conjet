@@ -1,0 +1,12 @@
+{
+  "qaRoot": "/Volumes/ExternalSSD/dev_workspace/tmp/conjet-vpn-package-mwm0rvpv",
+  "initialFailure": "hdiutil attach from external SSD returned Permission denied",
+  "resolution": "Mounted the identical DMG from an internal /tmp copy",
+  "status": "complete",
+  "mountedAppSignatureVerified": true,
+  "mountedHelperSignatureVerified": true,
+  "mountedHelperVersionVerified": true,
+  "dmgDetached": true,
+  "internalTemporaryCopyRemoved": true,
+  "temporaryRootRemoved": true
+}

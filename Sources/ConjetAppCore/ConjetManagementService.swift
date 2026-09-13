@@ -113,6 +113,8 @@ public struct DockerTerminalCommand: Equatable, Sendable {
 public struct ConjetManagementService: Sendable {
     private let runtime: ConjetRuntimeManagementService
 
+    public var dockerSocketPath: String { runtime.runtimeContext().paths.dockerSocket.path }
+
     public init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         conjetTool: ResolvedTool? = nil,
@@ -493,19 +495,57 @@ public struct ConjetManagementService: Sendable {
     ) async -> ProbeResult<[ContainerProcess]> {
         guard socketAvailable else { return ProbeResult(value: [], warnings: [], succeeded: false) }
         let running = containers.filter { $0.state.lowercased() == "running" }
-        var processes: [ContainerProcess] = []
-        var warnings: [String] = []
-        var succeeded = running.isEmpty
-        for container in running.prefix(12) {
-            let result = await docker(["top", container.id, "-eo", "pid,ppid,user,stat,comm,args"], timeoutSeconds: 8, context: context)
-            if result.exitCode != 0 {
-                warnings.append("docker top \(container.name): \(trim(result.stderr))")
-                continue
-            }
-            succeeded = true
-            processes += parseDockerTop(output: result.stdout, container: container)
+        guard !Task.isCancelled else {
+            return ProbeResult(value: [], warnings: ["Process refresh cancelled"], succeeded: false)
         }
-        return ProbeResult(value: processes, warnings: warnings, succeeded: succeeded)
+        // Keep subprocesses bounded while covering every running container. Store by
+        // inventory index so completion order cannot make rows jump on refresh.
+        return await withTaskGroup(of: (Int, ProcessResult).self) { group in
+            var results = [ProcessResult?](repeating: nil, count: running.count)
+            var nextIndex = 0
+            func enqueue(_ index: Int) {
+                let container = running[index]
+                group.addTask {
+                    let result = await docker(
+                        ["top", container.id, "-eo", "pid,ppid,user,stat,comm,args"],
+                        timeoutSeconds: 8,
+                        context: context
+                    )
+                    return (index, result)
+                }
+            }
+            while nextIndex < min(4, running.count) {
+                enqueue(nextIndex)
+                nextIndex += 1
+            }
+            while let (index, result) = await group.next() {
+                results[index] = result
+                if Task.isCancelled {
+                    group.cancelAll()
+                } else if nextIndex < running.count {
+                    enqueue(nextIndex)
+                    nextIndex += 1
+                }
+            }
+            guard !Task.isCancelled else {
+                return ProbeResult(value: [], warnings: ["Process refresh cancelled"], succeeded: false)
+            }
+            var processes: [ContainerProcess] = []
+            var warnings: [String] = []
+            var sampledCount = 0
+            for (index, container) in running.enumerated() {
+                guard let result = results[index], result.exitCode == 0 else {
+                    warnings.append("docker top \(container.name): \(trim(results[index]?.stderr ?? "not sampled"))")
+                    continue
+                }
+                sampledCount += 1
+                processes += parseDockerTop(output: result.stdout, container: container)
+            }
+            if sampledCount < running.count {
+                warnings.insert("Process coverage: \(sampledCount) of \(running.count) running containers; some processes are unavailable", at: 0)
+            }
+            return ProbeResult(value: processes, warnings: warnings, succeeded: running.isEmpty || sampledCount > 0)
+        }
     }
 
     private func docker(_ arguments: [String], timeoutSeconds: Double?, context: ConjetRuntimeContext) async -> ProcessResult {

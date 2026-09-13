@@ -1,0 +1,10 @@
+   Compiling vm-memory v0.17.1
+   Compiling krun-smbios v0.1.0-1.19.3
+   Compiling krun-arch v0.1.0-1.19.3
+   Compiling ppv-lite86 v0.2.21
+   Compiling krun-hvf v0.1.0-1.19.3
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.5
+   Compiling krun-devices v0.1.0-1.19.3
+   Compiling conjet-fs-probe v0.1.0 ($QA_ROOT/research/fs-probe)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 03s

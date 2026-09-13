@@ -6,6 +6,22 @@ public enum ConjetNetworkBindPolicy: String, Codable, Equatable, Sendable, CaseI
     case lanAllowlist = "lan-allowlist"
 }
 
+/// Guest internet traffic can originate from host sockets (VPN compatible),
+/// or use macOS vmnet NAT when explicitly requested.
+public enum ConjetNetworkEgressMode: String, Codable, Equatable, Sendable, CaseIterable {
+    case host
+    case vmnet
+
+    public var displayName: String {
+        switch self {
+        case .host: "Host networking (VPN compatible)"
+        case .vmnet: "vmnet NAT"
+        }
+    }
+
+    public var statusValue: String { self == .host ? "host-sockets" : "hvf-nat" }
+}
+
 public enum ConjetNetworkProxyEngine: String, Codable, Equatable, Sendable, CaseIterable {
     case auto
     case eventLoop = "event-loop"
@@ -43,6 +59,11 @@ public enum ConjetPortForwardState: String, Codable, Equatable, Sendable {
     case stopped
     case stale
     case repairing
+
+    /// A published endpoint is unavailable until the user resolves this state.
+    public var isFailure: Bool {
+        self == .requiresPrivilegedHelper || rawValue.hasPrefix("failed_")
+    }
 }
 
 public struct ConjetNetworkCapabilities: Codable, Equatable, Sendable {

@@ -1,0 +1,7 @@
+{
+  "artifact": "conjet-ubuntu-24.04-rootfs-aarch64-docker.raw.gz",
+  "sha512": "4603c2359fddab3cddf50e8c3ae32e9bdb028e83010ac4b8045e0019ce01a0a5caa6efca43325d87e3704ed3c1cd700da1a635f6f119558b40239c531f802ec4",
+  "verified": true,
+  "expandedBytes": 17179869184,
+  "freshDataDisk": true
+}

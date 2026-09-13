@@ -1,0 +1,9 @@
+x86_64
+Unable to find image 'busybox:1.37' locally
+1.37: Pulling from library/busybox
+436a1b1fd078: Pulling fs layer
+436a1b1fd078: Verifying Checksum
+436a1b1fd078: Download complete
+436a1b1fd078: Pull complete
+Digest: sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+Status: Downloaded newer image for busybox:1.37

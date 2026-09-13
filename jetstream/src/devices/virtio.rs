@@ -362,7 +362,10 @@ fn common_features_for(kind: VirtioDeviceKind) -> u64 {
         VirtioDeviceKind::Block | VirtioDeviceKind::Vsock => FEATURE_VERSION_1,
         VirtioDeviceKind::Net => FEATURE_VERSION_1 | NET_FEATURE_MAC | NET_FEATURE_STATUS,
         VirtioDeviceKind::Balloon => balloon_features(),
-        VirtioDeviceKind::Rng => FEATURE_VERSION_1 | FEATURE_INDIRECT_DESC | FEATURE_EVENT_IDX,
+        // SplitQueueExecutor uses the basic notification flags, not the
+        // avail_event/used_event fields required by EVENT_IDX. Advertising it
+        // suppresses later guest kicks and stalls entropy after the first buffer.
+        VirtioDeviceKind::Rng => FEATURE_VERSION_1 | FEATURE_INDIRECT_DESC,
     }
 }
 

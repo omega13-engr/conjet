@@ -1,0 +1,29 @@
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'ConjetApp' complete! (0.26s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'conjet' complete! (0.26s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'conjetd' complete! (0.26s)
+Building for debugging...
+[0/3] Write swift-version--58304C5D6DBC2206.txt
+Build of product 'conjet-port-helper' complete! (0.25s)
+   Compiling jetstream v0.1.0 (/Users/sly/Workspace/Personal/conjet/jetstream)
+    Finished `release` profile [optimized] target(s) in 11.61s
+$QA_ROOT/dist/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app/Contents/Resources/ConjetTools/conjet: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app/Contents/Resources/ConjetTools/conjetd: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app/Contents/Resources/ConjetTools/conjet-port-helper: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-network: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app/Contents/MacOS/Conjet Menu Bar: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Resources/ConjetTools/conjet: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Resources/ConjetTools/conjetd: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Resources/ConjetTools/conjet-port-helper: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-network: replacing existing signature
+$QA_ROOT/dist/Conjet.app/Contents/MacOS/Conjet: replacing existing signature
+$QA_ROOT/dist/Conjet.app: replacing existing signature
+$QA_ROOT/dist/Conjet.app

@@ -1,0 +1,11 @@
+running 2 tests
+test vsock_transmit_and_receive_queues_move_packets ... ok
+test block_queue_executes_write_flush_and_readback ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests jetstream
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

@@ -1,0 +1,35 @@
+{
+  "date": "2026-09-13",
+  "baseCommit": "ece0a8a7d02e383a0a844af2f649344d271858f1",
+  "runtimeIsolated": true,
+  "installedRuntimeReplaced": false,
+  "coreImageRebuilt": true,
+  "guestTargetBootTest": true,
+  "signing": "ad-hoc",
+  "validProductionSigningIdentities": 0,
+  "rootHelperAuthorized": false,
+  "packageSignatureVerification": {
+    "app": true,
+    "helper": true,
+    "daemon": true
+  },
+  "launchDaemonPlistBundled": true,
+  "knownFailedChecks": [
+    "host bind mounts: source path absent in guest",
+    "TCP/UDP 80/443 unprivileged bind: EACCES; authorized helper path unvalidated"
+  ],
+  "screenshots": 11,
+  "argumentParsingValidated": true,
+  "coreImageVersion": "1.3.0-qa",
+  "coreImageFreshBoot": true,
+  "packagedRuntimeWithoutExecutableOverrides": true,
+  "hardwareRNGReadAndDriverReset": true,
+  "fragmentedHTTPRegressionValidated": true,
+  "adHocSigningExplicitlyAuthorized": true,
+  "majorReleasePublished": false,
+  "hostFilesystemImplemented": false,
+  "dmgIntegrityVerified": true,
+  "dmgMountedReadOnly": true,
+  "dmgContentsVerified": true,
+  "dmgDetached": true
+}

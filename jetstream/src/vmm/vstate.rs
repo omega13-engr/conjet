@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use crate::devices::balloon::{BalloonMetrics, BalloonQueueHandler, MemoryLedgerSummary};
 use crate::devices::block::BlockQueueHandler;
 use crate::devices::bus::MmioBus;
-use crate::devices::net::{NetQueueHandler, VmnetPacketBridge};
+use crate::devices::net::{NetQueueHandler, NetworkPacketBridge};
+use crate::devices::rng::RngQueueHandler;
 use crate::devices::vsock::{HostUnixVsockBridge, VsockQueueHandler};
 use crate::vmm::memory::GuestMemory;
 
@@ -31,7 +32,8 @@ pub struct DeviceRuntimeState {
     pub block: BTreeMap<u64, BlockQueueHandler>,
     pub balloon: BTreeMap<u64, BalloonQueueHandler>,
     pub net: BTreeMap<u64, NetQueueHandler>,
-    pub vmnet_bridge: Option<Arc<Mutex<VmnetPacketBridge>>>,
+    pub rng: BTreeMap<u64, RngQueueHandler>,
+    pub network_bridge: Option<Arc<Mutex<NetworkPacketBridge>>>,
     pub vsock: BTreeMap<u64, VsockQueueHandler>,
     pub docker_bridge: Option<HostUnixVsockBridge>,
     pub memory_bridge: Option<HostUnixVsockBridge>,

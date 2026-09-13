@@ -25,7 +25,11 @@ class Conjet < Formula
   url "https://github.com/${source_repository}/releases/download/${tag}/${asset_name}"
   version "${version}"
   sha256 "${asset_sha256}"
-  head "https://github.com/${source_repository}.git", branch: "main"
+  head do
+    url "https://github.com/${source_repository}.git", branch: "main"
+    depends_on "go" => :build
+    depends_on "rust" => :build
+  end
 
   livecheck do
     url "https://github.com/${source_repository}/releases"

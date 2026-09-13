@@ -13,6 +13,8 @@ on:
       - Sources/**
       - Tests/**
       - build-support/**
+      - jetstream/**
+      - network-helper/**
       - benchmarks/**
       - Formula/**
       - Casks/**
@@ -25,6 +27,8 @@ on:
       - Sources/**
       - Tests/**
       - build-support/**
+      - jetstream/**
+      - network-helper/**
       - benchmarks/**
       - Formula/**
       - Casks/**
@@ -53,6 +57,12 @@ jobs:
         with:
           swift-version: ${{ env.SWIFT_VERSION }}
 
+      - name: Set up Go for host networking
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: network-helper/go.mod
+          cache-dependency-path: network-helper/go.sum
+
       - name: Show Swift version
         run: swift --version
 
@@ -61,6 +71,11 @@ jobs:
 
       - name: Build Conjet
         run: swift build
+
+      - name: Test host networking
+        run: |
+          go test -C network-helper ./...
+          cargo test --manifest-path jetstream/Cargo.toml
 
       - name: Test Conjet
         run: swift test
@@ -105,6 +120,9 @@ jobs:
           test -x "${mount_dir}/bin/conjet"
           test -x "${mount_dir}/bin/conjetd"
           test -x "${mount_dir}/bin/ConjetCoreVMM/Conjet Core"
+          test -x "${mount_dir}/bin/ConjetCoreVMM/conjet-network"
+          test -x "${mount_dir}/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-network"
+          "${mount_dir}/bin/ConjetCoreVMM/conjet-network" --version
           /usr/bin/codesign --verify --deep --strict "${mount_dir}/Conjet.app"
 
       - name: Validate rendered Homebrew packages

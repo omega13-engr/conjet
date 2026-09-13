@@ -219,7 +219,7 @@ private struct NetworkDetail: View {
                 HStack(spacing: 12) {
                     ResourceIcon(systemImage: "network", tint: .teal, size: 34)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("bridge")
+                        Text(dockerNetwork?.name ?? "Networking")
                             .font(.title3.weight(.semibold))
                         Text(network?.bridgeEngine ?? "No active bridge engine")
                             .font(.caption)
@@ -227,7 +227,7 @@ private struct NetworkDetail: View {
                     }
                     Spacer()
                     StatusBadge(
-                        text: network?.eventWatcherState ?? "unknown",
+                        text: "Events: \(network?.eventWatcherState ?? "unknown")",
                         state: network?.failedForwards == 0 ? .good : .warning
                     )
                 }
@@ -245,8 +245,27 @@ private struct NetworkDetail: View {
                     }
                 }
 
-                InspectorSection("Policy") {
-                    HStack(alignment: .center, spacing: 10) {
+                InspectorSection("Internet Access") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(network?.vmNetworkMode == "host-sockets" ? "Host networking (VPN compatible)" : (network?.vmNetworkMode == "hvf-nat" ? "vmnet NAT" : "No active network"))
+                            .font(.subheadline.weight(.semibold))
+                        Text(network?.vmNetworkMode == "host-sockets"
+                             ? "IPv4 connections and DNS use your Mac's network settings, including VPN routes."
+                             : (network?.vmNetworkMode == "hvf-nat"
+                                ? "vmnet NAT may not work with full-tunnel VPNs. Select host networking in Profiles for VPN compatibility."
+                                : "Start the machine to see its active internet access mode."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("The event connection above tracks Docker changes; it does not test internet access.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                PrivilegedPortAuthorizationView()
+
+                InspectorSection("Port Publishing") {
+                    VStack(alignment: .leading, spacing: 10) {
                         Picker("Bind", selection: $app.selectedBindPolicy) {
                             ForEach(ConjetNetworkBindPolicy.allCases, id: \.self) { policy in
                                 Text(policy.rawValue).tag(policy)
@@ -257,15 +276,16 @@ private struct NetworkDetail: View {
                                 Text(engine.rawValue).tag(engine)
                             }
                         }
-                        Spacer()
-                        CommandBarButton(title: "Apply", systemImage: "checkmark.circle") {
-                            Task { await app.applyNetworkPolicy() }
-                        }
-                        CommandBarButton(title: "Repair", systemImage: "wrench.adjustable") {
-                            Task { await app.repairNetwork() }
-                        }
-                        CommandBarButton(title: "Test", systemImage: "testtube.2") {
-                            Task { await app.bridgeTest() }
+                        HStack {
+                            CommandBarButton(title: "Apply", systemImage: "checkmark.circle") {
+                                Task { await app.applyNetworkPolicy() }
+                            }
+                            CommandBarButton(title: "Repair", systemImage: "wrench.adjustable") {
+                                Task { await app.repairNetwork() }
+                            }
+                            CommandBarButton(title: "Test Bridge", systemImage: "testtube.2") {
+                                Task { await app.bridgeTest() }
+                            }
                         }
                     }
                     .controlSize(.small)
@@ -349,12 +369,12 @@ private struct PortForwardRows: View {
 
             ForEach(Array(forwards.enumerated()), id: \.offset) { _, forward in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text("\(forward.hostPort)")
+                    Text(String(forward.hostPort))
                         .monospacedDigit()
                         .frame(width: 72, alignment: .leading)
                     Text(forward.protocol.rawValue)
                         .frame(width: 82, alignment: .leading)
-                    Text("\(forward.hostIP) -> \(forward.targetIP ?? "unknown"):\(forward.targetPort)")
+                    Text("\(forward.hostIP) -> \(forward.targetIP ?? "unknown"):\(String(forward.targetPort))")
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     StatusBadge(
@@ -386,6 +406,12 @@ struct ProcessCommandsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     InspectorSection("Container Process Table") {
+                        ForEach(app.snapshot.warnings.filter { $0.hasPrefix("Process coverage:") || $0.hasPrefix("docker top ") }, id: \.self) { warning in
+                            Label(warning, systemImage: "exclamationmark.triangle")
+                                .font(.callout)
+                                .foregroundStyle(.orange)
+                                .textSelection(.enabled)
+                        }
                         ContainerProcessActivityGrid(processes: app.snapshot.containerProcesses)
                     }
 
@@ -476,8 +502,8 @@ private struct CommandDetail: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 12) {
                     ResourceIcon(
-                        systemImage: entry.succeeded ? "checkmark.circle.fill" : "xmark.octagon.fill",
-                        tint: entry.succeeded ? .green : .red,
+                        systemImage: entry.kind == .terminalPreparation ? "terminal" : (entry.succeeded ? "checkmark.circle.fill" : "xmark.octagon.fill"),
+                        tint: entry.kind == .terminalPreparation ? .blue : (entry.succeeded ? .green : .red),
                         size: 34
                     )
                     VStack(alignment: .leading, spacing: 3) {
@@ -489,16 +515,19 @@ private struct CommandDetail: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    StatusBadge(text: entry.succeeded ? "success" : "failed", state: entry.succeeded ? .good : .bad)
+                    StatusBadge(text: entry.statusText, state: entry.kind == .terminalPreparation ? .neutral : (entry.succeeded ? .good : .bad))
                 }
 
                 InspectorSection("Info") {
                     KeyValueRows(rows: [
-                        ("Command", entry.commandLine),
-                        ("Exit", String(entry.exitCode)),
+                        ("Exit", entry.kind == .terminalPreparation ? "See Terminal session" : String(entry.exitCode)),
                         ("Started", ConjetAppFormatters.shortDateTime.string(from: entry.startedAt)),
                         ("Duration", String(format: "%.2fs", entry.duration))
                     ])
+                }
+
+                InspectorSection("Command") {
+                    OutputBlock(text: entry.commandLine)
                 }
 
                 InspectorSection("Output") {
@@ -517,8 +546,8 @@ private struct CommandLogRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Label(entry.label, systemImage: entry.succeeded ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                    .foregroundStyle(entry.succeeded ? .green : .red)
+                Label(entry.label, systemImage: entry.kind == .terminalPreparation ? "terminal" : (entry.succeeded ? "checkmark.circle.fill" : "xmark.octagon.fill"))
+                    .foregroundStyle(entry.kind == .terminalPreparation ? .blue : (entry.succeeded ? .green : .red))
                     .lineLimit(1)
                 Spacer()
                 Text(ConjetAppFormatters.timestamp.string(from: entry.finishedAt))

@@ -1,0 +1,12 @@
+Test Case '-[ConjetVZTests.VirtualizationProbeTests testInspectReportsSelectedHVFBackendAsExperimental]' started.
+Test Case '-[ConjetVZTests.VirtualizationProbeTests testInspectReportsSelectedHVFBackendAsExperimental]' passed (0.038 seconds).
+Test Suite 'VirtualizationProbeTests' passed at 2026-09-13 12:15:34.247.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.039 (0.040) seconds
+Test Suite 'conjetPackageTests.xctest' passed at 2026-09-13 12:15:34.248.
+	 Executed 423 tests, with 2 tests skipped and 0 failures (0 unexpected) in 39.986 (40.052) seconds
+Test Suite 'All tests' passed at 2026-09-13 12:15:34.248.
+	 Executed 423 tests, with 2 tests skipped and 0 failures (0 unexpected) in 39.986 (40.053) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

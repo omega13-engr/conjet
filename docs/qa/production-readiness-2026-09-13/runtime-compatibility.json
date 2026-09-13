@@ -1,0 +1,22 @@
+{
+  "results": [
+    {
+      "name": "named-volume-persistence",
+      "ok": true
+    },
+    {
+      "name": "bridge-container-dns",
+      "ok": true
+    },
+    {
+      "name": "container-https",
+      "ok": true
+    },
+    {
+      "name": "host-bind-file-directory-rw-readonly-symlink-rename-delete",
+      "ok": false,
+      "error": "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: $QA_ROOT/compat-zmkxbu1c/host directory with spaces\n\nRun 'docker run --help' for more information"
+    }
+  ],
+  "cleanupErrors": []
+}

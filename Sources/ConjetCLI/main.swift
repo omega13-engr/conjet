@@ -318,7 +318,6 @@ struct ConjetCLI {
             }
             try ensureSSHKeyInstalled()
             _ = try reconcileSSHKnownHosts()
-            _ = try installSSHConfigInclude()
             let endpoint = sshEndpoint(config: try ConjetConfig.loadOrCreate())
             if endpoint.transport == .tcp,
                !localTCPConnectable(host: endpoint.host, port: endpoint.port, timeoutSeconds: 1.0) {
@@ -332,7 +331,6 @@ struct ConjetCLI {
             }
             try ensureSSHKeyInstalled()
             _ = try reconcileSSHKnownHosts()
-            _ = try installSSHConfigInclude()
             let endpoint = sshEndpoint(config: try ConjetConfig.loadOrCreate())
             if endpoint.transport == .tcp,
                !localTCPConnectable(host: endpoint.host, port: endpoint.port, timeoutSeconds: 1.0) {
@@ -793,6 +791,7 @@ struct ConjetCLI {
     private static func sshArguments(endpoint: SSHEndpoint, forceTTY: Bool = false) -> [String] {
         let paths = ConjetPaths.default()
         var arguments = [
+            "-F", "/dev/null",
             "-i", sshPrivateKeyURL(paths: paths).path,
             "-o", "IdentitiesOnly=yes",
             "-o", "StrictHostKeyChecking=accept-new",

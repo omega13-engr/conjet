@@ -1,0 +1,92 @@
+[
+  {
+    "name": "volume-create",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "volume-write",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "volume-read",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "network-create",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "run",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "network-dns",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "top",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "stats",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "exec",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "exec-tty",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "pause",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "unpause",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "restart",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "host-bind-read",
+    "exit": 125,
+    "expected": 0
+  },
+  {
+    "name": "stop",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "remove",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "network-remove",
+    "exit": 0,
+    "expected": 0
+  },
+  {
+    "name": "volume-remove",
+    "exit": 0,
+    "expected": 0
+  }
+]

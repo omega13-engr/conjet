@@ -496,6 +496,35 @@ private struct ContainerDetail: View {
                     ("Size", container.size)
                 ])
             }
+            InspectorSection("Mac Port Publishing") {
+                let forwards = app.snapshot.network?.forwards.filter { forward in
+                    guard let id = forward.containerID, !id.isEmpty else {
+                        return forward.containerName == container.name
+                    }
+                    return container.id.hasPrefix(id) || id.hasPrefix(container.id)
+                } ?? []
+                if forwards.isEmpty {
+                    Text(!container.ports.contains("->")
+                         ? "No ports published to the Mac."
+                         : "Host listener status is not available yet. Check Network for diagnostics.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(forwards.enumerated()), id: \.offset) { _, forward in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label("\(forward.hostIP):\(String(forward.hostPort))/\(forward.protocol.rawValue) → \(String(forward.targetPort))",
+                                  systemImage: forward.state.isFailure ? "exclamationmark.triangle" : "network")
+                                .foregroundStyle(forward.state.isFailure ? Color.orange : Color.primary)
+                            Text(forward.state.rawValue.replacingOccurrences(of: "_", with: " "))
+                                .font(.caption)
+                            if let error = forward.error {
+                                Text(error).font(.caption).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+                Button("Open Network Diagnostics") { app.selectedSection = .network }
+            }
         case .stats:
             InspectorSection("Stats") {
                 if let matchingStat {

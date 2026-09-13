@@ -193,6 +193,7 @@ private struct ImageDetail: View {
 struct VolumesView: View {
     @EnvironmentObject private var app: ConjetAppState
     @State private var searchText = ""
+    @State private var showingCleanup = false
 
     private var filteredVolumes: [DockerVolume] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -217,8 +218,8 @@ struct VolumesView: View {
                 subtitle: "\(app.snapshot.volumes.count) available",
                 systemImage: "externaldrive"
             ) {
-                IconActionButton(title: "Prune unused volumes", systemImage: "trash", role: .destructive) {
-                    Task { await app.pruneVolumes() }
+                IconActionButton(title: "Review unused volumes", systemImage: "trash", role: .destructive) {
+                    showingCleanup = true
                 }
             }
             Divider()
@@ -245,6 +246,7 @@ struct VolumesView: View {
             }
         }
         .background(WorkbenchPalette.contentBackground)
+        .sheet(isPresented: $showingCleanup) { VolumeCleanupView() }
         .task {
             await app.refresh()
         }
@@ -321,6 +323,7 @@ private struct VolumeRow: View {
 private struct VolumeDetail: View {
     @EnvironmentObject private var app: ConjetAppState
     let volume: DockerVolume
+    @State private var confirmingRemoval = false
 
     var body: some View {
         ScrollView {
@@ -337,8 +340,9 @@ private struct VolumeDetail: View {
                     }
                     Spacer()
                     CommandBarButton(title: "Remove", systemImage: "trash", role: .destructive) {
-                        Task { await app.removeVolume(volume) }
+                        confirmingRemoval = true
                     }
+                    .disabled(app.activeCommandLabel != nil)
                 }
 
                 InspectorSection("Info") {
@@ -353,6 +357,59 @@ private struct VolumeDetail: View {
             }
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .confirmationDialog("Remove volume \(volume.name)?", isPresented: $confirmingRemoval, titleVisibility: .visible) {
+            Button("Remove Volume", role: .destructive) { Task { await app.removeVolume(volume) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("All data in this volume will be permanently deleted. Docker will refuse removal if a container still uses it.")
+        }
+    }
+}
+
+private struct VolumeCleanupView: View {
+    @EnvironmentObject private var app: ConjetAppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var selection: Set<String> = []
+    @State private var confirming = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Review Unused Volumes").font(.title2)
+            Text("Select volumes to permanently delete. Named volumes can contain database or application data. Nothing is selected automatically.")
+                .font(.callout).foregroundStyle(.secondary)
+            if let error = app.volumeCleanupError {
+                Text(error).foregroundStyle(.red).textSelection(.enabled)
+            }
+            List(app.volumeCleanupCandidates, selection: $selection) { volume in
+                VStack(alignment: .leading) {
+                    Text(volume.name).font(.body.monospaced())
+                    Text(volume.driver).font(.caption).foregroundStyle(.secondary)
+                }.tag(volume.name)
+            }
+            if app.volumeCleanupCandidates.isEmpty, app.activeCommandLabel == nil, app.volumeCleanupError == nil {
+                Text("No unused volumes.").foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Refresh Preview") { selection = []; Task { await app.previewUnusedVolumes() } }
+                Spacer()
+                Button("Close") { dismiss() }
+                Button("Remove Selected (\(selection.count))", role: .destructive) { confirming = true }
+                    .disabled(selection.isEmpty)
+            }
+            .disabled(app.activeCommandLabel != nil)
+        }
+        .padding(20)
+        .frame(width: 640, height: 450)
+        .task { await app.previewUnusedVolumes() }
+        .confirmationDialog("Permanently delete \(selection.count) selected volumes?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Delete Selected Volumes", role: .destructive) {
+                let names = selection
+                Task { await app.removeReviewedVolumes(names: names); selection = [] }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(selection.sorted().joined(separator: "\n"))
         }
     }
 }
