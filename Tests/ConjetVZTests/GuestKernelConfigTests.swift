@@ -223,7 +223,7 @@ final class GuestKernelConfigTests: XCTestCase {
         XCTAssertTrue(syntax.succeeded, syntax.stderr)
         XCTAssertTrue(dmgScript.contains(#"/usr/bin/ditto "$APP_BUNDLE/Contents/Resources/ConjetTools/ConjetCoreVMM" "$STAGING_ROOT/bin/ConjetCoreVMM""#))
         XCTAssertTrue(dmgScript.contains(#"/usr/bin/codesign --verify --strict "$STAGING_ROOT/bin/ConjetCoreVMM/Conjet Core""#))
-        XCTAssertTrue(caskTemplate.contains(##""#{staged_path}/bin/ConjetCoreVMM","##))
+        XCTAssertTrue(caskTemplate.contains(#""{{staged_path}}/bin/ConjetCoreVMM""#))
         XCTAssertTrue(ciWorkflow.contains(#"test -x "${mount_dir}/bin/ConjetCoreVMM/Conjet Core""#))
         XCTAssertTrue(releaseWorkflow.contains(#"test -x "dist/dmg-staging/${artifact_base}/bin/ConjetCoreVMM/Conjet Core""#))
     }

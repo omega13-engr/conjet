@@ -38,14 +38,18 @@ cask "conjet" do
   binary "bin/conjet"
   binary "bin/conjetd"
 
-  postflight do
-    [
-      "#{appdir}/Conjet.app",
-      "#{staged_path}/bin/conjet",
-      "#{staged_path}/bin/conjetd",
-      "#{staged_path}/bin/ConjetCoreVMM",
-    ].each do |path|
-      system_command "/usr/bin/xattr", args: ["-cr", path] if File.exist?(path)
+  postflight_steps do
+    if_path_exists "Conjet.app", base: :appdir do
+      run "/usr/bin/xattr", args: ["-cr", "{{appdir}}/Conjet.app"]
+    end
+    if_path_exists "bin/conjet" do
+      run "/usr/bin/xattr", args: ["-cr", "{{staged_path}}/bin/conjet"]
+    end
+    if_path_exists "bin/conjetd" do
+      run "/usr/bin/xattr", args: ["-cr", "{{staged_path}}/bin/conjetd"]
+    end
+    if_path_exists "bin/ConjetCoreVMM" do
+      run "/usr/bin/xattr", args: ["-cr", "{{staged_path}}/bin/ConjetCoreVMM"]
     end
   end
 
