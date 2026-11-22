@@ -5,12 +5,62 @@
 Official Kiri 0.2.2 is runnable for session-scoped tests. Live smoke and
 cancellation checks passed on 2026-11-22. No Kiri process is left running.
 Production Conjet remains running with its existing Docker context selected.
-The branch-built Conjet candidate and `conjet-speedup` context remain pending
-under SPEED-000; comparative performance benchmarks have not run.
+The branch-built Conjet candidate has run the pinned smoke fixture through
+`conjet-speedup`. Comparative performance benchmarks have not run.
 
 The user accepted keeping test data on ExternalSSD while allowing the official
 app's normal settings location. This replaces the earlier requirement for full
 filesystem isolation. It does not require a patched competitor or a new account.
+
+## Build and run the Conjet candidate
+
+Run from the checked-out `enhancement/speed-up` branch:
+
+```sh
+speed_build="$(mktemp -d /Volumes/ExternalSSD/dev_workspace/tmp/cj-build.XXXXXX)"
+swift build --build-system native --scratch-path "$speed_build/swift"
+PATH="/usr/bin:/bin:$PATH" cargo build --locked --manifest-path jetstream/Cargo.toml \
+  --target-dir "$speed_build/cargo"
+GOCACHE="$speed_build/go-cache" \
+  build-support/build-network-helper.sh "$speed_build/conjet-network"
+/usr/bin/codesign --force --sign - --entitlements build-support/conjet-debug.entitlements \
+  "$speed_build/cargo/debug/jetstream"
+python3 build-support/run-conjet-speedup.py \
+  --swift-bin "$speed_build/swift/debug" \
+  --core "$speed_build/cargo/debug/jetstream" \
+  --network-helper "$speed_build/conjet-network" \
+  --image alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+```
+
+On the current Xcode toolchain, the native SwiftPM build avoids a SwiftTerm
+Metal build failure from the default build system. Putting system tools first
+for Cargo selects Apple's archiver for the Mach-O vmnet shim.
+
+The launcher prints the fresh ExternalSSD session directory. It uses a
+private `CONJET_HOME`, the `speedup` profile, and the branch-built CLI,
+daemon, VMM, and networking helper. The VM starts with two vCPUs and
+2,048 MiB. The Docker fixture disables networking and requests no host
+ports or mounts. The setup uses `conjet vm start` to avoid shell and desktop
+integration. The launcher verifies the daemon peer PID and executable,
+checks the VM asset paths and the private `conjet-speedup` Docker endpoint,
+and records binary digests, production identities, health, configuration
+fingerprints, and background load in `session.json`.
+
+The launcher owns its daemon and waits for shutdown. SIGINT and SIGTERM
+enter cleanup. Use `--hold-seconds 60` to
+exercise cancellation after the smoke fixture prints its success marker.
+Production and the competitor must stay outside the candidate session.
+
+To reuse the release downloads, pass `--core-assets` with the earlier
+session's `h/profiles/speedup/state/vm` directory. The launcher copies the
+compressed release artifact and kernel with their sidecars, verifies the
+checksums, and imports fresh mutable disks. The candidate uses host networking
+via its own helper over an inherited socket pair. The fixture requests no
+published ports, so it reserves no host ports.
+
+Keep selected `session.json`, startup JSON, and logs after verifying
+cleanup. The VM disks, staged binaries, and build scratch directories
+are disposable. Preserve managed Kiri data and selected evidence.
 
 ## Run official Kiri
 

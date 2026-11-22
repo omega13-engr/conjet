@@ -2378,6 +2378,8 @@ impl HvfBootRunner {
         };
         let vm = Arc::new(vm);
 
+        // Hypervisor.framework routes interrupts through the GIC for this VM.
+        // hv_vcpu_set_pending_interrupt is unsupported after hv_gic_create.
         let gic_layout = GicLayout::new(self.plan.vcpu_count);
         let gic = match Gic::create(gic_layout) {
             Ok(gic) => {
@@ -2892,25 +2894,12 @@ impl HvfBootRunner {
                 break;
             };
             let current_vcpu = &vcpus[cpu_index].as_ref().unwrap().vcpu;
-            match poll_host_vsock_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices) {
-                Ok(true) => {
-                    if let Err(error) = current_vcpu.set_pending_interrupt(0, true) {
-                        stage(
-                            &mut stages,
-                            "hv_vcpu_set_pending_interrupt",
-                            false,
-                            describe_hvf_error(&error),
-                        );
-                        stop_reason = Some("vsock interrupt injection failed".to_string());
-                        break;
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    stage(&mut stages, "virtio-vsock-host-poll", false, error);
-                    stop_reason = Some("virtio-vsock host packet delivery failed".to_string());
-                    break;
-                }
+            if let Err(error) =
+                poll_host_vsock_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices)
+            {
+                stage(&mut stages, "virtio-vsock-host-poll", false, error);
+                stop_reason = Some("virtio-vsock host packet delivery failed".to_string());
+                break;
             }
             let docker_phase_metrics = docker_phase_metrics(&shared);
             let now = Instant::now();
@@ -3025,25 +3014,12 @@ impl HvfBootRunner {
                         .record_idle_backing_compaction_error(now, error, &shared),
                 }
             }
-            match poll_host_net_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices) {
-                Ok(true) => {
-                    if let Err(error) = current_vcpu.set_pending_interrupt(0, true) {
-                        stage(
-                            &mut stages,
-                            "hv_vcpu_set_pending_interrupt",
-                            false,
-                            describe_hvf_error(&error),
-                        );
-                        stop_reason = Some("net interrupt injection failed".to_string());
-                        break;
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    stage(&mut stages, "virtio-net-host-poll", false, error);
-                    stop_reason = Some("virtio-net host packet delivery failed".to_string());
-                    break;
-                }
+            if let Err(error) =
+                poll_host_net_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices)
+            {
+                stage(&mut stages, "virtio-net-host-poll", false, error);
+                stop_reason = Some("virtio-net host packet delivery failed".to_string());
+                break;
             }
             if let Err(error) = current_vcpu.run() {
                 let mut continue_after_probe_wake = false;
@@ -3140,16 +3116,6 @@ impl HvfBootRunner {
                         error.to_string(),
                     );
                     stop_reason = Some("virtual timer GIC injection failed".to_string());
-                    break;
-                }
-                if let Err(error) = current_vcpu.set_pending_interrupt(0, true) {
-                    stage(
-                        &mut stages,
-                        "hv_vcpu_set_pending_interrupt",
-                        false,
-                        describe_hvf_error(&error),
-                    );
-                    stop_reason = Some("virtual timer interrupt injection failed".to_string());
                     break;
                 }
                 continue;
@@ -3595,19 +3561,6 @@ fn spawn_secondary_vcpu(
                         );
                         break;
                     }
-                    if let Err(error) = vcpu.set_pending_interrupt(0, true) {
-                        shared_stage(
-                            &shared,
-                            "hv_vcpu_set_pending_interrupt",
-                            false,
-                            format!("cpu {cpu_index}: {}", describe_hvf_error(&error)),
-                        );
-                        request_shared_stop(
-                            &shared,
-                            format!("secondary cpu {cpu_index} virtual timer injection failed"),
-                        );
-                        break;
-                    }
                     continue;
                 }
                 if exit.reason != 1 {
@@ -3817,10 +3770,7 @@ fn handle_data_abort(
             maybe_deassert_virtio_irq(vm_state, gic, physical_address, value)?;
             execute_virtio_notification(vm_state, guest_base, physical_address)
                 .map_err(|error| format!("virtio queue execution failed: {error}"))?;
-            if maybe_assert_virtio_irq(vm_state, gic, physical_address)? {
-                vcpu.set_pending_interrupt(0, true)
-                    .map_err(|error| describe_hvf_error(&error))?;
-            }
+            maybe_assert_virtio_irq(vm_state, gic, physical_address)?;
         }
     } else {
         let value =
@@ -4858,10 +4808,9 @@ fn poll_host_vsock_packets(
     guest_base: u64,
     gic: &Gic,
     devices: &[VirtioMmioDevicePlan],
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let mut vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
     let memory = &vm_state.memory as *const GuestMemory;
-    let mut interrupt_asserted = false;
 
     for device in devices
         .iter()
@@ -4871,7 +4820,7 @@ fn poll_host_vsock_packets(
         let Some(mut handler) = vm_state.devices.vsock.remove(&base) else {
             continue;
         };
-        let result = {
+        {
             let Some(transport) = vm_state.mmio_bus.virtio_mut_at(base) else {
                 vm_state.devices.vsock.insert(base, handler);
                 continue;
@@ -4896,16 +4845,12 @@ fn poll_host_vsock_packets(
             if !used.is_empty() || transport.interrupt_status != 0 {
                 gic.set_spi(transport.plan.irq, true)
                     .map_err(|error| error.to_string())?;
-                true
-            } else {
-                false
             }
-        };
+        }
         vm_state.devices.vsock.insert(base, handler);
-        interrupt_asserted |= result;
     }
 
-    Ok(interrupt_asserted)
+    Ok(())
 }
 
 fn poll_host_net_packets(
@@ -4913,10 +4858,9 @@ fn poll_host_net_packets(
     guest_base: u64,
     gic: &Gic,
     devices: &[VirtioMmioDevicePlan],
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let mut vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
     let memory = &vm_state.memory as *const GuestMemory;
-    let mut interrupt_asserted = false;
 
     for device in devices
         .iter()
@@ -4926,7 +4870,7 @@ fn poll_host_net_packets(
         let Some(mut handler) = vm_state.devices.net.remove(&base) else {
             continue;
         };
-        let result = {
+        {
             let Some(transport) = vm_state.mmio_bus.virtio_mut_at(base) else {
                 vm_state.devices.net.insert(base, handler);
                 continue;
@@ -4966,32 +4910,28 @@ fn poll_host_net_packets(
             if !used.is_empty() || transport.interrupt_status != 0 {
                 gic.set_spi(transport.plan.irq, true)
                     .map_err(|error| error.to_string())?;
-                true
-            } else {
-                false
             }
-        };
+        }
         vm_state.devices.net.insert(base, handler);
-        interrupt_asserted |= result;
     }
 
-    Ok(interrupt_asserted)
+    Ok(())
 }
 
 fn maybe_assert_virtio_irq(
     vm_state: &mut VmState,
     gic: &Gic,
     physical_address: u64,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let Some(transport) = vm_state.mmio_bus.virtio_mut_at(physical_address) else {
-        return Ok(false);
+        return Ok(());
     };
     if transport.interrupt_status == 0 {
-        return Ok(false);
+        return Ok(());
     }
     gic.set_spi(transport.plan.irq, true)
         .map_err(|error| error.to_string())?;
-    Ok(true)
+    Ok(())
 }
 
 fn maybe_deassert_virtio_irq(

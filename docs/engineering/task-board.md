@@ -557,6 +557,14 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
+None.
+
+## UNDERREVIEW
+
+None.
+
+## DONE
+
 ### SPEED-000
 
 Title: Build and prove the isolated conjet-speedup environment
@@ -601,29 +609,49 @@ Approach:
 3. Verify Kiri isolation and explicit endpoints, run a smoke comparison, exercise
    failure/cancellation cleanup, and document reproducible commands in the runbook.
 
-Evidence: Official Kiri 0.2.2 smoke and cancellation tests passed using
-`build-support/run-kiri-speedup.py`; test data and private kiri-speedup context
-reside on ExternalSSD. Production snapshots matched and daemon/VM cleanup passed.
-See [runbook and evidence](speedup-environment.md). User accepted official
-~/.kiri settings and host shares; full filesystem confinement is not claimed.
-Conjet candidate launch, conjet-speedup context, and comparison remain pending.
+Evidence: The branch baseline was `8e5144683e3cb9bc89dd60a11d81585ec94ebd98`.
+Installed production Docker responded as 29.1.3 and kept its `conjet`
+context. The initial candidate boot reached PSCI CPU_ON but failed with
+`hv_vcpu_set_pending_interrupt = HV_UNSUPPORTED`; the failure and matching
+production snapshots are retained in `initial-hvf-failure/session.json` and its VM logs
+under the SPEED-000 evidence root. The local Hypervisor SDK declares this call
+unsupported with a GIC. The correction uses the existing GIC SPI and
+redistributor injection paths and preserves their error handling.
+
+The corrected candidate ran the pinned ARM64 Alpine no-network fixture at
+two vCPUs and 2,048 MiB. `smoke/session.json` records the staged executable
+hashes, live process paths, Docker socket peer PID, context endpoint, VM paths,
+production before/after observations, and background load. Official Kiri 0.2.2
+ran the same pinned Alpine digest separately. Its evidence is retained in
+`conjet-speedup-kiri/pinned-smoke-session.json`. No performance gate ran.
+
+The native SwiftPM build and 38 focused Swift tests passed. Jetstream ran 133
+tests successfully with three ignored using Apple's system archiver. The
+default SwiftPM build failed in SwiftTerm's Metal step, and the GNU archiver
+produced an unaligned archive for the Rust test link. Commands and workarounds
+are in the [environment runbook](speedup-environment.md). Candidate artifacts
+and command logs are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-000`.
+
+SIGTERM during asset import returned 143 and the observed gzip child exited.
+SIGTERM during the verified VM session returned 143 and left no staged
+processes or sockets. A test VMM that exited 27 during startup produced a
+failed session and clean shutdown. A conflicting inherited `DOCKER_HOST`
+was rejected before launch. The candidate run left no private mounts.
+Disposable session directories and disks were removed after evidence capture.
+Verification used machine-readable terminal and daemon evidence for this
+headless launcher.
 
 Source: [Isolated environment](speed-engineering-plan.md#isolated-speedup-environment),
 [paths](../../Sources/ConjetCore/ConjetPaths.swift),
 [environment](../../Sources/ConjetCore/ConjetEnvironment.swift),
 [CLI context configuration](../../Sources/ConjetCLI/main.swift).
 
-Review: Pending; inspect every path that can select production binaries, mutate
-shared settings, stop processes, or benchmark the wrong endpoint.
+Review: The launcher uses a fresh private profile, verifies the daemon peer
+before sending commands, validates imported asset paths before starting a VM,
+and verifies that the candidate VMM owns the Docker socket before invoking the
+fixture. Production health, endpoints and fingerprints matched in success,
+startup failure, and cancellation. The launcher removes residual socket entries
+only after confirming the staged runtime exited.
 
-Next Action: Build the separate Conjet candidate launcher and conjet-speedup
-context, validate its production separation, then connect both verified endpoints
-to the benchmark harness. Kiri runs through the foreground launcher above.
-
-## UNDERREVIEW
-
-None.
-
-## DONE
-
-None. Move tasks here only after their acceptance criteria and review pass.
+Next Action: Begin SPEED-001 with process tracing and a post-exec fixture.
