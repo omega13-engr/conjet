@@ -89,7 +89,10 @@ Approach:
 3. Verify Kiri isolation and explicit endpoints, run a smoke comparison, exercise
    failure/cancellation cleanup, and document reproducible commands in the runbook.
 
-Evidence: Pending launcher tests, executable/PID and resource manifests, private
+Evidence: Official Kiri 0.2.2 app installed privately and checksum/signature verified;
+see [installation receipt and startup blocker](speedup-environment.md). Runtime
+isolation is not qualified and no benchmark has run. Pending launcher tests,
+executable/PID and resource manifests, private
 context inspection, smoke benchmark JSON, production health observations, and
 cleanup results. Do not record setup as complete before live isolation passes.
 

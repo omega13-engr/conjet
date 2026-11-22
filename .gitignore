@@ -13,3 +13,6 @@ dist/
 .DS_Store
 .chum-cache/
 .chum-mem
+
+# Local speed engineering tools and runtime state
+/.speedup/
