@@ -393,8 +393,19 @@ a new workload and shut down cleanly. The companion normal boot passed the
 same lifecycle checks without crash injection. Both runs verified production
 snapshots and are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-006/restart`.
-The full allocation-stage, cancellation, resource and VM-loss fault matrix
-remains pending.
+The helper-failure matrix passed after injected loss following sandbox,
+mount, cgroup and child creation, exec confirmation, and the exit notification
+before cleanup. The live supervisor reconciled each owned workload without
+rotating the generation. Tests also verified a kernel exec failure (127),
+bounded output (64 KiB per stream with exact dropped-byte counts), and a
+memory cgroup kill (signal 9 and `oom_kill 1`). An independent disposable
+VMM kill after exec left that outcome ambiguous. A replacement VM rejected
+the old launch and handle and completed new work. All three runs preserved
+the production snapshots. Commands, raw protocol observations, compiler and
+guest logs are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-006/helper-faults`.
+The live matrix still needs deterministic cancellation before exec and
+during cleanup.
 
 Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 [verification policy](speed-engineering-plan.md#verification-and-claim-policy).
@@ -405,9 +416,8 @@ guest-only process group, PID pinning, stale generation check before
 admission, named cgroup teardown, and private root canaries. Comprehensive
 stage-by-stage fault and cancellation review remains pending.
 
-Next Action: Inject helper failure during allocation, exec and cleanup.
-Exercise bounded output, workload resource exhaustion, and disposable
-VM loss while retaining the process, mount and cgroup inventory.
+Next Action: Make pre-exec and cleanup cancellation boundaries observable
+and exercise both, then repeat the isolated failure matrix.
 
 ## UNDERREVIEW
 

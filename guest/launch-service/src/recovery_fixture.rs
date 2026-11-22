@@ -28,7 +28,7 @@ pub fn serve(allow_crash: bool) -> Result<(), Box<dyn std::error::Error>> {
         let pgid = service.id() as libc::pid_t;
         kill_owned_group(pgid)?;
         let status = service.wait()?;
-        reap_remaining(pgid)?;
+        reap_owned_children(-pgid)?;
         if status.success() {
             if intent.read()?.is_some() {
                 return Err("fresh supervisor stopped with an outstanding workload".into());
@@ -79,12 +79,12 @@ fn kill_owned_group(pgid: libc::pid_t) -> io::Result<()> {
     }
 }
 
-fn reap_remaining(pgid: libc::pid_t) -> io::Result<()> {
+pub(crate) fn reap_owned_children(selector: libc::pid_t) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        // PID 1 adopts the service's descendants. The group is separate from
-        // init and any other guest process, and admission is still closed.
-        let reaped = unsafe { libc::waitpid(-pgid, std::ptr::null_mut(), libc::WNOHANG) };
+        // PID 1 selects the owned group. The fixture subreaper has only its
+        // one admitted helper's descendants and can select all its children.
+        let reaped = unsafe { libc::waitpid(selector, std::ptr::null_mut(), libc::WNOHANG) };
         if reaped > 0 {
             continue;
         }

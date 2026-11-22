@@ -95,6 +95,10 @@ admitted handle already exists. For output, `stream` is `stdout` or `stderr`
 and `data` is standard base64. A gap in retained output is accounted for
 by `dropped_bytes` and the returned cursor.
 
+The restricted fresh fixture also reports `helper_failed` if the helper did
+not confirm cleanup. A successful reconciliation can yield
+`helper_failed=true` and `cleanup=complete` in the same terminal state.
+
 The first implementation advertises `ping`, `shutdown`, and `request_cancel`
 for pending waits in its isolated fixture. Guest launch features stay
 unadvertised until they pass their implementation gates. A client-side

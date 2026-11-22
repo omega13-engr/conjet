@@ -55,12 +55,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => "once",
                 Some(value) if value == "--hold" && args.next().is_none() => "hold",
                 Some(value) if value == "--fail" && args.next().is_none() => "fail",
+                Some(value) if value == "--flood" && args.next().is_none() => "flood",
+                Some(value) if value == "--exhaust-memory" && args.next().is_none() => {
+                    "exhaust-memory"
+                }
                 _ => return Err("invalid workload fixture option".into()),
             };
             conjet_launch_service::sandbox_fixture::verify_after_exec()?;
             match mode {
                 "hold" => std::thread::sleep(std::time::Duration::from_secs(10)),
                 "fail" => std::process::exit(23),
+                "flood" => {
+                    use std::io::Write;
+                    let chunk = [b'x'; 8_192];
+                    for _ in 0..12 {
+                        std::io::stdout().lock().write_all(&chunk)?;
+                        std::io::stderr().lock().write_all(&chunk)?;
+                    }
+                }
+                "exhaust-memory" => {
+                    let memory = vec![0x5au8; 48 * 1024 * 1024];
+                    std::hint::black_box(&memory);
+                    return Err("fixture survived unexpected memory pressure".into());
+                }
                 _ => {}
             }
             return Ok(());

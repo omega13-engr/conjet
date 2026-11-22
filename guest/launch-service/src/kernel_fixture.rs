@@ -16,6 +16,29 @@ use crate::spec::{MIN_MEMORY_BYTES, ResourceLimits};
 const CONTROLLERS: &str = "+cpu +memory +pids";
 const CGROUP_MOUNT: &str = "/run/conjet/probe-cgroup";
 
+pub(crate) fn test_mode(mode: &str) -> bool {
+    matches!(
+        mode,
+        "crash-supervisor"
+            | "fault-sandbox"
+            | "fault-mount"
+            | "fault-cgroup"
+            | "fault-child"
+            | "fault-exec"
+            | "fault-cleanup"
+            | "missing-executable"
+            | "flood"
+            | "exhaust-memory"
+    )
+}
+
+fn inject(mode: &str, at: &str) {
+    if mode == at {
+        eprintln!("conjet-launchd injecting helper failure at {at}");
+        std::process::exit(77);
+    }
+}
+
 #[repr(C)]
 #[derive(Default)]
 struct CloneArgs {
@@ -45,7 +68,7 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
             cpu_millicores: 500,
         },
         false,
-        None,
+        "once",
     )
 }
 
@@ -79,16 +102,15 @@ pub fn run_helper(
         pids: number(&mut args)?,
         cpu_millicores: number(&mut args)?,
     };
-    let workload_option = match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
-        Some("hold") => Some(c"--hold"),
-        Some("fail") => Some(c"--fail"),
-        Some("once") => None,
-        _ => return Err("fixture helper mode required".into()),
-    };
+    let mode = args.next().ok_or("fixture helper mode required")?;
+    let mode = mode.to_str().ok_or("invalid fixture helper mode")?;
+    if !matches!(mode, "once" | "hold" | "fail") && !test_mode(mode) {
+        return Err("unknown fixture helper mode".into());
+    }
     if args.next().is_some() {
         return Err("unexpected fixture helper arguments".into());
     }
-    run(true, id, limits, true, workload_option)
+    run(true, id, limits, true, mode)
 }
 
 fn run(
@@ -96,14 +118,16 @@ fn run(
     id: [u8; 16],
     limits: ResourceLimits,
     controlled: bool,
-    workload_option: Option<&'static std::ffi::CStr>,
+    mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = with_sandbox.then(Sandbox::prepare).transpose()?;
+    inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)
         .then(ProcMount::new)
         .transpose()?;
     security::clear_supplementary_groups()?;
     let mount = CgroupMount::new(Path::new(CGROUP_MOUNT))?;
+    inject(mode, "fault-mount");
     let root = mount.path.join("conjet-native");
     let workloads = root.join("workloads");
     let active = workloads.join("active");
@@ -113,11 +137,16 @@ fn run(
         write_control(directory, "cgroup.subtree_control", CONTROLLERS)?;
     }
     let cgroup = WorkloadCgroup::create(&active, id, limits)?;
-    let probe = clone_and_reap(&cgroup, sandbox.as_ref(), controlled, workload_option);
+    inject(mode, "fault-cgroup");
+    let probe = clone_and_reap(&cgroup, sandbox.as_ref(), controlled, mode);
+    if mode == "exhaust-memory" {
+        eprintln!("workload memory.events: {}", cgroup.memory_events()?);
+    }
     let exit_report = match &probe {
         Ok(wait_status) if controlled => notify_control(b'X', &wait_status.to_le_bytes()),
         _ => Ok(()),
     };
+    inject(mode, "fault-cleanup");
     cgroup.remove_empty()?;
     drop(cgroup);
     for path in [&active, &workloads, &root] {
@@ -151,8 +180,20 @@ fn clone_and_reap(
     cgroup: &WorkloadCgroup,
     sandbox: Option<&Sandbox>,
     controlled: bool,
-    workload_option: Option<&'static std::ffi::CStr>,
+    mode: &str,
 ) -> io::Result<i32> {
+    let executable = if mode == "missing-executable" {
+        c"/bin/absent"
+    } else {
+        c"/bin/probe"
+    };
+    let workload_option = match mode {
+        "hold" | "fault-exec" => Some(c"--hold"),
+        "fail" => Some(c"--fail"),
+        "flood" => Some(c"--flood"),
+        "exhaust-memory" => Some(c"--exhaust-memory"),
+        _ => None,
+    };
     let mut barrier = [-1; 2];
     // pipe2 writes two fresh descriptors which are each taken by one File.
     security::checked(unsafe { libc::pipe2(barrier.as_mut_ptr(), libc::O_CLOEXEC) })?;
@@ -228,7 +269,7 @@ fn clone_and_reap(
                 unsafe { libc::_exit(126) }
             }
             let args = [
-                c"/bin/probe".as_ptr(),
+                executable.as_ptr(),
                 c"--verify-workload-fixture".as_ptr(),
                 workload_option.map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
                 std::ptr::null(),
@@ -241,6 +282,7 @@ fn clone_and_reap(
     }
     let pid = pid as libc::pid_t;
     drop(child_ready);
+    inject(mode, "fault-child");
     if descriptor < 0 {
         drop(parent_ready);
         reap(pid)?;
@@ -267,6 +309,7 @@ fn clone_and_reap(
                         reap(pid)?;
                         return Err(error);
                     }
+                    inject(mode, "fault-exec");
                 } else {
                     println!("conjet-launchd kernel confirmed workload exec");
                 }

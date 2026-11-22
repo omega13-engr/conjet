@@ -98,6 +98,7 @@ struct Record {
     revision: u64,
     exec: &'static str,
     exit: Option<Value>,
+    helper_failed: bool,
     cancelled: bool,
     control: Option<UnixStream>,
     stdout: Capture,
@@ -113,7 +114,7 @@ impl Record {
     fn state(&self) -> Value {
         json!({
             "handle": self.handle, "revision": self.revision, "phase": self.phase.name(),
-            "exec": self.exec, "exit": self.exit,
+            "exec": self.exec, "exit": self.exit, "helper_failed": self.helper_failed,
             "cleanup": match self.phase {
                 Phase::Removed => "complete",
                 Phase::CleanupFailed => "failed",
@@ -206,6 +207,9 @@ impl FreshFixture {
         if intent.read()?.is_some() {
             return Err("unresolved fresh workload intent".into());
         }
+        // Reparent orphans from an interrupted helper here, while the live
+        // supervisor still owns their workload intent and cgroup.
+        crate::security::checked(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) })?;
         Ok(Arc::new(Self {
             image_digest,
             allow_crash,
@@ -233,11 +237,10 @@ impl FreshFixture {
             ["/bin/probe", "--verify-workload-fixture"] => "once",
             ["/bin/probe", "--verify-workload-fixture", "--hold"] => "hold",
             ["/bin/probe", "--verify-workload-fixture", "--fail"] => "fail",
-            [
-                "/bin/probe",
-                "--verify-workload-fixture",
-                "--crash-supervisor",
-            ] if self.allow_crash => "crash-supervisor",
+            ["/bin/probe", "--verify-workload-fixture", extra] if self.allow_crash => extra
+                .strip_prefix("--")
+                .filter(|mode| crate::kernel_fixture::test_mode(mode))
+                .ok_or(("unsupported_option", "unknown fixture test option"))?,
             _ => {
                 return Err((
                     "unsupported_option",
@@ -296,6 +299,7 @@ impl FreshFixture {
             revision: 1,
             exec: "pending",
             exit: None,
+            helper_failed: false,
             cancelled: false,
             control: None,
             stdout: Capture::default(),
@@ -306,9 +310,10 @@ impl FreshFixture {
         ledger.record = Some(record);
         let owner = Arc::clone(self);
         let limits = spec.limits;
+        let mode = mode.to_owned();
         if thread::Builder::new()
             .name("fresh-workload".into())
-            .spawn(move || owner.run_workload(id, limits, mode))
+            .spawn(move || owner.run_workload(id, limits, &mode))
             .is_err()
         {
             let record = ledger.record.as_mut().expect("reserved record");
@@ -340,14 +345,16 @@ impl FreshFixture {
         }
         self.update(|record| {
             record.control = None;
-            if let Ok((stdout, stderr)) = result {
+            if let Ok((stdout, stderr, recovered)) = result {
                 record.stdout = stdout;
                 record.stderr = stderr;
+                record.helper_failed = recovered;
                 if record.exec == "pending" {
-                    record.exec = "failed";
+                    record.exec = if recovered { "indeterminate" } else { "failed" };
                 }
                 record.change(Phase::Removed);
             } else {
+                record.helper_failed = true;
                 if record.exec == "pending" {
                     record.exec = "indeterminate";
                 }
@@ -361,7 +368,7 @@ impl FreshFixture {
         id: [u8; 16],
         limits: crate::spec::ResourceLimits,
         mode: &str,
-    ) -> io::Result<(Capture, Capture)> {
+    ) -> io::Result<(Capture, Capture, bool)> {
         let (mut peer, helper) = UnixStream::pair()?;
         peer.set_read_timeout(Some(Duration::from_secs(32)))?;
         let owner = peer.try_clone()?;
@@ -454,19 +461,23 @@ impl FreshFixture {
         if result.is_err() {
             let _ = peer.shutdown(std::net::Shutdown::Both);
             self.update(|record| record.control = None);
+            child.kill()?;
         }
         let finished = child.wait()?;
+        let recovered = result.is_err() || !finished.success() || !removed;
+        if recovered {
+            crate::kernel_fixture::recover_cgroup(id)?;
+            crate::recovery_fixture::reap_owned_children(-1)?;
+            crate::sandbox_fixture::recover()?;
+            println!("conjet-launchd recovered helper failure for {}", hex(&id));
+        }
         let stdout = stdout
             .join()
             .map_err(|_| io::Error::other("stdout reader failed"))??;
         let stderr = stderr
             .join()
             .map_err(|_| io::Error::other("stderr reader failed"))??;
-        result?;
-        if !finished.success() || !removed {
-            return Err(io::Error::other("fixture helper did not confirm cleanup"));
-        }
-        Ok((stdout, stderr))
+        Ok((stdout, stderr, recovered))
     }
 
     fn operation(self: &Arc<Self>, frame: &Frame, boot: &str) -> Reply {

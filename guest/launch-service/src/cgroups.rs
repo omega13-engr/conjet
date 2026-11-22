@@ -65,6 +65,10 @@ impl WorkloadCgroup {
         write_control(&self.path, "cgroup.kill", "1")
     }
 
+    pub(crate) fn memory_events(&self) -> io::Result<String> {
+        std::fs::read_to_string(self.path.join("memory.events"))
+    }
+
     pub fn populated(&self) -> io::Result<bool> {
         let events = std::fs::read_to_string(self.path.join("cgroup.events"))?;
         match events
