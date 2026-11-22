@@ -13,8 +13,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"))?;
             report_resources()?;
         }
+        #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--check-fresh-kernel" && args.next().is_none() => {
-            conjet_launch_service::kernel_fixture::check()?;
+            conjet_launch_service::kernel_fixture::check(false)?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--check-fresh-sandbox" && args.next().is_none() => {
+            conjet_launch_service::kernel_fixture::check(true)?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--verify-workload-fixture" && args.next().is_none() => {
+            conjet_launch_service::sandbox_fixture::verify_after_exec()?;
+            return Ok(());
         }
         _ => return Err("unexpected launchd argument".into()),
     }

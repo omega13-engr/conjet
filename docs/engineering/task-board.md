@@ -415,8 +415,24 @@ The first musl attempt caught a signedness mismatch in `statfs.f_type`
 that the GNU target had accepted. The corrected native boot report,
 commands, hashes and failure log are retained under `SPEED-005`.
 
-Image resolution, private writable rootfs, workload credentials,
-seccomp, exec, output and service lifecycle wiring remain pending.
+The next fixture executed a static ARM64 application in an isolated
+namespaced child with the private overlay root, closed stdin, descriptor
+closure, bounded resource limits, UID/GID 65532, no supplementary groups,
+empty capabilities, no-new-privileges and the ARM64 seccomp allowlist.
+The kernel confirmed exec. The executed application verified its
+credentials and empty capabilities, could not see an outside canary,
+wrote to its private upper layer, and received EPERM creating AF_VSOCK.
+The fixture reaped the child and verified that the lower root was
+unchanged. The cgroup and mount were removed and the guest powered off.
+The isolated ARM64 report and production snapshots are retained in
+`SPEED-005/sandbox-fixture`. Prior failures preserve the overlay denial
+before switching to mapped setup credentials and the early process
+failure before explicitly allowing the fd-poll syscall used at startup.
+Linux-target Clippy passed.
+
+Verified image admission and service-level launch, output, cancellation,
+wait, idempotency and cleanup reporting remain pending. Fresh execution
+is still unavailable on the service endpoint.
 
 Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 [guest init](../../guest/init/conjet-init.c).
