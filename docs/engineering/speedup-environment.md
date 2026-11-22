@@ -34,11 +34,27 @@ Do not run setup or open the app through Finder. Even direct daemon startup need
 an isolation solution and review of DNS, domain ports, Finder mounts, updates,
 and guest shared directories before use.
 
-Next step: qualify the unmodified official app in a dedicated test account/host,
-or obtain an upstream supported state-directory override. Account creation and
-system changes are not performed by this installation. Keep SPEED-000 incomplete
-until its live isolation and cleanup criteria pass. The conjet-speedup candidate
-context and launcher are also pending; no benchmark was run.
+Required environment location: `/Volumes/ExternalSSD/dev_workspace/tmp`.
+The user explicitly rejected creating a dedicated macOS test account. Keep the
+unmodified official app and do not alter production state. Candidate layout:
+
+```text
+/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-<session>/
+  kiri-data/
+  kiri-state/       # requires a supported state-directory override
+  docker-config/
+  logs/
+  evidence/
+```
+
+KIRI_DATA_DIR and KIRI_SOCKET alone cannot redirect all state. A private child
+HOME would normally address HOME-relative paths, but current session instructions
+prohibit overriding HOME. No such override has been executed. Qualification needs
+a supported complete state-path override or revised environment permissions;
+do not substitute an altered bundle identity or production-state symlinks.
+
+Keep SPEED-000 incomplete until live isolation and cleanup pass. The
+conjet-speedup candidate context and launcher remain pending. No benchmark ran.
 
 ## Removal
 
