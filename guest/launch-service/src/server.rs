@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::handshake::{self, BootId, Key, MAX_QUEUED_CONTROL, hex};
 use crate::socket::{Shutdown, Stream};
+use crate::spec::LaunchRequest;
 use crate::wire::{Frame, Kind, RequestId, WireError, write_error};
 
 const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
@@ -168,6 +169,21 @@ impl Server {
                         )?;
                     } else {
                         write_error(&mut stream, frame.id, "not_found", "pending wait not found")?;
+                    }
+                }
+                Kind::Launch => {
+                    let Some(request) = decode::<LaunchRequest>(&frame, &mut stream)? else {
+                        continue;
+                    };
+                    if let Err(error) = request.validate() {
+                        write_error(&mut stream, frame.id, error.code(), &error.to_string())?;
+                    } else {
+                        write_error(
+                            &mut stream,
+                            frame.id,
+                            "unsupported_option",
+                            "fresh execution unavailable",
+                        )?;
                     }
                 }
                 _ => write_error(

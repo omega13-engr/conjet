@@ -47,42 +47,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-005
-
-Title: Implement one fresh ARM64 no-network container launch
-
-Description: Implement launch, wait, cancel, output, and cleanup for the approved minimal specification. Deliver a working isolated end-to-end fixture.
-
-Is blocked by task: SPEED-004.
-
-Acceptance Criteria:
-
-- Implement private rootfs, namespaces, cgroup limits, credentials, capability
-  restrictions, and seccomp for the declared supported configuration.
-- Confirm exec separately from application readiness and return actual exit status.
-- Supervise children, bound output, cancel safely, and acknowledge complete cleanup.
-- Reject unsupported options and avoid duplicate starts on ambiguous disconnections.
-- Successful and failed launches leave no orphan process, mount, or cgroup.
-
-Problem and Evidence: The current small init launches one process and does not
-provide the proposed per-request container lifecycle or isolation contract.
-
-Approach:
-
-1. Allocate a private writable root, namespaces, and cgroup; apply the approved limits, credentials, capabilities, and seccomp policy.
-2. Start through the safe clone helper, track child lifetime, and report exec failure and actual exit status.
-3. Implement bounded output and cancellation; remove all owned resources before cleanup acknowledgment.
-
-Evidence: Pending focused Rust tests, entitled HVF integration traces, isolation
-and data canaries, failure injection, and cleanup inventory.
-
-Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
-[guest init](../../guest/init/conjet-init.c).
-
-Review: Pending; inspect syscall/FFI safety, isolation, limits, exec errors, and teardown.
-
-Next Action: Implement resource allocation with rollback for a single no-network launch.
-
 ### SPEED-006
 
 Title: Add lifecycle failure injection and recovery tests
@@ -417,7 +381,38 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-None.
+### SPEED-005
+
+Title: Implement one fresh ARM64 no-network container launch
+
+Description: Implement launch, wait, cancel, output, and cleanup for the approved minimal specification. Deliver a working isolated end-to-end fixture.
+
+Is blocked by task: SPEED-004.
+
+Acceptance Criteria:
+
+- Implement private rootfs, namespaces, cgroup limits, credentials, capability
+  restrictions, and seccomp for the declared supported configuration.
+- Confirm exec separately from application readiness and return actual exit status.
+- Supervise children, bound output, cancel safely, and acknowledge complete cleanup.
+- Reject unsupported options and avoid duplicate starts on ambiguous disconnections.
+- Successful and failed launches leave no orphan process, mount, or cgroup.
+
+Problem and Evidence: The spec increment adds a closed native launch request and
+validates the digest, canonical root-relative paths, environment,
+credentials, network mode, and resource limits before allocation. Valid
+requests still receive an unavailable response until fresh execution is
+wired. The service advertises its transport fixture capabilities only.
+Fifteen Rust tests, scoped Clippy, and the Linux ARM64 cross-check passed.
+Logs are in `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-005/spec`.
+Resource creation, exec, supervision, cleanup, and live fixture tests remain pending.
+
+Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
+[guest init](../../guest/init/conjet-init.c).
+
+Review: Request validation reviewed for closed fields, path ambiguity, privilege options, and request bounds. Pending execution review; inspect syscall/FFI safety, isolation, limits, exec errors, and teardown.
+
+Next Action: Implement resource allocation with rollback for a single no-network launch.
 
 ## UNDERREVIEW
 
