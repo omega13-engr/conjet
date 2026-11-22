@@ -112,14 +112,18 @@ pub fn run_helper(
     };
     let mode = args.next().ok_or("fixture helper mode required")?;
     let mode = mode.to_str().ok_or("invalid fixture helper mode")?;
-    if !matches!(mode, "once" | "hold" | "fail" | "benchmark") && !test_mode(mode) {
+    if !matches!(
+        mode,
+        "once" | "hold" | "fail" | "benchmark" | "memory-canary"
+    ) && !test_mode(mode)
+    {
         return Err("unknown fixture helper mode".into());
     }
     let network = args.next().ok_or("fixture network mode required")?;
     let prepared = match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("prepared")
             if network == "none"
-                && matches!(mode, "once" | "benchmark")
+                && matches!(mode, "once" | "memory-canary" | "benchmark")
                 && limits.memory_bytes <= crate::prepared::SLOT_MEMORY_LIMIT =>
         {
             true
@@ -167,13 +171,13 @@ fn run(
     inject(mode, "fault-mount");
     let root = mount.path.join("conjet-native");
     let workloads = root.join("workloads");
-    let active = workloads.join("active");
+    let scope = workloads.join(if prepared { "prepared" } else { "active" });
     write_control(&mount.path, "cgroup.subtree_control", CONTROLLERS)?;
-    for directory in [&root, &workloads, &active] {
+    for directory in [&root, &workloads, &scope] {
         std::fs::create_dir(directory)?;
         write_control(directory, "cgroup.subtree_control", CONTROLLERS)?;
     }
-    let cgroup = WorkloadCgroup::create(&active, id, limits)?;
+    let cgroup = WorkloadCgroup::create(&scope, id, limits)?;
     inject(mode, "fault-cgroup");
     let mut bridge = network.then(Bridge::create).transpose()?;
     inject(mode, "fault-bridge");
@@ -204,7 +208,7 @@ fn run(
     }
     cgroup.remove_empty()?;
     drop(cgroup);
-    for path in [&active, &workloads, &root] {
+    for path in [&scope, &workloads, &root] {
         std::fs::remove_dir(path)?;
     }
     mount.unmount()?;
@@ -254,6 +258,7 @@ fn clone_and_reap(
         "fail" => Some(c"--fail"),
         "flood" => Some(c"--flood"),
         "exhaust-memory" => Some(c"--exhaust-memory"),
+        "memory-canary" => Some(c"--memory-canary"),
         _ => None,
     };
     let mut barrier = [-1; 2];
@@ -710,25 +715,30 @@ pub(crate) fn recover_cgroup(id: [u8; 16]) -> io::Result<()> {
     if unsafe { filesystem.assume_init() }.f_type as u64 == CGROUP2_SUPER_MAGIC {
         let root = mount.join("conjet-native");
         let workloads = root.join("workloads");
-        let active = workloads.join("active");
-        let leaf = active.join(handshake::hex(&id));
-        if leaf.try_exists()? {
-            write_control(&leaf, "cgroup.kill", "1")?;
-            let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                match std::fs::remove_dir(&leaf) {
-                    Ok(()) => break,
-                    Err(error)
-                        if error.raw_os_error() == Some(libc::EBUSY)
-                            && Instant::now() < deadline =>
-                    {
-                        std::thread::sleep(Duration::from_millis(10));
+        for name in ["active", "prepared"] {
+            let scope = workloads.join(name);
+            let leaf = scope.join(handshake::hex(&id));
+            if leaf.try_exists()? {
+                write_control(&leaf, "cgroup.kill", "1")?;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    match std::fs::remove_dir(&leaf) {
+                        Ok(()) => break,
+                        Err(error)
+                            if error.raw_os_error() == Some(libc::EBUSY)
+                                && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => return Err(error),
                     }
-                    Err(error) => return Err(error),
                 }
             }
+            if scope.try_exists()? {
+                std::fs::remove_dir(scope)?;
+            }
         }
-        for path in [&active, &workloads, &root] {
+        for path in [&workloads, &root] {
             if path.try_exists()? {
                 std::fs::remove_dir(path)?;
             }
@@ -738,6 +748,14 @@ pub(crate) fn recover_cgroup(id: [u8; 16]) -> io::Result<()> {
         security::checked(unsafe { libc::umount(target.as_ptr()) })?;
     }
     std::fs::remove_dir(mount)
+}
+
+pub(crate) fn cgroup_observation(id: &str, prepared: bool) -> io::Result<(u64, bool)> {
+    let path = Path::new(CGROUP_MOUNT)
+        .join("conjet-native/workloads")
+        .join(if prepared { "prepared" } else { "active" })
+        .join(id);
+    crate::cgroups::observation(&path)
 }
 
 pub(crate) fn assert_cgroup_absent() -> io::Result<()> {

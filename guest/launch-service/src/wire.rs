@@ -31,6 +31,7 @@ pub enum Kind {
     ShutdownAck = 16,
     Prepare = 17,
     Claim = 18,
+    Memory = 19,
 }
 
 impl TryFrom<u8> for Kind {
@@ -57,6 +58,7 @@ impl TryFrom<u8> for Kind {
             16 => Ok(ShutdownAck),
             17 => Ok(Prepare),
             18 => Ok(Claim),
+            19 => Ok(Memory),
             _ => Err(WireError::BadHeader),
         }
     }

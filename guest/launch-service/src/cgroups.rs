@@ -70,18 +70,7 @@ impl WorkloadCgroup {
     }
 
     pub fn populated(&self) -> io::Result<bool> {
-        let events = std::fs::read_to_string(self.path.join("cgroup.events"))?;
-        match events
-            .lines()
-            .find_map(|line| line.strip_prefix("populated "))
-        {
-            Some("0") => Ok(false),
-            Some("1") => Ok(true),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid cgroup population state",
-            )),
-        }
+        populated(&self.path)
     }
 
     pub fn remove_empty(&self) -> io::Result<()> {
@@ -93,6 +82,29 @@ impl WorkloadCgroup {
         // The kernel rechecks membership atomically with rmdir.
         std::fs::remove_dir(&self.path)
     }
+}
+
+fn populated(path: &Path) -> io::Result<bool> {
+    let events = std::fs::read_to_string(path.join("cgroup.events"))?;
+    match events
+        .lines()
+        .find_map(|line| line.strip_prefix("populated "))
+    {
+        Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid cgroup population state",
+        )),
+    }
+}
+
+pub(crate) fn observation(path: &Path) -> io::Result<(u64, bool)> {
+    let current = std::fs::read_to_string(path.join("memory.current"))?
+        .trim()
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid cgroup memory charge"))?;
+    Ok((current, populated(path)?))
 }
 
 pub(crate) fn write_control(path: &Path, file: &str, value: &str) -> io::Result<()> {

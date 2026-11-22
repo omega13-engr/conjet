@@ -307,6 +307,20 @@ fallback is an explicit new request after confirmed non-execution.
 An indeterminate claim must be resolved against the original handle.
 Measure preparation, claims, misses, expiry, and refill separately.
 
+The isolated native memory fixture uses opcode 19. Its authenticated
+request carries `boot_id`, `budget_ms`, and optional `pressure`. The
+snapshot reports active and prepared ownership separately, with cgroup
+charge, population and sample validity. A claimed slot counts as active
+before its release byte is sent. Its existing cgroup retains the charge
+through teardown. An owned scope with missing samples remains accounted
+for, and cleanup failure retains ownership.
+
+The pressure input pauses preparation and evicts only unclaimed slots.
+A refill requires clearing pressure and a new explicit prepare request.
+Jetstream excludes its Docker-only idle controller from the isolated
+native mode until a qualified unified policy exists. Guest-reported
+ownership transitions continue to govern backing release.
+
 ## References
 
 - Linux creation and cgroup placement. [clone3 and CLONE_INTO_CGROUP](https://man7.org/linux/man-pages/man2/clone.2.html)

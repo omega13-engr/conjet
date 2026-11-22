@@ -2586,7 +2586,18 @@ impl HvfBootRunner {
             .balloon_target_mib
             .unwrap_or(self.config.memory_mib)
             .min(self.config.memory_mib);
-        let core_memory_policy = CoreMemoryPolicy::from_environment(self.config.memory_mib);
+        let mut core_memory_policy = CoreMemoryPolicy::from_environment(self.config.memory_mib);
+        if self.options.enable_native_launch {
+            // Docker-only workload telemetry cannot classify a native
+            // workload's lifetime. Guest-owned page reporting still runs.
+            core_memory_policy.enabled = false;
+            stage(
+                &mut stages,
+                "native-memory-policy",
+                true,
+                "Docker-only idle policy bypassed for the native fixture".to_string(),
+            );
+        }
         let mut core_memory_controller = CoreMemoryController::new(
             core_memory_policy,
             self.config.memory_mib,

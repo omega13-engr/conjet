@@ -62,6 +62,14 @@ struct Claim {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct MemoryRequest {
+    boot_id: String,
+    budget_ms: u64,
+    pressure: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Wait {
     handle: Handle,
     budget_ms: u64,
@@ -127,6 +135,7 @@ struct Record {
     slot: Option<Slot>,
     slot_expires: Option<Instant>,
     slot_expired: bool,
+    memory_limit_bytes: u64,
     cancelled: bool,
     control: Option<UnixStream>,
     stdout: Capture,
@@ -205,6 +214,52 @@ struct Ledger {
     closing: bool,
     waiting: usize,
     record: Option<Record>,
+    pressure: bool,
+    evictions: u64,
+}
+
+impl Ledger {
+    fn memory_snapshot(&self) -> Value {
+        let mut snapshot = json!({
+            "active": null, "prepared": null, "pressure": self.pressure,
+            "pressure_evictions": self.evictions,
+        });
+        if let Some(record) = self
+            .record
+            .as_ref()
+            .filter(|record| record.phase != Phase::Removed)
+        {
+            let prepared_scope = record.slot.is_some();
+            let active = record.slot.as_ref().is_none_or(Slot::claimed);
+            let observed = crate::kernel_fixture::cgroup_observation(
+                &record.handle.workload_id,
+                prepared_scope,
+            )
+            .ok();
+            snapshot[if active { "active" } else { "prepared" }] = json!({
+                "handle": record.handle, "phase": record.phase.name(),
+                "scope": if prepared_scope { "prepared" } else { "active" },
+                "limit_bytes": record.memory_limit_bytes,
+                "sample_valid": observed.is_some(),
+                "current_bytes": observed.map(|(bytes, _)| bytes),
+                "populated": observed.map(|(_, populated)| populated),
+            });
+        }
+        snapshot
+    }
+
+    fn set_pressure(&mut self, pressure: bool) {
+        self.pressure = pressure;
+        if pressure
+            && let Some(record) = &mut self.record
+            && !record.phase.terminal()
+            && !record.cancelled
+            && record.slot.as_ref().is_some_and(|slot| !slot.claimed())
+        {
+            record.cancel();
+            self.evictions = self.evictions.saturating_add(1);
+        }
+    }
 }
 
 pub(crate) struct FreshFixture {
@@ -349,6 +404,7 @@ impl FreshFixture {
             ["/bin/probe"] if benchmark => "benchmark",
             ["/bin/probe", "--verify-workload-fixture"] => "once",
             ["/bin/probe", "--verify-workload-fixture", "--hold"] => "hold",
+            ["/bin/probe", "--verify-workload-fixture", "--memory-canary"] => "memory-canary",
             ["/bin/probe", "--verify-workload-fixture", "--fail"] => "fail",
             ["/bin/probe", "--verify-workload-fixture", extra] if self.allow_crash => extra
                 .strip_prefix("--")
@@ -374,7 +430,7 @@ impl FreshFixture {
         if prepared
             && (bridge
                 || spec.limits.memory_bytes > SLOT_MEMORY_LIMIT
-                || !matches!(mode, "once" | "benchmark"))
+                || !matches!(mode, "once" | "memory-canary" | "benchmark"))
         {
             return Err((
                 "unsupported_option",
@@ -424,6 +480,12 @@ impl FreshFixture {
         if ledger.closing {
             return Err(("busy", "fresh fixture is draining"));
         }
+        if prepared && ledger.pressure {
+            return Err((
+                "memory_pressure",
+                "prepared admission paused under pressure",
+            ));
+        }
         if request.sequence <= ledger.highest_sequence {
             return Err((
                 "stale_sequence",
@@ -457,6 +519,7 @@ impl FreshFixture {
             slot: prepared.then(|| Slot::new(spec_digest(spec))),
             slot_expires: prepared.then(|| Instant::now() + SLOT_TTL),
             slot_expired: false,
+            memory_limit_bytes: spec.limits.memory_bytes,
             cancelled: false,
             control: None,
             stdout: Capture::default(),
@@ -738,6 +801,9 @@ impl FreshFixture {
                 let request: Claim = parse(frame)?;
                 let expires = deadline(request.budget_ms)?;
                 check(&guard, &request.handle)?;
+                if guard.pressure {
+                    return Err(("memory_pressure", "prepared claim paused under pressure"));
+                }
                 if guard.closing || Instant::now() >= expires {
                     return Err(("slot_unavailable", "prepared claim is no longer admissible"));
                 }
@@ -769,6 +835,21 @@ impl FreshFixture {
                 record.change(Phase::Claimed);
                 self.changed.notify_all();
                 Ok((Kind::State, record.state()))
+            }
+            Kind::Memory => {
+                let request: MemoryRequest = parse(frame)?;
+                let expires = deadline(request.budget_ms)?;
+                if request.boot_id != boot {
+                    return Err(("stale_generation", "unexpected boot ID"));
+                }
+                if Instant::now() >= expires {
+                    return Err(("deadline_exceeded", "memory operation budget elapsed"));
+                }
+                if let Some(pressure) = request.pressure {
+                    guard.set_pressure(pressure);
+                    self.changed.notify_all();
+                }
+                Ok((Kind::Memory, guard.memory_snapshot()))
             }
             Kind::Status | Kind::Cancel => {
                 let request: Control = parse(frame)?;

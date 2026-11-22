@@ -84,6 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(value) if value == "--bridge" && args.next().is_none() => "bridge",
                 Some(value) if value == "--bridge-hold" && args.next().is_none() => "bridge-hold",
                 Some(value) if value == "--flood" && args.next().is_none() => "flood",
+                Some(value) if value == "--memory-canary" && args.next().is_none() => {
+                    "memory-canary"
+                }
                 Some(value) if value == "--exhaust-memory" && args.next().is_none() => {
                     "exhaust-memory"
                 }
@@ -108,6 +111,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let memory = vec![0x5au8; 48 * 1024 * 1024];
                     std::hint::black_box(&memory);
                     return Err("fixture survived unexpected memory pressure".into());
+                }
+                "memory-canary" => {
+                    let mut memory = vec![0x5au8; 8 * 1024 * 1024];
+                    std::hint::black_box(&mut memory);
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    if memory.iter().any(|&byte| byte != 0x5a) {
+                        return Err("workload memory canary changed".into());
+                    }
+                    println!("verified live memory canary");
                 }
                 _ => {}
             }

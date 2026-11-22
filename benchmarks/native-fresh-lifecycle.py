@@ -229,6 +229,120 @@ def prepared_samples(channel, boot_id, args, scenario, report, connect_peer):
     print(f'Completed prepared no-network API: {args.samples} samples', flush=True)
 
 
+def memory_pressure_check(channel, boot_id, scenario, report, footprint, connect_peer):
+    rows = report['memory_pressure'] = {}
+
+    def memory(label, **command):
+        kind, snapshot = call(channel, 19, {'boot_id': boot_id, 'budget_ms': 1000, **command})
+        if kind != 19:
+            raise RuntimeError(f'memory operation failed: {snapshot}')
+        rows[label] = snapshot
+        return snapshot
+
+    def empty(label):
+        snapshot = memory(label)
+        if snapshot['prepared'] is not None or snapshot['active'] is not None:
+            raise RuntimeError(f'resources remain after verified cleanup: {snapshot}')
+
+    empty('empty_initial')
+    kind, stale = call(channel, 19, {'boot_id': '00' * 16, 'budget_ms': 1000, 'pressure': True})
+    if kind != 15 or stale['code'] != 'stale_generation':
+        raise RuntimeError(f'memory control accepted a stale generation: {stale}')
+    rows['idle_footprint'] = footprint('empty')
+    request, ready, rows['first_prepare_ns'] = prepare(channel, boot_id, scenario, 1)
+    snapshot = memory('ready')
+    reserve = snapshot['prepared']
+    if (snapshot['active'] is not None or not reserve['sample_valid']
+            or not reserve['populated'] or reserve['scope'] != 'prepared'
+            or reserve['limit_bytes'] != request['spec']['limits']['memory_bytes']):
+        raise RuntimeError(f'prepared memory was not accounted for: {snapshot}')
+    rows['ready_footprint'] = footprint('ready')
+    started = time.monotonic_ns()
+    snapshot = memory('evict_requested', pressure=True)
+    if snapshot['pressure_evictions'] != 1:
+        raise RuntimeError(f'unused prepared slot was not selected for eviction: {snapshot}')
+    state = wait_state(channel, ready, lambda value: value['cleanup'] == 'complete')
+    rows['eviction_cleanup_ns'] = time.monotonic_ns() - started
+    if state['exec'] == 'confirmed' or state['prepared_claimed']:
+        raise RuntimeError(f'evicted reserve executed: {state}')
+    empty('empty_after_eviction')
+    blocked = launch_request(boot_id, scenario, 'none', 2)
+    kind, error = call(channel, 17, blocked)
+    if kind != 15 or error['code'] != 'memory_pressure':
+        raise RuntimeError(f'prepared admission was not paused: {error}')
+    rows['paused_admission'] = error
+    state, rows['fresh_after_eviction_admission_ns'] = state_sample(channel, boot_id, scenario, 'none', 2)
+    if state['exec'] != 'confirmed' or state['exit'] != {'code': 0} or state['cleanup'] != 'complete':
+        raise RuntimeError(f'fresh work under pressure failed: {state}')
+    memory('cleared', pressure=False)
+
+    canary = {**scenario, 'manifest_digest': report['fixture_digest'],
+              'command': ['/bin/probe', '--verify-workload-fixture', '--memory-canary'],
+              'container_limits': {**scenario['container_limits'], 'memory_bytes': 32 * 1024 * 1024}}
+    request, state, _ = prepare(channel, boot_id, canary, 3)
+    kind, claimed = call(channel, 18, {'handle': state['handle'], 'spec': request['spec'], 'budget_ms': 3000})
+    if kind != 13 or not claimed['prepared_claimed']:
+        raise RuntimeError(f'live memory canary claim failed: {claimed}')
+    deadline = time.monotonic() + 1
+    rows['active_observations'] = []
+    while time.monotonic() < deadline:
+        active = memory('claimed_active')['active']
+        rows['active_observations'].append(active)
+        if active and active['sample_valid'] and active['populated'] and active['current_bytes'] >= 4 * 1024 * 1024:
+            break
+        if not active:
+            break
+        time.sleep(0.01)
+    else:
+        active = None
+    if not active:
+        _, rows['canary_status'] = call(channel, 9, {'handle': claimed['handle'], 'budget_ms': 1000})
+        for stream in ('stdout', 'stderr'):
+            _, result = call(channel, 12, {'handle': claimed['handle'], 'budget_ms': 1000,
+                                           'stream': stream, 'offset': 0, 'max_bytes': 4096})
+            rows[f'canary_{stream}'] = base64.b64decode(result['data']).decode(errors='replace')
+        raise RuntimeError('claimed reserve never reported its live allocation')
+    snapshot = memory('pressure_during_active', pressure=True)
+    if snapshot['active'] is None or snapshot['prepared'] is not None or snapshot['pressure_evictions'] != 1:
+        raise RuntimeError(f'pressure disturbed active workload ownership: {snapshot}')
+    completed = wait_state(channel, claimed, lambda value: value['cleanup'] == 'complete')
+    kind, output = call(channel, 12, {'handle': completed['handle'], 'budget_ms': 3000,
+                                      'stream': 'stdout', 'offset': 0, 'max_bytes': 4096})
+    if (completed['exit'] != {'code': 0} or kind != 14
+            or b'verified live memory canary' not in base64.b64decode(output['data'])):
+        raise RuntimeError(f'live workload did not preserve its data: {completed}')
+    rows['live_canary_cleanup'] = completed
+    empty('empty_after_active')
+    memory('refill_allowed', pressure=False)
+    request, ready, rows['refill_ns'] = prepare(channel, boot_id, scenario, 4)
+    kind, claimed = call(channel, 18, {'handle': ready['handle'], 'spec': request['spec'], 'budget_ms': 3000})
+    if kind != 13:
+        raise RuntimeError(f'refilled slot claim failed: {claimed}')
+    completed = wait_state(channel, claimed, lambda value: value['cleanup'] == 'complete')
+    if completed['exec'] != 'confirmed' or completed['exit'] != {'code': 0}:
+        raise RuntimeError(f'refilled slot did not complete: {completed}')
+    empty('empty_final')
+    request, ready, _ = prepare(channel, boot_id, scenario, 5)
+    claim_body = {'handle': ready['handle'], 'spec': request['spec'], 'budget_ms': 3000}
+    with connect_peer() as peer, ThreadPoolExecutor(max_workers=2) as clients:
+        admission = clients.submit(call, channel, 18, claim_body)
+        pressure = clients.submit(
+            call, peer, 19, {'boot_id': boot_id, 'budget_ms': 1000, 'pressure': True},
+        )
+        kind, result = admission.result()
+        pressure_kind, snapshot = pressure.result()
+    rows['racing_pressure'] = snapshot
+    if pressure_kind != 19 or kind not in (13, 15) or (kind == 15 and result['code'] != 'memory_pressure'):
+        raise RuntimeError(f'inconsistent pressure and claim race: {result} {snapshot}')
+    completed = wait_state(channel, result if kind == 13 else ready,
+                           lambda value: value['cleanup'] == 'complete')
+    rows['pressure_claim_race_terminal'] = completed
+    if (kind == 13) != (completed['exec'] == 'confirmed' and completed['exit'] == {'code': 0}):
+        raise RuntimeError(f'pressure changed the winning operation: {completed}')
+    empty('empty_after_race')
+    print('Verified prepared eviction, active allocation canary and refill', flush=True)
+
+
 def run_samples(channel, boot_id, args, scenario, endpoint, key_file, peer, report):
     sequence = 0
     for network in scenario['networks']:
@@ -356,11 +470,18 @@ def session(args):
                             report['host_before'] = process_observation(
                                 vm.pid, args.network_helper, args.output / 'footprint-before.json', adapter['run'],
                             )
-                            if args.prepared:
+                            def connect_peer():
+                                peer, _ = open_native(endpoint, key, vm, args.vmm, adapter['current_executable'])
+                                return peer
+                            if args.memory_pressure:
+                                def footprint(label):
+                                    return process_observation(
+                                        vm.pid, args.network_helper,
+                                        args.output / f'footprint-{label}.json', adapter['run'],
+                                    )
+                                memory_pressure_check(channel, boot_id, scenario, report, footprint, connect_peer)
+                            elif args.prepared:
                                 channel.settimeout(9)
-                                def connect_peer():
-                                    peer, _ = open_native(endpoint, key, vm, args.vmm, adapter['current_executable'])
-                                    return peer
                                 prepared_samples(channel, boot_id, args, scenario, report, connect_peer)
                             else:
                                 run_samples(channel, boot_id, args, scenario, endpoint, key_file, vm.pid, report)
@@ -440,7 +561,9 @@ def main():
     parser.add_argument('--samples', type=int, default=100)
     parser.add_argument('--runtime-ms', type=int, default=180_000)
     parser.add_argument('--phase-trace', action='store_true')
-    parser.add_argument('--prepared', action='store_true', help='measure the one-slot no-network experiment')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--prepared', action='store_true', help='measure the one-slot no-network experiment')
+    modes.add_argument('--memory-pressure', action='store_true', help='verify the authenticated pressure fixture')
     parser.add_argument('--expedited-rcu', action='store_true',
                         help='change the benchmark guest kernel only for an RCU diagnostic')
     args = parser.parse_args()

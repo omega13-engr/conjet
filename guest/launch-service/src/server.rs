@@ -55,6 +55,7 @@ impl Server {
                     "fresh_arm64_fixture",
                     "private_bridge_fixture",
                     "prepared_arm64_fixture",
+                    "native_memory_fixture",
                 ];
             }
             return &[
@@ -62,6 +63,7 @@ impl Server {
                 "shutdown",
                 "fresh_arm64_fixture",
                 "prepared_arm64_fixture",
+                "native_memory_fixture",
             ];
         }
         CAPABILITIES
@@ -125,6 +127,7 @@ impl Server {
                         | Kind::Output
                         | Kind::Prepare
                         | Kind::Claim
+                        | Kind::Memory
                 )
             {
                 fresh.dispatch(frame, &mut stream, &boot_id)?;

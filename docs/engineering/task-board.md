@@ -48,44 +48,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-010
-
-Title: Connect launch-service cgroups to memory accounting and eviction
-
-Description: Register active workloads and prepared reserves with the memory controller. Deliver pressure-eviction and allocation/free/reuse evidence.
-
-Development prerequisite: SPEED-009.
-
-Final qualification prerequisites: SPEED-008 and the applicable SPEED-011 gates.
-
-Acceptance Criteria:
-
-- Controller telemetry distinguishes active workloads, prepared reserve, and empty scopes.
-- Pressure destroys unused slots before reclaiming active demand; accounting is bounded.
-- Existing ownership, host-granule, backing-release, and service-pressure safeguards remain valid.
-- Exercise allocation/free/reuse, data canaries, pool eviction, rebuild, and launch after pressure.
-- Measure idle footprint with/without slots and verify cleanup without disturbing installed services.
-
-Problem and Evidence: Unregistered runtime cgroups could be mistaken for idle
-capacity; prepared resources consume memory even when launch latency is low.
-
-Approach:
-
-1. Expose separate active and prepared cgroup telemetry with validity indicators; verify idle classification against live workloads.
-2. Stop admitting slots and destroy unused slots under pressure; let existing ownership-based reclamation release backing.
-3. Run live canaries through allocation/free, eviction, fresh fallback, and preparation rebuild; compare footprint with zero and populated slots.
-
-Evidence: Pending memory-ledger snapshots, native/HVF regressions, workload
-correctness results, footprint measurements, and eviction traces.
-
-Source: [Memory integration](speed-engineering-plan.md#dynamic-memory-integration),
-[memory debugging](../dynamic-memory-debugging.md),
-[backing reclamation](../jetstream-host-backing-reclaim.md).
-
-Review: Pending; inspect active-demand classification, pressure races, and unsafe discard counters.
-
-Next Action: Add explicit active-workload and prepared-reserve telemetry to the guest memory snapshot contract.
-
 ### SPEED-011
 
 Title: Run the qualification matrix and publish measured verdicts
@@ -353,6 +315,64 @@ way to verify the official competitor's guest cleanup. Enable authorized
 energy sampling and rerun the matched qualification before product integration
 or release. Experimental SPEED-009 and SPEED-010 proceed under their
 development prerequisites.
+
+### SPEED-010
+
+Title: Connect launch-service cgroups to memory accounting and eviction
+
+Description: Register active workloads and prepared reserves with the memory controller. Deliver pressure-eviction and allocation/free/reuse evidence.
+
+Development prerequisite: SPEED-009 (DONE).
+
+Final qualification prerequisites: SPEED-008 and the applicable SPEED-011 gates.
+
+Acceptance Criteria:
+
+- Controller telemetry distinguishes active workloads, prepared reserve, and empty scopes.
+- Pressure destroys unused slots before reclaiming active demand; accounting is bounded.
+- Existing ownership, host-granule, backing-release, and service-pressure safeguards remain valid.
+- Exercise allocation/free/reuse, data canaries, pool eviction, rebuild, and launch after pressure.
+- Measure idle footprint with/without slots and verify cleanup without disturbing installed services.
+
+Problem and Evidence: Unregistered runtime cgroups could be mistaken for idle
+capacity; prepared resources consume memory even when launch latency is low.
+
+Approach:
+
+1. Expose separate active and prepared cgroup telemetry with validity indicators; verify idle classification against live workloads.
+2. Stop admitting slots and destroy unused slots under pressure; let existing ownership-based reclamation release backing.
+3. Run live canaries through allocation/free, eviction, fresh fallback, and preparation rebuild; compare footprint with zero and populated slots.
+
+Evidence: The isolated native controller now reports active and prepared
+ownership separately, including sample validity, current cgroup charge,
+population, and limit. A claimed reservation becomes active before release
+and retains its cgroup until teardown. The authenticated pressure input
+evicts unused slots and pauses preparation. The Docker-only idle controller
+cannot classify the isolated native mode. Existing page ownership and
+backing release paths are unchanged.
+
+Two live boots verified eviction in 1.430 and 1.681 ms through cleanup,
+explicit fresh work under pressure, and refill in 2.056 and 1.640 ms.
+An active 8 MiB byte canary reported 8,642,560 charged bytes and survived
+the pressure signal. The recorded claim/pressure race produced a single
+winning claim and verified cleanup. VMM footprint increased by 49,152
+and 81,920 bytes between empty and ready observations. The 50-operation
+prepared regression, workspace tests, Linux ARM64 Clippy and Python
+byte compilation passed. The initial too-large integer canary failures
+and successful reruns are preserved under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-010`.
+These runs used an authenticated pressure signal. Automatic Linux
+pressure detection and live pressure-specific qualification remain open.
+
+Source: [Memory integration](speed-engineering-plan.md#dynamic-memory-integration),
+[memory debugging](../dynamic-memory-debugging.md),
+[backing reclamation](../jetstream-host-backing-reclaim.md).
+
+Review: Checked accounting through cleanup, active protection at claim,
+serialization with pressure, and the opt-in scope of the host guard.
+
+Next Action: Gate prepared admission on guest memory availability and
+verify the isolated path with a constraining Linux balloon target.
 
 ## UNDERREVIEW
 
