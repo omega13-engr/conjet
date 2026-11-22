@@ -7,8 +7,17 @@ fn main() {
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::path::Path;
-    conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"))?;
-    report_resources()?;
+    let mut args = std::env::args_os().skip(1);
+    match args.next() {
+        None => {
+            conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"))?;
+            report_resources()?;
+        }
+        Some(argument) if argument == "--check-fresh-kernel" && args.next().is_none() => {
+            conjet_launch_service::kernel_fixture::check()?;
+        }
+        _ => return Err("unexpected launchd argument".into()),
+    }
     // The isolated transport fixture can run as the guest init. A service
     // invoked by a regular guest supervisor only returns to that supervisor.
     if std::process::id() == 1 {

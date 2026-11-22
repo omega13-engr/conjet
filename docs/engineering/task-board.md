@@ -405,7 +405,18 @@ requests still receive an unavailable response until fresh execution is
 wired. The service advertises its transport fixture capabilities only.
 Fifteen Rust tests, scoped Clippy, and the Linux ARM64 cross-check passed.
 Logs are in `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-005/spec`.
-Resource creation, exec, supervision, cleanup, and live fixture tests remain pending.
+The kernel fixture created a private cgroup v2 mount in the disposable
+ARM64 guest, installed memory, pids and CPU controls on a workload leaf,
+created a namespaced child with `clone3` and `CLONE_INTO_CGROUP`, obtained a
+pidfd, and reaped the child. It verified that the cgroup was empty and
+removed the leaf and mount before guest poweroff. Production observations
+matched. The binary was built with the pinned ARM64 musl compiler image.
+The first musl attempt caught a signedness mismatch in `statfs.f_type`
+that the GNU target had accepted. The corrected native boot report,
+commands, hashes and failure log are retained under `SPEED-005`.
+
+Image resolution, private writable rootfs, workload credentials,
+seccomp, exec, output and service lifecycle wiring remain pending.
 
 Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 [guest init](../../guest/init/conjet-init.c).

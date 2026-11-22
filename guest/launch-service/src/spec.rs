@@ -10,6 +10,7 @@ pub const WORKLOAD_GID: u32 = 65_532;
 pub const MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIDS: u32 = 64;
+pub const MIN_CPU_MILLICORES: u32 = 10;
 pub const MAX_CPU_MILLICORES: u32 = 1_000;
 const MAX_ENTRIES: usize = 32;
 const MAX_VALUE_BYTES: usize = 1_024;
@@ -138,7 +139,7 @@ impl LaunchRequest {
         let limits = spec.limits;
         if !(MIN_MEMORY_BYTES..=MAX_MEMORY_BYTES).contains(&limits.memory_bytes)
             || !(1..=MAX_PIDS).contains(&limits.pids)
-            || !(1..=MAX_CPU_MILLICORES).contains(&limits.cpu_millicores)
+            || !(MIN_CPU_MILLICORES..=MAX_CPU_MILLICORES).contains(&limits.cpu_millicores)
         {
             return Err(SpecError::Resources);
         }

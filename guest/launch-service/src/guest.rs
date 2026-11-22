@@ -112,10 +112,10 @@ pub fn serve(key_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         match thread::Builder::new()
             .name("launch-connection".into())
             .spawn(move || {
-                if let Err(error) = worker_server.serve(stream) {
-                    if !worker_server.shutdown().requested() {
-                        eprintln!("launch connection closed: {error}");
-                    }
+                if let Err(error) = worker_server.serve(stream)
+                    && !worker_server.shutdown().requested()
+                {
+                    eprintln!("launch connection closed: {error}");
                 }
             }) {
             Ok(worker) => workers.push(worker),
