@@ -46,94 +46,19 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
   those releases accordingly. Production signing, notarization, stapling, final
   DMG checksums, and Homebrew validation remain release gates.
 
+## Release scope audit
+
+| Tasks | Retained result and use in this release |
+| --- | --- |
+| SPEED-000 | Session-scoped launchers and private endpoints. Candidate Docker isolation was rerun with final source; production observations matched. |
+| SPEED-001, SPEED-002 | Distinct exec, readiness, removal and cleanup observations, with the pinned baseline retained. Docker acknowledgement and native verified cleanup use separate boundaries. |
+| SPEED-003, SPEED-004 | Bounded authenticated protocol, single-owner contract, v1 framing and generation checks. The product capability adds Inspect and unique operation IDs. |
+| SPEED-005, SPEED-006 | Restricted Linux execution path, explicit failure and recovery. Final product canaries reran isolation, output, cancellation, teardown and recovery checks. |
+| SPEED-007 | Private bridge fixture retained for research. The product explicitly rejects bridge and removes the guest network device. |
+| SPEED-008 | Original revise verdict recorded and unresolved. Comparative requirements deferred. |
+| SPEED-009, SPEED-010 | One-slot fixture and backing-ownership evidence retained. SPEED-012 integrates the relevant semantics with the product session. |
+
 ## BACKLOG
-
-### SPEED-011
-
-Title: Run the qualification matrix and publish measured verdicts
-
-Description: Create docs/engineering/speed-qualification.md linking raw reports and pass/fail results for each proposed performance claim.
-
-Is blocked by task: SPEED-012 product path for local acceptance. The deferred
-comparative matrix additionally requires SPEED-008.
-
-Acceptance Criteria:
-
-Required for experimental release: frozen M1 Pro product candidate,
-reproducible fresh/prepared API and CLI samples, failures, refill, misses,
-churn, CPU and memory observations, pressure and cleanup evidence, and
-declared operating limits.
-
-Deferred comparative research criteria:
-
-- Follow the plan's minimum sample/session/hardware matrix and predefined statistical method.
-- Report fresh, prepared, CLI, sustained churn, builds, and running-service scenarios separately.
-- Include pool misses/refill, CPU, memory, energy, host contention, and memory pressure.
-- Prepared sub-1 ms claims meet the declared p99 gate; fresh superiority meets
-  equivalent-work latency and throughput gates without correctness regressions.
-- Record go/no-go per claim; a missed target is reported honestly rather than concealed.
-
-Problem and Evidence: The 1,000-microsecond budget is a research allowance, not a
-measurement; neither fresh nor prepared superiority is established.
-
-Approach:
-
-1. Run the predeclared sample/session/hardware matrix for fresh, prepared, CLI, churn, builds, and services under reclaim.
-2. Record preparation/refill, misses, failures, CPU, memory, energy, contention, and pressure; profile and change one demonstrated bottleneck at a time.
-3. Evaluate the sub-1 ms prepared p99 gate and equivalent-work fresh superiority independently; document failed targets and uncertainty.
-
-Evidence: The [qualification preflight](speed-qualification.md) links
-the local experimental reports and lists the missing inputs. The
-required raw qualifying matrix and reviewed claim verdict remain pending.
-
-Source: [Latency budget](speed-engineering-plan.md#experimental-latency-budget),
-[claim policy](speed-engineering-plan.md#verification-and-claim-policy),
-[benchmark package](../../benchmarks/README.md).
-
-Review: Pending; independently check repeatability, equivalent work, tail latency,
-sustainable throughput, and memory/energy tradeoffs.
-
-Next Action: Freeze the candidate revision and qualification scenario manifest before collecting results.
-
-### SPEED-013
-
-Title: Open and qualify the speed enhancement PR to main
-
-Description: Submit the completed enhancement with its final benchmark and
-correctness evidence, then resolve review and CI findings before merging.
-
-Is blocked by task: SPEED-012 and SPEED-011 required experimental checks.
-
-Acceptance Criteria:
-
-- Prior development and required local gates are audited with passing evidence
-  and verified pushed commits. SPEED-008 continues to record its revise verdict.
-- Final qualification reports identify the tested revision and exact claim scope;
-  no required check is skipped or unresolved.
-- PR targets main from enhancement/speed-up and links the plan, board, reports,
-  compatibility limitations, and rollback procedure.
-- Required CI and review pass; changes during review receive applicable validation
-  and are pushed as additional increments before merge.
-
-Problem and Evidence: A pushed implementation branch alone does not establish
-reviewed integration or release readiness.
-
-Approach:
-
-1. Audit every task and final gate against the remote branch revision.
-2. Open the PR with concrete behavior, benchmark results, and validation evidence.
-3. Resolve findings, rerun affected checks, push increments, and merge only when
-   repository review and CI requirements are satisfied.
-
-Evidence: Pending gate audit, remote revision, PR URL, CI results, and merge revision.
-
-Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-policy),
-[release process](../release.md).
-
-Review: Pending; verify all development gates before opening the PR and all CI
-and review requirements before merge.
-
-Next Action: Audit SPEED-000 through SPEED-012 after their final passing evidence is available.
 
 ### SPEED-014
 
@@ -187,82 +112,46 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-### SPEED-012
+### SPEED-013
 
-Title: Expose the qualified native launch mode and document release scope
+Title: Open and qualify the speed enhancement PR to main
 
-Description: Integrate the passing native API, CLI, and status behavior; deliver E2E evidence, rollback instructions, and an explicit Docker-integration decision.
+Description: Submit the completed enhancement with its final benchmark and
+correctness evidence, then resolve review and CI findings before merging.
 
-Is blocked by task: reviewed implementation through SPEED-007 and isolated
-SPEED-009/SPEED-010 evidence (available). SPEED-011 local acceptance gates the PR.
+Is blocked by task: SPEED-012 and SPEED-011 required experimental checks.
 
 Acceptance Criteria:
 
-- Native API/CLI/status surfaces identify runtime owner, fresh/prepared mode,
-  preparation costs, misses, and unsupported features clearly.
-- Existing Docker/containerd behavior passes relevant regression checks.
-- Screenshot-backed E2E validates affected user-visible surfaces using isolated resources.
-- Docker routing is enabled only after a separately documented ownership and
-  compatibility gate; otherwise retain the existing Docker lane and record follow-up scope.
-- Document rollback, evidence-backed claims, remaining limits, and all temporary-resource cleanup.
+- Prior development and required local gates are audited with passing evidence
+  and verified pushed commits. SPEED-008 continues to record its revise verdict.
+- Final qualification reports identify the tested revision and exact claim scope;
+  no required check is skipped or unresolved.
+- PR targets main from enhancement/speed-up and links the plan, board, reports,
+  compatibility limitations, and rollback procedure.
+- Required CI and review pass; changes during review receive applicable validation
+  and are pushed as additional increments before merge.
 
-Problem and Evidence: A fast prototype does not establish product compatibility,
-operational readiness, or a safe unified Docker lifecycle.
+Problem and Evidence: A pushed implementation branch alone does not establish
+reviewed integration or release readiness.
 
 Approach:
 
-1. Expose runtime owner, launch mode, preparation state, misses, and errors through the selected native surfaces.
-2. Run existing Docker regressions and isolated native E2E flows; capture screenshots for affected UI/status surfaces and test rollback.
-3. Write docs/engineering/speed-release-scope.md with supported configurations and measured claims; leave Docker routing on its existing engine unless a separate compatibility gate is approved and passed.
+1. Audit every task and final gate against the remote branch revision.
+2. Open the PR with concrete behavior, benchmark results, and validation evidence.
+3. Resolve findings, rerun affected checks, push increments, and merge only when
+   repository review and CI requirements are satisfied.
 
-Evidence: The 2026-11-23 scope revision separates local product and
-release acceptance from the deferred comparative gates. Local and remote
-development heads agreed at `3aaf062` before the revision. Reviewed the
-original qualification criteria and retained evidence references.
+Evidence: Pending gate audit, remote revision, PR URL, CI results, and merge revision.
 
-The foreground native session exposes fresh, prepare, claim, status, cancellation,
-memory pressure and stop through the authenticated API and `conjet native
---experimental`. Its Linux guest accepts a pinned static ARM64 executable with
-no arguments or network. The host creates no Docker or memory socket in this
-mode. CLI admission is nonblocking and it never resubmits an indeterminate
-execution. The independent Docker lane retains its existing ownership.
+Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-policy),
+[release process](../release.md).
 
-M1 Pro validation used `swift test --build-system native` (440 tests, two
-skips), `cargo test --locked --workspace` (159 passing, three entitlement
-tests excluded from the default run), strict ARM64 Linux Clippy, Python
-compilation and formatting. The strict host Clippy diagnostics also
-appear on the archived `a9f06d9` baseline. The live product probe
-(`benchmarks/native-product.py`) checked no-network isolation, fresh and
-prepared execution, concurrent claims, eviction, active memory preservation,
-bounded output, disconnect replay/cancellation, expiration and verified
-cleanup. Its two guests both negotiated page reporting with zero
-reclamation errors. The separate branch-built `conjet-speedup` Docker
-smoke passed. Both launchers recorded matching production snapshots.
-Logs, partial runs, raw samples, and Docker evidence are under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-012`.
-The development timings were collected with other builds active. The
-source implementation was pushed as `ff1877c`.
+Review: Pending; verify all development gates before opening the PR and all CI
+and review requirements before merge.
 
-The release stage builds and bundles the static Linux guest beside the VMM.
-An isolated ARM64 app and DMG built with the repository scripts passed
-deep signature validation, byte comparison of the DMG-extracted CLI, VMM
-and guest against staging, DMG verification, SHA-256 verification, and
-Formula/Cask Ruby validation. `diskutil image attach --readOnly` mounted the
-DMG on this macOS host after legacy `hdiutil attach` returned permission
-denied. The local artifact used ad-hoc signing for rehearsal only.
-Logs are in the SPEED-012 evidence directory. No app was registered or
-launched. Final measurements use the packaged CLI and the app-sealed guest.
-
-Source: [Architecture ownership](speed-engineering-plan.md#architecture-and-ownership),
-[final recommendation](speed-engineering-plan.md#final-recommendation),
-[repository instructions](../../AGENTS.md).
-
-Review: Checked native endpoint ownership and key permissions, operation IDs
-and replay, bounded admission and output, expiry, and guest/host cleanup.
-Packaging and final local qualification review remain pending.
-
-Next Action: Integrate the bounded no-network experiment with explicit opt-in
-and exercise the shipping API and CLI before SPEED-011 local acceptance.
+Next Action: Open the final experimental PR after the local acceptance
+audit. Collect required CI and independent review before merging.
 
 ### SPEED-008
 
@@ -374,6 +263,140 @@ acceptance without changing the SPEED-008 verdict.
 None.
 
 ## DONE
+
+### SPEED-012
+
+Title: Expose the qualified native launch mode and document release scope
+
+Description: Integrate the passing native API, CLI, and status behavior; deliver E2E evidence, rollback instructions, and an explicit Docker-integration decision.
+
+Is blocked by task: reviewed implementation through SPEED-007 and isolated
+SPEED-009/SPEED-010 evidence (available). SPEED-011 local acceptance gates the PR.
+
+Acceptance Criteria:
+
+- Native API/CLI/status surfaces identify runtime owner, fresh/prepared mode,
+  preparation costs, misses, and unsupported features clearly.
+- Existing Docker/containerd behavior passes relevant regression checks.
+- Screenshot-backed E2E validates affected user-visible surfaces using isolated resources.
+- Docker routing is enabled only after a separately documented ownership and
+  compatibility gate; otherwise retain the existing Docker lane and record follow-up scope.
+- Document rollback, evidence-backed claims, remaining limits, and all temporary-resource cleanup.
+
+Problem and Evidence: A fast prototype does not establish product compatibility,
+operational readiness, or a safe unified Docker lifecycle.
+
+Approach:
+
+1. Expose runtime owner, launch mode, preparation state, misses, and errors through the selected native surfaces.
+2. Run existing Docker regressions and isolated native E2E flows; capture screenshots for affected UI/status surfaces and test rollback.
+3. Write docs/engineering/speed-release-scope.md with supported configurations and measured claims; leave Docker routing on its existing engine unless a separate compatibility gate is approved and passed.
+
+Evidence: The 2026-11-23 scope revision separates local product and
+release acceptance from the deferred comparative gates. Local and remote
+development heads agreed at `3aaf062` before the revision. Reviewed the
+original qualification criteria and retained evidence references.
+
+The foreground native session exposes fresh, prepare, claim, status, cancellation,
+memory pressure and stop through the authenticated API and `conjet native
+--experimental`. Its Linux guest accepts a pinned static ARM64 executable with
+no arguments or network. The host creates no Docker or memory socket in this
+mode. CLI admission is nonblocking and it never resubmits an indeterminate
+execution. The independent Docker lane retains its existing ownership.
+
+M1 Pro validation used `swift test --build-system native` (440 tests, two
+skips), `cargo test --locked --workspace` (159 passing, three entitlement
+tests excluded from the default run), strict ARM64 Linux Clippy, Python
+compilation and formatting. The strict host Clippy diagnostics also
+appear on the archived `a9f06d9` baseline. The live product probe
+(`benchmarks/native-product.py`) checked no-network isolation, fresh and
+prepared execution, concurrent claims, eviction, active memory preservation,
+bounded output, disconnect replay/cancellation, expiration and verified
+cleanup. Its two guests both negotiated page reporting with zero
+reclamation errors. The separate branch-built `conjet-speedup` Docker
+smoke passed. Both launchers recorded matching production snapshots.
+Logs, partial runs, raw samples, and Docker evidence are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-012`.
+The development timings were collected with other builds active. The
+source implementation was pushed as `ff1877c`.
+
+The release stage builds and bundles the static Linux guest beside the VMM.
+An isolated ARM64 app and DMG built with the repository scripts passed
+deep signature validation, byte comparison of the DMG-extracted CLI, VMM
+and guest against staging, DMG verification, SHA-256 verification, and
+Formula/Cask Ruby validation. `diskutil image attach --readOnly` mounted the
+DMG on this macOS host after legacy `hdiutil attach` returned permission
+denied. The local artifact used ad-hoc signing for rehearsal only.
+Logs are in the SPEED-012 evidence directory. No app was registered or
+launched. Final measurements use the packaged CLI and the app-sealed guest.
+
+Source: [Architecture ownership](speed-engineering-plan.md#architecture-and-ownership),
+[final recommendation](speed-engineering-plan.md#final-recommendation),
+[repository instructions](../../AGENTS.md).
+
+Review: Checked native endpoint ownership and key permissions, operation IDs
+and replay, bounded admission and output, expiry, and guest/host cleanup.
+Verified staged app and binary signatures, packaged/extracted byte matches
+and a successful native run from the DMG layout with default tool resolution.
+The changed surface is a JSON CLI and API with no graphical UI screenshot
+target. A second mount attempt raised a system prompt, was canceled, and
+the owned disk image was ejected. CI covers the mounted DMG contents.
+
+Next Action: Carry the validated experimental runtime and release
+documentation into SPEED-013.
+
+### SPEED-011
+
+Title: Run the qualification matrix and publish measured verdicts
+
+Description: Create docs/engineering/speed-qualification.md linking raw reports and pass/fail results for each proposed performance claim.
+
+Is blocked by task: SPEED-012 product path for local acceptance (DONE).
+The deferred comparative matrix additionally requires SPEED-008.
+
+Acceptance Criteria:
+
+Required for experimental release: frozen M1 Pro product candidate,
+reproducible fresh/prepared API and CLI samples, failures, refill, misses,
+churn, CPU and memory observations, pressure and cleanup evidence, and
+declared operating limits.
+
+Deferred comparative research criteria:
+
+- Follow the plan's minimum sample/session/hardware matrix and predefined statistical method.
+- Report fresh, prepared, CLI, sustained churn, builds, and running-service scenarios separately.
+- Include pool misses/refill, CPU, memory, energy, host contention, and memory pressure.
+- Prepared sub-1 ms claims meet the declared p99 gate; fresh superiority meets
+  equivalent-work latency and throughput gates without correctness regressions.
+- Record go/no-go per claim; a missed target is reported honestly rather than concealed.
+
+Problem and Evidence: The 1,000-microsecond budget is a research allowance, not a
+measurement; neither fresh nor prepared superiority is established.
+
+Approach:
+
+1. Run the predeclared sample/session/hardware matrix for fresh, prepared, CLI, churn, builds, and services under reclaim.
+2. Record preparation/refill, misses, failures, CPU, memory, energy, contention, and pressure; profile and change one demonstrated bottleneck at a time.
+3. Evaluate the sub-1 ms prepared p99 gate and equivalent-work fresh superiority independently; document failed targets and uncertainty.
+
+Evidence: The [local qualification report](speed-qualification.md) links
+three M1 Pro packaged-candidate sessions, with safety canaries and 2,400
+measured operations passing. The report records the exact executable
+and kernel hashes, latency, refill, misses, throughput, CPU, RSS,
+background contention and raw evidence. The 45-test Swift benchmark package, Go network race suite, and three
+separately entitled memory/backing tests passed. The historical 2.478 ms prepared p99 was
+recomputed from the retained raw samples. The comparative matrix remains
+deferred with its original acceptance criteria and unresolved verdict.
+
+Source: [Latency budget](speed-engineering-plan.md#experimental-latency-budget),
+[claim policy](speed-engineering-plan.md#verification-and-claim-policy),
+[benchmark package](../../benchmarks/README.md).
+
+Review: Verified per-session nearest-rank results against raw samples,
+cleanup boundaries, expected failures, and measured refill throughput.
+Comparative work and its independent review are deferred.
+
+Next Action: Carry the scoped evidence into SPEED-013. Resume comparative work when the deferred inputs become available.
 
 ### SPEED-010
 
