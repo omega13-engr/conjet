@@ -1,7 +1,8 @@
 # Fresh runtime gate
 
 **Decision is revise. SPEED-008 remains INPROGRESS.** The native path
-improved on this Mac. The required equivalent-work qualification is open.
+improved on this Mac. Equivalent-work qualification is unresolved and
+deferred under the authorized opt-in M1 Pro release scope.
 
 ## Comparison criteria
 
@@ -205,7 +206,7 @@ retain separate scopes. Commands, raw samples, failures from earlier
 probes, topology and resource metadata are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/api-churn`.
 
-## Release gate
+## Deferred comparative gate
 
 Proceed requires a verified equivalent cleanup observation for the
 official competitor, a comparison across two supported physical host
@@ -214,6 +215,6 @@ authorized energy measurement. Further qualification also needs matched
 network scope and sustained concurrency beyond this single-active-workload
 fixture. The authorized M1 Pro remains under production load. The
 tick-disabled native trial that stalled remains outside the tested
-configuration. Isolated SPEED-009 and SPEED-010 experiments may proceed.
-The gate still applies to final qualification, product integration, the
-final pull request, merge, signing, publication and superiority claims.
+configuration. The opt-in experiment can progress through its own local
+correctness, compatibility, integration and release checks. This comparative
+gate still applies to any superiority claim.

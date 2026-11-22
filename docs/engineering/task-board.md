@@ -13,9 +13,10 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
   and artifact links are recorded. Targets are not benchmark results.
 - UNDERREVIEW requires an implementation and verification evidence; DONE requires
   acceptance criteria and review to pass. Record blockers and failed experiments.
-- SPEED-009 and SPEED-010 may proceed as isolated experiments while SPEED-008
-  is open. The fresh and final qualification gates remain mandatory for product
-  integration, the final PR, merge, release and performance claims.
+- On 2026-11-23 the user authorized an opt-in M1 Pro experimental release.
+  SPEED-008 remains unresolved and deferred with its revise verdict. SPEED-011
+  tracks local acceptance and carries the original comparative research criteria.
+  SPEED-009 and SPEED-010 DONE evidence covers the isolated implementation only.
 - Preserve the installed runtime and unrelated changes. Use isolated QA resources,
   designated temporary artifact locations, and screenshot evidence where applicable,
   as described in the plan. No persistent prewarming services or startup jobs.
@@ -31,10 +32,9 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
   Use ordinary pushes; do not force-push or include unrelated working-tree files.
 - A failing increment stays INPROGRESS or UNDERREVIEW until fixed. Never mark it
   DONE or claim a passing benchmark because its code was committed or pushed.
-- Open the PR to `main` only after SPEED-000 through SPEED-012 are DONE and all
-  required final benchmark, correctness, compatibility, and review gates pass.
-  Missing hardware coverage, skipped required checks, and failed speed targets
-  remain blockers under this workflow; any scope change must be explicit.
+- Open the PR to `main` only after audited development, local experimental
+  acceptance, Docker compatibility, and final candidate measurement evidence
+  pass. Preserve unresolved comparative research under SPEED-008 and SPEED-011.
 - Prepare the release only after that gate. Choose the next semantic version
   from the final change scope and current release state; do not bump VERSION or
   publish a release tag during intermediate increments.
@@ -54,10 +54,17 @@ Title: Run the qualification matrix and publish measured verdicts
 
 Description: Create docs/engineering/speed-qualification.md linking raw reports and pass/fail results for each proposed performance claim.
 
-Is blocked by task: SPEED-010 for the complete matrix. Fresh qualification
-requires SPEED-008.
+Is blocked by task: SPEED-012 product path for local acceptance. The deferred
+comparative matrix additionally requires SPEED-008.
 
 Acceptance Criteria:
+
+Required for experimental release: frozen M1 Pro product candidate,
+reproducible fresh/prepared API and CLI samples, failures, refill, misses,
+churn, CPU and memory observations, pressure and cleanup evidence, and
+declared operating limits.
+
+Deferred comparative research criteria:
 
 - Follow the plan's minimum sample/session/hardware matrix and predefined statistical method.
 - Report fresh, prepared, CLI, sustained churn, builds, and running-service scenarios separately.
@@ -88,45 +95,6 @@ sustainable throughput, and memory/energy tradeoffs.
 
 Next Action: Freeze the candidate revision and qualification scenario manifest before collecting results.
 
-### SPEED-012
-
-Title: Expose the qualified native launch mode and document release scope
-
-Description: Integrate the passing native API, CLI, and status behavior; deliver E2E evidence, rollback instructions, and an explicit Docker-integration decision.
-
-Is blocked by task: SPEED-011, with a reviewed go decision for the shipped behavior.
-
-Acceptance Criteria:
-
-- Native API/CLI/status surfaces identify runtime owner, fresh/prepared mode,
-  preparation costs, misses, and unsupported features clearly.
-- Existing Docker/containerd behavior passes relevant regression checks.
-- Screenshot-backed E2E validates affected user-visible surfaces using isolated resources.
-- Docker routing is enabled only after a separately documented ownership and
-  compatibility gate; otherwise retain the existing Docker lane and record follow-up scope.
-- Document rollback, evidence-backed claims, remaining limits, and all temporary-resource cleanup.
-
-Problem and Evidence: A fast prototype does not establish product compatibility,
-operational readiness, or a safe unified Docker lifecycle.
-
-Approach:
-
-1. Expose runtime owner, launch mode, preparation state, misses, and errors through the selected native surfaces.
-2. Run existing Docker regressions and isolated native E2E flows; capture screenshots for affected UI/status surfaces and test rollback.
-3. Write docs/engineering/speed-release-scope.md with supported configurations and measured claims; leave Docker routing on its existing engine unless a separate compatibility gate is approved and passed.
-
-Evidence: Pending final diffs, automated results, UI screenshots, compatibility
-matrix, rollback check, and release-scope decision.
-
-Source: [Architecture ownership](speed-engineering-plan.md#architecture-and-ownership),
-[final recommendation](speed-engineering-plan.md#final-recommendation),
-[repository instructions](../../AGENTS.md).
-
-Review: Pending; assess product behavior, compatibility, runtime ownership,
-performance claims, and operational cleanup separately.
-
-Next Action: Select the configurations that passed SPEED-011 and map them to native API, CLI, and status changes.
-
 ### SPEED-013
 
 Title: Open and qualify the speed enhancement PR to main
@@ -134,11 +102,12 @@ Title: Open and qualify the speed enhancement PR to main
 Description: Submit the completed enhancement with its final benchmark and
 correctness evidence, then resolve review and CI findings before merging.
 
-Is blocked by task: SPEED-012 and all required final gates COMPLETE and PASSED.
+Is blocked by task: SPEED-012 and SPEED-011 required experimental checks.
 
 Acceptance Criteria:
 
-- SPEED-000 through SPEED-012 are DONE with passing evidence and pushed commits.
+- Prior development and required local gates are audited with passing evidence
+  and verified pushed commits. SPEED-008 continues to record its revise verdict.
 - Final qualification reports identify the tested revision and exact claim scope;
   no required check is skipped or unresolved.
 - PR targets main from enhancement/speed-up and links the plan, board, reports,
@@ -210,6 +179,50 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: After the PR merges, inspect current versions and release workflows to select the release scope.
 
 ## INPROGRESS
+
+### SPEED-012
+
+Title: Expose the qualified native launch mode and document release scope
+
+Description: Integrate the passing native API, CLI, and status behavior; deliver E2E evidence, rollback instructions, and an explicit Docker-integration decision.
+
+Is blocked by task: reviewed implementation through SPEED-007 and isolated
+SPEED-009/SPEED-010 evidence (available). SPEED-011 local acceptance gates the PR.
+
+Acceptance Criteria:
+
+- Native API/CLI/status surfaces identify runtime owner, fresh/prepared mode,
+  preparation costs, misses, and unsupported features clearly.
+- Existing Docker/containerd behavior passes relevant regression checks.
+- Screenshot-backed E2E validates affected user-visible surfaces using isolated resources.
+- Docker routing is enabled only after a separately documented ownership and
+  compatibility gate; otherwise retain the existing Docker lane and record follow-up scope.
+- Document rollback, evidence-backed claims, remaining limits, and all temporary-resource cleanup.
+
+Problem and Evidence: A fast prototype does not establish product compatibility,
+operational readiness, or a safe unified Docker lifecycle.
+
+Approach:
+
+1. Expose runtime owner, launch mode, preparation state, misses, and errors through the selected native surfaces.
+2. Run existing Docker regressions and isolated native E2E flows; capture screenshots for affected UI/status surfaces and test rollback.
+3. Write docs/engineering/speed-release-scope.md with supported configurations and measured claims; leave Docker routing on its existing engine unless a separate compatibility gate is approved and passed.
+
+Evidence: The 2026-11-23 scope revision separates local product and
+release acceptance from the deferred comparative gates. Local and remote
+development heads agreed at `3aaf062` before the revision. Reviewed the
+original qualification criteria and retained evidence references. Product
+integration, automated results, compatibility and rollback evidence are pending.
+
+Source: [Architecture ownership](speed-engineering-plan.md#architecture-and-ownership),
+[final recommendation](speed-engineering-plan.md#final-recommendation),
+[repository instructions](../../AGENTS.md).
+
+Review: Pending; assess product behavior, compatibility, runtime ownership,
+performance claims, and operational cleanup separately.
+
+Next Action: Integrate the bounded no-network experiment with explicit opt-in
+and exercise the shipping API and CLI before SPEED-011 local acceptance.
 
 ### SPEED-008
 
@@ -311,11 +324,10 @@ The gate remains unmet because the Docker competitor cleanup endpoint,
 second physical host configuration, equivalent network scope, energy,
 and full qualification matrix are unverified.
 
-Next Action: Obtain an authorized second ARM64 host and an independent
-way to verify the official competitor's guest cleanup. Enable authorized
-energy sampling and rerun the matched qualification before product integration
-or release. Experimental SPEED-009 and SPEED-010 proceed under their
-development prerequisites.
+Next Action: Deferred for comparative research. Obtain a second ARM64 host,
+a way to observe official Kiri guest teardown, and authorized energy sampling,
+then rerun the original matrix. Experimental release proceeds under local
+acceptance without changing the SPEED-008 verdict.
 
 ## UNDERREVIEW
 

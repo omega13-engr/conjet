@@ -1,13 +1,13 @@
 # Conjet speed engineering plan
 
-Status: proposed architecture; implementation and performance qualification pending.
+Status: opt-in M1 Pro experiment authorized; product implementation and local acceptance pending. Comparative research remains open.
 
 Created: 2026-11-22. Execution tracking: [task board](task-board.md).
 
 Development branch: `enhancement/speed-up`. Validate, review, commit, and push
-each coherent increment. Open a PR to `main` only when all development tasks
-and required final benchmarks are complete and passed; release the next Conjet
-version after merge and release validation. The task board records these gates
+each coherent increment. Open a PR to `main` after experimental product
+implementation and required M1 Pro acceptance pass. Merge after independent
+review and required CI, then release after production artifact validation. The task board records these gates
 as SPEED-013 and SPEED-014.
 
 ## Objective and honest feasibility
@@ -118,8 +118,9 @@ validate their identities before each run.
 Production remains running. Alternate candidate and Kiri measurement windows,
 stop only task-owned competitor instances, and report production/background load.
 Logical isolation cannot eliminate shared CPU, memory, thermal, and disk
-contention. Clean performance qualification requires a dedicated host or an
-explicitly authorized quiet window; a contaminated run cannot pass the final gate.
+contention. Clean comparative qualification requires a dedicated host or an explicitly
+authorized quiet window. Experimental release measurements may run alongside
+production on the available M1 Pro. Record contention in those measurements.
 
 ## Architecture and ownership
 
@@ -351,12 +352,19 @@ implementation from SPEED-009. Both may develop, test and collect local
 evidence in isolated fixtures while SPEED-008 remains open. Keep those
 results tied to their experimental scope and revision.
 
-SPEED-008 remains required for final qualification. Completing an experimental
-implementation leaves every outstanding qualification requirement in force.
-SPEED-011 must pass the applicable qualification gates before SPEED-012
-exposes product surfaces. All required gates must pass before the final PR,
-merge, release or a superiority claim. A revise or stop verdict remains
-valid evidence and leaves the affected qualification gate open.
+The authorized release scope is an explicit, no-network native experiment on
+the available M1 Pro. SPEED-012 can implement the product path before the
+SPEED-011 local measurements. Opening the PR requires the tested product path,
+isolated correctness and cleanup, Docker compatibility, documentation, and the
+local qualification report for the final candidate. Independent review and
+required CI gate merge. Production signing, notarization, packaging, and
+publication checks gate release.
+
+SPEED-008 retains its revise verdict. The original comparative matrix,
+second hardware configuration, privileged energy measurements, equivalent
+Kiri guest teardown, and sub-1 ms p99 target are deferred research. Their
+criteria remain in force for future performance claims. The experimental
+release carries no comparative claim or broad hardware qualification.
 
 ## Verification and claim policy
 

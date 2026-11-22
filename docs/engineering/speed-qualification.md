@@ -1,9 +1,21 @@
 # Speed qualification preflight
 
-SPEED-008 remains open with a revise decision. SPEED-011 has no passing
-verdict. The isolated runs support engineering decisions on this Mac.
-Final qualification requires a frozen candidate revision and the complete
-comparison matrix. [Fresh runtime gate](fresh-runtime-gate.md)
+SPEED-008 retains its unresolved **revise** verdict. The user authorized
+an experimental opt-in release on the available M1 Pro on 2026-11-23.
+The original comparative program is deferred and the recorded runs remain
+historical evidence. [Fresh runtime gate](fresh-runtime-gate.md)
+
+## Required experimental acceptance
+
+Exercise the final product candidate with fresh and prepared workloads,
+concurrent requests and bounded admission, cancellation, disconnect and
+timeout recovery, expiry, one-use claims, bounded output, memory pressure
+and active preservation, and verified cleanup. Verify Docker compatibility
+and record production identity and endpoint before/after. Record supported
+configuration, commands, commit and hashes, raw latency samples, failures,
+CPU, memory, background load, preparation/refill, misses, and throughput.
+Required local acceptance precedes the PR. Independent review and CI precede
+merge, and production signing and artifact verification precede publication.
 
 ## Evidence available
 
@@ -22,7 +34,7 @@ comparison matrix. [Fresh runtime gate](fresh-runtime-gate.md)
   simultaneous active-workload and reserve case needs a broader fixture.
   [SPEED-010](task-board.md#speed-010)
 
-## Inputs needed for the qualifying runs
+## Deferred comparative qualification inputs
 
 1. Access to a second supported physical ARM64 Mac and measurement windows
    on both hosts with background load within the predeclared limits.
@@ -42,6 +54,6 @@ fresh, prepared, CLI, sustained churn, build and running-service scenarios
 with their declared endpoints. Include concurrency, pressure, pool
 exhaustion and refill, resource consumption, and CPU and energy evidence.
 Retain failed trials and calculate the predeclared uncertainty on
-independent sessions. Only passing evidence on the qualifying revision
-can authorize product integration, the final pull request or a claim.
+independent sessions. Keep the original sub-1 ms prepared p99 and
+equivalent-work superiority criteria. Neither claim has passing evidence.
 [Verification and claim policy](speed-engineering-plan.md#verification-and-claim-policy)
