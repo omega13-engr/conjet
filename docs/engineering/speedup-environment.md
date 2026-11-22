@@ -85,6 +85,25 @@ router/DNS ports, and an existing Kiri Finder path. It holds an exclusive sessio
 lock. It strips inherited Kiri, Docker, Buildx, and Conjet endpoint overrides from
 child processes and uses an explicit private Docker config and context.
 
+## Run the fresh lifecycle baseline
+
+Append `--benchmark-output PATH --benchmark-samples 100` to the candidate
+build-and-run command. Use a new output directory under ExternalSSD. Run the
+competitor in a separate foreground session:
+
+```sh
+baseline_root="$(mktemp -d /Volumes/ExternalSSD/dev_workspace/tmp/conjet-baseline.XXXXXX)"
+python3 build-support/run-kiri-speedup.py \
+  --benchmark-output "$baseline_root/kiri" --benchmark-samples 100
+```
+
+Both benchmark adapters use the same host Docker executable and API 1.44.
+Kiri's official launcher still uses the bundled Docker client for its
+preflight and smoke commands. The adapter pins the Alpine image and
+pre-pulls it before warmups. Each output directory contains raw operation
+records, resolved runtime metadata, and resource observations. Selected
+reports belong under `benchmarks/reports/`.
+
 ## Paths and settings
 
 ```text

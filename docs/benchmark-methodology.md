@@ -145,6 +145,37 @@ swift run --package-path benchmarks conjet-bench run \
   --output-dir benchmarks/reports/rerun-failed-gates
 ```
 
+## Fresh Docker lifecycle
+
+The pinned scenario uses ARM64 Alpine `/bin/true`, a resident two-vCPU VM
+with a 2,048 MiB ceiling, a pre-pulled image, and engine-default container
+limits. Run the `none` and `bridge` networks separately. Resolve and record the
+actual image configuration ID, guest kernel, server identity, host hardware,
+and binary hashes for each engine. Use the verified private launchers and
+alternate engine order across sessions.
+
+The resident API lane times create, start, wait, and remove with one client.
+The CLI lane times a new Docker process through return from `run --rm`.
+Keep raw stage timings, warmups, failed samples, and observed host load.
+End the session after its first fixture failure, preserve the partial group,
+and treat the session as failed. API removal acknowledgement is recorded independently of observable cleanup.
+When guest cleanup telemetry is unavailable, record it as unknown. An
+initial baseline may use this boundary to describe API behaviour only.
+
+For final comparisons, use at least 10,000 measured operations per scenario
+per engine across at least five independent paired sessions on each of two
+supported hardware configurations. Predeclare a minimum 5% improvement at
+p50 and p99 for each required fresh lane. For each hardware, scenario,
+and percentile, compute candidate-to-competitor ratios from the paired
+session percentiles. Report the median ratio and a paired-session bootstrap
+95% interval from 10,000 resamples. The upper interval bound must be at
+or below 0.95. Report nearest-rank percentiles, use failure-free sessions
+for the superiority gate, and retain all failures in raw evidence and
+operation counts. The cleanup-complete boundary must pass independently.
+Report throughput without excluding the elapsed time of failed operations.
+Small smoke runs and single-host baselines are descriptive. They cannot pass
+the qualification gate.
+
 ## Topology Labels
 
 Every result must include topology metadata:

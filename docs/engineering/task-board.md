@@ -47,41 +47,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-002
-
-Title: Add and run the fresh-lifecycle baseline harness
-
-Description: Extend benchmarks/ with pinned scenarios and explicit runtime endpoints. Deliver baseline JSON and a report for both engines.
-
-Is blocked by task: SPEED-001.
-
-Acceptance Criteria:
-
-- Pin engine revisions, images, kernels, hardware, resources, cache state, and network mode.
-- Distinguish API-visible removal from cleanup completion and exclude no failed samples silently.
-- Preserve raw samples, stage traces, p50/p95/p99, CPU, footprint, and throughput.
-- Record an initial baseline and predeclare comparison margin/statistical method;
-  do not claim superiority from unmatched published figures.
-
-Problem and Evidence: Kiri's published 2.55 ms result does not include Conjet;
-its exit notification and cleanup boundaries differ.
-
-Approach:
-
-1. Use the SPEED-000 private conjet-speedup and verified Kiri endpoints; add scenario manifests for native ARM64 Alpine true with no-network and bridge modes, using the same image digest and resource limits.
-2. Measure API create/start/wait/remove and CLI invocation separately; record API removal and observable cleanup independently.
-3. Run isolated baseline sessions and write configuration, raw samples, failures, and percentiles under benchmarks/reports/; mark cleanup unknown if it cannot be observed.
-
-Evidence: Pending harness checks and measured baseline artifacts.
-
-Source: [Verification policy](speed-engineering-plan.md#verification-and-claim-policy),
-[benchmark methodology](../benchmark-methodology.md),
-[Kiri results](https://github.com/libracoder/kiri/blob/0de1837588eed54c945890f955ef861f2da71cc4/bench/results.json).
-
-Review: Pending; assess equivalent work, cleanup, sample handling, and reproducibility.
-
-Next Action: Add the scenario manifest schema and explicit socket/context inputs to the benchmark package.
-
 ### SPEED-003
 
 Title: Write the launch-service protocol and lifecycle specification
@@ -705,3 +670,71 @@ raw event streams and process observations.
 
 Next Action: Begin SPEED-002 with a pinned and endpoint-verified fresh
 lifecycle harness.
+
+### SPEED-002
+
+Title: Add and run the fresh-lifecycle baseline harness
+
+Description: Extend benchmarks/ with pinned scenarios and explicit runtime endpoints. Deliver baseline JSON and a report for both engines.
+
+Is blocked by task: SPEED-001.
+
+Acceptance Criteria:
+
+- Pin engine revisions, images, kernels, hardware, resources, cache state, and network mode.
+- Distinguish API-visible removal from cleanup completion and exclude no failed samples silently.
+- Preserve raw samples, stage traces, p50/p95/p99, CPU, footprint, and throughput.
+- Record an initial baseline and predeclare comparison margin/statistical method;
+  do not claim superiority from unmatched published figures.
+
+Problem and Evidence: Kiri's published 2.55 ms result does not include Conjet;
+its exit notification and cleanup boundaries differ.
+
+Approach:
+
+1. Use the SPEED-000 private conjet-speedup and verified Kiri endpoints; add scenario manifests for native ARM64 Alpine true with no-network and bridge modes, using the same image digest and resource limits.
+2. Measure API create/start/wait/remove and CLI invocation separately; record API removal and observable cleanup independently.
+3. Run isolated baseline sessions and write configuration, raw samples, failures, and percentiles under benchmarks/reports/; mark cleanup unknown if it cannot be observed.
+
+Evidence: `benchmarks/fresh-lifecycle.py` and the pinned scenario ran
+100 measured operations and 10 warmups per engine per network and lane,
+with zero fixture failures across the completed sessions. The M1 Pro host
+ran production Conjet throughout. Both engines used the same ARM64 Alpine
+configuration ID, host Docker client and API 1.44. Guest kernels were
+`6.12.86-conjet` and `6.18-kiri`. The launchers allocated two vCPUs and a
+2,048 MiB ceiling to each engine.
+
+No-network API p50/p99 was 396.837/479.683 ms for Conjet and 3.773/5.058 ms
+for Kiri. Bridge API p50/p99 was 493.304/567.220 ms and 34.437/63.064 ms
+respectively. The selected report contains both CLI lanes, stage latencies,
+throughput, CPU and memory observations, image and binary digests, and all
+raw samples. Kiri's initial footprint snapshot covered its Docker peer
+only. Its final snapshot also identified the VM process by the private disk.
+
+Report and selected raw captures are under
+`benchmarks/reports/speed-002-initial/`. Commands, launcher evidence,
+failed attempts, and the report renderer are retained under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-002`.
+The initial API 1.41 attempt failed Conjet negotiation. A subsequent slow
+candidate run was interrupted and its partial evidence was retained.
+The complete run used API 1.44 and reported progress by group.
+
+Five fixture accounting and cleanup tests and Ruff passed. The official
+Kiri smoke passed. SIGTERM during the Kiri benchmark retained the partial
+report, recovered one labeled fixture, and stopped its VM and daemon.
+No socket or disk holder remained. Production observations matched.
+This headless benchmark used raw evidence and has no screenshot surface.
+
+Source: [Verification policy](speed-engineering-plan.md#verification-and-claim-policy),
+[benchmark methodology](../benchmark-methodology.md),
+[Kiri results](https://github.com/libracoder/kiri/blob/0de1837588eed54c945890f955ef861f2da71cc4/bench/results.json).
+
+Review: Endpoint and CLI identities were revalidated, and both engines
+completed the same pinned Docker work. The benchmark preserves failure and
+abort records. API removal and guest cleanup are explicit separate fields.
+Guest cleanup is unknown in this initial baseline, and the single-host
+samples do not establish a competitive result. The comparison margin and
+paired-session statistical method were declared before the completed runs.
+
+Next Action: Begin SPEED-003 with a native launch protocol and lifecycle
+ownership contract.

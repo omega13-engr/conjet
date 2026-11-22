@@ -9,12 +9,12 @@ import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
+import runpy
 import signal
 import socket
 import subprocess
-import sys
 import time
+from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 ROOT = Path('/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-kiri')
@@ -44,6 +44,8 @@ def production_snapshot():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--smoke', action='store_true', help='pull Alpine and run an ephemeral container')
+    parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
+    parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
     parser.add_argument('docker_args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if not APP.exists():
@@ -121,7 +123,7 @@ def main():
             else:
                 raise RuntimeError('Kiri readiness timed out')
             inspect = subprocess.run(prefix[:-2] + ['context', 'inspect', CONTEXT],
-                                     env=env, capture_output=True, text=True, timeout=10)
+                                     check=False, env=env, capture_output=True, text=True, timeout=10)
             if inspect.returncode == 0:
                 actual = json.loads(inspect.stdout)[0]['Endpoints']['docker']['Host']
                 if actual != f'unix://{endpoint}':
@@ -137,6 +139,19 @@ def main():
                     raise RuntimeError('unexpected smoke result')
                 result['smoke'] = output.stdout.strip()
                 print(output.stdout, end='', flush=True)
+            if args.benchmark_output:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(3)
+                    client.connect(str(endpoint))
+                    if client.getsockopt(0, 2) != proc.pid:  # Darwin LOCAL_PEERPID
+                        raise RuntimeError('Docker socket is outside the owned Kiri process')
+                benchmark = runpy.run_path(str(REPO / 'benchmarks/fresh-lifecycle.py'))
+                benchmark['main']([
+                    '--engine', 'kiri', '--socket', str(endpoint), '--config', env['DOCKER_CONFIG'],
+                    '--peer-pid', str(proc.pid), '--docker', '/opt/homebrew/bin/docker',
+                    '--output', str(args.benchmark_output), '--samples', str(args.benchmark_samples),
+                ])
+                result['benchmark_output'] = str(args.benchmark_output)
             requested = args.docker_args
             if requested[:1] == ['--']:
                 requested = requested[1:]

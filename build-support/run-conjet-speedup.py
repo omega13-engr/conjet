@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import runpy
 import shutil
 import signal
 import socket
@@ -285,6 +286,14 @@ def session(args, root):
         if evidence['smoke'] != 'conjet-speedup-ok':
             raise RuntimeError('unexpected fixture output')
         print(evidence['smoke'], flush=True)
+        if args.benchmark_output:
+            benchmark = runpy.run_path(str(REPO / 'benchmarks/fresh-lifecycle.py'))
+            benchmark['main']([
+                '--engine', 'conjet', '--socket', str(docker_socket), '--config', str(docker_config),
+                '--peer-pid', str(docker_peer), '--docker', str(DOCKER),
+                '--output', str(args.benchmark_output), '--samples', str(args.benchmark_samples),
+            ])
+            evidence['benchmark_output'] = str(args.benchmark_output)
         if args.hold_seconds:
             time.sleep(args.hold_seconds)
         evidence['passed'] = True
@@ -320,6 +329,8 @@ def main():
     parser.add_argument('--core', required=True, type=Path)
     parser.add_argument('--network-helper', required=True, type=Path)
     parser.add_argument('--image', default='alpine:3.22')
+    parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
+    parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
     parser.add_argument('--core-assets', type=Path, help='reuse verified ExternalSSD release downloads')
     parser.add_argument('--hold-seconds', type=int, choices=range(121), default=0,
                         metavar='0..120', help='keep the verified VM alive briefly for QA')

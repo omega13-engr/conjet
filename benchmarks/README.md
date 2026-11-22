@@ -67,6 +67,16 @@ swift run --package-path benchmarks conjet-bench run \
   --output-dir benchmarks/reports/rerun-failed-gates
 ```
 
+## Fresh lifecycle baseline
+
+The [pinned scenario](scenarios/fresh-lifecycle-v1.json) runs separate API
+and CLI samples for both network modes. Pass `--benchmark-output` to the
+[isolated runtime launchers](../docs/engineering/speedup-environment.md).
+Use `--benchmark-samples` to choose the measured count per lane and network.
+Each launcher validates its engine and owns cleanup for the duration of
+the benchmark. Reports preserve all observations and distinguish API
+removal from the guest cleanup boundary.
+
 ## Energy Gate
 
 Run the energy gate with required power measurement:
