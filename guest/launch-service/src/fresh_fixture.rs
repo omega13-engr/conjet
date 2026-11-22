@@ -101,6 +101,7 @@ struct Record {
     exec: &'static str,
     exit: Option<Value>,
     helper_failed: bool,
+    network_cleanup: &'static str,
     cancelled: bool,
     control: Option<UnixStream>,
     stdout: Capture,
@@ -117,6 +118,7 @@ impl Record {
         json!({
             "handle": self.handle, "revision": self.revision, "phase": self.phase.name(),
             "exec": self.exec, "exit": self.exit, "helper_failed": self.helper_failed,
+            "network_cleanup": self.network_cleanup,
             "cleanup": match self.phase {
                 Phase::Removed => "complete",
                 Phase::CleanupFailed => "failed",
@@ -257,6 +259,20 @@ impl FreshFixture {
                 "request does not match the pinned ARM64 fixture",
             ));
         }
+        let bridge = spec.network == "bridge";
+        if bridge
+            && !matches!(
+                mode,
+                "once"
+                    | "hold"
+                    | "pause-cleanup"
+                    | "fault-bridge"
+                    | "fault-bridge-child"
+                    | "fault-cleanup"
+            )
+        {
+            return Err(("unsupported_option", "unsupported bridge workload option"));
+        }
         let request = ready.request();
         let body: [u8; 32] =
             Sha256::digest(serde_json::to_vec(request).expect("typed request")).into();
@@ -303,6 +319,7 @@ impl FreshFixture {
             exec: "pending",
             exit: None,
             helper_failed: false,
+            network_cleanup: if bridge { "pending" } else { "not_applicable" },
             cancelled: false,
             control: None,
             stdout: Capture::default(),
@@ -316,30 +333,42 @@ impl FreshFixture {
         let mode = mode.to_owned();
         if thread::Builder::new()
             .name("fresh-workload".into())
-            .spawn(move || owner.run_workload(id, limits, &mode))
+            .spawn(move || owner.run_workload(id, limits, &mode, bridge))
             .is_err()
         {
             let record = ledger.record.as_mut().expect("reserved record");
             record.exec = "failed";
+            if bridge {
+                record.network_cleanup = "complete";
+            }
             record.change(Phase::Removed);
             return Ok((Kind::State, record.state()));
         }
         Ok((Kind::State, reply))
     }
 
-    fn run_workload(&self, id: [u8; 16], limits: crate::spec::ResourceLimits, mode: &str) {
+    fn run_workload(
+        &self,
+        id: [u8; 16],
+        limits: crate::spec::ResourceLimits,
+        mode: &str,
+        bridge: bool,
+    ) {
         {
             let mut ledger = self.ledger.lock().expect("fresh ledger");
             let record = ledger.record.as_mut().expect("admitted workload");
             if record.cancelled {
                 record.exec = "failed";
+                if bridge {
+                    record.network_cleanup = "complete";
+                }
                 record.change(Phase::Removed);
                 self.changed.notify_all();
                 return;
             }
         }
         let result = self.intent.record(id).and_then(|()| {
-            let output = self.run_helper(id, limits, mode)?;
+            let output = self.run_helper(id, limits, mode, bridge)?;
             self.intent.complete(id)?;
             Ok(output)
         });
@@ -352,12 +381,18 @@ impl FreshFixture {
                 record.stdout = stdout;
                 record.stderr = stderr;
                 record.helper_failed = recovered;
+                if bridge {
+                    record.network_cleanup = "complete";
+                }
                 if record.exec == "pending" {
                     record.exec = if recovered { "indeterminate" } else { "failed" };
                 }
                 record.change(Phase::Removed);
             } else {
                 record.helper_failed = true;
+                if bridge && record.network_cleanup == "pending" {
+                    record.network_cleanup = "failed";
+                }
                 if record.exec == "pending" {
                     record.exec = "indeterminate";
                 }
@@ -371,6 +406,7 @@ impl FreshFixture {
         id: [u8; 16],
         limits: crate::spec::ResourceLimits,
         mode: &str,
+        bridge: bool,
     ) -> io::Result<(Capture, Capture, bool)> {
         let (mut peer, helper) = UnixStream::pair()?;
         peer.set_read_timeout(Some(Duration::from_secs(32)))?;
@@ -388,6 +424,7 @@ impl FreshFixture {
                 } else {
                     mode
                 },
+                if bridge { "bridge" } else { "none" },
             ])
             .env_clear()
             .stdin(Stdio::from(OwnedFd::from(helper)))
@@ -406,6 +443,7 @@ impl FreshFixture {
         });
         let mut removed = false;
         let mut exit_received = false;
+        let mut network_removed = !bridge;
         let result = (|| -> io::Result<()> {
             let mut code = [0];
             while peer.read(&mut code)? == 1 {
@@ -461,7 +499,14 @@ impl FreshFixture {
                         exit_received = true;
                         self.update(|record| record.change(Phase::Cleaning));
                     }
-                    b'R' if exit_received => {
+                    b'B' if exit_received && !network_removed => {
+                        network_removed = true;
+                        self.update(|record| {
+                            record.network_cleanup = "complete";
+                            record.revision += 1;
+                        });
+                    }
+                    b'R' if exit_received && network_removed => {
                         removed = true;
                         break;
                     }

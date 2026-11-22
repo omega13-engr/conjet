@@ -63,6 +63,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => "once",
                 Some(value) if value == "--hold" && args.next().is_none() => "hold",
                 Some(value) if value == "--fail" && args.next().is_none() => "fail",
+                Some(value) if value == "--bridge" && args.next().is_none() => "bridge",
+                Some(value) if value == "--bridge-hold" && args.next().is_none() => "bridge-hold",
                 Some(value) if value == "--flood" && args.next().is_none() => "flood",
                 Some(value) if value == "--exhaust-memory" && args.next().is_none() => {
                     "exhaust-memory"
@@ -70,8 +72,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => return Err("invalid workload fixture option".into()),
             };
             conjet_launch_service::sandbox_fixture::verify_after_exec()?;
+            if matches!(mode, "bridge" | "bridge-hold") {
+                conjet_launch_service::bridge_fixture::verify_workload()?;
+            }
             match mode {
-                "hold" => std::thread::sleep(std::time::Duration::from_secs(10)),
+                "hold" | "bridge-hold" => std::thread::sleep(std::time::Duration::from_secs(10)),
                 "fail" => std::process::exit(23),
                 "flood" => {
                     use std::io::Write;

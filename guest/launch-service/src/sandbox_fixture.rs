@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use crate::security::{self, NoNetworkFilter};
+use crate::security::{self, WorkloadFilter};
 use crate::spec::{WORKLOAD_GID, WORKLOAD_UID};
 
 const BASE: &str = "/run/conjet/workload-probe";
@@ -17,12 +17,12 @@ const UID_WIDTH: u32 = 65_536;
 pub(crate) struct Sandbox {
     new_root: CString,
     overlay: CString,
-    filter: NoNetworkFilter,
+    filter: WorkloadFilter,
     stdin: File,
 }
 
 impl Sandbox {
-    pub(crate) fn prepare() -> io::Result<Self> {
+    pub(crate) fn prepare(bridge: bool) -> io::Result<Self> {
         let base = Path::new(BASE);
         std::fs::create_dir(base)?;
         let setup = (|| {
@@ -35,6 +35,13 @@ impl Sandbox {
                 std::fs::Permissions::from_mode(0o555),
             )?;
             std::fs::write(base.join("lower/work/immutable"), b"verified fixture\n")?;
+            if bridge {
+                std::fs::create_dir(base.join("lower/etc"))?;
+                std::fs::write(
+                    base.join("lower/etc/resolv.conf"),
+                    crate::bridge_fixture::RESOLVER_CONFIG,
+                )?;
+            }
             for directory in ["upper", "work", "root"] {
                 let path = CString::new(base.join(directory).as_os_str().as_bytes())?;
                 security::checked(unsafe { libc::chown(path.as_ptr(), UID_BASE, GID_BASE) })?;
@@ -64,7 +71,7 @@ impl Sandbox {
                 overlay: CString::new(format!(
                     "lowerdir={BASE}/lower,upperdir={BASE}/upper,workdir={BASE}/work,userxattr"
                 ))?,
-                filter: NoNetworkFilter::new(),
+                filter: WorkloadFilter::new(bridge),
                 stdin: File::open("/dev/null")?,
             })
         })();

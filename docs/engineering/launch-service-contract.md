@@ -98,6 +98,10 @@ by `dropped_bytes` and the returned cursor.
 The restricted fresh fixture also reports `helper_failed` if the helper did
 not confirm cleanup. A successful reconciliation can yield
 `helper_failed=true` and `cleanup=complete` in the same terminal state.
+The fixture reports bridge teardown independently as `network_cleanup`.
+It is `not_applicable` for no-network workloads, `pending` while owned
+network resources remain, and `complete` after teardown. An unreconciled
+bridge cleanup reports `failed`.
 
 The first implementation advertises `ping`, `shutdown`, and `request_cancel`
 for pending waits in its isolated fixture. Guest launch features stay

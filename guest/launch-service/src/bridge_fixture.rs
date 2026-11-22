@@ -2,7 +2,7 @@ use std::ffi::CStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::mem::size_of;
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -19,6 +19,10 @@ const PEER: &CStr = c"cjpeer0";
 const BRIDGE_IP: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
 const PEER_IP: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 2);
 const PREFIX: u8 = 30;
+const DNS_PORT: u16 = 53;
+const CANARY_PORT: u16 = 8080;
+pub(crate) const RESOLVER_CONFIG: &str = "nameserver 198.18.0.1\n";
+const DNS_QUERY: &[u8] = b"\x39\xf2\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x05probe\x06conjet\x04test\x00\x00\x01\x00\x01";
 
 fn kernel_address() -> libc::sockaddr_nl {
     // All optional fields, including multicast groups and destination port
@@ -195,6 +199,252 @@ fn interface_index(name: &CStr) -> io::Result<u32> {
     } else {
         Ok(index)
     }
+}
+
+struct Links {
+    route: Route,
+    bridge: Option<u32>,
+    port: Option<u32>,
+    peer_namespace: Option<File>,
+}
+
+impl Links {
+    fn create() -> io::Result<Self> {
+        let mut links = Self {
+            route: Route::open()?,
+            bridge: None,
+            port: None,
+            peer_namespace: None,
+        };
+        let bridge = links.route.create_link(BRIDGE, c"bridge", &[])?;
+        links.bridge = Some(bridge);
+        let mut other = link_message(0, 0);
+        attribute(&mut other, libc::IFLA_IFNAME, PEER.to_bytes_with_nul());
+        let mut data = Vec::new();
+        attribute(&mut data, VETH_INFO_PEER | NESTED, &other);
+        let port = links.route.create_link(PORT, c"veth", &data)?;
+        links.port = Some(port);
+        links
+            .route
+            .configure_link(port, true, &[(libc::IFLA_MASTER, &bridge.to_ne_bytes())])?;
+        links.route.configure_link(bridge, true, &[])?;
+        links.route.address(bridge, BRIDGE_IP)?;
+        Ok(links)
+    }
+
+    fn move_peer(&mut self, pid: u32) -> io::Result<()> {
+        let peer_namespace = File::open(format!("/proc/{pid}/ns/net"))?;
+        self.route.configure_link(
+            interface_index(PEER)?,
+            false,
+            &[(
+                libc::IFLA_NET_NS_FD,
+                &peer_namespace.as_raw_fd().to_ne_bytes(),
+            )],
+        )?;
+        self.peer_namespace = Some(peer_namespace);
+        Ok(())
+    }
+
+    fn remove(&mut self) -> io::Result<()> {
+        if let Some(port) = self.port {
+            self.route.remove(port)?;
+            self.port = None;
+        }
+        if let Some(bridge) = self.bridge {
+            self.route.remove(bridge)?;
+            self.bridge = None;
+        }
+        for link in [PORT, BRIDGE, PEER] {
+            assert_link_absent(link)?;
+        }
+        assert_address_absent(BRIDGE_IP)
+    }
+}
+
+impl Drop for Links {
+    fn drop(&mut self) {
+        if let Some(port) = self.port {
+            let _ = self.route.remove(port);
+        }
+        if let Some(bridge) = self.bridge {
+            let _ = self.route.remove(bridge);
+        }
+    }
+}
+
+fn assert_link_absent(name: &CStr) -> io::Result<()> {
+    match interface_index(name) {
+        Err(error) if error.raw_os_error() == Some(libc::ENODEV) => Ok(()),
+        Ok(_) => Err(io::Error::other(
+            "fixture network interface remained after cleanup",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn assert_address_absent(address: Ipv4Addr) -> io::Result<()> {
+    match TcpListener::bind((address, 0)) {
+        Err(error) if error.kind() == io::ErrorKind::AddrNotAvailable => Ok(()),
+        _ => Err(io::Error::other("fixture address remained usable")),
+    }
+}
+
+pub(crate) struct Bridge {
+    links: Links,
+    dns: UdpSocket,
+    canary: TcpListener,
+}
+
+impl Bridge {
+    pub(crate) fn create() -> io::Result<Self> {
+        // Only the dedicated single-threaded helper enters a new namespace.
+        checked(unsafe { libc::unshare(libc::CLONE_NEWNET) })?;
+        let links = Links::create()?;
+        let dns = UdpSocket::bind((BRIDGE_IP, DNS_PORT))?;
+        let canary = TcpListener::bind((BRIDGE_IP, CANARY_PORT))?;
+        dns.set_nonblocking(true)?;
+        canary.set_nonblocking(true)?;
+        Ok(Self { links, dns, canary })
+    }
+
+    pub(crate) fn attach(&mut self, pid: libc::pid_t) -> io::Result<()> {
+        self.links.move_peer(pid as u32)?;
+        let peer = self.links.peer_namespace.as_ref().expect("moved peer");
+        let original = File::open("/proc/self/ns/net")?;
+        let result = in_namespace(peer, configure_peer);
+        // Restore the helper's namespace even when peer configuration failed.
+        enter_namespace(&original)?;
+        result
+    }
+
+    pub(crate) fn poll_fds(&self) -> [libc::pollfd; 2] {
+        [self.dns.as_raw_fd(), self.canary.as_raw_fd()].map(|fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+    }
+
+    pub(crate) fn receive_dns(&self) -> io::Result<()> {
+        let mut packet = [0; 512];
+        let (count, source) = self.dns.recv_from(&mut packet)?;
+        if source.ip() != PEER_IP || &packet[..count] != DNS_QUERY {
+            return Err(io::Error::other("unexpected DNS fixture query"));
+        }
+        let reply = dns_reply();
+        if self.dns.send_to(&reply, source)? != reply.len() {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn receive_tcp(&self) -> io::Result<()> {
+        let (mut stream, source) = self.canary.accept()?;
+        if source.ip() != PEER_IP {
+            return Err(io::Error::other("unexpected TCP fixture source"));
+        }
+        stream.set_read_timeout(Some(TIMEOUT))?;
+        stream.set_write_timeout(Some(TIMEOUT))?;
+        let mut request = [0; 4];
+        stream.read_exact(&mut request)?;
+        if &request != b"ping" {
+            return Err(io::Error::other("bridge TCP fixture canary mismatch"));
+        }
+        stream.write_all(b"pong")
+    }
+
+    pub(crate) fn close(self) -> io::Result<()> {
+        let Self {
+            mut links,
+            dns,
+            canary,
+        } = self;
+        drop((dns, canary));
+        links.remove()?;
+        if let Some(peer) = &links.peer_namespace {
+            let original = File::open("/proc/self/ns/net")?;
+            let result = in_namespace(peer, || {
+                assert_link_absent(PEER)?;
+                assert_address_absent(PEER_IP)
+            });
+            enter_namespace(&original)?;
+            result?;
+        }
+        Ok(())
+    }
+}
+
+fn enter_namespace(target: &File) -> io::Result<()> {
+    checked(unsafe { libc::setns(target.as_raw_fd(), libc::CLONE_NEWNET) })
+}
+
+fn in_namespace<T>(target: &File, work: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    enter_namespace(target)?;
+    work()
+}
+
+fn configure_peer() -> io::Result<()> {
+    let mut route = Route::open()?;
+    let peer = interface_index(PEER)?;
+    route.configure_link(peer, true, &[])?;
+    route.address(peer, PEER_IP)?;
+    assert_link_absent(BRIDGE)?;
+    assert_link_absent(PORT)
+}
+
+fn dns_reply() -> Vec<u8> {
+    let mut response = DNS_QUERY.to_vec();
+    response[2..4].copy_from_slice(&[0x81, 0x80]); // Response, no error.
+    response[7] = 1; // One answer.
+    response.extend_from_slice(b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x00\x00\x04");
+    response.extend_from_slice(&BRIDGE_IP.octets());
+    response
+}
+
+pub fn verify_workload() -> io::Result<()> {
+    let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW | libc::SOCK_CLOEXEC, 0) };
+    if raw >= 0 {
+        unsafe { libc::close(raw) };
+        return Err(io::Error::other(
+            "bridge fixture unexpectedly opened a raw socket",
+        ));
+    }
+    if io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
+        return Err(io::Error::other(
+            "unexpected restriction result for raw socket",
+        ));
+    }
+    let configuration = std::fs::read_to_string("/etc/resolv.conf")?;
+    if configuration != RESOLVER_CONFIG {
+        return Err(io::Error::other(
+            "unexpected private bridge resolver configuration",
+        ));
+    }
+    let dns = UdpSocket::bind((PEER_IP, 0))?;
+    dns.set_read_timeout(Some(TIMEOUT))?;
+    dns.send_to(DNS_QUERY, (BRIDGE_IP, DNS_PORT))?;
+    let mut packet = [0; 512];
+    let (count, source) = dns.recv_from(&mut packet)?;
+    if source != (BRIDGE_IP, DNS_PORT).into() || packet[..count] != dns_reply() {
+        return Err(io::Error::other(
+            "private bridge DNS response did not match",
+        ));
+    }
+    let endpoint = SocketAddrV4::new(BRIDGE_IP, CANARY_PORT);
+    let mut stream = TcpStream::connect(endpoint)?;
+    stream.set_read_timeout(Some(TIMEOUT))?;
+    stream.set_write_timeout(Some(TIMEOUT))?;
+    stream.write_all(b"ping")?;
+    let mut response = [0; 4];
+    stream.read_exact(&mut response)?;
+    if &response != b"pong" {
+        return Err(io::Error::other(
+            "private bridge TCP response did not match",
+        ));
+    }
+    println!("conjet-launchd workload verified private DNS and TCP");
+    Ok(())
 }
 
 pub fn check() -> Result<(), Box<dyn std::error::Error>> {

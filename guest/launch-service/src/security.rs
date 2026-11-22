@@ -9,6 +9,7 @@ const RET_ALLOW: u32 = 0x7fff_0000;
 const BPF_LOAD_WORD: u16 = 0x20;
 const BPF_JUMP_EQUAL: u16 = 0x15;
 const BPF_RETURN: u16 = 0x06;
+const BPF_AND: u16 = 0x54;
 
 pub(crate) fn clear_supplementary_groups() -> io::Result<()> {
     checked(unsafe { libc::setgroups(0, std::ptr::null()) })
@@ -95,12 +96,12 @@ pub(crate) fn set_process_limits() -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) struct NoNetworkFilter {
+pub(crate) struct WorkloadFilter {
     program: Vec<libc::sock_filter>,
 }
 
-impl NoNetworkFilter {
-    pub(crate) fn new() -> Self {
+impl WorkloadFilter {
+    pub(crate) fn new(bridge: bool) -> Self {
         fn statement(code: u16, k: u32) -> libc::sock_filter {
             libc::sock_filter {
                 code,
@@ -178,6 +179,56 @@ impl NoNetworkFilter {
             statement(BPF_RETURN, RET_KILL_PROCESS),
             statement(BPF_LOAD_WORD, 0), // seccomp_data.nr
         ];
+        if bridge {
+            let denied = RET_ERRNO | libc::EPERM as u32;
+            let socket = [
+                statement(BPF_LOAD_WORD, 16), // args[0]: domain, little-endian ARM64
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: libc::AF_INET as u32,
+                    jt: 1,
+                    jf: 0,
+                },
+                statement(BPF_RETURN, denied),
+                statement(BPF_LOAD_WORD, 32), // args[2]: protocol (automatic selection)
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: 0,
+                    jt: 1,
+                    jf: 0,
+                },
+                statement(BPF_RETURN, denied),
+                statement(BPF_LOAD_WORD, 24), // args[1]: type and socket flags
+                statement(
+                    BPF_AND,
+                    !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
+                ),
+                next_or_skip(libc::SOCK_STREAM as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                next_or_skip(libc::SOCK_DGRAM as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, denied),
+            ];
+            program.push(libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                k: libc::SYS_socket as u32,
+                jt: 0,
+                jf: socket.len() as u8,
+            });
+            program.extend(socket);
+            for syscall in [
+                libc::SYS_bind,
+                libc::SYS_connect,
+                libc::SYS_sendto,
+                libc::SYS_recvfrom,
+                libc::SYS_setsockopt,
+                libc::SYS_getsockopt,
+                libc::SYS_getsockname,
+            ] {
+                program.push(next_or_skip(syscall as u32));
+                program.push(statement(BPF_RETURN, RET_ALLOW));
+            }
+        }
         for syscall in allowed {
             program.push(next_or_skip(syscall as u32));
             program.push(statement(BPF_RETURN, RET_ALLOW));

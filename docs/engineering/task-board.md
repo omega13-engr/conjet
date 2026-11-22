@@ -348,18 +348,35 @@ interfaces. The normal host remained unchanged. The pinned musl rebuild,
 command, hashes, guest logs and production observations are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-007/network-kernel`.
 Strict ARM64 Clippy, 17 focused Rust tests, formatting, and diff checks passed.
-Native launch still rejects bridge mode. DNS, launch integration, partial
-failure and concurrent network isolation require further validation.
+The opt-in native bridge now passes authenticated launch and root, DNS,
+TCP and teardown canaries. The bridge and peer use a private IPv4 /30
+with no uplink. Its test resolver answers one pinned name, and TCP uses
+one guest-private port. Host networking and published ports are rejected
+before allocation. The no-network mode retains its original seccomp deny
+rules. The bridge filter allows IPv4 stream and datagram sockets and
+rejects raw sockets and AF_VSOCK. The focused run observed actual workload
+exit while network cleanup was pending, then network removal and total
+lifecycle removal in separate states. Injected helper failures recovered
+after bridge creation, peer attachment, and before link cleanup. Five
+complete launch cycles in each mode and the SPEED-006 failure and
+cancellation regression matrix passed, with matching production snapshots.
+The pinned rebuild, raw RPC, guest logs and verification scripts are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-007/bridge-launch`.
+Concurrent independent bridge scope and startup capability checks remain
+pending.
 
 Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 [measurement contract](speed-engineering-plan.md#measurement-contract).
 
 Review: The link proof reviewed the kernel sender and request sequence,
-namespace ownership, explicit link deletion and address cleanup. Workload
-admission, DNS/port cleanup and concurrent teardown review remain pending.
+namespace ownership, explicit link deletion and address cleanup. Reviewed
+the workload socket filter, fixed guest DNS and port bindings, peer
+namespace FD lifetime, and the separate network-cleanup state. Concurrent
+teardown and readiness review remain pending.
 
-Next Action: Integrate the private bridge with the fresh helper and
-validate DNS, port support and teardown independently from workload exit.
+Next Action: Verify independent bridge scopes with overlapping address
+pairs active simultaneously and advertise the fixture capability only
+after a successful kernel probe.
 
 ## UNDERREVIEW
 

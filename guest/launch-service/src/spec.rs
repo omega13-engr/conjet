@@ -64,7 +64,7 @@ pub enum SpecError {
     Environment,
     #[error("native launch requires UID and GID 65532")]
     Identity,
-    #[error("this launch profile supports only the none network")]
+    #[error("this launch profile supports only none and bridge networking")]
     Network,
     #[error("resource limits exceed the native launch profile")]
     Resources,
@@ -137,7 +137,7 @@ impl LaunchRequest {
         if spec.uid != WORKLOAD_UID || spec.gid != WORKLOAD_GID {
             return Err(SpecError::Identity);
         }
-        if spec.network != "none" {
+        if !matches!(spec.network.as_str(), "none" | "bridge") {
             return Err(SpecError::Network);
         }
         let limits = spec.limits;
@@ -228,7 +228,7 @@ mod tests {
         request.spec.limits.pids = 0;
         assert_eq!(request.validate().err(), Some(SpecError::Resources));
         let mut request = valid();
-        request.spec.network = "bridge".into();
+        request.spec.network = "host".into();
         assert_eq!(request.validate().err(), Some(SpecError::Network));
         let mut request = valid();
         request.spec.uid = 0;

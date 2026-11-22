@@ -6,6 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::bridge_fixture::Bridge;
 use crate::cgroups::{CGROUP2_SUPER_MAGIC, WorkloadCgroup, write_control};
 use crate::handshake;
 use crate::sandbox_fixture::Sandbox;
@@ -32,6 +33,8 @@ pub(crate) fn test_mode(mode: &str) -> bool {
             | "pause-prepare"
             | "pause-child"
             | "pause-cleanup"
+            | "fault-bridge"
+            | "fault-bridge-child"
     )
 }
 
@@ -72,6 +75,7 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
         },
         false,
         "once",
+        false,
     )
 }
 
@@ -110,10 +114,11 @@ pub fn run_helper(
     if !matches!(mode, "once" | "hold" | "fail") && !test_mode(mode) {
         return Err("unknown fixture helper mode".into());
     }
-    if args.next().is_some() {
+    let network = args.next().ok_or("fixture network mode required")?;
+    if !matches!(network.to_str(), Some("bridge" | "none")) || args.next().is_some() {
         return Err("unexpected fixture helper arguments".into());
     }
-    run(true, id, limits, true, mode)
+    run(true, id, limits, true, mode, network == "bridge")
 }
 
 fn run(
@@ -122,17 +127,23 @@ fn run(
     limits: ResourceLimits,
     controlled: bool,
     mode: &str,
+    network: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if controlled {
         notify_control(b'P', &[])?;
         pause_for_cancel(mode, "pause-prepare")?;
         if cancellation_ready()? {
             notify_control(b'N', &[])?;
+            if network {
+                notify_control(b'B', &[])?;
+            }
             notify_control(b'R', &[])?;
             return Ok(());
         }
     }
-    let sandbox = with_sandbox.then(Sandbox::prepare).transpose()?;
+    let sandbox = with_sandbox
+        .then(|| Sandbox::prepare(network))
+        .transpose()?;
     inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)
         .then(ProcMount::new)
@@ -150,7 +161,9 @@ fn run(
     }
     let cgroup = WorkloadCgroup::create(&active, id, limits)?;
     inject(mode, "fault-cgroup");
-    let probe = clone_and_reap(&cgroup, sandbox.as_ref(), controlled, mode);
+    let mut bridge = network.then(Bridge::create).transpose()?;
+    inject(mode, "fault-bridge");
+    let probe = clone_and_reap(&cgroup, sandbox.as_ref(), controlled, mode, bridge.as_mut());
     if mode == "exhaust-memory" {
         eprintln!("workload memory.events: {}", cgroup.memory_events()?);
     }
@@ -164,6 +177,10 @@ fn run(
         cancellation_ready()?;
     }
     inject(mode, "fault-cleanup");
+    if let Some(bridge) = bridge {
+        bridge.close()?;
+        notify_control(b'B', &[])?;
+    }
     cgroup.remove_empty()?;
     drop(cgroup);
     for path in [&active, &workloads, &root] {
@@ -198,6 +215,7 @@ fn clone_and_reap(
     sandbox: Option<&Sandbox>,
     controlled: bool,
     mode: &str,
+    mut bridge: Option<&mut Bridge>,
 ) -> io::Result<Option<i32>> {
     if controlled && cancellation_ready()? {
         return Ok(None);
@@ -208,6 +226,8 @@ fn clone_and_reap(
         c"/bin/probe"
     };
     let workload_option = match mode {
+        "hold" if bridge.is_some() => Some(c"--bridge-hold"),
+        "once" | "pause-cleanup" | "fault-cleanup" if bridge.is_some() => Some(c"--bridge"),
         "hold" | "fault-exec" => Some(c"--hold"),
         "fail" => Some(c"--fail"),
         "flood" => Some(c"--flood"),
@@ -314,6 +334,10 @@ fn clone_and_reap(
     let authorization = sandbox
         .map_or(Ok(()), |sandbox| sandbox.mappings(pid))
         .and_then(|()| {
+            if let Some(bridge) = &mut bridge {
+                bridge.attach(pid)?;
+                inject(mode, "fault-bridge-child");
+            }
             if controlled {
                 notify_control(b'C', &[])?;
                 pause_for_cancel(mode, "pause-child")?;
@@ -349,7 +373,7 @@ fn clone_and_reap(
         }
     }
     let ready = if controlled {
-        poll_controlled_child(pidfd.as_raw_fd(), cgroup)
+        poll_controlled_child(pidfd.as_raw_fd(), cgroup, bridge.as_deref())
     } else {
         wait(
             pidfd.as_raw_fd(),
@@ -417,7 +441,11 @@ fn notify_control(event: u8, content: &[u8]) -> io::Result<()> {
     }
 }
 
-fn poll_controlled_child(pidfd: i32, cgroup: &WorkloadCgroup) -> io::Result<()> {
+fn poll_controlled_child(
+    pidfd: i32,
+    cgroup: &WorkloadCgroup,
+    bridge: Option<&Bridge>,
+) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut pollfds = [
         libc::pollfd {
@@ -430,15 +458,33 @@ fn poll_controlled_child(pidfd: i32, cgroup: &WorkloadCgroup) -> io::Result<()> 
             events: libc::POLLIN,
             revents: 0,
         },
+        libc::pollfd {
+            fd: -1,
+            events: 0,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: -1,
+            events: 0,
+            revents: 0,
+        },
     ];
+    if let Some(bridge) = bridge {
+        pollfds[2..].copy_from_slice(&bridge.poll_fds());
+    }
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(io::ErrorKind::TimedOut.into());
         }
         // Both descriptors belong to this single-threaded helper.
-        let ready =
-            unsafe { libc::poll(pollfds.as_mut_ptr(), 2, remaining.as_millis() as i32 + 1) };
+        let ready = unsafe {
+            libc::poll(
+                pollfds.as_mut_ptr(),
+                pollfds.len() as libc::nfds_t,
+                remaining.as_millis() as i32 + 1,
+            )
+        };
         if ready < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
@@ -462,6 +508,14 @@ fn poll_controlled_child(pidfd: i32, cgroup: &WorkloadCgroup) -> io::Result<()> 
                 )
             };
             return cgroup.kill();
+        }
+        if let Some(bridge) = bridge {
+            if pollfds[2].revents != 0 {
+                bridge.receive_dns()?;
+            }
+            if pollfds[3].revents != 0 {
+                bridge.receive_tcp()?;
+            }
         }
     }
 }
