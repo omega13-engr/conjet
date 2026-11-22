@@ -336,6 +336,15 @@ peer, matching production observations, removed socket, and no residual
 VM disk holder. Python compilation, 17 focused Rust tests and strict
 macOS and ARM64 Linux Clippy passed.
 
+Six further isolated native boots measured optional guest-local phase
+timestamps. Two traced default-kernel runs attributed about 19 ms median
+to bridge preparation before child authorization and 40–41 ms median to
+verified network teardown after exit. The on/off trials overlapped and do
+not resolve trace overhead. Expedited RCU increased bridge latency and
+remains a diagnostic flag. All 1,200 measured operations passed fixture
+checks. Evidence and passing production comparisons are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/phase-analysis`.
+
 Source: [Delivery gates](speed-engineering-plan.md#incremental-delivery-and-decision-gates),
 [verification policy](speed-engineering-plan.md#verification-and-claim-policy).
 
@@ -343,9 +352,9 @@ Review: Reviewed the kqueue descriptor lifetime, empty queue idle behavior,
 virtio stream ownership and opt-in scope. Causal attribution beyond
 host wake latency and the fresh gate review remain pending.
 
-Next Action: Profile native launch and teardown phases using the common
-image, measure trace overhead and test a justified bridge correction.
-Record the gate verdict with the remaining cleanup and hardware limitations.
+Next Action: Batch owned bridge and veth deletion in one synchronous
+kernel operation. Repeat lifecycle and teardown checks and record the
+fresh gate verdict.
 
 ## UNDERREVIEW
 

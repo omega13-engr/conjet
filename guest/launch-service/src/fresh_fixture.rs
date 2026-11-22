@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
@@ -109,20 +110,35 @@ struct Record {
     exit: Option<Value>,
     helper_failed: bool,
     network_cleanup: &'static str,
+    trace: Option<Trace>,
     cancelled: bool,
     control: Option<UnixStream>,
     stdout: Capture,
     stderr: Capture,
 }
 
+struct Trace {
+    admitted: Instant,
+    events: BTreeMap<&'static str, u128>,
+}
+
 impl Record {
     fn change(&mut self, phase: Phase) {
         self.phase = phase;
         self.revision += 1;
+        self.mark(phase.name());
+    }
+
+    fn mark(&mut self, milestone: &'static str) {
+        if let Some(trace) = &mut self.trace {
+            trace
+                .events
+                .insert(milestone, trace.admitted.elapsed().as_nanos());
+        }
     }
 
     fn state(&self) -> Value {
-        json!({
+        let mut state = json!({
             "handle": self.handle, "revision": self.revision, "phase": self.phase.name(),
             "exec": self.exec, "exit": self.exit, "helper_failed": self.helper_failed,
             "network_cleanup": self.network_cleanup,
@@ -131,7 +147,11 @@ impl Record {
                 Phase::CleanupFailed => "failed",
                 _ => "pending",
             }
-        })
+        });
+        if let Some(trace) = &self.trace {
+            state["guest_phase_ns"] = json!(trace.events);
+        }
+        state
     }
 
     fn cancel(&mut self) {
@@ -162,6 +182,7 @@ struct Ledger {
 pub(crate) struct FreshFixture {
     image_digest: String,
     benchmark_digest: Option<String>,
+    trace_benchmark: bool,
     bridge_available: bool,
     allow_crash: bool,
     intent: Intent,
@@ -231,6 +252,12 @@ impl FreshFixture {
         }
         let image_digest = format!("sha256:{}", hex(&Sha256::digest(&manifest)));
         let benchmark_digest = benchmark_image()?;
+        let trace_benchmark = match bounded_file("/etc/conjet/benchmark-timing", 2) {
+            Ok(contents) if contents == b"1\n" => true,
+            Ok(_) => return Err("invalid benchmark timing marker".into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
         let directory = Path::new(DIRECTORY);
         match fs::DirBuilder::new().mode(0o700).create(directory) {
             Ok(()) => {}
@@ -256,6 +283,7 @@ impl FreshFixture {
         Ok(Arc::new(Self {
             image_digest,
             benchmark_digest,
+            trace_benchmark,
             bridge_available,
             allow_crash,
             intent,
@@ -376,6 +404,10 @@ impl FreshFixture {
             exit: None,
             helper_failed: false,
             network_cleanup: if bridge { "pending" } else { "not_applicable" },
+            trace: (benchmark && self.trace_benchmark).then(|| Trace {
+                admitted: Instant::now(),
+                events: BTreeMap::new(),
+            }),
             cancelled: false,
             control: None,
             stdout: Capture::default(),
@@ -527,6 +559,7 @@ impl FreshFixture {
                         }
                         self.update(|record| {
                             record.exec = "confirmed";
+                            record.mark("exec_confirmed");
                             if !record.cancelled {
                                 record.change(Phase::Running);
                             }
@@ -560,6 +593,7 @@ impl FreshFixture {
                         self.update(|record| {
                             record.network_cleanup = "complete";
                             record.revision += 1;
+                            record.mark("network_removed");
                         });
                     }
                     b'R' if exit_received && network_removed => {

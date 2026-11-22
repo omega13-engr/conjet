@@ -110,4 +110,31 @@ The experiment identifies a faster typical no-network observation with a
 weaker tail and slower bridge observations. The gate remains open while
 bridge phase costs and the comparison boundaries are investigated.
 
-[Pinned Kiri guest agent](https://github.com/libracoder/kiri/blob/0de1837588eed54c945890f955ef861f2da71cc4/crates/kiri-init/src/linux/agent.rs#L1129-L1165)
+[Kiri 0.2.2 guest exit path](https://github.com/libracoder/kiri/blob/686bffa5f38ba6ecc3d086c36ec7148cd7fb976a/crates/kiri-init/src/linux/agent.rs#L1050)
+[Kiri 0.2.2 network teardown](https://github.com/libracoder/kiri/blob/686bffa5f38ba6ecc3d086c36ec7148cd7fb976a/crates/kiri-init/src/linux/container.rs#L845)
+
+## Bridge phase attribution
+
+Six separate disposable boots ran 50 measured operations per mode and
+lane, with the same workload, guest kernel, host resources and VMM.
+The two traced runs showed 18.9–19.0 ms median from helper preparation
+to the authorized child and 39.8–41.5 ms from process exit to verified
+network removal. Child authorization to exec confirmation took less
+than 0.8 ms at the median. The no-network median for exit through final
+cleanup was about 0.2 ms.
+
+The four default-kernel runs alternated trace settings in off/on/on/off
+order. No-network API p50 ranged from 2.170 to 3.144 ms without tracing
+and 2.310 to 2.408 ms with tracing. Bridge API p50 ranged from 63.460
+to 67.626 ms without tracing and 63.996 to 68.004 ms with tracing. The
+overlapping intervals across this small set do not resolve the cost of
+tracing. External latency and guest-local timestamps use separate clocks.
+
+Expedited RCU in the benchmark guest increased bridge API p50 to
+101.292 and 104.478 ms, with teardown medians of 67.4 and 63.5 ms.
+Both diagnostic sessions completed without correctness failures. VMM
+CPU-time deltas were 1.64 and 2.71 seconds, versus 1.49–1.60 seconds
+across the four default-kernel sessions, including 40 warmups each.
+The diagnostic flag remains opt-in. Commands and raw stage records are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/phase-analysis`.
+[Linux kernel RCU parameter documentation](https://docs.kernel.org/admin-guide/kernel-parameters.html)

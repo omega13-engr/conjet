@@ -176,6 +176,7 @@ def session(args):
               'hashes': {str(path): adapter['file_hash'](path)
                          for path in (args.kernel, args.init, args.cli, args.vmm, args.client, args.network_helper)},
               'vcpus': 2, 'memory_mib': 2048, 'host_tick_ms': 25,
+              'phase_trace': args.phase_trace, 'diagnostic_expedited_rcu': args.expedited_rcu,
               'cleanup_boundary': 'native removal reply requires verified cleanup'}
     with tempfile.TemporaryDirectory(prefix='cf-', dir=SCRATCH) as temporary:
         qa = Path(temporary)
@@ -199,7 +200,10 @@ def session(args):
                     'kernelPath': str(kernel), 'initialRamdiskPath': str(initrd), 'rootDiskPath': str(disk),
                     'bootstrapSharePath': str(root / 'bootstrap'), 'serialLogPath': str(home / 'logs/serial.log'),
                     'dockerSocketPath': str(home / 'run/docker.sock'), 'source': 'isolated benchmark',
-                    'kernelCommandLine': 'console=ttyAMA0 rdinit=/init --serve-fresh-fixture quiet'}
+                    'kernelCommandLine': 'console=ttyAMA0 '
+                    + ('rcupdate.rcu_expedited=1 ' if args.expedited_rcu else '')
+                    + 'rdinit=/init --serve-fresh-fixture quiet'}
+        report['kernel_command_line'] = manifest['kernelCommandLine']
         manifest_path.write_text(json.dumps(manifest))
         launcher['vm_paths'](manifest, home, home / 'run/docker.sock')
         env = {'HOME': str(qa), 'CONJET_HOME': str(home), 'DOCKER_CONFIG': str(qa / 'docker'),
@@ -214,10 +218,15 @@ def session(args):
                             '--output', initrd, '--json'], env=env, check=True, timeout=15)
             descriptor = {'architecture': 'arm64', 'os': 'linux',
                           'executable_sha256': adapter['file_hash'](args.init)}
-            initrd.write_bytes(gzip.compress(cpio_insert(gzip.decompress(initrd.read_bytes()), {
+            assets = {
                 'etc/conjet/launch.key': key, 'etc/conjet/fresh-fixture-image.json': json.dumps(descriptor).encode(),
                 'etc/conjet/benchmark-image.json': manifest_bytes, 'etc/conjet/benchmark-executable': workload,
-            }), mtime=0))
+            }
+            if args.phase_trace:
+                assets['etc/conjet/benchmark-timing'] = b'1\n'
+            initrd.write_bytes(gzip.compress(cpio_insert(
+                gzip.decompress(initrd.read_bytes()), assets,
+            ), mtime=0))
             with (args.output / 'vm.json').open('w') as stdout, (args.output / 'vm.stderr.log').open('w') as stderr:
                 with subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr, start_new_session=True) as vm:
                     try:
@@ -284,6 +293,9 @@ def main():
     parser.add_argument('--network-helper', type=Path, required=True)
     parser.add_argument('--samples', type=int, default=100)
     parser.add_argument('--runtime-ms', type=int, default=180_000)
+    parser.add_argument('--phase-trace', action='store_true')
+    parser.add_argument('--expedited-rcu', action='store_true',
+                        help='change the benchmark guest kernel only for an RCU diagnostic')
     args = parser.parse_args()
     if not 1 <= args.samples <= 10_000 or not 10_000 <= args.runtime_ms <= 3_600_000:
         parser.error('sample count or VM runtime out of range')
