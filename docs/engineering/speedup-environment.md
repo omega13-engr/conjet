@@ -62,3 +62,19 @@ With no Kiri processes running, remove only the task-owned
 `.speedup/tools/kiri-0.2.2` directory. No global uninstaller is needed because no
 setup integration was run. Download, source-audit, and conversion scratch files
 were removed after preserving this receipt.
+
+## Follow-up isolation audit
+
+The v0.2.2 guest configuration hardcodes host shares for `/Users`, `/Volumes`,
+and `/private` in `crates/kiri/src/guest.rs::mac_share_dirs`. Data and socket
+relocation alone therefore cannot establish complete host filesystem isolation.
+A minimal sandbox-exec invocation succeeded, but confinement of Apple's VM
+helper and guest virtiofs access has not been qualified. No Kiri daemon was run.
+
+A same-account implementation path is a source build pinned to the official
+release with narrowly scoped configuration additions: an explicit state root,
+an explicit host-share allowlist restricted to the QA root, and disabled optional
+host integrations. This is a modified competitor build and must be disclosed in
+benchmark evidence. It is not interchangeable with an unmodified official binary
+for claims. Implementing that competitor fork requires agreement on this changed
+benchmark scope. The installed official app remains intact for reference.
