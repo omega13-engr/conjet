@@ -433,13 +433,24 @@ fn clone_and_reap(
 fn wait_for_claim() -> io::Result<bool> {
     let expires = Instant::now() + crate::prepared::SLOT_TTL;
     notify_control(b'Q', &[])?;
-    match wait(0, libc::POLLIN, None, Some(expires)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+    loop {
+        let now = Instant::now();
+        if now >= expires {
             notify_control(b'T', &[])?;
             return Ok(false);
         }
-        Err(error) => return Err(error),
+        if crate::memory::pressures_reserve(crate::memory::available_bytes()) {
+            notify_control(b'M', &[])?;
+            return Ok(false);
+        }
+        // Only an admitted parked child samples pressure. This wait is
+        // bounded by its lease and consumes no polling thread while idle.
+        let next_check = expires.min(now + Duration::from_millis(250));
+        match wait(0, libc::POLLIN, None, Some(next_check)) {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
+            Err(error) => return Err(error),
+        }
     }
     let mut command = [0];
     let size = unsafe {
@@ -451,10 +462,16 @@ fn wait_for_claim() -> io::Result<bool> {
         )
     };
     match (size, command[0]) {
-        (1, crate::prepared::RELEASE) if Instant::now() < expires => Ok(true),
         (1, crate::prepared::RELEASE) => {
-            notify_control(b'T', &[])?;
-            Ok(false)
+            if Instant::now() >= expires {
+                notify_control(b'T', &[])?;
+                Ok(false)
+            } else if crate::memory::pressures_reserve(crate::memory::available_bytes()) {
+                notify_control(b'M', &[])?;
+                Ok(false)
+            } else {
+                Ok(true)
+            }
         }
         (0, _) | (1, crate::prepared::CANCEL) => Ok(false),
         (-1, _) => Err(io::Error::last_os_error()),

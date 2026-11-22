@@ -343,6 +343,31 @@ def memory_pressure_check(channel, boot_id, scenario, report, footprint, connect
     print('Verified prepared eviction, active allocation canary and refill', flush=True)
 
 
+def balloon_pressure_check(channel, boot_id, scenario, report):
+    rows = report['balloon_pressure'] = []
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        kind, snapshot = call(channel, 19, {'boot_id': boot_id, 'budget_ms': 1000})
+        if kind != 19:
+            raise RuntimeError(f'guest pressure snapshot failed: {snapshot}')
+        rows.append(snapshot)
+        if (snapshot['pressure'] and not snapshot['requested_pressure']
+                and snapshot['available_bytes'] is not None
+                and snapshot['available_bytes'] < snapshot['prepared_floor_bytes']):
+            break
+        time.sleep(0.10)
+    else:
+        raise RuntimeError(f'balloon did not reach the preparation floor: {rows[-1:]}')
+    kind, error = call(channel, 17, launch_request(boot_id, scenario, 'none', 1))
+    if kind != 15 or error['code'] != 'memory_pressure':
+        raise RuntimeError(f'low guest memory admitted a reservation: {error}')
+    state, _ = state_sample(channel, boot_id, scenario, 'none', 1)
+    if state['exec'] != 'confirmed' or state['exit'] != {'code': 0} or state['cleanup'] != 'complete':
+        raise RuntimeError(f'fresh work under the guest balloon target failed: {state}')
+    report['balloon_fresh_cleanup'] = state
+    print(f'Guest memory floor paused preparation at {snapshot["available_bytes"]} available bytes', flush=True)
+
+
 def run_samples(channel, boot_id, args, scenario, endpoint, key_file, peer, report):
     sequence = 0
     for network in scenario['networks']:
@@ -403,12 +428,13 @@ def session(args):
         raise RuntimeError('staged fixture identity mismatch')
     args.output.mkdir(mode=0o700)
     before = launcher['production']()
+    memory_mib = 512 if args.balloon_pressure else 2048
     report = {'engine': 'native', 'scenario': scenario, 'groups': [], 'passed': False,
               'revision': adapter['run'](['/usr/bin/git', '-C', REPO, 'rev-parse', 'HEAD']),
               'scenario_sha256': adapter['file_hash'](scenario_path), 'production_before': before,
               'hashes': {str(path): adapter['file_hash'](path)
                          for path in (args.kernel, args.init, args.cli, args.vmm, args.client, args.network_helper)},
-              'vcpus': 2, 'memory_mib': 2048, 'host_tick_ms': 25,
+              'vcpus': 2, 'memory_mib': memory_mib, 'host_tick_ms': 25,
               'phase_trace': args.phase_trace, 'diagnostic_expedited_rcu': args.expedited_rcu,
               'cleanup_boundary': 'native removal reply requires verified cleanup'}
     with tempfile.TemporaryDirectory(prefix='cf-', dir=SCRATCH) as temporary:
@@ -442,9 +468,11 @@ def session(args):
         env = {'HOME': str(qa), 'CONJET_HOME': str(home), 'DOCKER_CONFIG': str(qa / 'docker'),
                'TMPDIR': str(qa / 'tmp'), 'PATH': '/usr/bin:/bin',
                'CONJET_NETWORK_HELPER_PATH': str(args.network_helper)}
-        command = [args.vmm, 'boot', '--manifest', manifest_path, '--memory-mib', '2048', '--cpus', '2',
+        command = [args.vmm, 'boot', '--manifest', manifest_path, '--memory-mib', str(memory_mib), '--cpus', '2',
                    '--max-exits', str(2**64 - 1), '--max-runtime-ms', str(args.runtime_ms),
                    '--host-tick-ms', '25', '--early-console-only', '--enable-native-launch', '--json']
+        if args.balloon_pressure:
+            command += ['--balloon-target-mib', '72']
         report['command'] = list(map(str, command))
         try:
             subprocess.run([args.cli, 'vm', 'build-initramfs', '--init', args.init,
@@ -480,6 +508,8 @@ def session(args):
                                         args.output / f'footprint-{label}.json', adapter['run'],
                                     )
                                 memory_pressure_check(channel, boot_id, scenario, report, footprint, connect_peer)
+                            elif args.balloon_pressure:
+                                balloon_pressure_check(channel, boot_id, scenario, report)
                             elif args.prepared:
                                 channel.settimeout(9)
                                 prepared_samples(channel, boot_id, args, scenario, report, connect_peer)
@@ -564,6 +594,7 @@ def main():
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--prepared', action='store_true', help='measure the one-slot no-network experiment')
     modes.add_argument('--memory-pressure', action='store_true', help='verify the authenticated pressure fixture')
+    modes.add_argument('--balloon-pressure', action='store_true', help='verify admission under a real Linux balloon target')
     parser.add_argument('--expedited-rcu', action='store_true',
                         help='change the benchmark guest kernel only for an RCU diagnostic')
     args = parser.parse_args()

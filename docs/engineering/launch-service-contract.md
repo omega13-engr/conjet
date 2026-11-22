@@ -317,6 +317,10 @@ for, and cleanup failure retains ownership.
 
 The pressure input pauses preparation and evicts only unclaimed slots.
 A refill requires clearing pressure and a new explicit prepare request.
+Linux `MemAvailable` below the experimental 64 MiB floor or an unavailable
+reading blocks preparation and claims. Only a parked helper rechecks the
+floor while waiting, using blocked waits bounded by its five-second lease.
+The final release check also verifies the floor.
 Jetstream excludes its Docker-only idle controller from the isolated
 native mode until a qualified unified policy exists. Guest-reported
 ownership transitions continue to govern backing release.

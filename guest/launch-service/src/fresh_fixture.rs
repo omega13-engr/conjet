@@ -220,8 +220,12 @@ struct Ledger {
 
 impl Ledger {
     fn memory_snapshot(&self) -> Value {
+        let available = crate::memory::available_bytes();
         let mut snapshot = json!({
-            "active": null, "prepared": null, "pressure": self.pressure,
+            "active": null, "prepared": null,
+            "pressure": self.pressure || crate::memory::pressures_reserve(available),
+            "requested_pressure": self.pressure, "available_bytes": available,
+            "prepared_floor_bytes": crate::memory::MIN_AVAILABLE_BYTES,
             "pressure_evictions": self.evictions,
         });
         if let Some(record) = self
@@ -480,7 +484,10 @@ impl FreshFixture {
         if ledger.closing {
             return Err(("busy", "fresh fixture is draining"));
         }
-        if prepared && ledger.pressure {
+        if prepared
+            && (ledger.pressure
+                || crate::memory::pressures_reserve(crate::memory::available_bytes()))
+        {
             return Err((
                 "memory_pressure",
                 "prepared admission paused under pressure",
@@ -678,6 +685,18 @@ impl FreshFixture {
                         record.slot.as_mut().expect("prepared record").discard();
                         record.change(Phase::Exiting);
                     }),
+                    b'M' if prepared => {
+                        let mut ledger = self.ledger.lock().expect("fresh ledger");
+                        let record = ledger.record.as_mut().expect("prepared record");
+                        if !record.cancelled {
+                            record.cancelled = true;
+                            let slot = record.slot.as_mut().expect("prepared slot");
+                            slot.discard();
+                            record.change(Phase::Exiting);
+                            ledger.evictions = ledger.evictions.saturating_add(1);
+                            self.changed.notify_all();
+                        }
+                    }
                     b'E' => {
                         if mode == "crash-supervisor" {
                             // Only the explicit disposable-guest recovery mode can
@@ -801,7 +820,9 @@ impl FreshFixture {
                 let request: Claim = parse(frame)?;
                 let expires = deadline(request.budget_ms)?;
                 check(&guard, &request.handle)?;
-                if guard.pressure {
+                if guard.pressure
+                    || crate::memory::pressures_reserve(crate::memory::available_bytes())
+                {
                     return Err(("memory_pressure", "prepared claim paused under pressure"));
                 }
                 if guard.closing || Instant::now() >= expires {

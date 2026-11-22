@@ -88,6 +88,20 @@ the private Docker endpoint. Use `native-fresh-lifecycle.py` with the
 same fixture directory and branch-built native guest and host tools to
 measure the separate native API and experimental native CLI.
 
+The native runner accepts `--prepared` for the isolated one-slot no-network
+experiment. Its raw rows separate preparation, claim acknowledgement,
+exec observation, and verified cleanup. Cancellation and expiry probes
+include miss timing. Each sample prepares a new slot, so preparation
+also records the refill cost under sequential churn.
+
+Run `--memory-pressure` to audit active and prepared cgroup ownership,
+authenticated eviction, and refill. This mode records empty and
+ready VMM footprints and checks a live allocation canary through
+the pressure transition. The separate `--balloon-pressure` mode
+uses a disposable 512 MiB guest and a 72 MiB balloon target to
+verify the automatic admission guard from guest memory telemetry.
+Use a new ExternalSSD output directory for each boot.
+
 ## Energy Gate
 
 Run the energy gate with required power measurement:

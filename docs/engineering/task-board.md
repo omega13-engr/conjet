@@ -316,6 +316,12 @@ energy sampling and rerun the matched qualification before product integration
 or release. Experimental SPEED-009 and SPEED-010 proceed under their
 development prerequisites.
 
+## UNDERREVIEW
+
+None.
+
+## DONE
+
 ### SPEED-010
 
 Title: Connect launch-service cgroups to memory accounting and eviction
@@ -361,8 +367,22 @@ prepared regression, workspace tests, Linux ARM64 Clippy and Python
 byte compilation passed. The initial too-large integer canary failures
 and successful reruns are preserved under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-010`.
-These runs used an authenticated pressure signal. Automatic Linux
-pressure detection and live pressure-specific qualification remain open.
+These runs used an authenticated pressure signal. The guest now also
+fails closed on missing availability or less than 64 MiB. A separate
+512 MiB disposable VM with a 72 MiB balloon target reported 25,894,912
+available bytes and rejected preparation automatically while a fresh
+workload executed and cleaned up successfully. The low-start test
+verified automatic admission. Ready-slot eviction was exercised with
+the authenticated pressure signal.
+
+The final baseline, pressure and prepared regressions passed. Three
+entitled tests separately exercised Linux free-page reporting and
+uncorrupted reuse, partial backing release, and immediate HVF backing
+release. The Linux reuse test recorded RSS falling from 137,904,128 to
+69,566,464 bytes. Reports and binary identities are in
+`SPEED-010/guest-availability` and `SPEED-010/backing-release`.
+The experimental scope is one owned workload. Production adaptive policy
+integration and competitive qualification remain gated.
 
 Source: [Memory integration](speed-engineering-plan.md#dynamic-memory-integration),
 [memory debugging](../dynamic-memory-debugging.md),
@@ -371,14 +391,9 @@ Source: [Memory integration](speed-engineering-plan.md#dynamic-memory-integratio
 Review: Checked accounting through cleanup, active protection at claim,
 serialization with pressure, and the opt-in scope of the host guard.
 
-Next Action: Gate prepared admission on guest memory availability and
-verify the isolated path with a constraining Linux balloon target.
-
-## UNDERREVIEW
-
-None.
-
-## DONE
+Next Action: Keep local measurements experimental and prepare the final
+qualification matrix. The paired preparation trace identifies guest
+setup after claim as the largest remaining median component.
 
 ### SPEED-009
 
