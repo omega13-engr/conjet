@@ -359,15 +359,31 @@ records the timed measurement window in addition to individual operations
 and tracks the native VMM and owned networking helper. Reports are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/direct-peer`.
 
+The serial common-image run on `64fe823` captured 4,000 native operations
+with verified cleanup, 4,000 Kiri Docker API operations, and 200 original
+Conjet Docker API operations. All completed at their adapter's boundary.
+The native bridge recorded 20.196 ms p50 and 32.315 ms p99 across 42.352
+seconds, while Kiri's API acknowledgement was 33.608 ms p50 and 63.461 ms
+p99. Kiri's read-only guest visibility probe saw its own container as
+PID 1 and could not verify guest cleanup. Raw timings, launcher
+observations, physical footprint, CPU and balloon evidence are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/api-churn`.
+The reviewed gate decision is **revise**. Qualification is still pending.
+
 Source: [Delivery gates](speed-engineering-plan.md#incremental-delivery-and-decision-gates),
 [verification policy](speed-engineering-plan.md#verification-and-claim-policy).
 
-Review: Reviewed the kqueue descriptor lifetime, empty queue idle behavior,
-virtio stream ownership and opt-in scope. Causal attribution beyond
-host wake latency and the fresh gate review remain pending.
+Review: Reviewed the kqueue callback and queue ownership, guest phase
+attribution, grouped link teardown, and direct peer registration. The
+revised native path passed the scoped correctness and recovery matrix.
+The gate remains unmet because the Docker competitor cleanup endpoint,
+second physical host configuration, equivalent network scope, energy,
+and full qualification matrix are unverified.
 
-Next Action: Run a longer serial API churn comparison on the verified
-revision and record the fresh gate verdict and qualification blockers.
+Next Action: Obtain an authorized second ARM64 host and an independent
+way to verify the official competitor's guest cleanup. Enable authorized
+energy sampling and rerun the matched qualification before prepared
+launch, product integration, or release work can proceed.
 
 ## UNDERREVIEW
 

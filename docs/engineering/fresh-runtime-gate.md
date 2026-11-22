@@ -1,7 +1,7 @@
 # Fresh runtime gate
 
-**SPEED-008 is in progress.** The transport experiment identified avoidable
-host wake latency. Equivalent-work qualification remains open.
+**Decision is revise. SPEED-008 remains INPROGRESS.** The native path
+improved on this Mac. The required equivalent-work qualification is open.
 
 ## Comparison criteria
 
@@ -171,3 +171,48 @@ single-host figures remain preliminary and use the native cleanup-complete
 boundary. Raw evidence is under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/direct-peer`.
 [Linux 6.12 veth peer creation](https://github.com/torvalds/linux/blob/v6.12/drivers/net/veth.c#L1784-L1830)
+
+## Serial API churn on the M1 Pro
+
+The final code revision tested was `64fe82397bbf302bdb9ad0d23e0cafddb7db41e6`.
+All engines used the same ARM64 image artifact, 10 warmups per mode,
+the same requested workload limits and two vCPUs with a 2 GiB VM
+configuration. Engines ran serially with production Conjet in service.
+Across the recorded endpoints, system one-minute load ranged from 4.86
+to 6.52. No adapter reported a failed operation in these windows.
+
+| Engine and observed boundary | Network | Samples | p50 / p95 / p99 (ms) | Window (s) | Ops/s |
+| --- | --- | ---: | --- | ---: | ---: |
+| Native, verified cleanup | none | 2,000 | 2.109 / 3.051 / 4.406 | 4.463 | 448.15 |
+| Native, verified cleanup | bridge | 2,000 | 20.196 / 27.845 / 32.315 | 42.352 | 47.22 |
+| Kiri, Docker removal acknowledgement | none | 2,000 | 4.521 / 9.935 / 20.773 | 10.777 | 185.58 |
+| Kiri, Docker removal acknowledgement | bridge | 2,000 | 33.608 / 53.843 / 63.461 | 68.784 | 29.08 |
+| Original Conjet, Docker removal acknowledgement | none | 100 | 394.564 / 478.224 / 602.113 | 40.501 | 2.47 |
+| Original Conjet, Docker removal acknowledgement | bridge | 100 | 479.779 / 515.515 / 541.395 | 47.623 | 2.10 |
+
+The native VMM used 15.84 CPU seconds across both windows and their
+warmups. Its physical footprint grew from 31.08 to 80.50 MiB. RSS
+grew from 100,912 to 715,056 KiB. The balloon report recorded 4.67 GiB
+in cumulative backing decommit across repeated free-page reports.
+The Kiri VM could only be attributed at the final snapshot, so a paired
+VM footprint or CPU delta is unavailable. Energy use and the effect of
+memory reclamation on running services require separate qualification.
+
+Kiri's read-only `--pid=host` probe observed its own BusyBox process as
+PID 1. It could not verify the guest init's mount, cgroup or veth inventory.
+The Docker acknowledgements and native cleanup measurements therefore
+retain separate scopes. Commands, raw samples, failures from earlier
+probes, topology and resource metadata are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/api-churn`.
+
+## Release gate
+
+Proceed requires a verified equivalent cleanup observation for the
+official competitor, a comparison across two supported physical host
+configurations with the predeclared sample and session counts, and
+authorized energy measurement. Further qualification also needs matched
+network scope and sustained concurrency beyond this single-active-workload
+fixture. The authorized M1 Pro remains under production load. The
+tick-disabled native trial that stalled remains outside the tested
+configuration. SPEED-009 through SPEED-014 remain blocked, including
+the pull request, merge, signing and publication.
