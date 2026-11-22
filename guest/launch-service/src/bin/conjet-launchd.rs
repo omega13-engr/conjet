@@ -50,6 +50,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             conjet_launch_service::kernel_fixture::check(true)?;
         }
         #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--check-fresh-bridge" && args.next().is_none() => {
+            conjet_launch_service::bridge_fixture::check()?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--check-bridge-peer" && args.next().is_none() => {
+            conjet_launch_service::bridge_fixture::check_peer()?;
+        }
+        #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--verify-workload-fixture" => {
             let mode = match args.next() {
                 None => "once",

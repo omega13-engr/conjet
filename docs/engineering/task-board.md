@@ -47,40 +47,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-007
-
-Title: Implement fresh bridge networking with verified teardown
-
-Description: Add one private bridge mode with addresses, DNS, and the explicitly supported port behavior. Deliver network correctness and cleanup tests.
-
-Is blocked by task: SPEED-006.
-
-Acceptance Criteria:
-
-- Implement the declared bridge, addressing, DNS, and port behavior or explicitly
-  reject unsupported networking options.
-- Verify identity isolation, traffic correctness, address reuse, and teardown under churn.
-- API-visible removal and actual network cleanup are independently observable.
-- No unbounded deferred cleanup or networking changes to the installed runtime.
-
-Problem and Evidence: A no-network result cannot substantiate a bridge-network
-win against Kiri; deferred veth cleanup changes the lifecycle boundary.
-
-Approach:
-
-1. Allocate network identity and interfaces as owned launch resources; unwind every partial failure.
-2. Verify DNS, peer isolation, supported port traffic, concurrent address reuse, and rejection of unsupported network options.
-3. Observe interface, address, DNS, and port cleanup before declaring cleanup complete; run repeated bridge launches with traffic canaries.
-
-Evidence: Pending network integration results, concurrent traffic checks, and cleanup traces.
-
-Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
-[measurement contract](speed-engineering-plan.md#measurement-contract).
-
-Review: Pending; inspect identity reuse, DNS/port cleanup, and concurrent teardown.
-
-Next Action: Define the bridge-mode resource inventory and implement allocation/rollback.
-
 ### SPEED-008
 
 Title: Run the fresh-runtime comparison and record the gate decision
@@ -347,7 +313,53 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-None.
+### SPEED-007
+
+Title: Implement fresh bridge networking with verified teardown
+
+Description: Add one private bridge mode with addresses, DNS, and the explicitly supported port behavior. Deliver network correctness and cleanup tests.
+
+Is blocked by task: SPEED-006.
+
+Acceptance Criteria:
+
+- Implement the declared bridge, addressing, DNS, and port behavior or explicitly
+  reject unsupported networking options.
+- Verify identity isolation, traffic correctness, address reuse, and teardown under churn.
+- API-visible removal and actual network cleanup are independently observable.
+- No unbounded deferred cleanup or networking changes to the installed runtime.
+
+Problem and Evidence: A no-network result cannot substantiate a bridge-network
+win against Kiri; deferred veth cleanup changes the lifecycle boundary.
+
+Approach:
+
+1. Allocate network identity and interfaces as owned launch resources; unwind every partial failure.
+2. Verify DNS, peer isolation, supported port traffic, concurrent address reuse, and rejection of unsupported network options.
+3. Observe interface, address, DNS, and port cleanup before declaring cleanup complete; run repeated bridge launches with traffic canaries.
+
+Evidence: The standalone ARM64 kernel fixture opened a new private
+network namespace, used checked rtnetlink requests to create an IPv4 bridge
+and move a veth peer into a second network namespace, and verified TCP
+traffic from the assigned address. It removed the bridge and veth and
+confirmed on both sides that their addresses could no longer bind.
+Ten consecutive allocations reused the same address pair with no residual
+interfaces. The normal host remained unchanged. The pinned musl rebuild,
+command, hashes, guest logs and production observations are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-007/network-kernel`.
+Strict ARM64 Clippy, 17 focused Rust tests, formatting, and diff checks passed.
+Native launch still rejects bridge mode. DNS, launch integration, partial
+failure and concurrent network isolation require further validation.
+
+Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
+[measurement contract](speed-engineering-plan.md#measurement-contract).
+
+Review: The link proof reviewed the kernel sender and request sequence,
+namespace ownership, explicit link deletion and address cleanup. Workload
+admission, DNS/port cleanup and concurrent teardown review remain pending.
+
+Next Action: Integrate the private bridge with the fresh helper and
+validate DNS, port support and teardown independently from workload exit.
 
 ## UNDERREVIEW
 
