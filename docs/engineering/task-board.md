@@ -6,15 +6,16 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 - Each task must deliver the artifact or behavior named in Description. Complete
   Approach steps in order and record commands, results, and artifact paths in Evidence.
-- Work sequentially by task ID; move a task between sections rather than copying it.
-- Start only when dependencies are DONE with review evidence. Each implementation
+- Follow implementation dependencies; move a task between sections as its status changes.
+- Start implementation when its development prerequisites are DONE with review evidence. Each implementation
   task includes focused automated checks, diff review, and resource cleanup.
 - Evidence is pending until actual commands, results, revisions, configurations,
   and artifact links are recorded. Targets are not benchmark results.
 - UNDERREVIEW requires an implementation and verification evidence; DONE requires
   acceptance criteria and review to pass. Record blockers and failed experiments.
-- A no-go at a research gate blocks downstream work until the plan is revised;
-  do not weaken acceptance criteria merely to obtain a passing result.
+- SPEED-009 and SPEED-010 may proceed as isolated experiments while SPEED-008
+  is open. The fresh and final qualification gates remain mandatory for product
+  integration, the final PR, merge, release and performance claims.
 - Preserve the installed runtime and unrelated changes. Use isolated QA resources,
   designated temporary artifact locations, and screenshot evidence where applicable,
   as described in the plan. No persistent prewarming services or startup jobs.
@@ -53,7 +54,9 @@ Title: Implement prepare, claim, expire, and destroy for one-use slots
 
 Description: Add explicit prepared-launch API operations and a bounded slot table. Deliver state-machine and isolation tests plus preparation/hit/miss measurements.
 
-Is blocked by task: SPEED-008, with a reviewed proceed decision.
+Development prerequisite: SPEED-007 (DONE).
+
+Final qualification prerequisites: SPEED-008 and the applicable SPEED-011 gates.
 
 Acceptance Criteria:
 
@@ -89,7 +92,9 @@ Title: Connect launch-service cgroups to memory accounting and eviction
 
 Description: Register active workloads and prepared reserves with the memory controller. Deliver pressure-eviction and allocation/free/reuse evidence.
 
-Is blocked by task: SPEED-009.
+Development prerequisite: SPEED-009.
+
+Final qualification prerequisites: SPEED-008 and the applicable SPEED-011 gates.
 
 Acceptance Criteria:
 
@@ -125,7 +130,8 @@ Title: Run the qualification matrix and publish measured verdicts
 
 Description: Create docs/engineering/speed-qualification.md linking raw reports and pass/fail results for each proposed performance claim.
 
-Is blocked by task: SPEED-010.
+Is blocked by task: SPEED-010 for the complete matrix. Fresh qualification
+requires SPEED-008.
 
 Acceptance Criteria:
 
@@ -382,8 +388,9 @@ and full qualification matrix are unverified.
 
 Next Action: Obtain an authorized second ARM64 host and an independent
 way to verify the official competitor's guest cleanup. Enable authorized
-energy sampling and rerun the matched qualification before prepared
-launch, product integration, or release work can proceed.
+energy sampling and rerun the matched qualification before product integration
+or release. Experimental SPEED-009 and SPEED-010 proceed under their
+development prerequisites.
 
 ## UNDERREVIEW
 

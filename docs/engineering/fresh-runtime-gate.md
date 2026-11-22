@@ -214,5 +214,6 @@ authorized energy measurement. Further qualification also needs matched
 network scope and sustained concurrency beyond this single-active-workload
 fixture. The authorized M1 Pro remains under production load. The
 tick-disabled native trial that stalled remains outside the tested
-configuration. SPEED-009 through SPEED-014 remain blocked, including
-the pull request, merge, signing and publication.
+configuration. Isolated SPEED-009 and SPEED-010 experiments may proceed.
+The gate still applies to final qualification, product integration, the
+final pull request, merge, signing, publication and superiority claims.

@@ -332,7 +332,7 @@ to those differences without profiling.
 
 ## Incremental delivery and decision gates
 
-Follow [the task board](task-board.md) in dependency order:
+Follow the implementation dependencies in [the task board](task-board.md):
 
 0. Prove the isolated conjet-speedup environment and competitor routing.
 1. Correct tracing and establish equivalent baselines.
@@ -345,9 +345,18 @@ Follow [the task board](task-board.md) in dependency order:
 8. Tune measured bottlenecks and run competitive qualification.
 9. Integrate qualified native product surfaces; gate Docker compatibility separately.
 
-An unmet gate leaves downstream implementation blocked. A documented no-go
-decision is a valid research outcome, not permission to mark unimplemented
-downstream work done. Revise scope explicitly if the evidence changes the design.
+The reviewed fresh implementation through SPEED-007 is the development
+prerequisite for experimental SPEED-009. SPEED-010 builds on the prepared
+implementation from SPEED-009. Both may develop, test and collect local
+evidence in isolated fixtures while SPEED-008 remains open. Keep those
+results tied to their experimental scope and revision.
+
+SPEED-008 remains required for final qualification. Completing an experimental
+implementation leaves every outstanding qualification requirement in force.
+SPEED-011 must pass the applicable qualification gates before SPEED-012
+exposes product surfaces. All required gates must pass before the final PR,
+merge, release or a superiority claim. A revise or stop verdict remains
+valid evidence and leaves the affected qualification gate open.
 
 ## Verification and claim policy
 
