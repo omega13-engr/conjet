@@ -332,8 +332,8 @@ def main():
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
     parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
     parser.add_argument('--core-assets', type=Path, help='reuse verified ExternalSSD release downloads')
-    parser.add_argument('--hold-seconds', type=int, choices=range(121), default=0,
-                        metavar='0..120', help='keep the verified VM alive briefly for QA')
+    parser.add_argument('--hold-seconds', type=int, choices=range(601), default=0,
+                        metavar='0..600', help='keep the verified VM alive briefly for QA')
     args = parser.parse_args()
     if not args.image or args.image.startswith('-'):
         parser.error('image must be a Docker image reference')

@@ -417,55 +417,7 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-### SPEED-004
-
-Title: Implement the VSOCK service handshake and bounded request loop
-
-Description: Add a Rust guest-service skeleton and native host client using the approved contract. Deliver an isolated round-trip fixture without application execution.
-
-Is blocked by task: SPEED-003.
-
-Acceptance Criteria:
-
-- Versioned, bounded protocol implements handshake, capability discovery, errors,
-  deadlines, cancellation, and orderly shutdown.
-- Unauthorized, malformed, oversized, disconnected, and saturated requests are tested.
-- Guest supervision never runs under VMM device-processing locks.
-- Round-trip measurements and service resource costs are recorded without busy polling.
-- Disposable QA resources are cleaned up; no installed service registration changes.
-
-Problem and Evidence: Existing VSOCK machinery provides transport, but the proposed
-launch protocol and guest supervisor are not implemented.
-
-Approach:
-
-1. Implement version negotiation, capability reporting, request IDs, framing limits, deadlines, and shutdown over persistent VSOCK.
-2. Add malformed-frame, unauthorized-client, queue-full, timeout, and disconnect tests.
-3. Run the fixture in a disposable VM, record round-trip latency and resource use, then verify shutdown and cleanup.
-
-Evidence: Added a pinned Rust launch-service crate with a 28-byte v1
-frame codec, a pre-allocation payload bound, typed JSON, and mutual
-HMAC-SHA256 authentication. Seven tests passed via
-`cargo test --locked -p conjet-launch-service`, including an independent
-HMAC vector, a persistent socket-pair handshake, replay rejection, peer
-rejection, oversized frames and truncation. The scoped Clippy command
-`cargo clippy --locked -p conjet-launch-service --all-targets -- -D warnings`
-passed. Logs are under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-004/codec`.
-The codec increment runs in-process socket tests. Live VSOCK service,
-control flow, resource measurement and isolated cleanup remain pending.
-
-Source: [Architecture](speed-engineering-plan.md#architecture-and-ownership),
-[VSOCK device](../../jetstream/src/devices/vsock.rs).
-
-Review: Frame header and declared length are checked before payload
-allocation. The transcript binds both role proofs, version negotiation,
-peer nonces and the boot generation. The guest and host reject each other's
-invalid proof before lifecycle traffic. Review of queue, connection and
-shutdown ownership remains pending.
-
-Next Action: Connect the codec to an event-driven guest VSOCK listener,
-bounded control handling, and the native host fixture client.
+None.
 
 ## UNDERREVIEW
 
@@ -762,3 +714,81 @@ lifecycle ownership with the Docker engine.
 
 Next Action: Begin SPEED-004 with the frame codec, authenticated persistent
 VSOCK handshake, and bounded control request loop.
+
+### SPEED-004
+
+Title: Implement the VSOCK service handshake and bounded request loop
+
+Description: Add a Rust guest-service skeleton and native host client using the approved contract. Deliver an isolated round-trip fixture without application execution.
+
+Is blocked by task: SPEED-003.
+
+Acceptance Criteria:
+
+- Versioned, bounded protocol implements handshake, capability discovery, errors,
+  deadlines, cancellation, and orderly shutdown.
+- Unauthorized, malformed, oversized, disconnected, and saturated requests are tested.
+- Guest supervision never runs under VMM device-processing locks.
+- Round-trip measurements and service resource costs are recorded without busy polling.
+- Disposable QA resources are cleaned up; no installed service registration changes.
+
+Problem and Evidence: Existing VSOCK machinery provides transport, but the proposed
+launch protocol and guest supervisor are not implemented.
+
+Approach:
+
+1. Implement version negotiation, capability reporting, request IDs, framing limits, deadlines, and shutdown over persistent VSOCK.
+2. Add malformed-frame, unauthorized-client, queue-full, timeout, and disconnect tests.
+3. Run the fixture in a disposable VM, record round-trip latency and resource use, then verify shutdown and cleanup.
+
+Evidence: Added a pinned Rust launch-service crate with a 28-byte v1
+frame codec, a pre-allocation payload bound, typed JSON, and mutual
+HMAC-SHA256 authentication. Seven tests passed via
+`cargo test --locked -p conjet-launch-service`, including an independent
+HMAC vector, a persistent socket-pair handshake, replay rejection, peer
+rejection, oversized frames and truncation. The scoped Clippy command
+`cargo clippy --locked -p conjet-launch-service --all-targets -- -D warnings`
+passed. Logs are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-004/codec`.
+The transport increment added the Linux AF_VSOCK listener on port 2380,
+a native Darwin client, an opt-in private Jetstream listener, and bounded
+control handling. `cargo test --locked --workspace` passed 149 tests with
+three existing opt-in integration tests ignored. Linux ARM64 cross-check
+and scoped Clippy passed. The builder compiled a static ARM64 release
+binary in the verified candidate using pinned Rust 1.91.1 Alpine and
+`--target aarch64-unknown-linux-musl`. The first build failure and the
+ad-hoc signing repair are retained alongside successful build logs.
+
+In the isolated 512 MiB, two-vCPU VM, the live host fixture proved wrong
+peer rejection, oversized and malformed frames, wait deadlines, full
+wait and connection queues, cancellation, disconnect, and authenticated
+shutdown. The shutdown acknowledgement was followed by VMM exit and
+native socket removal. Production observations matched, and the runtime
+roots and ephemeral key were removed. Existing Docker smoke passed with
+the updated VMM. Results are in `SPEED-004/transport` under the retained
+evidence root. Replay commands identify the kernel, VMM, host client and
+guest binary by hash.
+
+Across 100 control pings, p50/p95/p99 were 0.197/0.329/29.171 ms with a
+39.349 ms handshake. The prior 100-ping run recorded 0.345/0.427/0.495 ms.
+The larger p99 stays in the evidence. The final guest service reported
+4.022 ms user CPU, 32.177 ms system CPU, and 472 KiB peak RSS across the
+fixture session. VMM footprint was 32,457,520 bytes before the ping loop
+and 31,572,784 after it. The measurements cover a transport fixture on
+the shared host. The headless fixture produced raw records and no UI.
+
+Source: [Architecture](speed-engineering-plan.md#architecture-and-ownership),
+[VSOCK device](../../jetstream/src/devices/vsock.rs).
+
+Review: Frame header and declared length are checked before payload
+allocation. The transcript binds both role proofs, version negotiation,
+peer nonces and the boot generation. The guest and host reject each other's
+invalid proof before lifecycle traffic. Bounded pending waits and connections passed both unit and live tests.
+Guest waits block in the kernel. The new host listener uses a wakeable
+poll and joins on teardown. The live tests identified and fixed Docker
+HTTP inference on native frames, raw EOF propagation, and the shared-VM
+state lifetime that initially delayed listener cleanup. Docker retains
+its existing bridge path.
+
+Next Action: Begin SPEED-005 with the validated launch spec and the
+isolated fresh execution path.

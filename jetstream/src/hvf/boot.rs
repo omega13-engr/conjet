@@ -121,6 +121,7 @@ pub struct HvfBootOptions {
     pub balloon_target_mib: Option<u64>,
     pub memory_control_socket: Option<PathBuf>,
     pub trace_guest_readiness: bool,
+    pub enable_native_launch: bool,
 }
 
 impl Default for HvfBootOptions {
@@ -137,6 +138,7 @@ impl Default for HvfBootOptions {
             balloon_target_mib: None,
             memory_control_socket: None,
             trace_guest_readiness: false,
+            enable_native_launch: false,
         }
     }
 }
@@ -2527,6 +2529,7 @@ impl HvfBootRunner {
             &mut vm_state,
             Some(memory_reclaimer),
             trace_started,
+            self.options.enable_native_launch,
         ) {
             Ok(detail) => stage(&mut stages, "virtio-runtime", true, detail),
             Err(error) => {
@@ -3361,7 +3364,11 @@ impl HvfBootRunner {
             .vsock
             .values_mut()
             .find_map(VsockQueueHandler::take_readiness_records);
+        let native_launch_bridge = vm_state.devices.native_launch_bridge.take();
         drop(vm_state);
+        // Other boot threads can still retain shared VM state. Close the
+        // private launch listener before publishing completion.
+        drop(native_launch_bridge);
         let mut report = self.finish_with_docker_probe(
             ok,
             message,
@@ -3811,6 +3818,7 @@ fn configure_virtio_runtime(
     vm_state: &mut VmState,
     memory_reclaimer: Option<Arc<dyn GuestMemoryReclaimer>>,
     trace_started: Option<Instant>,
+    enable_native_launch: bool,
 ) -> Result<String, String> {
     let mut block_paths = vec![config.boot_source.root_disk_path.clone()];
     if let Some(path) = config.boot_source.data_disk_path.clone() {
@@ -3880,8 +3888,19 @@ fn configure_virtio_runtime(
                     vm_state.devices.memory_bridge = Some(bridge);
                     state
                 };
-                let mut handler =
-                    VsockQueueHandler::with_bridges(vec![docker_bridge, memory_bridge]);
+                let mut bridges = vec![docker_bridge, memory_bridge];
+                if enable_native_launch {
+                    let native_bridge = HostUnixVsockBridge::bind_native_launch(
+                        config
+                            .boot_source
+                            .docker_socket_path
+                            .with_file_name("native-launch.sock"),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    bridges.push(native_bridge.state.clone());
+                    vm_state.devices.native_launch_bridge = Some(native_bridge);
+                }
+                let mut handler = VsockQueueHandler::with_bridges(bridges);
                 if let Some(started) = trace_started {
                     handler.enable_readiness_trace(started);
                 }

@@ -152,6 +152,16 @@ impl Frame {
         }
         if self.kind == Kind::Error {
             let error: ErrorReply = self.decode()?;
+            if error.code.is_empty()
+                || error.code.len() > 64
+                || !error
+                    .code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                || error.message.len() > 256
+            {
+                return Err(WireError::InvalidPayload);
+            }
             return Err(WireError::PeerError(error.code));
         }
         if self.kind != kind {

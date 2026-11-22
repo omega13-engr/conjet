@@ -76,6 +76,9 @@ enum Command {
         /// Collect bounded guest process observations over the readiness VSOCK port.
         #[arg(long)]
         trace_guest_readiness: bool,
+        /// Expose the isolated native launch transport on native-launch.sock.
+        #[arg(long)]
+        enable_native_launch: bool,
         /// Emit pretty JSON boot report.
         #[arg(long)]
         json: bool,
@@ -131,6 +134,7 @@ fn main() -> anyhow::Result<()> {
             balloon_target_mib,
             memory_control_socket,
             trace_guest_readiness,
+            enable_native_launch,
             json,
             dry_run,
         } => {
@@ -160,6 +164,7 @@ fn main() -> anyhow::Result<()> {
                 balloon_target_mib,
                 memory_control_socket,
                 trace_guest_readiness,
+                enable_native_launch,
             });
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);

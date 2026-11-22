@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::Shutdown;
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,6 +24,8 @@ pub const HOST_CID: u64 = 2;
 pub const DEFAULT_GUEST_CID: u64 = 3;
 pub const DOCKER_BRIDGE_PORT: u32 = 2375;
 pub const MEMORY_BRIDGE_PORT: u32 = 2376;
+const NATIVE_LAUNCH_PORT: u32 = 2380;
+const MAX_NATIVE_BRIDGE_STREAMS: usize = 8;
 const STREAM_TYPE: u16 = 1;
 const OP_REQUEST: u16 = 1;
 const OP_RESPONSE: u16 = 2;
@@ -480,6 +483,14 @@ fn receive_guest_packet(
 pub struct HostUnixVsockBridge {
     pub state: Arc<Mutex<HostUnixVsockBridgeState>>,
     socket_path: PathBuf,
+    native_listener: Option<NativeListener>,
+}
+
+#[derive(Debug)]
+struct NativeListener {
+    stop: UnixStream,
+    thread: thread::JoinHandle<()>,
+    identity: (u64, u64),
 }
 
 impl HostUnixVsockBridge {
@@ -515,11 +526,123 @@ impl HostUnixVsockBridge {
             .name("jetstream-docker-vsock-bridge".to_string())
             .spawn(move || accept_loop(listener, worker_state))
             .map_err(VsockError::Io)?;
-        Ok(Self { state, socket_path })
+        Ok(Self {
+            state,
+            socket_path,
+            native_listener: None,
+        })
+    }
+
+    pub fn bind_native_launch(socket_path: PathBuf) -> Result<Self, VsockError> {
+        let parent = socket_path
+            .parent()
+            .ok_or(std::io::ErrorKind::InvalidInput)
+            .map_err(std::io::Error::from)?;
+        let directory = std::fs::symlink_metadata(parent)?;
+        if !directory.is_dir() || directory.mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "native launch requires a private socket directory",
+            )
+            .into());
+        }
+        let (wake, stop) = UnixStream::pair()?;
+        let listener = UnixListener::bind(&socket_path)?;
+        let setup = (|| -> std::io::Result<_> {
+            let metadata = std::fs::symlink_metadata(&socket_path)?;
+            listener.set_nonblocking(true)?;
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+            let state = Arc::new(Mutex::new(HostUnixVsockBridgeState::new(
+                NATIVE_LAUNCH_PORT,
+                55_000,
+                false,
+            )));
+            let worker_state = Arc::clone(&state);
+            let thread = thread::Builder::new()
+                .name("jetstream-launch-vsock".into())
+                .spawn(move || accept_native_launch(listener, wake, worker_state))?;
+            Ok((
+                state,
+                NativeListener {
+                    stop,
+                    thread,
+                    identity: (metadata.dev(), metadata.ino()),
+                },
+            ))
+        })();
+        match setup {
+            Ok((state, native_listener)) => Ok(Self {
+                state,
+                socket_path,
+                native_listener: Some(native_listener),
+            }),
+            Err(error) => {
+                let _ = std::fs::remove_file(&socket_path);
+                Err(error.into())
+            }
+        }
     }
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+}
+
+impl Drop for HostUnixVsockBridge {
+    fn drop(&mut self) {
+        if let Some(listener) = self.native_listener.take() {
+            drop(listener.stop);
+            let _ = listener.thread.join();
+            if let Ok(metadata) = std::fs::symlink_metadata(&self.socket_path) {
+                if metadata.file_type().is_socket()
+                    && (metadata.dev(), metadata.ino()) == listener.identity
+                {
+                    let _ = std::fs::remove_file(&self.socket_path);
+                }
+            }
+        }
+    }
+}
+
+fn accept_native_launch(
+    listener: UnixListener,
+    wake: UnixStream,
+    state: Arc<Mutex<HostUnixVsockBridgeState>>,
+) {
+    let mut descriptors = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        // Both descriptor owners stay alive throughout poll.
+        let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, -1) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if descriptors[1].revents != 0 {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let mut state = state.lock().expect("vsock bridge mutex poisoned");
+                if state.streams.len() < MAX_NATIVE_BRIDGE_STREAMS {
+                    state.accept_stream(stream);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => break,
+        }
     }
 }
 
@@ -607,7 +730,14 @@ impl HostUnixVsockBridgeState {
         let port = self.next_port;
         self.next_port = self.next_port.saturating_add(1);
         let _ = stream.set_nonblocking(true);
-        let stream = HostUnixVsockStream::new(stream);
+        let mut stream = HostUnixVsockStream::new(stream);
+        if self.guest_port == NATIVE_LAUNCH_PORT {
+            // The launch protocol is explicitly raw. HTTP body and close
+            // inference belongs to the Docker-facing transport.
+            stream.host_protocol_known = true;
+            stream.binary_frame_stream = true;
+            stream.response_framing = HostResponseFraming::CloseDelimited;
+        }
         self.pending_guest_packets
             .push_back(VsockPacket::connection_request(port, self.guest_port));
         self.streams.insert(port, stream);
@@ -1953,6 +2083,65 @@ mod tests {
         frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         frame.extend_from_slice(payload);
         frame
+    }
+
+    #[test]
+    fn native_bridge_forwards_guest_eof_after_the_transport_drains() {
+        let (mut client, socket) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut bridge = HostUnixVsockBridgeState::new(NATIVE_LAUNCH_PORT, 55_000, false);
+        bridge.accept_stream(socket);
+        bridge.handle_guest_packet(VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: NATIVE_LAUNCH_PORT,
+            dst_port: 55_000,
+            op: OP_SHUTDOWN,
+            flags: SHUTDOWN_SEND,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: vec![],
+        });
+        bridge.finish_pending_guest_shutdowns_after_transport_drain();
+        assert_eq!(client.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn native_bridge_forwards_split_binary_data_without_http_inference() {
+        let (mut client, socket) = UnixStream::pair().unwrap();
+        let mut bridge = HostUnixVsockBridgeState::new(NATIVE_LAUNCH_PORT, 55_000, false);
+        bridge.accept_stream(socket);
+        assert_eq!(
+            bridge.pending_guest_packets.pop_front().unwrap().op,
+            OP_REQUEST
+        );
+        client.write_all(b"CJ").unwrap();
+        bridge.poll_host_streams();
+        let first = bridge.pending_guest_packets.pop_front().unwrap();
+        assert_eq!(first.op, OP_RW);
+        assert_eq!(first.payload, b"CJ");
+        client.write_all(b"LS").unwrap();
+        bridge.poll_host_streams();
+        let second = bridge.pending_guest_packets.pop_front().unwrap();
+        assert_eq!(second.op, OP_RW);
+        assert_eq!(second.payload, b"LS");
+    }
+
+    #[test]
+    fn native_listener_refuses_existing_paths_and_unlinks_only_its_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = dir.path().join("launch.sock");
+        std::fs::write(&endpoint, b"existing").unwrap();
+        assert!(HostUnixVsockBridge::bind_native_launch(endpoint.clone()).is_err());
+        assert_eq!(std::fs::read(&endpoint).unwrap(), b"existing");
+        std::fs::remove_file(&endpoint).unwrap();
+        let bridge = HostUnixVsockBridge::bind_native_launch(endpoint.clone()).unwrap();
+        assert!(endpoint.exists());
+        drop(bridge);
+        assert!(!endpoint.exists());
     }
 
     #[test]

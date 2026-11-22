@@ -98,7 +98,10 @@ by `dropped_bytes` and the returned cursor.
 The first implementation advertises `ping`, `shutdown`, and `request_cancel`
 for pending waits in its isolated fixture. Guest launch features stay
 unadvertised until they pass their implementation gates. A client-side
-correlation ID never authorizes a privileged operation by itself.
+correlation ID never authorizes a privileged operation by itself. The
+transport fixture advertises `fixture_wait` and reserves the all-zero
+workload ID with the current boot ID. A wait on this handle becomes a
+pending timer without allocating any workload resources.
 
 ### Limits, admission, and deadlines
 
@@ -126,10 +129,12 @@ drain produces an error and retains recovery ownership.
 Use explicit errors `unsupported_version`, `unauthorized`, `malformed`,
 `unsupported_option`, `invalid_spec`, `busy`, `deadline_exceeded`,
 `id_conflict`, `stale_sequence`, `stale_generation`, `not_found`, and
-`cleanup_failed`. Request rejection precedes side effects. For the isolated
-handshake fixture, `cancel` may contain a `request_id` in place of a handle
-and cancels only the matching pending wait on that connection. Native
-workload cancellation requires a handle.
+`cleanup_failed`, and `cancelled`. Request rejection precedes side effects.
+For the isolated handshake fixture, `cancel` may contain a `request_id` in
+place of a handle and cancels only the matching pending wait on that
+connection. The pending wait receives `cancelled`. The cancellation request
+receives kind 11 in the reply direction with `request_id` and
+`cancelled: true`. Native workload cancellation requires a handle.
 
 ## Lifecycle and recovery
 
