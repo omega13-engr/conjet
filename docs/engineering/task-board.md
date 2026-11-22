@@ -47,42 +47,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-003
-
-Title: Write the launch-service protocol and lifecycle specification
-
-Description: Create docs/engineering/launch-service-contract.md with the message schema, state transitions, ownership rules, and initial supported options.
-
-Is blocked by task: SPEED-002.
-
-Acceptance Criteria:
-
-- Specify one lifecycle owner, request IDs, cancellation, disconnect/retry behavior,
-  recovery, and exactly-once slot consumption without promising exactly-once external side effects.
-- Define supported OCI options and reject unsupported configurations before resource creation.
-- Define authentication, bounded frames/queues/output, handles, generations, and error semantics.
-- Document state transitions, child-creation safety, cgroup layout, and cleanup ownership.
-- Keep the existing Docker lane explicit; prohibit silent mixed-engine ownership.
-
-Problem and Evidence: Existing direct-OCI support is limited and lacks the proposed
-reusable supervisor; an ambiguous retry could execute user work twice.
-
-Approach:
-
-1. Specify handshake, launch, cancel, status, output, exit, and cleanup messages with request IDs, deadlines, maximum sizes, and errors.
-2. Define states from accepted through removed, and behavior for duplicate requests, disconnected clients, and service restart.
-3. Specify a native ARM64 no-network feature matrix, cgroup ownership, and a safe child-creation model; reject all other options explicitly.
-
-Evidence: Pending contract, supported-feature matrix, failure scenarios, and review record.
-
-Source: [Architecture](speed-engineering-plan.md#architecture-and-ownership),
-[OCI loader](../../Sources/ConjetCore/ConjetContainerRuntime.swift),
-[binary framing](../../Sources/ConjetCore/ConjetBinaryFrame.swift).
-
-Review: Pending; check ownership, validation, duplicate execution, and compatibility boundaries.
-
-Next Action: Create launch-service-contract.md and write the request/response schema and state-transition table.
-
 ### SPEED-004
 
 Title: Implement the VSOCK service handshake and bounded request loop
@@ -738,3 +702,50 @@ paired-session statistical method were declared before the completed runs.
 
 Next Action: Begin SPEED-003 with a native launch protocol and lifecycle
 ownership contract.
+
+### SPEED-003
+
+Title: Write the launch-service protocol and lifecycle specification
+
+Description: Create docs/engineering/launch-service-contract.md with the message schema, state transitions, ownership rules, and initial supported options.
+
+Is blocked by task: SPEED-002.
+
+Acceptance Criteria:
+
+- Specify one lifecycle owner, request IDs, cancellation, disconnect/retry behavior,
+  recovery, and exactly-once slot consumption without promising exactly-once external side effects.
+- Define supported OCI options and reject unsupported configurations before resource creation.
+- Define authentication, bounded frames/queues/output, handles, generations, and error semantics.
+- Document state transitions, child-creation safety, cgroup layout, and cleanup ownership.
+- Keep the existing Docker lane explicit; prohibit silent mixed-engine ownership.
+
+Problem and Evidence: Existing direct-OCI support is limited and lacks the proposed
+reusable supervisor; an ambiguous retry could execute user work twice.
+
+Approach:
+
+1. Specify handshake, launch, cancel, status, output, exit, and cleanup messages with request IDs, deadlines, maximum sizes, and errors.
+2. Define states from accepted through removed, and behavior for duplicate requests, disconnected clients, and service restart.
+3. Specify a native ARM64 no-network feature matrix, cgroup ownership, and a safe child-creation model; reject all other options explicitly.
+
+Evidence: [Launch service contract](launch-service-contract.md) defines
+the dedicated VSOCK lane, 16 message types, mutual per-VM authentication,
+deadlines and quotas, native ARM64 feature matrix, Linux execution and cleanup,
+and recovery across connection and service loss. Verified all local links,
+the contiguous message kind assignments, and `git diff --check`. The contract
+uses the Linux `clone3`, pidfd and cgroup v2 interfaces documented in its
+references.
+
+Source: [Architecture](speed-engineering-plan.md#architecture-and-ownership),
+[OCI loader](../../Sources/ConjetCore/ConjetContainerRuntime.swift),
+[binary framing](../../Sources/ConjetCore/ConjetBinaryFrame.swift).
+
+Review: Checked that queue and output limits are explicit, that retries
+cannot readmit an evicted sequence, and that guest restart reconciles only
+native-owned resources. The contract separates exec, application readiness
+and cleanup. It binds claims to the declared native scope and leaves Docker
+lifecycle ownership with the Docker engine.
+
+Next Action: Begin SPEED-004 with the frame codec, authenticated persistent
+VSOCK handshake, and bounded control request loop.
