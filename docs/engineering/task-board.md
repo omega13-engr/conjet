@@ -48,44 +48,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-009
-
-Title: Implement prepare, claim, expire, and destroy for one-use slots
-
-Description: Add explicit prepared-launch API operations and a bounded slot table. Deliver state-machine and isolation tests plus preparation/hit/miss measurements.
-
-Development prerequisite: SPEED-007 (DONE).
-
-Final qualification prerequisites: SPEED-008 and the applicable SPEED-011 gates.
-
-Acceptance Criteria:
-
-- Bind authenticated handles to image/specification digests, ownership, and generation.
-- Atomically consume each slot once; executed slots are destroyed rather than recycled.
-- Enforce slot count, memory, queue, lifetime, and preparation-concurrency bounds.
-- Record preparation, hits, misses, expiry, and replenishment; miss fallback is explicit
-  and occurs only before execution.
-- Test concurrent claims, invalidation, cancellation, exhaustion, and no cross-run state leakage.
-
-Problem and Evidence: Fresh resource setup may dominate latency; prepared execution
-moves that cost earlier but creates memory and stale-state risks.
-
-Approach:
-
-1. Implement specification digest, owner and generation validation, and atomic READY-to-CLAIMED transition.
-2. Create a private waiting init without running application code; consume once, then destroy the slot and its resources.
-3. Enforce configured limits and expiry; test concurrent claims, stale handles, changed specifications, cancellation, exhaustion, and explicit fresh fallback before execution.
-
-Evidence: Pending slot state-machine tests, isolation canaries, preparation costs,
-and hit/miss latency traces.
-
-Source: [Prepared lane](speed-engineering-plan.md#prepared-launch-lane),
-[latency budget](speed-engineering-plan.md#experimental-latency-budget).
-
-Review: Pending; verify one-use semantics, invalidation, hidden pre-execution, and refill accounting.
-
-Next Action: Implement the slot state machine and concurrent one-use claim tests before allocating waiting processes.
-
 ### SPEED-010
 
 Title: Connect launch-service cgroups to memory accounting and eviction
@@ -397,6 +359,62 @@ development prerequisites.
 None.
 
 ## DONE
+
+### SPEED-009
+
+Title: Implement prepare, claim, expire, and destroy for one-use slots
+
+Description: Add explicit prepared-launch API operations and a bounded slot table. Deliver state-machine and isolation tests plus preparation/hit/miss measurements.
+
+Development prerequisite: SPEED-007 (DONE).
+
+Final qualification prerequisites: SPEED-008 and the applicable SPEED-011 gates.
+
+Acceptance Criteria:
+
+- Bind authenticated handles to image/specification digests, ownership, and generation.
+- Atomically consume each slot once; executed slots are destroyed rather than recycled.
+- Enforce slot count, memory, queue, lifetime, and preparation-concurrency bounds.
+- Record preparation, hits, misses, expiry, and replenishment; miss fallback is explicit
+  and occurs only before execution.
+- Test concurrent claims, invalidation, cancellation, exhaustion, and no cross-run state leakage.
+
+Problem and Evidence: Fresh resource setup may dominate latency; prepared execution
+moves that cost earlier but creates memory and stale-state risks.
+
+Approach:
+
+1. Implement specification digest, owner and generation validation, and atomic READY-to-CLAIMED transition.
+2. Create a private waiting init without running application code; consume once, then destroy the slot and its resources.
+3. Enforce configured limits and expiry; test concurrent claims, stale handles, changed specifications, cancellation, exhaustion, and explicit fresh fallback before execution.
+
+Evidence: The isolated no-network fixture implements authenticated prepare and
+claim with one exclusive slot, no queue, a 32 MiB cgroup ceiling, a bounded
+lifetime and explicit fallback. Two independent local boots each measured
+100 post-warmup prepared launches. Preparation p50/p99 was 1.040/2.755
+and 1.033/1.722 ms. Claim-to-exec observation p50/p99 was 1.512/2.709
+and 1.500/2.484 ms. Verified cleanup p50/p99 was 2.231/4.421 and
+2.126/3.775 ms from claim. Cancel and expiry misses took 0.360–0.470 ms
+across the four checks. Preparation is charged again on every refill.
+
+The two live runs verified credential, root and seccomp canaries,
+simultaneous claims, replay, stale generation, changed spec, slot exhaustion,
+cancellation, expiry and explicit fresh fallback after proven non-execution.
+The final run also rejected requests above the experimental reserve limit
+and checked distinct handles across refills. Fresh API and CLI regression
+passed for both network modes. The 19 focused Rust tests, Linux ARM64
+Clippy, Python byte compilation, formatting and diff review passed.
+Raw samples, commands, binary hashes and production snapshots are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-009`.
+These are local implementation checks. Final qualification remains open.
+
+Source: [Prepared lane](speed-engineering-plan.md#prepared-launch-lane),
+[latency budget](speed-engineering-plan.md#experimental-latency-budget).
+
+Review: Checked serialized claim and release, pre-exec isolation, fail-closed
+expired or indeterminate claims, verified cleanup, and repeat preparation costs.
+
+Next Action: Wire experimental cgroup telemetry and pressure eviction in SPEED-010.
 
 ### SPEED-007
 

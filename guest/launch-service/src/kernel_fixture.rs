@@ -76,6 +76,7 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
         false,
         "once",
         false,
+        false,
     )
 }
 
@@ -115,10 +116,21 @@ pub fn run_helper(
         return Err("unknown fixture helper mode".into());
     }
     let network = args.next().ok_or("fixture network mode required")?;
+    let prepared = match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
+        Some("prepared")
+            if network == "none"
+                && matches!(mode, "once" | "benchmark")
+                && limits.memory_bytes <= crate::prepared::SLOT_MEMORY_LIMIT =>
+        {
+            true
+        }
+        Some("fresh") => false,
+        _ => return Err("invalid fixture preparation mode".into()),
+    };
     if !matches!(network.to_str(), Some("bridge" | "none")) || args.next().is_some() {
         return Err("unexpected fixture helper arguments".into());
     }
-    run(true, id, limits, true, mode, network == "bridge")
+    run(true, id, limits, true, mode, network == "bridge", prepared)
 }
 
 fn run(
@@ -128,6 +140,7 @@ fn run(
     controlled: bool,
     mode: &str,
     network: bool,
+    prepared: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if controlled {
         notify_control(b'P', &[])?;
@@ -164,7 +177,14 @@ fn run(
     inject(mode, "fault-cgroup");
     let mut bridge = network.then(Bridge::create).transpose()?;
     inject(mode, "fault-bridge");
-    let probe = clone_and_reap(&cgroup, sandbox.as_ref(), controlled, mode, bridge.as_mut());
+    let probe = clone_and_reap(
+        &cgroup,
+        sandbox.as_ref(),
+        controlled,
+        mode,
+        bridge.as_mut(),
+        prepared,
+    );
     if mode == "exhaust-memory" {
         eprintln!("workload memory.events: {}", cgroup.memory_events()?);
     }
@@ -217,6 +237,7 @@ fn clone_and_reap(
     controlled: bool,
     mode: &str,
     mut bridge: Option<&mut Bridge>,
+    prepared: bool,
 ) -> io::Result<Option<i32>> {
     if controlled && cancellation_ready()? {
         return Ok(None);
@@ -350,6 +371,9 @@ fn clone_and_reap(
                     return Ok(false);
                 }
             }
+            if prepared && !wait_for_claim()? {
+                return Ok(false);
+            }
             parent_ready.write_all(&[1])?;
             Ok(true)
         });
@@ -399,6 +423,38 @@ fn clone_and_reap(
     ready?;
     authorization?;
     Ok(Some(status))
+}
+
+fn wait_for_claim() -> io::Result<bool> {
+    let expires = Instant::now() + crate::prepared::SLOT_TTL;
+    notify_control(b'Q', &[])?;
+    match wait(0, libc::POLLIN, None, Some(expires)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            notify_control(b'T', &[])?;
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    }
+    let mut command = [0];
+    let size = unsafe {
+        libc::recv(
+            0,
+            command.as_mut_ptr().cast(),
+            command.len(),
+            libc::MSG_DONTWAIT,
+        )
+    };
+    match (size, command[0]) {
+        (1, crate::prepared::RELEASE) if Instant::now() < expires => Ok(true),
+        (1, crate::prepared::RELEASE) => {
+            notify_control(b'T', &[])?;
+            Ok(false)
+        }
+        (0, _) | (1, crate::prepared::CANCEL) => Ok(false),
+        (-1, _) => Err(io::Error::last_os_error()),
+        _ => Err(io::Error::other("invalid prepared helper command")),
+    }
 }
 
 fn cancellation_ready() -> io::Result<bool> {

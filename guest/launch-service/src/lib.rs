@@ -25,3 +25,6 @@ mod output;
 
 #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 mod intent;
+
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+mod prepared;

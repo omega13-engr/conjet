@@ -18,8 +18,9 @@ use sha2::{Digest, Sha256};
 use crate::handshake::{hex, random};
 use crate::intent::{DIRECTORY, Intent};
 use crate::output::{Capture, capture};
+use crate::prepared::{CANCEL, ClaimError, RELEASE, SLOT_MEMORY_LIMIT, SLOT_TTL, Slot};
 use crate::socket::Stream;
-use crate::spec::{LaunchRequest, ValidatedLaunch};
+use crate::spec::{LaunchRequest, LaunchSpec, ValidatedLaunch};
 use crate::wire::{Frame, Kind, WireError, write_error};
 
 #[derive(Deserialize)]
@@ -53,6 +54,14 @@ struct Control {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Claim {
+    handle: Handle,
+    budget_ms: u64,
+    spec: LaunchSpec,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Wait {
     handle: Handle,
     budget_ms: u64,
@@ -74,6 +83,8 @@ enum Phase {
     Accepted,
     Preparing,
     ChildCreated,
+    PreparedReady,
+    Claimed,
     Running,
     Exiting,
     Cleaning,
@@ -87,6 +98,8 @@ impl Phase {
             Self::Accepted => "accepted",
             Self::Preparing => "preparing",
             Self::ChildCreated => "child_created",
+            Self::PreparedReady => "prepared_ready",
+            Self::Claimed => "claimed",
             Self::Running => "running",
             Self::Exiting => "exiting",
             Self::Cleaning => "cleaning",
@@ -111,6 +124,9 @@ struct Record {
     helper_failed: bool,
     network_cleanup: &'static str,
     trace: Option<Trace>,
+    slot: Option<Slot>,
+    slot_expires: Option<Instant>,
+    slot_expired: bool,
     cancelled: bool,
     control: Option<UnixStream>,
     stdout: Capture,
@@ -151,6 +167,10 @@ impl Record {
         if let Some(trace) = &self.trace {
             state["guest_phase_ns"] = json!(trace.events);
         }
+        if let Some(slot) = &self.slot {
+            state["prepared_claimed"] = json!(slot.claimed());
+            state["prepared_expired"] = json!(self.slot_expired);
+        }
         state
     }
 
@@ -159,12 +179,20 @@ impl Record {
             return;
         }
         self.cancelled = true;
+        if let Some(slot) = &mut self.slot {
+            slot.discard();
+        }
         if let Some(control) = &mut self.control {
-            let _ = control.write_all(&[1]);
+            let _ = control.write_all(&[CANCEL]);
         }
         if matches!(
             self.phase,
-            Phase::Accepted | Phase::Preparing | Phase::ChildCreated | Phase::Running
+            Phase::Accepted
+                | Phase::Preparing
+                | Phase::ChildCreated
+                | Phase::PreparedReady
+                | Phase::Claimed
+                | Phase::Running
         ) {
             self.change(Phase::Exiting);
         }
@@ -304,7 +332,13 @@ impl FreshFixture {
         }
     }
 
-    fn admit(self: &Arc<Self>, ready: ValidatedLaunch, boot: &str, deadline: Instant) -> Reply {
+    fn admit(
+        self: &Arc<Self>,
+        ready: ValidatedLaunch,
+        boot: &str,
+        deadline: Instant,
+        prepared: bool,
+    ) -> Reply {
         if ready.request().boot_id != boot {
             return Err(("stale_generation", "unexpected boot ID"));
         }
@@ -337,6 +371,16 @@ impl FreshFixture {
             ));
         }
         let bridge = spec.network == "bridge";
+        if prepared
+            && (bridge
+                || spec.limits.memory_bytes > SLOT_MEMORY_LIMIT
+                || !matches!(mode, "once" | "benchmark"))
+        {
+            return Err((
+                "unsupported_option",
+                "prepared fixture supports bounded no-network workloads",
+            ));
+        }
         if bridge && !self.bridge_available {
             return Err((
                 "unsupported_option",
@@ -358,8 +402,10 @@ impl FreshFixture {
             return Err(("unsupported_option", "unsupported bridge workload option"));
         }
         let request = ready.request();
-        let body: [u8; 32] =
-            Sha256::digest(serde_json::to_vec(request).expect("typed request")).into();
+        let mut hash = Sha256::new();
+        hash.update([u8::from(prepared)]);
+        hash.update(serde_json::to_vec(request).expect("typed request"));
+        let body: [u8; 32] = hash.finalize().into();
         let mut ledger = self.ledger.lock().expect("fresh ledger");
         if let Some(record) = &ledger.record {
             if record.sequence == request.sequence {
@@ -408,6 +454,9 @@ impl FreshFixture {
                 admitted: Instant::now(),
                 events: BTreeMap::new(),
             }),
+            slot: prepared.then(|| Slot::new(spec_digest(spec))),
+            slot_expires: prepared.then(|| Instant::now() + SLOT_TTL),
+            slot_expired: false,
             cancelled: false,
             control: None,
             stdout: Capture::default(),
@@ -421,7 +470,7 @@ impl FreshFixture {
         let mode = mode.to_owned();
         if thread::Builder::new()
             .name("fresh-workload".into())
-            .spawn(move || owner.run_workload(id, limits, &mode, bridge))
+            .spawn(move || owner.run_workload(id, limits, &mode, bridge, prepared))
             .is_err()
         {
             let record = ledger.record.as_mut().expect("reserved record");
@@ -441,6 +490,7 @@ impl FreshFixture {
         limits: crate::spec::ResourceLimits,
         mode: &str,
         bridge: bool,
+        prepared: bool,
     ) {
         {
             let mut ledger = self.ledger.lock().expect("fresh ledger");
@@ -456,7 +506,7 @@ impl FreshFixture {
             }
         }
         let result = self.intent.record(id).and_then(|()| {
-            let output = self.run_helper(id, limits, mode, bridge)?;
+            let output = self.run_helper(id, limits, mode, bridge, prepared)?;
             self.intent.complete(id)?;
             Ok(output)
         });
@@ -465,6 +515,9 @@ impl FreshFixture {
         }
         self.update(|record| {
             record.control = None;
+            if let Some(slot) = &mut record.slot {
+                slot.discard();
+            }
             if let Ok((stdout, stderr, recovered)) = result {
                 record.stdout = stdout;
                 record.stderr = stderr;
@@ -495,6 +548,7 @@ impl FreshFixture {
         limits: crate::spec::ResourceLimits,
         mode: &str,
         bridge: bool,
+        prepared: bool,
     ) -> io::Result<(Capture, Capture, bool)> {
         let (mut peer, helper) = UnixStream::pair()?;
         peer.set_read_timeout(Some(Duration::from_secs(32)))?;
@@ -513,6 +567,7 @@ impl FreshFixture {
                     mode
                 },
                 if bridge { "bridge" } else { "none" },
+                if prepared { "prepared" } else { "fresh" },
             ])
             .env_clear()
             .stdin(Stdio::from(OwnedFd::from(helper)))
@@ -526,7 +581,7 @@ impl FreshFixture {
         self.update(|record| {
             record.control = Some(owner);
             if record.cancelled {
-                let _ = record.control.as_mut().unwrap().write_all(&[1]);
+                let _ = record.control.as_mut().unwrap().write_all(&[CANCEL]);
             }
         });
         let mut removed = false;
@@ -545,6 +600,20 @@ impl FreshFixture {
                         if !record.cancelled {
                             record.change(Phase::ChildCreated);
                         }
+                    }),
+                    b'Q' if prepared => self.update(|record| {
+                        if !record.cancelled
+                            && let (Some(slot), Some(expires)) =
+                                (&mut record.slot, record.slot_expires)
+                        {
+                            slot.ready(expires);
+                            record.change(Phase::PreparedReady);
+                        }
+                    }),
+                    b'T' if prepared => self.update(|record| {
+                        record.slot_expired = true;
+                        record.slot.as_mut().expect("prepared record").discard();
+                        record.change(Phase::Exiting);
                     }),
                     b'E' => {
                         if mode == "crash-supervisor" {
@@ -656,14 +725,50 @@ impl FreshFixture {
             Ok(())
         };
         match frame.kind {
-            Kind::Launch => {
+            Kind::Launch | Kind::Prepare => {
                 drop(guard);
                 let request: LaunchRequest = parse(frame)?;
                 let ready = request
                     .validate()
                     .map_err(|err| (err.code(), "invalid native launch spec"))?;
                 let expires = deadline(ready.request().budget_ms)?;
-                self.admit(ready, boot, expires)
+                self.admit(ready, boot, expires, frame.kind == Kind::Prepare)
+            }
+            Kind::Claim => {
+                let request: Claim = parse(frame)?;
+                let expires = deadline(request.budget_ms)?;
+                check(&guard, &request.handle)?;
+                if guard.closing || Instant::now() >= expires {
+                    return Err(("slot_unavailable", "prepared claim is no longer admissible"));
+                }
+                let record = guard.record.as_mut().expect("checked record");
+                let slot = record
+                    .slot
+                    .as_mut()
+                    .ok_or(("slot_unavailable", "handle has no prepared slot"))?;
+                slot.claim(spec_digest(&request.spec), Instant::now())
+                    .map_err(|error| match error {
+                        ClaimError::Unavailable => {
+                            ("slot_unavailable", "prepared slot is unavailable")
+                        }
+                        ClaimError::Mismatch => ("spec_mismatch", "prepared specification differs"),
+                    })?;
+                let control = record
+                    .control
+                    .as_mut()
+                    .expect("ready slot owns control socket");
+                if control.write_all(&[RELEASE]).is_err() {
+                    let _ = control.shutdown(std::net::Shutdown::Both);
+                    record.cancel();
+                    self.changed.notify_all();
+                    return Err((
+                        "claim_indeterminate",
+                        "query original handle for terminal state",
+                    ));
+                }
+                record.change(Phase::Claimed);
+                self.changed.notify_all();
+                Ok((Kind::State, record.state()))
             }
             Kind::Status | Kind::Cancel => {
                 let request: Control = parse(frame)?;
@@ -771,4 +876,8 @@ impl FreshFixture {
         }
         true
     }
+}
+
+fn spec_digest(spec: &LaunchSpec) -> [u8; 32] {
+    Sha256::digest(serde_json::to_vec(spec).expect("typed specification")).into()
 }

@@ -29,6 +29,8 @@ pub enum Kind {
     OutputChunk = 14,
     Error = 15,
     ShutdownAck = 16,
+    Prepare = 17,
+    Claim = 18,
 }
 
 impl TryFrom<u8> for Kind {
@@ -53,6 +55,8 @@ impl TryFrom<u8> for Kind {
             14 => Ok(OutputChunk),
             15 => Ok(Kind::Error),
             16 => Ok(ShutdownAck),
+            17 => Ok(Prepare),
+            18 => Ok(Claim),
             _ => Err(WireError::BadHeader),
         }
     }

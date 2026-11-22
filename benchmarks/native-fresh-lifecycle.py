@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Measure a staged ARM64 fixture on the disposable native launch endpoint."""
 import argparse
+import base64
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import hashlib
 import hmac
@@ -96,14 +98,18 @@ def cpio_insert(archive, entries):
     return archive[:offset] + staged + archive[offset:]
 
 
-def state_sample(channel, boot_id, scenario, network, sequence):
-    started = time.monotonic_ns()
-    accepted_kind, accepted = call(channel, 8, {
+def launch_request(boot_id, scenario, network, sequence):
+    return {
         'boot_id': boot_id, 'sequence': sequence, 'budget_ms': 3_000,
         'spec': {'image_digest': scenario['manifest_digest'], 'argv': scenario['command'],
                  'env': [], 'cwd': '/work', 'uid': 65532, 'gid': 65532, 'network': network,
                  'limits': scenario['container_limits']},
-    })
+    }
+
+
+def state_sample(channel, boot_id, scenario, network, sequence):
+    started = time.monotonic_ns()
+    accepted_kind, accepted = call(channel, 8, launch_request(boot_id, scenario, network, sequence))
     accepted_ns = time.monotonic_ns() - started
     if accepted_kind != 13 or accepted['handle']['boot_id'] != boot_id:
         raise RuntimeError(f'native launch admission failed: {accepted}')
@@ -112,6 +118,115 @@ def state_sample(channel, boot_id, scenario, network, sequence):
     if kind != 13 or removed['handle'] != accepted['handle']:
         raise RuntimeError(f'native launch wait failed: {removed}')
     return removed, accepted_ns
+
+
+def wait_state(channel, state, predicate, budget_ms=3000):
+    deadline = time.monotonic() + budget_ms / 1000
+    while not predicate(state):
+        remaining = int((deadline - time.monotonic()) * 1000)
+        if remaining < 1 or state['cleanup'] in ('complete', 'failed'):
+            raise RuntimeError(f'unexpected terminal or timed-out prepared state: {state}')
+        kind, state = call(channel, 10, {'handle': state['handle'], 'after_revision': state['revision'],
+                                         'budget_ms': remaining})
+        if kind != 13:
+            raise RuntimeError(f'prepared wait failed: {state}')
+    return state
+
+
+def prepare(channel, boot_id, scenario, sequence):
+    request = launch_request(boot_id, scenario, 'none', sequence)
+    started = time.monotonic_ns()
+    kind, admitted = call(channel, 17, request)
+    if kind != 13:
+        raise RuntimeError(f'prepare admission failed: {admitted}')
+    state = wait_state(channel, admitted, lambda value: value['phase'] == 'prepared_ready')
+    if state['exec'] != 'pending' or state['prepared_claimed']:
+        raise RuntimeError(f'workload ran before claim: {state}')
+    return request, state, time.monotonic_ns() - started
+
+
+def prepared_samples(channel, boot_id, args, scenario, report, connect_peer):
+    report['prepared'] = {'checks': [], 'warmups': [], 'samples': []}
+    data = report['prepared']
+    canary = {**scenario, 'manifest_digest': report['fixture_digest'],
+              'command': ['/bin/probe', '--verify-workload-fixture']}
+    request, state, _ = prepare(channel, boot_id, canary, 1)
+    operation = {'handle': state['handle'], 'spec': request['spec'], 'budget_ms': 3000}
+    kind, retry = call(channel, 17, request)
+    if kind != 13 or retry['handle'] != state['handle']:
+        raise RuntimeError('prepare replay changed its handle')
+    changed = {**operation, 'spec': {**request['spec'], 'argv': ['/bin/changed']}}
+    stale = {**operation, 'handle': {**state['handle'], 'boot_id': '00' * 16}}
+    full = {**request, 'sequence': 2}
+    large = {**full, 'spec': {**request['spec'], 'limits': {**request['spec']['limits'],
+                                                         'memory_bytes': 64 * 1024 * 1024}}}
+    for opcode, payload, expected in [(18, changed, 'spec_mismatch'), (18, stale, 'stale_generation'),
+                                      (17, large, 'unsupported_option'), (17, full, 'busy'),
+                                      (8, request, 'id_conflict')]:
+        kind, error = call(channel, opcode, payload)
+        if kind != 15 or error['code'] != expected:
+            raise RuntimeError(f'expected {expected}, observed {error}')
+        data['checks'].append(expected)
+    with connect_peer() as peer, ThreadPoolExecutor(max_workers=2) as clients:
+        claims = [clients.submit(call, stream, 18, operation) for stream in (channel, peer)]
+        outcomes = [claim.result() for claim in claims]
+    if sorted(kind for kind, _ in outcomes) != [13, 15] or not any(
+            kind == 15 and reply['code'] == 'slot_unavailable' for kind, reply in outcomes):
+        raise RuntimeError(f'expected exactly one successful claim: {outcomes}')
+    winner = next(reply for kind, reply in outcomes if kind == 13)
+    completed = wait_state(channel, winner, lambda value: value['cleanup'] == 'complete')
+    if completed['exit'] != {'code': 0} or completed['exec'] != 'confirmed':
+        raise RuntimeError(f'claimed workload did not execute: {completed}')
+    kind, output = call(channel, 12, {'handle': completed['handle'], 'budget_ms': 3000,
+                                      'stream': 'stdout', 'offset': 0, 'max_bytes': 4096})
+    if kind != 14 or b'verified private root, credentials, and seccomp' not in base64.b64decode(output['data']):
+        raise RuntimeError('prepared sandbox canary failed')
+    data['checks'].append('private root, credentials, and seccomp canary')
+    data['checks'].append('exactly one concurrent claim')
+    for sequence, cancel in [(2, True), (3, False)]:
+        request, state, _ = prepare(channel, boot_id, scenario, sequence)
+        if state['handle'] == completed['handle']:
+            raise RuntimeError('refill reused a consumed slot identity')
+        operation = {'handle': state['handle'], 'budget_ms': 3000}
+        if cancel:
+            kind, state = call(channel, 11, operation)
+            if kind != 13:
+                raise RuntimeError(f'prepared cancellation failed: {state}')
+        state = wait_state(channel, state, lambda value: value['cleanup'] == 'complete', budget_ms=7500)
+        if state['exec'] == 'confirmed' or state['prepared_claimed'] or state['prepared_expired'] == cancel:
+            raise RuntimeError(f'unclaimed slot survived or executed: {state}')
+        started = time.monotonic_ns()
+        kind, error = call(channel, 18, {**operation, 'spec': request['spec']})
+        if kind != 15 or error['code'] != 'slot_unavailable':
+            raise RuntimeError(f'discarded slot accepted claim: {error}')
+        data['checks'].append({'cause': 'cancel' if cancel else 'expiry',
+                               'miss_ns': time.monotonic_ns() - started, 'terminal': state})
+    state, _ = state_sample(channel, boot_id, scenario, 'none', 4)
+    if state['exec'] != 'confirmed' or state['exit'] != {'code': 0} or state['cleanup'] != 'complete':
+        raise RuntimeError(f'explicit fresh fallback failed: {state}')
+    data['checks'].append('explicit fresh fallback after confirmed no execution')
+    for index in range(args.samples + 10):
+        row = {}
+        data['warmups' if index < 10 else 'samples'].append(row)
+        try:
+            request, state, row['prepare_ns'] = prepare(channel, boot_id, scenario, index + 5)
+            started = time.monotonic_ns()
+            kind, claimed = call(channel, 18, {'handle': state['handle'], 'spec': request['spec'],
+                                               'budget_ms': 3000})
+            if kind != 13 or not claimed['prepared_claimed']:
+                raise RuntimeError(f'claim failed: {claimed}')
+            row['claim_ack_ns'] = time.monotonic_ns() - started
+            state = wait_state(channel, claimed, lambda value: value['exec'] == 'confirmed')
+            row['exec_observed_ns'] = time.monotonic_ns() - started
+            state = wait_state(channel, state, lambda value: value['cleanup'] == 'complete')
+            row['cleanup_observed_ns'] = time.monotonic_ns() - started
+            row['state'] = state
+            if state['exit'] != {'code': 0} or state['helper_failed']:
+                raise RuntimeError(f'prepared workload failed: {state}')
+        except Exception as error:
+            row['error'] = str(error)
+            raise
+    print(f'Completed prepared no-network API: {args.samples} samples', flush=True)
 
 
 def run_samples(channel, boot_id, args, scenario, endpoint, key_file, peer, report):
@@ -222,8 +337,10 @@ def session(args):
                             '--output', initrd, '--json'], env=env, check=True, timeout=15)
             descriptor = {'architecture': 'arm64', 'os': 'linux',
                           'executable_sha256': adapter['file_hash'](args.init)}
+            fixture_descriptor = json.dumps(descriptor).encode()
+            report['fixture_digest'] = 'sha256:' + hashlib.sha256(fixture_descriptor).hexdigest()
             assets = {
-                'etc/conjet/launch.key': key, 'etc/conjet/fresh-fixture-image.json': json.dumps(descriptor).encode(),
+                'etc/conjet/launch.key': key, 'etc/conjet/fresh-fixture-image.json': fixture_descriptor,
                 'etc/conjet/benchmark-image.json': manifest_bytes, 'etc/conjet/benchmark-executable': workload,
             }
             if args.phase_trace:
@@ -239,7 +356,14 @@ def session(args):
                             report['host_before'] = process_observation(
                                 vm.pid, args.network_helper, args.output / 'footprint-before.json', adapter['run'],
                             )
-                            run_samples(channel, boot_id, args, scenario, endpoint, key_file, vm.pid, report)
+                            if args.prepared:
+                                channel.settimeout(9)
+                                def connect_peer():
+                                    peer, _ = open_native(endpoint, key, vm, args.vmm, adapter['current_executable'])
+                                    return peer
+                                prepared_samples(channel, boot_id, args, scenario, report, connect_peer)
+                            else:
+                                run_samples(channel, boot_id, args, scenario, endpoint, key_file, vm.pid, report)
                             report['host_after'] = process_observation(
                                 vm.pid, args.network_helper, args.output / 'footprint-after.json', adapter['run'],
                             )
@@ -316,6 +440,7 @@ def main():
     parser.add_argument('--samples', type=int, default=100)
     parser.add_argument('--runtime-ms', type=int, default=180_000)
     parser.add_argument('--phase-trace', action='store_true')
+    parser.add_argument('--prepared', action='store_true', help='measure the one-slot no-network experiment')
     parser.add_argument('--expedited-rcu', action='store_true',
                         help='change the benchmark guest kernel only for an RCU diagnostic')
     args = parser.parse_args()

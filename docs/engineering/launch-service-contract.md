@@ -283,15 +283,29 @@ when any step fails; never mark the workload removed after a partial cleanup.
 
 ### Prepared slots
 
-Version 1 fresh execution advertises no prepared capability. Later prepare
-and launch requests will bind a private slot to an immutable launch spec,
-profile owner, VM generation, slot generation and expiration. The supervisor
-will atomically consume a validated slot once before releasing a waiting
-init. Consumed slots can never return to ready. A stale or invalid handle
-has no side effects. Eviction and replenishment charge their CPU, memory,
-and throughput to the prepared lane. A miss may take a declared fresh path
-only before workload execution. The fresh protocol does not accept prepared
-handles or silently cross into Docker.
+Only the isolated ARM64 fixture advertises `prepared_arm64_fixture`.
+Opcode 17 prepares using the same bounded request as fresh launch and
+shares its generation and sequence ledger. Opcode 18 claims with
+`handle`, `spec`, and `budget_ms`. The authenticated profile owner,
+boot ID, random per-slot workload ID, and digest of the full immutable
+specification identify the slot.
+
+The fixture owns at most one fresh or prepared workload, has no
+preparation queue, and caps the prepared cgroup at 32 MiB. It stages
+the private root inputs, creates the private namespaces and cgroup,
+and parks the child at the authorization barrier. Final sandbox setup,
+security restrictions, and exec follow a successful claim. The supervisor
+serializes the READY-to-CLAIMED transition before writing the release byte.
+Exact prepare retries keep the same handle. Consumed slots cannot return
+to ready, and a disconnected claimant can query the original handle.
+
+An unclaimed slot accepts claims for at most five seconds from admission.
+The helper also enforces a five-second ready timeout so expiry disposes
+of the slot without a client. Cancellation closes the execution path of
+an unclaimed slot, and terminal state reports verified cleanup. Fresh
+fallback is an explicit new request after confirmed non-execution.
+An indeterminate claim must be resolved against the original handle.
+Measure preparation, claims, misses, expiry, and refill separately.
 
 ## References
 

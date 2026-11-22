@@ -54,9 +54,15 @@ impl Server {
                     "shutdown",
                     "fresh_arm64_fixture",
                     "private_bridge_fixture",
+                    "prepared_arm64_fixture",
                 ];
             }
-            return &["ping", "shutdown", "fresh_arm64_fixture"];
+            return &[
+                "ping",
+                "shutdown",
+                "fresh_arm64_fixture",
+                "prepared_arm64_fixture",
+            ];
         }
         CAPABILITIES
     }
@@ -112,7 +118,13 @@ impl Server {
             if let Some(fresh) = &self.fresh
                 && matches!(
                     frame.kind,
-                    Kind::Launch | Kind::Status | Kind::Wait | Kind::Cancel | Kind::Output
+                    Kind::Launch
+                        | Kind::Status
+                        | Kind::Wait
+                        | Kind::Cancel
+                        | Kind::Output
+                        | Kind::Prepare
+                        | Kind::Claim
                 )
             {
                 fresh.dispatch(frame, &mut stream, &boot_id)?;
