@@ -64,6 +64,7 @@ struct Output {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Phase {
     Accepted,
+    Preparing,
     ChildCreated,
     Running,
     Exiting,
@@ -76,6 +77,7 @@ impl Phase {
     fn name(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
+            Self::Preparing => "preparing",
             Self::ChildCreated => "child_created",
             Self::Running => "running",
             Self::Exiting => "exiting",
@@ -124,16 +126,17 @@ impl Record {
     }
 
     fn cancel(&mut self) {
-        if !self.cancelled
-            && matches!(
-                self.phase,
-                Phase::Accepted | Phase::ChildCreated | Phase::Running
-            )
-        {
-            self.cancelled = true;
-            if let Some(control) = &mut self.control {
-                let _ = control.write_all(&[1]);
-            }
+        if self.cancelled || self.phase.terminal() {
+            return;
+        }
+        self.cancelled = true;
+        if let Some(control) = &mut self.control {
+            let _ = control.write_all(&[1]);
+        }
+        if matches!(
+            self.phase,
+            Phase::Accepted | Phase::Preparing | Phase::ChildCreated | Phase::Running
+        ) {
             self.change(Phase::Exiting);
         }
     }
@@ -407,6 +410,11 @@ impl FreshFixture {
             let mut code = [0];
             while peer.read(&mut code)? == 1 {
                 match code[0] {
+                    b'P' => self.update(|record| {
+                        if !record.cancelled {
+                            record.change(Phase::Preparing);
+                        }
+                    }),
                     b'C' => self.update(|record| {
                         if !record.cancelled {
                             record.change(Phase::ChildCreated);
@@ -448,6 +456,10 @@ impl FreshFixture {
                             };
                             record.change(Phase::Cleaning);
                         });
+                    }
+                    b'N' if !exit_received => {
+                        exit_received = true;
+                        self.update(|record| record.change(Phase::Cleaning));
                     }
                     b'R' if exit_received => {
                         removed = true;

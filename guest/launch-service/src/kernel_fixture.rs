@@ -29,6 +29,9 @@ pub(crate) fn test_mode(mode: &str) -> bool {
             | "missing-executable"
             | "flood"
             | "exhaust-memory"
+            | "pause-prepare"
+            | "pause-child"
+            | "pause-cleanup"
     )
 }
 
@@ -120,6 +123,15 @@ fn run(
     controlled: bool,
     mode: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if controlled {
+        notify_control(b'P', &[])?;
+        pause_for_cancel(mode, "pause-prepare")?;
+        if cancellation_ready()? {
+            notify_control(b'N', &[])?;
+            notify_control(b'R', &[])?;
+            return Ok(());
+        }
+    }
     let sandbox = with_sandbox.then(Sandbox::prepare).transpose()?;
     inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)
@@ -143,9 +155,14 @@ fn run(
         eprintln!("workload memory.events: {}", cgroup.memory_events()?);
     }
     let exit_report = match &probe {
-        Ok(wait_status) if controlled => notify_control(b'X', &wait_status.to_le_bytes()),
+        Ok(Some(wait_status)) if controlled => notify_control(b'X', &wait_status.to_le_bytes()),
+        Ok(None) if controlled => notify_control(b'N', &[]),
         _ => Ok(()),
     };
+    pause_for_cancel(mode, "pause-cleanup")?;
+    if mode == "pause-cleanup" {
+        cancellation_ready()?;
+    }
     inject(mode, "fault-cleanup");
     cgroup.remove_empty()?;
     drop(cgroup);
@@ -157,16 +174,16 @@ fn run(
         proc_mount.unmount()?;
     }
     if let Some(sandbox) = sandbox {
-        sandbox.cleanup(matches!(probe, Ok(0)))?;
+        sandbox.cleanup(matches!(probe, Ok(Some(0))))?;
     }
     let wait_status = probe?;
     exit_report?;
     if controlled {
         notify_control(b'R', &[])?;
     } else {
-        if wait_status != 0 {
+        if wait_status != Some(0) {
             return Err(
-                format!("namespace probe child failed with wait status {wait_status}").into(),
+                format!("namespace probe child failed with wait status {wait_status:?}").into(),
             );
         }
         println!(
@@ -181,7 +198,10 @@ fn clone_and_reap(
     sandbox: Option<&Sandbox>,
     controlled: bool,
     mode: &str,
-) -> io::Result<i32> {
+) -> io::Result<Option<i32>> {
+    if controlled && cancellation_ready()? {
+        return Ok(None);
+    }
     let executable = if mode == "missing-executable" {
         c"/bin/absent"
     } else {
@@ -296,11 +316,16 @@ fn clone_and_reap(
         .and_then(|()| {
             if controlled {
                 notify_control(b'C', &[])?;
+                pause_for_cancel(mode, "pause-child")?;
+                if cancellation_ready()? {
+                    return Ok(false);
+                }
             }
-            parent_ready.write_all(&[1])
+            parent_ready.write_all(&[1])?;
+            Ok(true)
         });
     drop(parent_ready);
-    if authorization.is_ok() && sandbox.is_some() {
+    if matches!(authorization, Ok(true)) && sandbox.is_some() {
         match confirm_exec(pid) {
             Ok(ExecObservation::Confirmed) => {
                 if controlled {
@@ -314,7 +339,7 @@ fn clone_and_reap(
                     println!("conjet-launchd kernel confirmed workload exec");
                 }
             }
-            Ok(ExecObservation::Reaped(status)) => return Ok(status),
+            Ok(ExecObservation::Reaped(status)) => return Ok(Some(status)),
             Err(error) => {
                 // This child remains ours until waitpid reaps it.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
@@ -344,7 +369,36 @@ fn clone_and_reap(
     let status = reap(pid)?;
     ready?;
     authorization?;
-    Ok(status)
+    Ok(Some(status))
+}
+
+fn cancellation_ready() -> io::Result<bool> {
+    let mut byte = 0u8;
+    // The helper's stdin is its private control socket until workload exec.
+    let read = unsafe { libc::recv(0, (&mut byte as *mut u8).cast(), 1, libc::MSG_DONTWAIT) };
+    match read {
+        0 | 1 => Ok(true),
+        _ => {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::WouldBlock {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn pause_for_cancel(mode: &str, stage: &str) -> io::Result<()> {
+    if mode == stage {
+        wait(
+            0,
+            libc::POLLIN,
+            None,
+            Some(Instant::now() + Duration::from_secs(5)),
+        )?;
+    }
+    Ok(())
 }
 
 fn notify_control(event: u8, content: &[u8]) -> io::Result<()> {

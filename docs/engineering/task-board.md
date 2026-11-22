@@ -347,6 +347,14 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
+None.
+
+## UNDERREVIEW
+
+None.
+
+## DONE
+
 ### SPEED-006
 
 Title: Add lifecycle failure injection and recovery tests
@@ -404,8 +412,20 @@ the old launch and handle and completed new work. All three runs preserved
 the production snapshots. Commands, raw protocol observations, compiler and
 guest logs are in
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-006/helper-faults`.
-The live matrix still needs deterministic cancellation before exec and
-during cleanup.
+The final live matrix paused independently during preparation, with the
+child created but before exec authorization, and during cleanup after
+application exit. Cancellation before resources returned no exit.
+Cancellation at the child barrier returned its actual exit 125 and no
+exec confirmation. Cancellation during cleanup preserved the confirmed
+exec and exit 0. Exact launch retries kept the same handle at each stage
+and the reserved admission quota rejected a different launch. The full
+matrix repeated all six helper failures, verified recovery of the owned
+processes, cgroup and sandbox before reuse, and passed the normal boot
+and disposable VM-loss runs again. This was the restricted one-workload
+fixture, on the M1 Pro with production running and matching before/after
+snapshots. All 17 focused Rust tests and strict Linux ARM64 Clippy passed.
+The pinned rebuild, verification scripts, binary hashes and raw traces are
+under `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-006/cancellation`.
 
 Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 [verification policy](speed-engineering-plan.md#verification-and-claim-policy).
@@ -413,17 +433,12 @@ Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 Review: Reviewed write-before-helper ordering, deterministic cgroup identity,
 and fail-closed admission after an unresolved intent. Reviewed the
 guest-only process group, PID pinning, stale generation check before
-admission, named cgroup teardown, and private root canaries. Comprehensive
-stage-by-stage fault and cancellation review remains pending.
+admission, named cgroup teardown, private root canaries, the authorization
+barrier and the distinction between accepting cancellation and finishing
+cleanup. The fixture has no production activation path.
 
-Next Action: Make pre-exec and cleanup cancellation boundaries observable
-and exercise both, then repeat the isolated failure matrix.
-
-## UNDERREVIEW
-
-None.
-
-## DONE
+Next Action: Begin the private IPv4 bridge and verify its independently
+owned link, addressing, DNS and port resources under teardown.
 
 ### SPEED-005
 
