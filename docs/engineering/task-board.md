@@ -47,41 +47,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-004
-
-Title: Implement the VSOCK service handshake and bounded request loop
-
-Description: Add a Rust guest-service skeleton and native host client using the approved contract. Deliver an isolated round-trip fixture without application execution.
-
-Is blocked by task: SPEED-003.
-
-Acceptance Criteria:
-
-- Versioned, bounded protocol implements handshake, capability discovery, errors,
-  deadlines, cancellation, and orderly shutdown.
-- Unauthorized, malformed, oversized, disconnected, and saturated requests are tested.
-- Guest supervision never runs under VMM device-processing locks.
-- Round-trip measurements and service resource costs are recorded without busy polling.
-- Disposable QA resources are cleaned up; no installed service registration changes.
-
-Problem and Evidence: Existing VSOCK machinery provides transport, but the proposed
-launch protocol and guest supervisor are not implemented.
-
-Approach:
-
-1. Implement version negotiation, capability reporting, request IDs, framing limits, deadlines, and shutdown over persistent VSOCK.
-2. Add malformed-frame, unauthorized-client, queue-full, timeout, and disconnect tests.
-3. Run the fixture in a disposable VM, record round-trip latency and resource use, then verify shutdown and cleanup.
-
-Evidence: Pending protocol tests, isolated integration traces, resource measurements, and cleanup record.
-
-Source: [Architecture](speed-engineering-plan.md#architecture-and-ownership),
-[VSOCK device](../../jetstream/src/devices/vsock.rs).
-
-Review: Pending; inspect queue bounds, locking, shutdown, and trust boundaries.
-
-Next Action: Add the guest service entry point and handshake message implementation.
-
 ### SPEED-005
 
 Title: Implement one fresh ARM64 no-network container launch
@@ -452,7 +417,55 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-None.
+### SPEED-004
+
+Title: Implement the VSOCK service handshake and bounded request loop
+
+Description: Add a Rust guest-service skeleton and native host client using the approved contract. Deliver an isolated round-trip fixture without application execution.
+
+Is blocked by task: SPEED-003.
+
+Acceptance Criteria:
+
+- Versioned, bounded protocol implements handshake, capability discovery, errors,
+  deadlines, cancellation, and orderly shutdown.
+- Unauthorized, malformed, oversized, disconnected, and saturated requests are tested.
+- Guest supervision never runs under VMM device-processing locks.
+- Round-trip measurements and service resource costs are recorded without busy polling.
+- Disposable QA resources are cleaned up; no installed service registration changes.
+
+Problem and Evidence: Existing VSOCK machinery provides transport, but the proposed
+launch protocol and guest supervisor are not implemented.
+
+Approach:
+
+1. Implement version negotiation, capability reporting, request IDs, framing limits, deadlines, and shutdown over persistent VSOCK.
+2. Add malformed-frame, unauthorized-client, queue-full, timeout, and disconnect tests.
+3. Run the fixture in a disposable VM, record round-trip latency and resource use, then verify shutdown and cleanup.
+
+Evidence: Added a pinned Rust launch-service crate with a 28-byte v1
+frame codec, a pre-allocation payload bound, typed JSON, and mutual
+HMAC-SHA256 authentication. Seven tests passed via
+`cargo test --locked -p conjet-launch-service`, including an independent
+HMAC vector, a persistent socket-pair handshake, replay rejection, peer
+rejection, oversized frames and truncation. The scoped Clippy command
+`cargo clippy --locked -p conjet-launch-service --all-targets -- -D warnings`
+passed. Logs are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-004/codec`.
+The codec increment runs in-process socket tests. Live VSOCK service,
+control flow, resource measurement and isolated cleanup remain pending.
+
+Source: [Architecture](speed-engineering-plan.md#architecture-and-ownership),
+[VSOCK device](../../jetstream/src/devices/vsock.rs).
+
+Review: Frame header and declared length are checked before payload
+allocation. The transcript binds both role proofs, version negotiation,
+peer nonces and the boot generation. The guest and host reject each other's
+invalid proof before lifecycle traffic. Review of queue, connection and
+shutdown ownership remains pending.
+
+Next Action: Connect the codec to an event-driven guest VSOCK listener,
+bounded control handling, and the native host fixture client.
 
 ## UNDERREVIEW
 
