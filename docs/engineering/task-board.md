@@ -254,8 +254,17 @@ Approach:
 Evidence: The final local gate was audited against `cb1f80f` and the
 remote enhancement branch matched. [PR #33](https://github.com/omega13-engr/conjet/pull/33)
 targets main and discloses the experimental scope, local measurements,
-rollback procedure and deferred comparative work. Independent review,
-required CI and merge remain pending.
+rollback procedure and deferred comparative work. On `d613c87`,
+[hosted CI](https://github.com/omega13-engr/conjet/actions/runs/45083820209)
+passed the build and host tests, then failed the existing overflow-pulse
+app test. Its fixed 220 ms sleep could end before asynchronous inventory
+loading recorded any invocations. The test now awaits the scheduled
+refresh and retains all five Docker inventory assertions. The application
+change only exposes the existing task on its test hook. The 50-test
+focused suite and the 440-test full Swift suite passed locally, with two
+configuration skips in the full suite. Failure and regression logs are retained under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-013`.
+Independent review, passing hosted CI and merge remain pending.
 
 Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-policy),
 [release process](../release.md).

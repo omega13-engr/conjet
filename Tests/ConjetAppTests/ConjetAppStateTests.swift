@@ -730,12 +730,13 @@ final class ConjetAppStateTests: XCTestCase {
         app.selectedSection = .profiles
         app.setInteractiveSurfaceVisible(true)
 
-        app.applyPulseFrameForTesting(ConjetPulseFrame(
+        let frame = ConjetPulseFrame(
             kind: .events,
             state: ConjetPulseState(highWatermark: 21, replayAvailableFrom: 14),
             overflowed: true
-        ))
-        try await Task.sleep(nanoseconds: 220_000_000)
+        )
+        let refresh = try XCTUnwrap(app.applyPulseFrameForTesting(frame))
+        await refresh.value
 
         let invocations = await executor.invocations
         XCTAssertTrue(invocations.contains { $0.arguments.contains("ps") })

@@ -339,8 +339,10 @@ final class ConjetAppState: ObservableObject {
         await refresh(trigger: .automatic)
     }
 
-    func applyPulseFrameForTesting(_ frame: ConjetPulseFrame) {
+    @discardableResult
+    func applyPulseFrameForTesting(_ frame: ConjetPulseFrame) -> Task<Void, Never>? {
         handlePulseFrame(frame)
+        return deferredRefreshTask
     }
 
     private func refresh(trigger initialTrigger: DashboardRefreshTrigger) async {
