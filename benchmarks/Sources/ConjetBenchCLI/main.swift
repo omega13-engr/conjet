@@ -971,15 +971,22 @@ struct ConjetBenchCLI {
                 ?? ProcessInfo.processInfo.environment["CONJET_BENCH_CONJET"]
                 ?? ".build/debug/conjet"
         )
-        let conjetHome = value(after: "--conjet-home", in: args).map(expandedPath)
+        guard let home = value(after: "--conjet-home", in: args) else {
+            throw ConjetError.invalidArgument("startup-trace requires an isolated --conjet-home")
+        }
+        let conjetHome = expandedPath(home)
         let outputDirectory = URL(
             fileURLWithPath: expandedPath(value(after: "--output-dir", in: args) ?? "benchmarks/reports/startup-trace-local"),
             isDirectory: true
         )
         let tracesDirectory = outputDirectory.appendingPathComponent("traces", isDirectory: true)
         let timeoutSeconds = value(after: "--command-timeout", in: args).flatMap(Double.init) ?? 30
-        let maxExits = value(after: "--max-exits", in: args) ?? "16"
-        let timeoutMilliseconds = value(after: "--timeout-ms", in: args) ?? "1000"
+        let maxExits = value(after: "--max-exits", in: args) ?? String(Int.max)
+        let rawBootTimeout = value(after: "--timeout-ms", in: args) ?? "10000"
+        guard let bootTimeoutMilliseconds = Int(rawBootTimeout), bootTimeoutMilliseconds > 0 else {
+            throw ConjetError.invalidArgument("--timeout-ms must be a positive integer")
+        }
+        let bootTimeoutSeconds = 1 + (bootTimeoutMilliseconds - 1) / 1_000
         let memoryMiB = value(after: "--memory-mib", in: args) ?? "512"
 
         try FileManager.default.createDirectory(at: tracesDirectory, withIntermediateDirectories: true)
@@ -991,26 +998,30 @@ struct ConjetBenchCLI {
                 conjetPath,
                 "vm", "backend", "boot-attempt",
                 "--max-exits", maxExits,
-                "--timeout-ms", timeoutMilliseconds,
+                "--timeout-seconds", String(bootTimeoutSeconds),
                 "--memory-mib", memoryMiB,
                 "--timeline-jsonl", traceURL.path,
                 "--json"
             ]
-            if let conjetHome {
-                command.insert("CONJET_HOME=\(conjetHome)", at: 0)
-                command.insert("/usr/bin/env", at: 0)
+            for flag in ["--early-console-only", "--require-docker-ready", "--trace-guest-readiness"]
+                where args.contains(flag) {
+                command.append(flag)
             }
+            command.insert("CONJET_HOME=\(conjetHome)", at: 0)
+            command.insert("/usr/bin/env", at: 0)
 
             let startedAt = Date()
+            let startNanoseconds = ContinuousHostClock.nanoseconds()
             let process = try runProcess(command, timeoutSeconds: timeoutSeconds)
-            let duration = Date().timeIntervalSince(startedAt)
+            let duration = Double(ContinuousHostClock.nanoseconds() - startNanoseconds) / 1_000_000_000
+            let responseURL = tracesDirectory.appendingPathComponent("sample-\(sample)-response.stdout")
+            try process.stdout.write(to: responseURL, atomically: true, encoding: .utf8)
             var metrics = BenchmarkMetrics()
             metrics["sample"] = Double(sample)
             metrics.setString(traceURL.path, for: "startup_trace_jsonl")
             metrics.setString(conjetPath, for: "conjet_path")
-            if let conjetHome {
-                metrics.setString(conjetHome, for: "conjet_home")
-            }
+            metrics.setString(conjetHome, for: "conjet_home")
+            metrics.setString(responseURL.path, for: "startup_boot_response")
 
             if FileManager.default.fileExists(atPath: traceURL.path) {
                 do {
@@ -1911,7 +1922,7 @@ struct ConjetBenchCLI {
                           Run ConjetNet path-segmentation microbenchmarks.
               app-ui       Measure SwiftUI app-core inventory and command latency with an isolated fake executor.
               startup-trace
-                          Repeatedly run conjet vm backend boot-attempt and collect T0-T7 JSONL traces.
+                          Run bounded boot attempts and collect CLI timelines and VMM responses.
               gate         Score existing raw JSON reports.
               help         Show this help text.
 

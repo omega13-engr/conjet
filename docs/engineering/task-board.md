@@ -523,81 +523,7 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-### SPEED-001
-
-Title: Correct process-start events and add a readiness fixture
-
-Description: Update the guest event producer and host decoder; add a fixture that signals readiness only after exec. Deliver trace-schema documentation and failure-path tests.
-
-Is blocked by task: SPEED-000.
-
-Acceptance Criteria:
-
-- Current post-fork notification is not reported as successful application execution.
-- Missing executable, permission failure, and early process exit produce accurate outcomes.
-- End-to-end timing uses one host monotonic clock; guest durations remain separate.
-- Trace schema and benchmark methodology document endpoints and instrumentation overhead.
-
-Problem and Evidence: `guest/init/conjet-init.c` reports PROCESS_STARTED after
-fork before exec success; the existing timeline labels T6 as first instruction.
-
-Approach:
-
-1. Trace PROCESS_STARTED from guest/init/conjet-init.c through its host decoder and replace the false exec-success interpretation.
-2. Add distinct child-created, exec-confirmed, application-ready, and exec-failed outcomes; retain compatibility for existing event consumers.
-3. Run a valid executable, missing path, non-executable file, and immediate exit; verify each trace and measure tracing overhead.
-
-Evidence: The active Rust VMM had no receiver for guest-initiated readiness
-connections, and the Rust CLI boot command rejected the benchmark's
-`--timeline-jsonl` argument. The host increment adds an explicit
-`--trace-guest-readiness` flag, bounded v1 VSOCK reception, separate host and
-guest timestamps, and labels the legacy event as a launch observation.
-
-Built and signed the branch VMM, then ran `jetstream boot` with the isolated
-Core 1.3.1 manifest, two vCPUs, 2,048 MiB, 25 ms host tick,
-`--require-docker-ready --hold-after-ready-ms 1000 --trace-guest-readiness
---json`. Docker reached readiness and the host collected `control_ready` and
-`legacy_process_started` records with the same guest boot ID and ordered host
-offsets. The first decode attempt rejected the appliance producer's
-`VMADDR_CID_ANY` envelope. The corrected decoder validates the transport
-CID and accepts that existing envelope marker.
-
-Raw reports, production observations, the VMM hash, and Cargo and Swift test
-logs are under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-001/host-decoder`.
-Two Swift StartupTimeline tests and 135 Rust tests passed, with three Rust
-tests ignored. The published Docker guest emitted legacy markers only.
-
-Built the static ARM64 Pulse init on the verified candidate Docker endpoint
-using Alpine's GCC 14.2.0 and musl. The guest boot fixture proved control,
-child creation, exec confirmation, application readiness, and normal exit.
-A missing executable returned errno 2 and exit 127. A non-executable file
-returned errno 13 and exit 127. An early exit confirmed exec and returned
-status 23 with no application readiness. Production observations matched.
-The focused Swift guest, initramfs, and timeline suites passed 33 tests.
-
-Ten alternating pairs measured host-monotonic VMM invocation through guest
-poweroff, with the same fixture and host collector enabled in both arms.
-Guest tracing added a median 0.693 ms, with paired differences from -5.342
-to +5.425 ms on this shared host. An initial run had a median of -0.969 ms.
-Boot variance prevents a precise estimate of the tracing cost. Raw
-reports, compiler details, hashes and the replay scripts are under the
-SPEED-001 evidence root in `guest-fixtures` and `initial-guest-fixtures`.
-The existing startup-trace adapter still needs its CLI arguments aligned.
-
-Source: [Measurement contract](speed-engineering-plan.md#measurement-contract),
-[guest init](../../guest/init/conjet-init.c),
-[timeline](../../Sources/ConjetCore/StartupTimeline.swift).
-
-Review: Host increment reviewed for bounded frames, guest port and stream
-validation, legacy event classification, and clock boundaries. The boot
-report retains the legacy markers as guest observations. A final review
-requires the benchmark adapter. Guest review confirmed exec from the
-kernel event and fixture readiness from the inherited descriptor, and
-verified errors and early exit in raw reports.
-
-Next Action: Restore the startup benchmark adapter and verify its host
-timeline and preserved guest records through the usual command.
+None.
 
 ## UNDERREVIEW
 
@@ -695,3 +621,87 @@ startup failure, and cancellation. The launcher removes residual socket entries
 only after confirming the staged runtime exited.
 
 Next Action: Begin SPEED-001 with process tracing and a post-exec fixture.
+
+### SPEED-001
+
+Title: Correct process-start events and add a readiness fixture
+
+Description: Update the guest event producer and host decoder; add a fixture that signals readiness only after exec. Deliver trace-schema documentation and failure-path tests.
+
+Is blocked by task: SPEED-000.
+
+Acceptance Criteria:
+
+- Current post-fork notification is not reported as successful application execution.
+- Missing executable, permission failure, and early process exit produce accurate outcomes.
+- End-to-end timing uses one host monotonic clock; guest durations remain separate.
+- Trace schema and benchmark methodology document endpoints and instrumentation overhead.
+
+Problem and Evidence: `guest/init/conjet-init.c` reports PROCESS_STARTED after
+fork before exec success; the existing timeline labels T6 as first instruction.
+
+Approach:
+
+1. Trace PROCESS_STARTED from guest/init/conjet-init.c through its host decoder and replace the false exec-success interpretation.
+2. Add distinct child-created, exec-confirmed, application-ready, and exec-failed outcomes; retain compatibility for existing event consumers.
+3. Run a valid executable, missing path, non-executable file, and immediate exit; verify each trace and measure tracing overhead.
+
+Evidence: The active Rust VMM had no receiver for guest-initiated readiness
+connections, and the Rust CLI boot command rejected the benchmark's
+`--timeline-jsonl` argument. The host increment adds an explicit
+`--trace-guest-readiness` flag, bounded v1 VSOCK reception, separate host and
+guest timestamps, and labels the legacy event as a launch observation.
+
+Built and signed the branch VMM, then ran `jetstream boot` with the isolated
+Core 1.3.1 manifest, two vCPUs, 2,048 MiB, 25 ms host tick,
+`--require-docker-ready --hold-after-ready-ms 1000 --trace-guest-readiness
+--json`. Docker reached readiness and the host collected `control_ready` and
+`legacy_process_started` records with the same guest boot ID and ordered host
+offsets. The first decode attempt rejected the appliance producer's
+`VMADDR_CID_ANY` envelope. The corrected decoder validates the transport
+CID and accepts that existing envelope marker.
+
+Raw reports, production observations, the VMM hash, and Cargo and Swift test
+logs are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-001/host-decoder`.
+Two Swift StartupTimeline tests and 135 Rust tests passed, with three Rust
+tests ignored. The published Docker guest emitted legacy markers only.
+
+Built the static ARM64 Pulse init on the verified candidate Docker endpoint
+using Alpine's GCC 14.2.0 and musl. The guest boot fixture proved control,
+child creation, exec confirmation, application readiness, and normal exit.
+A missing executable returned errno 2 and exit 127. A non-executable file
+returned errno 13 and exit 127. An early exit confirmed exec and returned
+status 23 with no application readiness. Production observations matched.
+The focused Swift guest, initramfs, and timeline suites passed 33 tests.
+
+Ten alternating pairs measured host-monotonic VMM invocation through guest
+poweroff, with the same fixture and host collector enabled in both arms.
+Guest tracing added a median 0.693 ms, with paired differences from -5.342
+to +5.425 ms on this shared host. An initial run had a median of -0.969 ms.
+Boot variance prevents a precise estimate of the tracing cost. Raw
+reports, compiler details, hashes and the replay scripts are under the
+SPEED-001 evidence root in `guest-fixtures` and `initial-guest-fixtures`.
+The restored `conjet-bench startup-trace` ran against the isolated
+fixture with `--early-console-only --trace-guest-readiness`. It retained
+ordered T0, T1, T7 JSONL and a full boot response with all five expected
+guest events. Both CLI and benchmark builds passed, and all 45 benchmark
+package tests passed. Exact arguments and output are under
+`timeline-adapter`. Production observations matched for the final run.
+
+Source: [Measurement contract](speed-engineering-plan.md#measurement-contract),
+[guest init](../../guest/init/conjet-init.c),
+[timeline](../../Sources/ConjetCore/StartupTimeline.swift).
+
+Review: Host increment reviewed for bounded frames, guest port and stream
+validation, legacy event classification, and clock boundaries. The boot
+report retains the legacy markers as guest observations. Guest review
+confirmed exec from the kernel event and fixture readiness from the
+inherited descriptor, and verified errors and early exit in raw reports.
+The benchmark adapter uses host monotonic time for CLI intervals and
+keeps raw guest timestamps separate. The underlying timed subprocess
+boundary is documented. Runtime checks were headless and verified through
+raw event streams and process observations.
+
+Next Action: Begin SPEED-002 with a pinned and endpoint-verified fresh
+lifecycle harness.

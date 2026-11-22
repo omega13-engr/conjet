@@ -5957,7 +5957,7 @@ struct ConjetCLI {
                     """
                     Usage:
                       conjet vm backend [status|set <vz|hvf-experimental>] [--json|--format json]
-                      conjet vm backend rust-boot-attempt [--memory-mib N|--full-memory] [--cpus N] [--max-exits N] [--early-console-only] [--trace-guest-readiness] [--dry-run] [--timeout-seconds N] [--json]
+                      conjet vm backend rust-boot-attempt [--memory-mib N|--full-memory] [--cpus N] [--max-exits N] [--early-console-only] [--trace-guest-readiness] [--timeline-jsonl PATH] [--dry-run] [--timeout-seconds N] [--json]
                     """
                 )
             case "memory":

@@ -210,6 +210,9 @@ extension ConjetCLI {
         let fullMemory = bootArgs.removeAllOccurrences("--full-memory")
         let requireDocker = bootArgs.removeAllOccurrences("--require-docker-ready")
         let traceGuestReadiness = bootArgs.removeAllOccurrences("--trace-guest-readiness")
+        let timelinePath = try takeValueOption("--timeline-jsonl", from: &bootArgs)
+        let timeline = timelinePath.map { _ in StartupTimeline(label: "jetstream-boot-attempt") }
+        timeline?.record(.t0)
         let config = try ConjetConfig.loadOrCreate(paths: paths)
         let memoryMiB = try takeValueOption("--memory-mib", from: &bootArgs).map {
             try parsePositiveInt($0, flag: "--memory-mib")
@@ -260,11 +263,21 @@ extension ConjetCLI {
             displayName: "Conjet Core Rust bounded boot",
             timeoutSeconds: timeoutSeconds
         )
+        timeline?.record(.t1, label: "manifest and VMM invocation resolved")
         let process = try ProcessRunner.run(
             invocation.executable,
             invocation.arguments,
             timeoutSeconds: timeoutSeconds
         )
+        if let timeline, let timelinePath {
+            timeline.record(.t7, label: "VMM process result received",
+                            metrics: ["exit_code": Double(process.exitCode)])
+            try timeline.snapshot().jsonLines().write(
+                to: URL(fileURLWithPath: timelinePath),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
         return RustBootAttemptOutput(
             vmmPath: tool.executable,
             vmmSource: tool.source,

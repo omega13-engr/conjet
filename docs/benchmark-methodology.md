@@ -17,6 +17,7 @@ startup-trace runner:
 swift run --package-path benchmarks conjet-bench startup-trace \
   --conjet .build/debug/conjet \
   --conjet-home "$qa_root/conjet-home" \
+  --trace-guest-readiness \
   --samples 10 \
   --output-dir "$qa_root/startup-trace"
 ```
@@ -24,7 +25,7 @@ swift run --package-path benchmarks conjet-bench startup-trace \
 Each sample invokes:
 
 ```sh
-conjet vm backend boot-attempt --timeline-jsonl "$trace"
+conjet vm backend boot-attempt --timeline-jsonl "$trace" --trace-guest-readiness
 ```
 
 The trace is newline-delimited JSON with one `StartupTimelineEvent` per line.
@@ -41,8 +42,13 @@ ordered before a result can support a performance claim:
 - `T7`: first useful response or launch exit result.
 - `TD`: Docker API readiness for the resident Docker lane.
 
-Reports must keep the per-sample JSONL files, `all-results.json`, and
-`startup-trace.md`. At minimum, startup reports must state:
+The bounded Rust boot command records T0, T1, and T7 on the host clock. T7 on
+this command is VMM subprocess completion, which includes returning the boot
+report or failure. Guest readiness records remain separate in the VMM report.
+Supply `--early-console-only` for a bounded fixture that powers off directly.
+
+Reports must keep the per-sample JSONL files, full VMM response output,
+`all-results.json`, and `startup-trace.md`. At minimum, startup reports must state:
 
 - sample count and failures;
 - T0-to-T7 p50 and p95;
