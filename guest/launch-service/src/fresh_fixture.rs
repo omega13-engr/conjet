@@ -1,8 +1,9 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -14,6 +15,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::handshake::{hex, random};
+use crate::intent::{DIRECTORY, Intent};
 use crate::output::{Capture, capture};
 use crate::socket::Stream;
 use crate::spec::{LaunchRequest, ValidatedLaunch};
@@ -121,7 +123,12 @@ impl Record {
     }
 
     fn cancel(&mut self) {
-        if !self.cancelled && !self.phase.terminal() {
+        if !self.cancelled
+            && matches!(
+                self.phase,
+                Phase::Accepted | Phase::ChildCreated | Phase::Running
+            )
+        {
             self.cancelled = true;
             if let Some(control) = &mut self.control {
                 let _ = control.write_all(&[1]);
@@ -141,6 +148,7 @@ struct Ledger {
 
 pub(crate) struct FreshFixture {
     image_digest: String,
+    intent: Intent,
     ledger: Mutex<Ledger>,
     changed: Condvar,
 }
@@ -183,8 +191,23 @@ impl FreshFixture {
             return Err("fresh fixture image identity differs from its verified input".into());
         }
         let image_digest = format!("sha256:{}", hex(&Sha256::digest(&manifest)));
+        let directory = Path::new(DIRECTORY);
+        match fs::DirBuilder::new().mode(0o700).create(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let metadata = directory.symlink_metadata()?;
+        if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o777 != 0o700 {
+            return Err("fixture intent directory must be private to root".into());
+        }
+        let intent = Intent::open(directory);
+        if intent.read()?.is_some() {
+            return Err("unresolved fresh workload intent".into());
+        }
         Ok(Arc::new(Self {
             image_digest,
+            intent,
             ledger: Mutex::new(Ledger::default()),
             changed: Condvar::new(),
         }))
@@ -275,7 +298,7 @@ impl FreshFixture {
         let limits = spec.limits;
         if thread::Builder::new()
             .name("fresh-workload".into())
-            .spawn(move || owner.run_workload(limits, mode))
+            .spawn(move || owner.run_workload(id, limits, mode))
             .is_err()
         {
             let record = ledger.record.as_mut().expect("reserved record");
@@ -286,8 +309,22 @@ impl FreshFixture {
         Ok((Kind::State, reply))
     }
 
-    fn run_workload(&self, limits: crate::spec::ResourceLimits, mode: &str) {
-        let result = self.run_helper(limits, mode);
+    fn run_workload(&self, id: [u8; 16], limits: crate::spec::ResourceLimits, mode: &str) {
+        {
+            let mut ledger = self.ledger.lock().expect("fresh ledger");
+            let record = ledger.record.as_mut().expect("admitted workload");
+            if record.cancelled {
+                record.exec = "failed";
+                record.change(Phase::Removed);
+                self.changed.notify_all();
+                return;
+            }
+        }
+        let result = self.intent.record(id).and_then(|()| {
+            let output = self.run_helper(id, limits, mode)?;
+            self.intent.complete(id)?;
+            Ok(output)
+        });
         if let Err(error) = &result {
             eprintln!("fresh fixture did not confirm cleanup: {error}");
         }
@@ -311,6 +348,7 @@ impl FreshFixture {
 
     fn run_helper(
         &self,
+        id: [u8; 16],
         limits: crate::spec::ResourceLimits,
         mode: &str,
     ) -> io::Result<(Capture, Capture)> {
@@ -320,6 +358,7 @@ impl FreshFixture {
         let mut child = Command::new("/init")
             .args([
                 "--run-fresh-fixture",
+                &hex(&id),
                 &limits.memory_bytes.to_string(),
                 &limits.pids.to_string(),
                 &limits.cpu_millicores.to_string(),

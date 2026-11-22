@@ -47,40 +47,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-006
-
-Title: Add lifecycle failure injection and recovery tests
-
-Description: Deliver a deterministic test matrix proving that launch failures, disconnects, and cancellation do not leak resources or duplicate execution.
-
-Is blocked by task: SPEED-005.
-
-Acceptance Criteria:
-
-- Exercise cancellation at each lifecycle stage, malformed specs, exec failure,
-  output backpressure, resource exhaustion, disconnects, and supervisor/guest failure.
-- Verify isolation and data canaries, child reaping, and absence of resource leaks.
-- Restart/recovery reconciles state without re-executing ambiguous requests.
-- Relevant automated checks pass; unresolved correctness failures block later tasks.
-
-Problem and Evidence: Direct supervision removes runtime layers whose lifecycle
-and cleanup responsibilities must now be implemented by Conjet.
-
-Approach:
-
-1. Inject failure after each resource allocation and at child creation, exec, output handling, and cleanup.
-2. Test cancellation before start, during execution, and during cleanup; reconnect using the same request ID and verify no duplicate start.
-3. Kill the supervisor or disposable guest at defined stages; reconcile state and compare process, mount, and cgroup inventories before and after repeated runs.
-
-Evidence: Pending reproducible failure matrix, test results, recovery traces, and leak inventories.
-
-Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
-[verification policy](speed-engineering-plan.md#verification-and-claim-policy).
-
-Review: Pending; qualify cancellation races, PID reuse, recovery, and resource ownership.
-
-Next Action: Add allocation-stage failure hooks and a resource-inventory assertion to the isolated harness.
-
 ### SPEED-007
 
 Title: Implement fresh bridge networking with verified teardown
@@ -381,7 +347,55 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-None.
+### SPEED-006
+
+Title: Add lifecycle failure injection and recovery tests
+
+Description: Deliver a deterministic test matrix proving that launch failures, disconnects, and cancellation do not leak resources or duplicate execution.
+
+Is blocked by task: SPEED-005.
+
+Acceptance Criteria:
+
+- Exercise cancellation at each lifecycle stage, malformed specs, exec failure,
+  output backpressure, resource exhaustion, disconnects, and supervisor/guest failure.
+- Verify isolation and data canaries, child reaping, and absence of resource leaks.
+- Restart/recovery reconciles state without re-executing ambiguous requests.
+- Relevant automated checks pass; unresolved correctness failures block later tasks.
+
+Problem and Evidence: Direct supervision removes runtime layers whose lifecycle
+and cleanup responsibilities must now be implemented by Conjet.
+
+Approach:
+
+1. Inject failure after each resource allocation and at child creation, exec, output handling, and cleanup.
+2. Test cancellation before start, during execution, and during cleanup; reconnect using the same request ID and verify no duplicate start.
+3. Kill the supervisor or disposable guest at defined stages; reconcile state and compare process, mount, and cgroup inventories before and after repeated runs.
+
+Evidence: The fixture records a single root-private workload intent before
+starting its helper. The helper verifies that intent and uses the same ID for
+the cgroup leaf. Completion releases the record only after the helper confirms
+cleanup. A corrupt or outstanding intent blocks admission on start. Cancellation
+does not regress an observed cleanup phase.
+
+`cargo test --locked -p conjet-launch-service` passed 17 tests, including
+exclusive intent creation, re-opening a recorded ID, rejection of a different
+owner, and preservation of corrupt state. Strict Linux ARM64 Clippy passed.
+The pinned ARM64 musl build and live repeat of the fresh lifecycle matrix,
+with before/after production observations, are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-006/intent`.
+Supervisor restart, deterministic failure hooks, and leak inventory remain
+pending.
+
+Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
+[verification policy](speed-engineering-plan.md#verification-and-claim-policy).
+
+Review: Reviewed write-before-helper ordering, deterministic cgroup identity,
+and failure to closed admission after an unresolved intent. Comprehensive
+recovery, cancellation race, and PID reuse review remain pending.
+
+Next Action: Reconcile the private resource inventory after helper loss and
+validate same-guest supervisor restart with a rotated generation.
 
 ## UNDERREVIEW
 

@@ -37,6 +37,7 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
     run(
         with_sandbox,
+        handshake::random()?,
         ResourceLimits {
             memory_bytes: MIN_MEMORY_BYTES,
             pids: 4,
@@ -62,6 +63,15 @@ pub fn run_helper(
             .ok_or("fixture helper bounds required")?
             .parse()?)
     }
+    if unsafe { libc::getppid() } != 1 {
+        return Err("fresh helper requires the guest init supervisor".into());
+    }
+    let id = args.next().ok_or("fresh workload ID required")?;
+    let id = handshake::unhex(id.to_str().ok_or("invalid workload ID")?)?;
+    let intent = crate::intent::Intent::open(Path::new(crate::intent::DIRECTORY));
+    if intent.read()? != Some(id) {
+        return Err("fresh helper does not own the recorded workload".into());
+    }
     let limits = ResourceLimits {
         memory_bytes: number(&mut args)?,
         pids: number(&mut args)?,
@@ -76,21 +86,12 @@ pub fn run_helper(
     if args.next().is_some() {
         return Err("unexpected fixture helper arguments".into());
     }
-    run_controlled(limits, workload_option)
-}
-
-pub(crate) fn run_controlled(
-    limits: ResourceLimits,
-    workload_option: Option<&'static std::ffi::CStr>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if unsafe { libc::getppid() } != 1 {
-        return Err("fresh helper requires the guest init supervisor".into());
-    }
-    run(true, limits, true, workload_option)
+    run(true, id, limits, true, workload_option)
 }
 
 fn run(
     with_sandbox: bool,
+    id: [u8; 16],
     limits: ResourceLimits,
     controlled: bool,
     workload_option: Option<&'static std::ffi::CStr>,
@@ -107,7 +108,6 @@ fn run(
         std::fs::create_dir(directory)?;
         write_control(directory, "cgroup.subtree_control", CONTROLLERS)?;
     }
-    let id = handshake::random()?;
     let cgroup = WorkloadCgroup::create(&active, id, limits)?;
     let probe = clone_and_reap(&cgroup, sandbox.as_ref(), controlled, workload_option);
     let exit_report = match &probe {
