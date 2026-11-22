@@ -120,7 +120,10 @@ def run_samples(channel, boot_id, args, scenario, endpoint, key_file, peer, repo
         for lane in scenario['lanes']:
             group = {'network': network, 'lane': lane, 'warmups': [], 'samples': []}
             report['groups'].append(group)
+            measured_start = None
             for index in range(args.samples + scenario['warmups_per_lane']):
+                if index == scenario['warmups_per_lane']:
+                    measured_start = time.monotonic_ns()
                 sequence += 1
                 row = {'sequence': sequence, 'error': None, 'api_removed_ns': None,
                        'cleanup_complete_ns': None}
@@ -155,6 +158,7 @@ def run_samples(channel, boot_id, args, scenario, endpoint, key_file, peer, repo
                     raise
                 finally:
                     row['elapsed_ns'] = time.monotonic_ns() - started
+            group['measured_wall_ns'] = time.monotonic_ns() - measured_start
             print(f'Completed native {network}/{lane}: {args.samples} samples', flush=True)
 
 
@@ -232,9 +236,13 @@ def session(args):
                     try:
                         channel, boot_id = open_native(endpoint, key, vm, args.vmm, adapter['current_executable'])
                         with channel:
-                            report['host_before'] = process_observation(vm.pid, adapter['run'])
+                            report['host_before'] = process_observation(
+                                vm.pid, args.network_helper, args.output / 'footprint-before.json', adapter['run'],
+                            )
                             run_samples(channel, boot_id, args, scenario, endpoint, key_file, vm.pid, report)
-                            report['host_after'] = process_observation(vm.pid, adapter['run'])
+                            report['host_after'] = process_observation(
+                                vm.pid, args.network_helper, args.output / 'footprint-after.json', adapter['run'],
+                            )
                             kind, result = call(channel, 7, {'budget_ms': 3000})
                             if kind != 16 or result['state'] != 'stopped' or vm.wait(timeout=12) != 0:
                                 raise RuntimeError('native fixture did not shut down')
@@ -262,9 +270,23 @@ def session(args):
         raise RuntimeError('native benchmark verification failed')
 
 
-def process_observation(pid, run):
-    return {'load_average': os.getloadavg(),
-            'cpu_time_and_rss': run(['/bin/ps', '-p', str(pid), '-o', 'pid=,time=,rss='])}
+def process_observation(pid, network_helper, footprint, run):
+    roles = {pid: 'vmm'}
+    for row in run(['/bin/ps', '-axo', 'pid=,ppid=,comm=']).splitlines():
+        process, parent, executable = row.strip().split(maxsplit=2)
+        if int(parent) == pid and Path(executable) == network_helper:
+            roles[int(process)] = 'network_helper'
+    ids = ','.join(map(str, roles))
+    observation = {'load_average': os.getloadavg(), 'process_roles': roles,
+                   'cpu_time_and_rss': run(['/bin/ps', '-p', ids, '-o', 'pid=,time=,rss='])}
+    try:
+        flags = [argument for process in roles for argument in ('--pid', str(process))]
+        run(['/usr/bin/footprint', '--noCategories', '--format', 'bytes', '--json',
+             footprint, *flags], timeout=10)
+        observation['footprint_json'] = footprint.name
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        observation['footprint_error'] = str(error)
+    return observation
 
 
 def open_native(endpoint, key, vm, vmm, executable):

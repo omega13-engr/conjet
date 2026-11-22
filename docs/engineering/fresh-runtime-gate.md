@@ -154,3 +154,20 @@ cancellation checks also passed. Production observations matched.
 Evidence is under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/grouped-teardown`.
 [Linux 6.12 group link deletion](https://github.com/torvalds/linux/blob/v6.12/net/core/rtnetlink.c#L3058-L3090)
+
+## Direct veth placement
+
+The veth peer is now registered in its final namespace using the namespace
+descriptor carried in the peer creation message. There is no separate
+link move. Startup probes peer creation and teardown before advertising
+the bridge capability.
+
+Two further boots ran 100 measurements per mode and lane with the same
+ARM64 fixture. Traced bridge setup p50 fell from about 19 ms to 0.382
+and 0.309 ms. Bridge API p50/p99 became 20.171/43.929 and 20.333/43.699 ms.
+No-network API p50/p99 was 2.009/3.080 and 2.071/7.954 ms. The full live
+bridge, cancellation and recovery regressions passed again. These
+single-host figures remain preliminary and use the native cleanup-complete
+boundary. Raw evidence is under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/direct-peer`.
+[Linux 6.12 veth peer creation](https://github.com/torvalds/linux/blob/v6.12/drivers/net/veth.c#L1784-L1830)

@@ -300,7 +300,10 @@ def session(args):
                 group = {'network': network, 'lane': lane, 'warmups': [], 'samples': []}
                 report['groups'].append(group)
                 count = args.samples + scenario['warmups_per_lane']
+                measured_start = None
                 for index in range(count):
+                    if index == scenario['warmups_per_lane']:
+                        measured_start = time.monotonic_ns()
                     name = f'speed-{token}-{network}-{lane}-{index}'
                     report['in_flight'] = {'name': name, 'network': network, 'lane': lane,
                                            'warmup': index < scenario['warmups_per_lane']}
@@ -314,6 +317,7 @@ def session(args):
                     if row['error'] is not None:
                         group['summary'] = summarize(group['samples'])
                         raise RuntimeError(f"fixture failed in {network}/{lane}: {row['error']}")
+                group['measured_wall_ns'] = time.monotonic_ns() - measured_start
                 group['summary'] = summarize(group['samples'])
                 print(f"Completed {args.engine} {network}/{lane}: {args.samples} samples", flush=True)
         remaining = run(docker + ['ps', '-aq', '--filter', f'label={SESSION_LABEL}={token}'], env)

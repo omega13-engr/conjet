@@ -351,6 +351,14 @@ from roughly 40 ms to 19 ms. Bridge API p50 fell from 64–68 ms to
 800 follow-up measurements, focused Rust tests, and strict ARM64 Clippy
 passed. Retained evidence is in `SPEED-008/grouped-teardown`.
 
+Direct peer registration reduced measured bridge preparation from about
+19 ms to under 0.4 ms. Two boots measured native bridge API p50 about
+20.2 ms and p99 about 44 ms. All 800 operations and the bridge, private
+scope, teardown, fault and cancellation regressions passed. The runner
+records the timed measurement window in addition to individual operations
+and tracks the native VMM and owned networking helper. Reports are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/direct-peer`.
+
 Source: [Delivery gates](speed-engineering-plan.md#incremental-delivery-and-decision-gates),
 [verification policy](speed-engineering-plan.md#verification-and-claim-policy).
 
@@ -358,9 +366,8 @@ Review: Reviewed the kqueue descriptor lifetime, empty queue idle behavior,
 virtio stream ownership and opt-in scope. Causal attribution beyond
 host wake latency and the fresh gate review remain pending.
 
-Next Action: Remove the separate peer move by placing the veth directly
-in its target namespace. Repeat focused isolation, cleanup and timing
-checks, then run a longer API churn comparison.
+Next Action: Run a longer serial API churn comparison on the verified
+revision and record the fresh gate verdict and qualification blockers.
 
 ## UNDERREVIEW
 

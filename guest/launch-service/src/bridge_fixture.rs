@@ -227,30 +227,31 @@ impl Links {
         };
         let bridge = links.route.create_link(BRIDGE, c"bridge", &[])?;
         links.bridge = Some(bridge);
-        let mut other = link_message(0, 0);
-        attribute(&mut other, libc::IFLA_IFNAME, PEER.to_bytes_with_nul());
-        let mut data = Vec::new();
-        attribute(&mut data, VETH_INFO_PEER | NESTED, &other);
-        let port = links.route.create_link(PORT, c"veth", &data)?;
-        links.port = Some(port);
-        links
-            .route
-            .configure_link(port, true, &[(libc::IFLA_MASTER, &bridge.to_ne_bytes())])?;
         links.route.configure_link(bridge, true, &[])?;
         links.route.address(bridge, BRIDGE_IP)?;
         Ok(links)
     }
 
-    fn move_peer(&mut self, pid: u32) -> io::Result<()> {
+    fn attach_peer(&mut self, pid: u32) -> io::Result<()> {
+        let bridge = self
+            .bridge
+            .ok_or_else(|| io::Error::other("bridge link is not live"))?;
         let peer_namespace = File::open(format!("/proc/{pid}/ns/net"))?;
-        self.route.configure_link(
-            interface_index(PEER)?,
-            false,
-            &[(
-                libc::IFLA_NET_NS_FD,
-                &peer_namespace.as_raw_fd().to_ne_bytes(),
-            )],
-        )?;
+        let mut other = link_message(0, 0);
+        attribute(&mut other, libc::IFLA_IFNAME, PEER.to_bytes_with_nul());
+        // Register the peer in its final namespace, avoiding the separate
+        // namespace move and its network grace period.
+        attribute(
+            &mut other,
+            libc::IFLA_NET_NS_FD,
+            &peer_namespace.as_raw_fd().to_ne_bytes(),
+        );
+        let mut data = Vec::new();
+        attribute(&mut data, VETH_INFO_PEER | NESTED, &other);
+        let port = self.route.create_link(PORT, c"veth", &data)?;
+        self.port = Some(port);
+        self.route
+            .configure_link(port, true, &[(libc::IFLA_MASTER, &bridge.to_ne_bytes())])?;
         self.peer_namespace = Some(peer_namespace);
         Ok(())
     }
@@ -318,7 +319,7 @@ impl Bridge {
     }
 
     pub(crate) fn attach(&mut self, pid: libc::pid_t) -> io::Result<()> {
-        self.links.move_peer(pid as u32)?;
+        self.links.attach_peer(pid as u32)?;
         let peer = self.links.peer_namespace.as_ref().expect("moved peer");
         let original = File::open("/proc/self/ns/net")?;
         let result = in_namespace(peer, configure_peer);
@@ -462,7 +463,8 @@ pub fn check_available() -> io::Result<()> {
             "bridge availability check requires a fixture supervisor",
         ));
     }
-    Bridge::create()?.close()
+    Bridge::create()?.close()?;
+    traffic_and_teardown(None, 0)
 }
 
 pub fn check() -> Result<(), Box<dyn std::error::Error>> {
@@ -579,7 +581,7 @@ pub fn check_scope(parent: u32) -> io::Result<()> {
 fn traffic_and_teardown(coordinator: Option<&mut UnixStream>, marker: u8) -> io::Result<()> {
     let mut peer = FixtureProcess::spawn("--check-bridge-peer")?;
     let mut links = Links::create()?;
-    links.move_peer(peer.child.id())?;
+    links.attach_peer(peer.child.id())?;
     let listening_port = if coordinator.is_some() {
         CANARY_PORT
     } else {
