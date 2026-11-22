@@ -54,8 +54,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             conjet_launch_service::bridge_fixture::check()?;
         }
         #[cfg(target_arch = "aarch64")]
-        Some(argument) if argument == "--check-bridge-peer" && args.next().is_none() => {
-            conjet_launch_service::bridge_fixture::check_peer()?;
+        Some(argument) if argument == "--check-bridge-availability" && args.next().is_none() => {
+            conjet_launch_service::bridge_fixture::check_available()?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument)
+            if argument == "--check-bridge-peer" || argument == "--check-bridge-scope" =>
+        {
+            let parent = args
+                .next()
+                .and_then(|value| value.into_string().ok())
+                .ok_or("bridge fixture owner required")?
+                .parse()?;
+            if args.next().is_some() {
+                return Err("unexpected bridge fixture arguments".into());
+            }
+            if argument == "--check-bridge-peer" {
+                conjet_launch_service::bridge_fixture::check_peer(parent)?;
+            } else {
+                conjet_launch_service::bridge_fixture::check_scope(parent)?;
+            }
         }
         #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--verify-workload-fixture" => {

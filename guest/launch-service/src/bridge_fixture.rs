@@ -4,9 +4,10 @@ use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::security::checked;
@@ -447,6 +448,15 @@ pub fn verify_workload() -> io::Result<()> {
     Ok(())
 }
 
+pub fn check_available() -> io::Result<()> {
+    if unsafe { libc::getppid() } <= 1 {
+        return Err(io::Error::other(
+            "bridge availability check requires a fixture supervisor",
+        ));
+    }
+    Bridge::create()?.close()
+}
+
 pub fn check() -> Result<(), Box<dyn std::error::Error>> {
     if std::process::id() != 1 {
         return Err("bridge proof requires a disposable guest init".into());
@@ -454,145 +464,189 @@ pub fn check() -> Result<(), Box<dyn std::error::Error>> {
     let _proc = crate::kernel_fixture::ProcMount::new()?;
     checked(unsafe { libc::unshare(libc::CLONE_NEWNET) })?;
     for _ in 0..10 {
-        traffic_and_teardown()?;
+        traffic_and_teardown(None, 0)?;
     }
     println!(
         "conjet-launchd verified private bridge address, peer traffic and link teardown across 10 allocations"
     );
+    for _ in 0..5 {
+        check_concurrent()?;
+    }
+    println!(
+        "conjet-launchd verified overlapping IPv4 and TCP bindings in two simultaneous private bridge scopes across 5 rounds"
+    );
     Ok(())
 }
 
-fn traffic_and_teardown() -> io::Result<()> {
-    let (mut control, peer_control) = UnixStream::pair()?;
+struct FixtureProcess {
+    child: Child,
+    control: UnixStream,
+}
+
+impl FixtureProcess {
+    fn spawn(mode: &str) -> io::Result<Self> {
+        let (control, peer_control) = UnixStream::pair()?;
+        control.set_read_timeout(Some(TIMEOUT))?;
+        control.set_write_timeout(Some(TIMEOUT))?;
+        let mut command = Command::new("/init");
+        command
+            .arg(mode)
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::from(OwnedFd::from(peer_control)));
+        // Only a raw namespace syscall runs before exec.
+        unsafe { command.pre_exec(|| checked(libc::unshare(libc::CLONE_NEWNET))) };
+        let child = command.spawn()?;
+        Ok(Self { child, control })
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        if !self.child.wait()?.success() {
+            return Err(io::Error::other("bridge fixture subprocess failed"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FixtureProcess {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+fn fixture_control(parent: u32) -> io::Result<UnixStream> {
+    if unsafe { libc::getppid() } as u32 != parent || parent == 0 {
+        return Err(io::Error::other("bridge fixture owner identity mismatch"));
+    }
+    // The launcher supplies FD 0 as this process's private control stream.
+    let control = UnixStream::from(unsafe { OwnedFd::from_raw_fd(0) });
     control.set_read_timeout(Some(TIMEOUT))?;
     control.set_write_timeout(Some(TIMEOUT))?;
-    let mut command = Command::new("/init");
-    command
-        .arg("--check-bridge-peer")
-        .stdin(Stdio::from(OwnedFd::from(peer_control)));
-    // Only a raw namespace syscall runs before exec.
-    unsafe { command.pre_exec(|| checked(libc::unshare(libc::CLONE_NEWNET))) };
-    let mut peer = command.spawn()?;
-    let result = (|| {
-        let peer_namespace = File::open(format!("/proc/{}/ns/net", peer.id()))?;
-        let mut route = Route::open()?;
-        let bridge = route.create_link(BRIDGE, c"bridge", &[])?;
-        let mut other = link_message(0, 0);
-        attribute(&mut other, libc::IFLA_IFNAME, PEER.to_bytes_with_nul());
-        let mut data = Vec::new();
-        attribute(&mut data, VETH_INFO_PEER | NESTED, &other);
-        let port = route.create_link(PORT, c"veth", &data)?;
-        let peer_link = interface_index(PEER)?;
-        route.configure_link(
-            peer_link,
-            false,
-            &[(
-                libc::IFLA_NET_NS_FD,
-                &peer_namespace.as_raw_fd().to_ne_bytes(),
-            )],
-        )?;
-        route.configure_link(port, true, &[(libc::IFLA_MASTER, &bridge.to_ne_bytes())])?;
-        route.configure_link(bridge, true, &[])?;
-        route.address(bridge, BRIDGE_IP)?;
-        let listener = TcpListener::bind((BRIDGE_IP, 0))?;
-        let port_number = listener.local_addr()?.port();
-        control.write_all(&port_number.to_le_bytes())?;
-        wait(
-            listener.as_raw_fd(),
-            libc::POLLIN,
-            None,
-            Some(Instant::now() + TIMEOUT),
-        )?;
-        let (mut stream, source) = listener.accept()?;
-        if source.ip() != PEER_IP {
+    Ok(control)
+}
+
+fn read_byte(stream: &mut UnixStream) -> io::Result<u8> {
+    let mut byte = [0];
+    stream.read_exact(&mut byte)?;
+    Ok(byte[0])
+}
+
+fn check_concurrent() -> io::Result<()> {
+    let mut first = FixtureProcess::spawn("--check-bridge-scope")?;
+    let mut second = FixtureProcess::spawn("--check-bridge-scope")?;
+    let namespace_inode = |process: &FixtureProcess| {
+        std::fs::metadata(format!("/proc/{}/ns/net", process.child.id())).map(|info| info.ino())
+    };
+    if namespace_inode(&first)? == namespace_inode(&second)? {
+        return Err(io::Error::other(
+            "concurrent bridge scopes share a namespace",
+        ));
+    }
+    first.control.write_all(&[0x5a])?;
+    second.control.write_all(&[0xa5])?;
+    for process in [&mut first, &mut second] {
+        if read_byte(&mut process.control)? != 1 {
             return Err(io::Error::other(
-                "bridge traffic used the wrong source address",
+                "concurrent bridge scope did not finish binding",
             ));
         }
-        stream.set_read_timeout(Some(TIMEOUT))?;
-        stream.set_write_timeout(Some(TIMEOUT))?;
-        let mut request = [0; 4];
-        stream.read_exact(&mut request)?;
-        if &request != b"ping" {
-            return Err(io::Error::other("bridge application canary mismatch"));
-        }
-        stream.write_all(b"pong")?;
-        let mut checked_reply = [0];
-        control.read_exact(&mut checked_reply)?;
-        if checked_reply != [1] {
-            return Err(io::Error::other("bridge peer did not verify the response"));
-        }
-        drop((listener, stream));
-        route.remove(port)?;
-        route.remove(bridge)?;
-        for interface in [PORT, BRIDGE, PEER] {
-            if interface_index(interface).is_ok() {
-                return Err(io::Error::other(
-                    "fixture network interface remained after cleanup",
-                ));
-            }
-        }
-        control.write_all(&[2])?;
-        control.read_exact(&mut checked_reply)?;
-        if checked_reply != [2] {
-            return Err(io::Error::other("bridge peer did not verify teardown"));
-        }
-        match TcpListener::bind((BRIDGE_IP, 0)) {
-            Err(error) if error.kind() == io::ErrorKind::AddrNotAvailable => Ok(()),
-            _ => Err(io::Error::other("fixture bridge address remained usable")),
-        }
-    })();
-    if result.is_err() {
-        peer.kill()?;
     }
-    let status = peer.wait()?;
-    result?;
-    if !status.success() {
-        return Err(io::Error::other("bridge fixture peer failed"));
+    // Both bridge IPs and port bindings are alive before either accepts
+    // traffic. Their distinct canaries detect any crossing between scopes.
+    for process in [&mut first, &mut second] {
+        process.control.write_all(&[2])?;
     }
-    Ok(())
+    first.finish()?;
+    second.finish()
 }
 
-pub fn check_peer() -> io::Result<()> {
-    if unsafe { libc::getppid() } != 1 {
+pub fn check_scope(parent: u32) -> io::Result<()> {
+    let mut coordinator = fixture_control(parent)?;
+    let marker = read_byte(&mut coordinator)?;
+    traffic_and_teardown(Some(&mut coordinator), marker)
+}
+
+fn traffic_and_teardown(coordinator: Option<&mut UnixStream>, marker: u8) -> io::Result<()> {
+    let mut peer = FixtureProcess::spawn("--check-bridge-peer")?;
+    let mut links = Links::create()?;
+    links.move_peer(peer.child.id())?;
+    let listening_port = if coordinator.is_some() {
+        CANARY_PORT
+    } else {
+        0
+    };
+    let listener = TcpListener::bind((BRIDGE_IP, listening_port))?;
+    if let Some(coordinator) = coordinator {
+        coordinator.write_all(&[1])?;
+        if read_byte(coordinator)? != 2 {
+            return Err(io::Error::other(
+                "fixture coordinator did not release bridge peers",
+            ));
+        }
+    }
+    let control = &mut peer.control;
+    let port_number = listener.local_addr()?.port();
+    control.write_all(&port_number.to_le_bytes())?;
+    control.write_all(&[marker])?;
+    wait(
+        listener.as_raw_fd(),
+        libc::POLLIN,
+        None,
+        Some(Instant::now() + TIMEOUT),
+    )?;
+    let (mut stream, source) = listener.accept()?;
+    if source.ip() != PEER_IP {
         return Err(io::Error::other(
-            "bridge peer requires the disposable guest init",
+            "bridge traffic used the wrong source address",
         ));
     }
-    let mut control = UnixStream::from(unsafe { OwnedFd::from_raw_fd(0) });
-    control.set_read_timeout(Some(TIMEOUT))?;
-    control.set_write_timeout(Some(TIMEOUT))?;
+    stream.set_read_timeout(Some(TIMEOUT))?;
+    stream.set_write_timeout(Some(TIMEOUT))?;
+    let mut request = [0; 5];
+    stream.read_exact(&mut request)?;
+    if &request[..4] != b"ping" || request[4] != marker {
+        return Err(io::Error::other("bridge application canary mismatch"));
+    }
+    stream.write_all(b"pong")?;
+    stream.write_all(&[marker])?;
+    if read_byte(control)? != 1 {
+        return Err(io::Error::other("bridge peer did not verify the response"));
+    }
+    drop((listener, stream));
+    links.remove()?;
+    control.write_all(&[2])?;
+    if read_byte(control)? != 2 {
+        return Err(io::Error::other("bridge peer did not verify teardown"));
+    }
+    peer.finish()
+}
+
+pub fn check_peer(parent: u32) -> io::Result<()> {
+    let mut control = fixture_control(parent)?;
     let mut port = [0; 2];
     control.read_exact(&mut port)?;
-    let mut route = Route::open()?;
-    let peer = interface_index(PEER)?;
-    route.configure_link(peer, true, &[])?;
-    route.address(peer, PEER_IP)?;
-    if interface_index(BRIDGE).is_ok() || interface_index(PORT).is_ok() {
-        return Err(io::Error::other(
-            "bridge leaked parent-side links into its peer",
-        ));
-    }
+    let marker = read_byte(&mut control)?;
+    configure_peer()?;
     let endpoint = SocketAddrV4::new(BRIDGE_IP, u16::from_le_bytes(port));
     let mut stream = TcpStream::connect_timeout(&endpoint.into(), TIMEOUT)?;
     stream.set_read_timeout(Some(TIMEOUT))?;
     stream.set_write_timeout(Some(TIMEOUT))?;
     stream.write_all(b"ping")?;
-    let mut response = [0; 4];
+    stream.write_all(&[marker])?;
+    let mut response = [0; 5];
     stream.read_exact(&mut response)?;
-    if &response != b"pong" {
+    if &response[..4] != b"pong" || response[4] != marker {
         return Err(io::Error::other("bridge peer canary mismatch"));
     }
     control.write_all(&[1])?;
-    let mut check_teardown = [0];
-    control.read_exact(&mut check_teardown)?;
-    if check_teardown != [2] || interface_index(PEER).is_ok() {
+    if read_byte(&mut control)? != 2 {
         return Err(io::Error::other(
-            "veth peer remained after parent removed link",
+            "bridge peer did not receive teardown request",
         ));
     }
-    match TcpListener::bind((PEER_IP, 0)) {
-        Err(error) if error.kind() == io::ErrorKind::AddrNotAvailable => control.write_all(&[2]),
-        _ => Err(io::Error::other("fixture peer address remained usable")),
-    }
+    assert_link_absent(PEER)?;
+    assert_address_absent(PEER_IP)?;
+    control.write_all(&[2])
 }

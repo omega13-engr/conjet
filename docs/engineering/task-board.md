@@ -313,6 +313,14 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
+None.
+
+## UNDERREVIEW
+
+None.
+
+## DONE
+
 ### SPEED-007
 
 Title: Implement fresh bridge networking with verified teardown
@@ -362,8 +370,16 @@ complete launch cycles in each mode and the SPEED-006 failure and
 cancellation regression matrix passed, with matching production snapshots.
 The pinned rebuild, raw RPC, guest logs and verification scripts are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-007/bridge-launch`.
-Concurrent independent bridge scope and startup capability checks remain
-pending.
+The final native binary probes bridge creation, resolver and TCP socket
+binding, and verified removal before advertising its capability. Two
+independent kernel bridge scopes in the same guest used the same addresses
+and TCP port simultaneously, with separate namespace IDs and different
+payload canaries, for five rounds. Native admission still enforces one
+active workload. Fifty serial native bridge launches passed in each of the
+normal and recovery boots, along with separate exit and network-cleanup
+observations and forced recovery. Pinned binary hashes, raw traces, logs,
+and passing production comparisons are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-007/bridge-scopes`.
 
 Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 [measurement contract](speed-engineering-plan.md#measurement-contract).
@@ -371,18 +387,13 @@ Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 Review: The link proof reviewed the kernel sender and request sequence,
 namespace ownership, explicit link deletion and address cleanup. Reviewed
 the workload socket filter, fixed guest DNS and port bindings, peer
-namespace FD lifetime, and the separate network-cleanup state. Concurrent
-teardown and readiness review remain pending.
+namespace FD lifetime, the separate network-cleanup state, the
+kernel capability probe, and concurrent network identity isolation.
+The one-workload fixture rejects host networking, user port maps and
+arbitrary DNS. Broader Docker networking remains on its existing owner.
 
-Next Action: Verify independent bridge scopes with overlapping address
-pairs active simultaneously and advertise the fixture capability only
-after a successful kernel probe.
-
-## UNDERREVIEW
-
-None.
-
-## DONE
+Next Action: Begin SPEED-008 with matching scenarios and a focused
+transport timing experiment before claiming any lifecycle speedup.
 
 ### SPEED-006
 

@@ -154,6 +154,7 @@ struct Ledger {
 
 pub(crate) struct FreshFixture {
     image_digest: String,
+    bridge_available: bool,
     allow_crash: bool,
     intent: Intent,
     ledger: Mutex<Ledger>,
@@ -215,13 +216,23 @@ impl FreshFixture {
         // Reparent orphans from an interrupted helper here, while the live
         // supervisor still owns their workload intent and cgroup.
         crate::security::checked(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) })?;
+        let bridge_available = Command::new("/init")
+            .arg("--check-bridge-availability")
+            .env_clear()
+            .status()?
+            .success();
         Ok(Arc::new(Self {
             image_digest,
+            bridge_available,
             allow_crash,
             intent,
             ledger: Mutex::new(Ledger::default()),
             changed: Condvar::new(),
         }))
+    }
+
+    pub(crate) fn bridge_available(&self) -> bool {
+        self.bridge_available
     }
 
     fn update(&self, f: impl FnOnce(&mut Record)) {
@@ -260,6 +271,12 @@ impl FreshFixture {
             ));
         }
         let bridge = spec.network == "bridge";
+        if bridge && !self.bridge_available {
+            return Err((
+                "unsupported_option",
+                "private bridge unavailable in this guest",
+            ));
+        }
         if bridge
             && !matches!(
                 mode,

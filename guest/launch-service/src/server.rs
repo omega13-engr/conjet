@@ -47,13 +47,16 @@ impl Server {
 
     fn capabilities(&self) -> &'static [&'static str] {
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        if self.fresh.is_some() {
-            return &[
-                "ping",
-                "shutdown",
-                "fresh_arm64_fixture",
-                "private_bridge_fixture",
-            ];
+        if let Some(fresh) = &self.fresh {
+            if fresh.bridge_available() {
+                return &[
+                    "ping",
+                    "shutdown",
+                    "fresh_arm64_fixture",
+                    "private_bridge_fixture",
+                ];
+            }
+            return &["ping", "shutdown", "fresh_arm64_fixture"];
         }
         CAPABILITIES
     }
