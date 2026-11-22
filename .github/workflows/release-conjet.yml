@@ -117,8 +117,13 @@ jobs:
           security unlock-keychain -p "${keychain_password}" "${keychain_path}"
           security import "${certificate_path}" -P "${MACOS_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
           security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain_path}"
-          mapfile -t existing_keychains < <(security list-keychains -d user | sed 's/[ "]//g')
-          security list-keychains -d user -s "${keychain_path}" "${existing_keychains[@]}"
+          keychain_paths=("${keychain_path}")
+          while IFS= read -r keychain; do
+            if [ -n "${keychain}" ] && [ "${keychain}" != "${keychain_path}" ]; then
+              keychain_paths+=("${keychain}")
+            fi
+          done <<< "$(security list-keychains -d user | sed -E 's/^[[:space:]]*"([^"]*)"$/\1/')"
+          security list-keychains -d user -s "${keychain_paths[@]}"
 
           identity="$(security find-identity -v -p codesigning "${keychain_path}" | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
           if [ -z "${identity}" ]; then

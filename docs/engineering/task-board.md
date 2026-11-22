@@ -96,7 +96,9 @@ Evidence: Local rehearsal and Homebrew rendering are recorded under
 SPEED-012. The static guest is distributed in the app; the verified Core
 v1.3.1 kernel remains compatible, so a separate Core release is unnecessary.
 The production workflow fails closed on missing signing and notarization
-credentials. The repository Actions secrets endpoint reports zero
+credentials. Its keychain setup was exercised with the system Bash,
+including a retained keychain path containing spaces. The repository
+Actions secrets endpoint reports zero
 repository secrets and the environments endpoint reports no environments.
 Developer ID certificate and Apple notarization credentials must be
 configured or their organization-level availability verified before
