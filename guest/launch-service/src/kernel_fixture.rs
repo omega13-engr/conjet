@@ -111,7 +111,7 @@ pub fn run_helper(
     };
     let mode = args.next().ok_or("fixture helper mode required")?;
     let mode = mode.to_str().ok_or("invalid fixture helper mode")?;
-    if !matches!(mode, "once" | "hold" | "fail") && !test_mode(mode) {
+    if !matches!(mode, "once" | "hold" | "fail" | "benchmark") && !test_mode(mode) {
         return Err("unknown fixture helper mode".into());
     }
     let network = args.next().ok_or("fixture network mode required")?;
@@ -141,8 +141,9 @@ fn run(
             return Ok(());
         }
     }
+    let benchmark = mode == "benchmark";
     let sandbox = with_sandbox
-        .then(|| Sandbox::prepare(network))
+        .then(|| Sandbox::prepare(network, benchmark))
         .transpose()?;
     inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)
@@ -191,7 +192,7 @@ fn run(
         proc_mount.unmount()?;
     }
     if let Some(sandbox) = sandbox {
-        sandbox.cleanup(matches!(probe, Ok(Some(0))))?;
+        sandbox.cleanup(!benchmark && matches!(probe, Ok(Some(0))))?;
     }
     let wait_status = probe?;
     exit_report?;
@@ -310,7 +311,11 @@ fn clone_and_reap(
             }
             let args = [
                 executable.as_ptr(),
-                c"--verify-workload-fixture".as_ptr(),
+                if mode == "benchmark" {
+                    std::ptr::null()
+                } else {
+                    c"--verify-workload-fixture".as_ptr()
+                },
                 workload_option.map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
                 std::ptr::null(),
             ];

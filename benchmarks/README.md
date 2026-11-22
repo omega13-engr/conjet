@@ -77,6 +77,17 @@ Each launcher validates its engine and owns cleanup for the duration of
 the benchmark. Reports preserve all observations and distinguish API
 removal from the guest cleanup boundary.
 
+For a matched static ARM64 fixture, build `fixtures/fresh-arm64-exit.S`
+as a Linux ELF with an AArch64 assembler and static linker, then pass it
+to `create-fresh-fixture.py` with a new ExternalSSD output directory.
+The script writes the image archive, the OCI manifest, the executable,
+and a scenario containing their digests and runtime limits. Pass the
+scenario and archive via `--benchmark-scenario` and `--benchmark-archive`
+to either launcher. Each launcher imports the image after validating
+the private Docker endpoint. Use `native-fresh-lifecycle.py` with the
+same fixture directory and branch-built native guest and host tools to
+measure the separate native API and experimental native CLI.
+
 ## Energy Gate
 
 Run the energy gate with required power measurement:

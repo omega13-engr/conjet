@@ -319,8 +319,22 @@ The workspace passed 156 Rust tests with three existing opt-in tests
 ignored. The focused VSOCK suite passed 29 tests. The branch-built
 candidate's separate Docker smoke passed. The [fresh runtime gate](fresh-runtime-gate.md)
 records the comparison method and the limited diagnostic results.
-Equivalent image and boundaries, sustainable churn and the gate verdict
-remain pending.
+The matched image probe used a single pinned static ARM64 executable
+and the same requested workload resource limits on original Conjet at
+`bbe8019`, the official Kiri 0.2.2 app, and the native candidate. All 240
+measurements passed their adapter checks. Native no-network API p50 was
+2.156 ms and p99 was 6.997 ms, versus Kiri's 4.074 and 5.025 ms. Native
+bridge API p50 was 76.018 ms versus Kiri's 37.155 ms. Native terminal
+responses require verified cleanup. The Docker API observations stop at
+removal acknowledgement and do not establish equivalent cleanup. This
+M1 Pro run remained under production background load and yields no
+competitive qualification decision. The reports, hashes, host snapshots,
+and launcher verification are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/common-image`.
+The Kiri smoke and mid-benchmark cancellation checks verified the official
+peer, matching production observations, removed socket, and no residual
+VM disk holder. Python compilation, 17 focused Rust tests and strict
+macOS and ARM64 Linux Clippy passed.
 
 Source: [Delivery gates](speed-engineering-plan.md#incremental-delivery-and-decision-gates),
 [verification policy](speed-engineering-plan.md#verification-and-claim-policy).
@@ -329,9 +343,9 @@ Review: Reviewed the kqueue descriptor lifetime, empty queue idle behavior,
 virtio stream ownership and opt-in scope. Causal attribution beyond
 host wake latency and the fresh gate review remain pending.
 
-Next Action: Stage a common verified ARM64 fixture image for original
-Conjet, official Kiri and the native candidate. Measure matching API
-work and identify the observable cleanup and resource boundaries.
+Next Action: Profile native launch and teardown phases using the common
+image, measure trace overhead and test a justified bridge correction.
+Record the gate verdict with the remaining cleanup and hardware limitations.
 
 ## UNDERREVIEW
 

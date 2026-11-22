@@ -292,6 +292,8 @@ def session(args, root):
                 '--engine', 'conjet', '--socket', str(docker_socket), '--config', str(docker_config),
                 '--peer-pid', str(docker_peer), '--docker', str(DOCKER),
                 '--output', str(args.benchmark_output), '--samples', str(args.benchmark_samples),
+                *(['--scenario', str(args.benchmark_scenario), '--archive', str(args.benchmark_archive)]
+                  if args.benchmark_scenario else []),
             ])
             evidence['benchmark_output'] = str(args.benchmark_output)
         if args.hold_seconds:
@@ -331,10 +333,15 @@ def main():
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
     parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
+    parser.add_argument('--benchmark-scenario', type=Path, help='use a staged lifecycle scenario')
+    parser.add_argument('--benchmark-archive', type=Path, help='load the scenario image into the private runtime')
     parser.add_argument('--core-assets', type=Path, help='reuse verified ExternalSSD release downloads')
     parser.add_argument('--hold-seconds', type=int, choices=range(601), default=0,
                         metavar='0..600', help='keep the verified VM alive briefly for QA')
     args = parser.parse_args()
+    if (bool(args.benchmark_scenario) != bool(args.benchmark_archive)
+            or (args.benchmark_scenario and not args.benchmark_output)):
+        parser.error('a staged scenario requires benchmark output and an image archive')
     if not args.image or args.image.startswith('-'):
         parser.error('image must be a Docker image reference')
     if not SSD.is_mount() or SCRATCH.resolve() != SCRATCH:

@@ -46,8 +46,13 @@ def main():
     parser.add_argument('--smoke', action='store_true', help='pull Alpine and run an ephemeral container')
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
     parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
+    parser.add_argument('--benchmark-scenario', type=Path, help='use a staged lifecycle scenario')
+    parser.add_argument('--benchmark-archive', type=Path, help='load the scenario image into the private runtime')
     parser.add_argument('docker_args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if (bool(args.benchmark_scenario) != bool(args.benchmark_archive)
+            or (args.benchmark_scenario and not args.benchmark_output)):
+        parser.error('a staged scenario requires benchmark output and an image archive')
     if not APP.exists():
         parser.error(f'official Kiri app missing: {APP}')
     if not Path('/Volumes/ExternalSSD').is_mount():
@@ -150,6 +155,8 @@ def main():
                     '--engine', 'kiri', '--socket', str(endpoint), '--config', env['DOCKER_CONFIG'],
                     '--peer-pid', str(proc.pid), '--docker', '/opt/homebrew/bin/docker',
                     '--output', str(args.benchmark_output), '--samples', str(args.benchmark_samples),
+                    *(['--scenario', str(args.benchmark_scenario), '--archive', str(args.benchmark_archive)]
+                      if args.benchmark_scenario else []),
                 ])
                 result['benchmark_output'] = str(args.benchmark_output)
             requested = args.docker_args

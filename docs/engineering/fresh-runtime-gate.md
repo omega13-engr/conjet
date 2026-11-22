@@ -64,3 +64,50 @@ adds DNS and TCP canary work, while the baseline executes `/bin/true`.
 These diagnostic results quantify part of Conjet's native path. The
 comparison still requires a matched workload and cleanup observation.
 Only the M1 Pro is currently authorized. Production stayed in service.
+
+## Common static image probe
+
+The three adapters ran the same SHA-256-pinned static ARM64 executable
+with two vCPUs, a 2 GiB VM ceiling and requested workload limits of
+16 MiB, four PIDs and 500 millicores. The original Conjet VMM was built
+from `bbe80193412c7fc150df5a50e35b0f9b1c4f1a63`. Kiri used the
+official unmodified 0.2.2 binary. Each group had 10 warmups and 20
+measured operations. All 240 measurements passed their adapter's exit
+and lifecycle checks. Production remained in service. The recorded
+one-minute system load ranged from 5.1 to 12.4 across the session endpoints.
+
+| Engine | Network | Lane | p50 / p95 / p99 (ms) | Sequential ops/s |
+| --- | --- | --- | --- | ---: |
+| Original Conjet | none | Docker API | 375.357 / 410.793 / 441.084 | 2.6 |
+| Official Kiri | none | Docker API | 4.074 / 4.911 / 5.025 | 243.9 |
+| Native candidate | none | Native API | 2.156 / 2.936 / 6.997 | 406.9 |
+| Original Conjet | bridge | Docker API | 462.728 / 526.631 / 559.878 | 2.1 |
+| Official Kiri | bridge | Docker API | 37.155 / 59.208 / 73.133 | 26.1 |
+| Native candidate | bridge | Native API | 76.018 / 92.148 / 92.926 | 13.2 |
+| Original Conjet | none | Docker CLI | 438.738 / 510.541 / 513.531 | 2.2 |
+| Official Kiri | none | Docker CLI | 21.398 / 23.853 / 27.676 | 45.9 |
+| Native candidate | none | Experimental CLI | 8.038 / 9.224 / 9.858 | 121.3 |
+| Original Conjet | bridge | Docker CLI | 572.340 / 621.496 / 660.189 | 1.7 |
+| Official Kiri | bridge | Docker CLI | 48.181 / 63.889 / 72.050 | 20.3 |
+| Native candidate | bridge | Experimental CLI | 91.477 / 104.988 / 106.753 | 10.9 |
+
+The Docker API adapters record removal acknowledgement. The native API
+reports removal after verified cleanup. The native bridge has a separate
+cleanup state and a private IPv4 topology. None of these workloads send
+network packets. Kiri's pinned guest source sends the exit event before
+teardown and handles removal without a cleanup reply. The available Docker
+adapters leave verified guest cleanup unobserved. At 20 operations, the
+nearest-rank p99 is the individual maximum. The probe supplies neither
+independent-session uncertainty estimates nor sustained churn.
+
+The raw reports include host CPU-time and RSS snapshots, image identities,
+commands, and hashes at
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/common-image`.
+Energy capture requires authorized `powermetrics` execution. The host
+returned that an administrator password was required.
+
+The experiment identifies a faster typical no-network observation with a
+weaker tail and slower bridge observations. The gate remains open while
+bridge phase costs and the comparison boundaries are investigated.
+
+[Pinned Kiri guest agent](https://github.com/libracoder/kiri/blob/0de1837588eed54c945890f955ef861f2da71cc4/crates/kiri-init/src/linux/agent.rs#L1129-L1165)

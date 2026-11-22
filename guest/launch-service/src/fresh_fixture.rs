@@ -29,6 +29,13 @@ struct Image {
     os: String,
 }
 
+#[derive(Deserialize)]
+struct BenchmarkManifest {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+    annotations: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Handle {
@@ -154,6 +161,7 @@ struct Ledger {
 
 pub(crate) struct FreshFixture {
     image_digest: String,
+    benchmark_digest: Option<String>,
     bridge_available: bool,
     allow_crash: bool,
     intent: Intent,
@@ -184,6 +192,29 @@ fn bounded_file(path: &str, limit: u64) -> io::Result<Vec<u8>> {
     Ok(buffer)
 }
 
+fn benchmark_image() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let manifest = match bounded_file("/etc/conjet/benchmark-image.json", 8_192) {
+        Ok(manifest) => manifest,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let descriptor: BenchmarkManifest = serde_json::from_slice(&manifest)?;
+    let workload = bounded_file(
+        crate::sandbox_fixture::BENCHMARK_EXECUTABLE,
+        4 * 1024 * 1024,
+    )?;
+    let workload_sha = hex(&Sha256::digest(&workload));
+    if descriptor.schema_version != 2
+        || descriptor
+            .annotations
+            .get("dev.conjet.fixture.workload.sha256")
+            != Some(&workload_sha)
+    {
+        return Err("benchmark executable does not match the staged OCI manifest".into());
+    }
+    Ok(Some(format!("sha256:{}", hex(&Sha256::digest(&manifest)))))
+}
+
 impl FreshFixture {
     pub(crate) fn open(allow_crash: bool) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         if std::process::id() == 1 || unsafe { libc::getppid() } != 1 {
@@ -199,6 +230,7 @@ impl FreshFixture {
             return Err("fresh fixture image identity differs from its verified input".into());
         }
         let image_digest = format!("sha256:{}", hex(&Sha256::digest(&manifest)));
+        let benchmark_digest = benchmark_image()?;
         let directory = Path::new(DIRECTORY);
         match fs::DirBuilder::new().mode(0o700).create(directory) {
             Ok(()) => {}
@@ -223,6 +255,7 @@ impl FreshFixture {
             .success();
         Ok(Arc::new(Self {
             image_digest,
+            benchmark_digest,
             bridge_available,
             allow_crash,
             intent,
@@ -249,7 +282,9 @@ impl FreshFixture {
         }
         let spec = &ready.request().spec;
         let argv = spec.argv.iter().map(String::as_str).collect::<Vec<_>>();
+        let benchmark = self.benchmark_digest.as_ref() == Some(&spec.image_digest);
         let mode = match argv.as_slice() {
+            ["/bin/probe"] if benchmark => "benchmark",
             ["/bin/probe", "--verify-workload-fixture"] => "once",
             ["/bin/probe", "--verify-workload-fixture", "--hold"] => "hold",
             ["/bin/probe", "--verify-workload-fixture", "--fail"] => "fail",
@@ -264,7 +299,10 @@ impl FreshFixture {
                 ));
             }
         };
-        if spec.image_digest != self.image_digest || spec.cwd != "/work" || !spec.env.is_empty() {
+        if (mode != "benchmark" && spec.image_digest != self.image_digest)
+            || spec.cwd != "/work"
+            || !spec.env.is_empty()
+        {
             return Err((
                 "unsupported_option",
                 "request does not match the pinned ARM64 fixture",
@@ -282,6 +320,7 @@ impl FreshFixture {
                 mode,
                 "once"
                     | "hold"
+                    | "benchmark"
                     | "pause-cleanup"
                     | "fault-bridge"
                     | "fault-bridge-child"

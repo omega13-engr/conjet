@@ -116,9 +116,15 @@ def api_sample(connection, scenario, network, name, token):
             stages[label] = time.monotonic_ns() - t0
 
     try:
+        host_config = {'NetworkMode': network}
+        if 'container_limits' in scenario:
+            limits = scenario['container_limits']
+            host_config.update(Memory=limits['memory_bytes'], PidsLimit=limits['pids'],
+                               NanoCpus=limits['cpu_millicores'] * 1_000_000,
+                               CapDrop=['ALL'], SecurityOpt=['no-new-privileges'])
         result = stage('create', 'POST', '/containers/create?name=' + name, (201,), {
             'Image': scenario['image'], 'Cmd': scenario['command'],
-            'Labels': {SESSION_LABEL: token}, 'HostConfig': {'NetworkMode': network},
+            'Labels': {SESSION_LABEL: token}, 'HostConfig': host_config,
         })
         candidate_id = result['Id']
         if not candidate_id or not all(c in 'abcdef0123456789' for c in candidate_id):
@@ -149,8 +155,14 @@ def cli_sample(connection, prefix, env, scenario, network, name, token):
     row = {'name': name, 'api_removed_ns': None, 'cleanup_complete_ns': None, 'error': None}
     started = time.monotonic_ns()
     try:
+        runtime_args = []
+        if 'container_limits' in scenario:
+            limits = scenario['container_limits']
+            runtime_args = ['--memory', str(limits['memory_bytes']), '--pids-limit', str(limits['pids']),
+                            '--cpus', f"{limits['cpu_millicores'] / 1000:.3f}",
+                            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges']
         run(prefix + ['run', '--rm', '--name', name, '--label', f'{SESSION_LABEL}={token}',
-                      '--platform', scenario['platform'], '--network', network,
+                      '--platform', scenario['platform'], '--network', network, *runtime_args,
                       scenario['image'], *scenario['command']], env)
     except (OSError, subprocess.SubprocessError, RuntimeError) as error:
         row['error'] = str(error)
@@ -235,7 +247,8 @@ def cleanup_fixtures(docker, env, token):
 
 
 def session(args):
-    scenario = json.loads(SCENARIO.read_text())
+    scenario_path = args.scenario or SCENARIO
+    scenario = json.loads(scenario_path.read_text())
     docker, env, executable = verify_endpoint(args)
     args.output.mkdir(mode=0o700)
     token = uuid.uuid4().hex
@@ -245,7 +258,7 @@ def session(args):
               'docker_config': str(args.config), 'docker_peer_pid': args.peer_pid,
               'revision': run(['/usr/bin/git', '-C', REPO, 'rev-parse', 'HEAD']),
               'engine_binary_sha256': file_hash(executable), 'docker_binary_sha256': file_hash(args.docker),
-              'scenario': scenario, 'scenario_sha256': file_hash(SCENARIO),
+              'scenario': scenario, 'scenario_sha256': file_hash(scenario_path),
               'machine': {'machine': platform.machine(), 'release': platform.release(),
                           'hardware': run(['/usr/sbin/sysctl', '-n', 'hw.model']),
                           'cpu': run(['/usr/sbin/sysctl', '-n', 'machdep.cpu.brand_string']),
@@ -267,11 +280,20 @@ def session(args):
         info = api(connection, 'GET', '/info', (200,))
         report['guest'] = {key: info.get(key) for key in ('Architecture', 'NCPU', 'MemTotal', 'KernelVersion',
                                                          'Driver', 'OperatingSystem', 'CgroupVersion')}
-        run(docker + ['pull', '--platform', scenario['platform'], scenario['image']], env, timeout=120)
+        if args.archive:
+            archive_hash = file_hash(args.archive)
+            report['image_archive_sha256'] = archive_hash
+            if archive_hash != scenario['archive_sha256']:
+                raise RuntimeError('fixture archive digest mismatch')
+            run(docker + ['load', '--input', args.archive], env, timeout=120)
+        else:
+            run(docker + ['pull', '--platform', scenario['platform'], scenario['image']], env, timeout=120)
         report['image'] = json.loads(run(docker + ['image', 'inspect', scenario['image'],
                                                   '--format', '{{json .}}'], env))
         if report['image'].get('Os') != 'linux' or report['image'].get('Architecture') != 'arm64':
             raise RuntimeError('unexpected fixture image architecture')
+        if args.archive and report['image'].get('Id') != scenario['config_digest']:
+            raise RuntimeError('loaded fixture image has unexpected config digest')
         report['host_before'] = sample_host(args, args.output / 'footprint-before.json')
         for network in scenario['networks']:
             for lane in scenario['lanes']:
@@ -326,11 +348,19 @@ def main(argv=None):
     parser.add_argument('--docker', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--samples', type=int, default=100)
+    parser.add_argument('--scenario', type=Path)
+    parser.add_argument('--archive', type=Path)
     args = parser.parse_args(argv)
     if not 1 <= args.samples <= 10_000:
         parser.error('--samples must be between 1 and 10000')
     if not args.output.is_absolute() or not args.output.parent.resolve().is_relative_to(SCRATCH):
         parser.error('--output must be a new directory under the designated ExternalSSD root')
+    if bool(args.scenario) != bool(args.archive):
+        parser.error('--scenario and --archive must be supplied together')
+    for path in (args.scenario, args.archive):
+        if path is not None and (path.is_symlink() or not path.is_file()
+                                 or not path.resolve().is_relative_to(SCRATCH)):
+            parser.error('fixture inputs must be files under the designated ExternalSSD root')
     session(args)
 
 
