@@ -381,6 +381,14 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
+None.
+
+## UNDERREVIEW
+
+None.
+
+## DONE
+
 ### SPEED-005
 
 Title: Implement one fresh ARM64 no-network container launch
@@ -400,9 +408,9 @@ Acceptance Criteria:
 
 Problem and Evidence: The spec increment adds a closed native launch request and
 validates the digest, canonical root-relative paths, environment,
-credentials, network mode, and resource limits before allocation. Valid
-requests still receive an unavailable response until fresh execution is
-wired. The service advertises its transport fixture capabilities only.
+credentials, network mode, and resource limits before allocation. The original transport-only service still rejects fresh
+execution. A separate, explicitly selected disposable-guest mode advertises
+its restricted fresh fixture capability.
 Fifteen Rust tests, scoped Clippy, and the Linux ARM64 cross-check passed.
 Logs are in `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-005/spec`.
 The kernel fixture created a private cgroup v2 mount in the disposable
@@ -430,22 +438,38 @@ before switching to mapped setup credentials and the early process
 failure before explicitly allowing the fd-poll syscall used at startup.
 Linux-target Clippy passed.
 
-Verified image admission and service-level launch, output, cancellation,
-wait, idempotency and cleanup reporting remain pending. Fresh execution
-is still unavailable on the service endpoint.
+The service resolves one root-owned ARM64 fixture manifest and checks its
+staged executable's SHA-256 before accepting launches. The fresh mode
+supports one active workload and one retained record. Over authenticated
+VSOCK it verifies kernel exec independently of application output, returns
+the exit code or signal, and reports removal only after the helper has
+reaped the child and confirmed cleanup. It rejects unverified executables,
+returns the original handle for identical retried requests, and rejects
+conflicting and superseded sequences. A disconnected client can reconnect
+and cancel the same workload. Tests verify nonzero exit, replay protection,
+cleanup, and successful reuse of the workspace after failures.
+
+Evidence: `cargo fmt --all -- --check`, `git diff --check`,
+`cargo test --locked -p conjet-launch-service` (16 passed), and
+`cargo clippy --locked -p conjet-launch-service --all-targets --target aarch64-unknown-linux-gnu -- -D warnings`
+passed with ExternalSSD target directories. The pinned ARM64 musl build,
+verified manifest and executable hashes, replay commands, raw VSOCK frames,
+serial log, and production observations are retained under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-005/fresh-service`.
+Earlier attempts are retained separately, including the raw-clone trace
+identity failure and the private cancellation socket reset.
 
 Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 [guest init](../../guest/init/conjet-init.c).
 
-Review: Request validation reviewed for closed fields, path ambiguity, privilege options, and request bounds. Pending execution review; inspect syscall/FFI safety, isolation, limits, exec errors, and teardown.
+Review: Reviewed the single-helper ownership path, the identity and isolation
+checks applied before exec, exit collection, output limits, and the boundary
+between exit and removal. This fixture uses its pinned executable and a
+closed no-network workload shape. General OCI image admission, restart
+reconciliation, and stage-by-stage cleanup fault coverage remain outside this
+fixture's qualified envelope. Production was observed without interaction.
 
-Next Action: Implement resource allocation with rollback for a single no-network launch.
-
-## UNDERREVIEW
-
-None.
-
-## DONE
+Next Action: Begin SPEED-006 with named resource ownership and recovery tests.
 
 ### SPEED-000
 

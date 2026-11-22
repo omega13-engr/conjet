@@ -35,6 +35,66 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
     if std::process::id() != 1 {
         return Err("kernel fixture must be PID 1 in a disposable Linux guest".into());
     }
+    run(
+        with_sandbox,
+        ResourceLimits {
+            memory_bytes: MIN_MEMORY_BYTES,
+            pids: 4,
+            cpu_millicores: 500,
+        },
+        false,
+        None,
+    )
+}
+
+pub fn run_helper(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fn number<T: std::str::FromStr>(
+        args: &mut impl Iterator<Item = std::ffi::OsString>,
+    ) -> Result<T, Box<dyn std::error::Error>>
+    where
+        T::Err: std::error::Error + 'static,
+    {
+        Ok(args
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .ok_or("fixture helper bounds required")?
+            .parse()?)
+    }
+    let limits = ResourceLimits {
+        memory_bytes: number(&mut args)?,
+        pids: number(&mut args)?,
+        cpu_millicores: number(&mut args)?,
+    };
+    let workload_option = match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
+        Some("hold") => Some(c"--hold"),
+        Some("fail") => Some(c"--fail"),
+        Some("once") => None,
+        _ => return Err("fixture helper mode required".into()),
+    };
+    if args.next().is_some() {
+        return Err("unexpected fixture helper arguments".into());
+    }
+    run_controlled(limits, workload_option)
+}
+
+pub(crate) fn run_controlled(
+    limits: ResourceLimits,
+    workload_option: Option<&'static std::ffi::CStr>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if unsafe { libc::getppid() } != 1 {
+        return Err("fresh helper requires the guest init supervisor".into());
+    }
+    run(true, limits, true, workload_option)
+}
+
+fn run(
+    with_sandbox: bool,
+    limits: ResourceLimits,
+    controlled: bool,
+    workload_option: Option<&'static std::ffi::CStr>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = with_sandbox.then(Sandbox::prepare).transpose()?;
     let proc_mount = with_sandbox.then(ProcMount::new).transpose()?;
     security::clear_supplementary_groups()?;
@@ -48,16 +108,12 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
         write_control(directory, "cgroup.subtree_control", CONTROLLERS)?;
     }
     let id = handshake::random()?;
-    let cgroup = WorkloadCgroup::create(
-        &active,
-        id,
-        ResourceLimits {
-            memory_bytes: MIN_MEMORY_BYTES,
-            pids: 4,
-            cpu_millicores: 500,
-        },
-    )?;
-    let probe = clone_and_reap(&cgroup, sandbox.as_ref());
+    let cgroup = WorkloadCgroup::create(&active, id, limits)?;
+    let probe = clone_and_reap(&cgroup, sandbox.as_ref(), controlled, workload_option);
+    let exit_report = match &probe {
+        Ok(wait_status) if controlled => notify_control(b'X', &wait_status.to_le_bytes()),
+        _ => Ok(()),
+    };
     cgroup.remove_empty()?;
     drop(cgroup);
     for path in [&active, &workloads, &root] {
@@ -68,16 +124,31 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
         proc_mount.unmount()?;
     }
     if let Some(sandbox) = sandbox {
-        sandbox.cleanup(probe.is_ok())?;
+        sandbox.cleanup(matches!(probe, Ok(0)))?;
     }
-    probe?;
-    println!(
-        "conjet-launchd fresh-kernel fixture verified clone3, namespaces, pidfd and cgroup limits"
-    );
+    let wait_status = probe?;
+    exit_report?;
+    if controlled {
+        notify_control(b'R', &[])?;
+    } else {
+        if wait_status != 0 {
+            return Err(
+                format!("namespace probe child failed with wait status {wait_status}").into(),
+            );
+        }
+        println!(
+            "conjet-launchd fresh-kernel fixture verified clone3, namespaces, pidfd and cgroup limits"
+        );
+    }
     Ok(())
 }
 
-fn clone_and_reap(cgroup: &WorkloadCgroup, sandbox: Option<&Sandbox>) -> io::Result<()> {
+fn clone_and_reap(
+    cgroup: &WorkloadCgroup,
+    sandbox: Option<&Sandbox>,
+    controlled: bool,
+    workload_option: Option<&'static std::ffi::CStr>,
+) -> io::Result<i32> {
     let mut barrier = [-1; 2];
     // pipe2 writes two fresh descriptors which are each taken by one File.
     security::checked(unsafe { libc::pipe2(barrier.as_mut_ptr(), libc::O_CLOEXEC) })?;
@@ -127,7 +198,25 @@ fn clone_and_reap(cgroup: &WorkloadCgroup, sandbox: Option<&Sandbox>) -> io::Res
                     std::ptr::null_mut::<libc::c_void>(),
                 )
             };
-            if traced != 0 || unsafe { libc::raise(libc::SIGSTOP) } != 0 {
+            if traced != 0 {
+                eprintln!(
+                    "workload trace authorization failed: {}",
+                    io::Error::last_os_error()
+                );
+                unsafe { libc::_exit(124) }
+            }
+            // The raw clone does not update libc's cached thread identity.
+            // Read the new namespace IDs from the kernel for the trace stop.
+            let stopped = unsafe {
+                libc::syscall(
+                    libc::SYS_tgkill,
+                    libc::syscall(libc::SYS_getpid),
+                    libc::syscall(libc::SYS_gettid),
+                    libc::SIGSTOP,
+                )
+            };
+            if stopped != 0 {
+                eprintln!("workload trace stop failed: {}", io::Error::last_os_error());
                 unsafe { libc::_exit(124) }
             }
             if let Err(error) = sandbox.enter() {
@@ -137,6 +226,7 @@ fn clone_and_reap(cgroup: &WorkloadCgroup, sandbox: Option<&Sandbox>) -> io::Res
             let args = [
                 c"/bin/probe".as_ptr(),
                 c"--verify-workload-fixture".as_ptr(),
+                workload_option.map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
                 std::ptr::null(),
             ];
             let env = [std::ptr::null()];
@@ -157,18 +247,27 @@ fn clone_and_reap(cgroup: &WorkloadCgroup, sandbox: Option<&Sandbox>) -> io::Res
     let pidfd = unsafe { OwnedFd::from_raw_fd(descriptor) };
     let authorization = sandbox
         .map_or(Ok(()), |sandbox| sandbox.mappings(pid))
-        .and_then(|()| parent_ready.write_all(&[1]));
+        .and_then(|()| {
+            if controlled {
+                notify_control(b'C', &[])?;
+            }
+            parent_ready.write_all(&[1])
+        });
     drop(parent_ready);
     if authorization.is_ok() && sandbox.is_some() {
         match confirm_exec(pid) {
             Ok(ExecObservation::Confirmed) => {
-                println!("conjet-launchd kernel confirmed workload exec")
+                if controlled {
+                    if let Err(error) = notify_control(b'E', &[]) {
+                        unsafe { libc::kill(pid, libc::SIGKILL) };
+                        reap(pid)?;
+                        return Err(error);
+                    }
+                } else {
+                    println!("conjet-launchd kernel confirmed workload exec");
+                }
             }
-            Ok(ExecObservation::Reaped(status)) => {
-                return Err(io::Error::other(format!(
-                    "workload exited before exec, status {status}"
-                )));
-            }
+            Ok(ExecObservation::Reaped(status)) => return Ok(status),
             Err(error) => {
                 // This child remains ours until waitpid reaps it.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
@@ -177,26 +276,93 @@ fn clone_and_reap(cgroup: &WorkloadCgroup, sandbox: Option<&Sandbox>) -> io::Res
             }
         }
     }
-    let ready = wait(
-        pidfd.as_raw_fd(),
-        libc::POLLIN,
-        None,
-        Some(Instant::now() + Duration::from_secs(2)),
-    );
+    let ready = if controlled {
+        poll_controlled_child(pidfd.as_raw_fd(), cgroup)
+    } else {
+        wait(
+            pidfd.as_raw_fd(),
+            libc::POLLIN,
+            None,
+            Some(Instant::now() + Duration::from_secs(2)),
+        )
+    };
     if ready.is_err() {
-        // The child was created by this probe and has not been reaped, so this
-        // PID still names that child even if it exited before the signal.
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        // The child was created by this helper and has not been reaped.
+        if let Err(error) = cgroup.kill() {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            reap(pid)?;
+            return Err(error);
+        }
     }
     let status = reap(pid)?;
     ready?;
     authorization?;
-    if status != 0 {
-        return Err(io::Error::other(format!(
-            "namespace probe child failed with wait status {status}"
-        )));
+    Ok(status)
+}
+
+fn notify_control(event: u8, content: &[u8]) -> io::Result<()> {
+    let mut data = [0; 5];
+    data[0] = event;
+    data[1..1 + content.len()].copy_from_slice(content);
+    let bytes = &data[..1 + content.len()];
+    // FD 0 is the private Unix control socket passed by the guest supervisor.
+    let sent = unsafe { libc::send(0, bytes.as_ptr().cast(), bytes.len(), libc::MSG_NOSIGNAL) };
+    if sent == bytes.len() as isize {
+        Ok(())
+    } else if sent < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Err(io::ErrorKind::WriteZero.into())
     }
-    Ok(())
+}
+
+fn poll_controlled_child(pidfd: i32, cgroup: &WorkloadCgroup) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut pollfds = [
+        libc::pollfd {
+            fd: pidfd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        // Both descriptors belong to this single-threaded helper.
+        let ready =
+            unsafe { libc::poll(pollfds.as_mut_ptr(), 2, remaining.as_millis() as i32 + 1) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if pollfds[0].revents != 0 {
+            return Ok(());
+        }
+        if pollfds[1].revents != 0 {
+            let mut cancellation = 0u8;
+            // Read the single supervisor cancellation byte before closing.
+            // A hung-up control channel also cancels the owned workload.
+            unsafe {
+                libc::recv(
+                    0,
+                    (&mut cancellation as *mut u8).cast(),
+                    1,
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            return cgroup.kill();
+        }
+    }
 }
 
 enum ExecObservation {

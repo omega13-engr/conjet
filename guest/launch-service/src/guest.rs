@@ -75,8 +75,18 @@ fn accept(listener: &OwnedFd) -> io::Result<Option<OwnedFd>> {
     Ok(Some(fd))
 }
 
-pub fn serve(key_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let server = Server::new(read_key(key_path)?)?;
+pub fn serve(key_path: &Path, fresh: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let key = read_key(key_path)?;
+    let server = if fresh {
+        #[cfg(target_arch = "aarch64")]
+        {
+            Server::with_fresh(key, crate::fresh_fixture::FreshFixture::open()?)?
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        return Err("fresh fixture requires ARM64".into());
+    } else {
+        Server::new(key)?
+    };
     let shutdown = server.shutdown();
     let listener = listener()?;
     let mut workers: Vec<thread::JoinHandle<()>> = Vec::with_capacity(MAX_CONNECTIONS);

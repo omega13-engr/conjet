@@ -10,8 +10,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
     match args.next() {
         None => {
-            conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"))?;
+            conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"), false)?;
             report_resources()?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--serve-fresh-fixture" && args.next().is_none() => {
+            conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"), true)?;
+            report_resources()?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--run-fresh-fixture" => {
+            return conjet_launch_service::kernel_fixture::run_helper(args);
         }
         #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--check-fresh-kernel" && args.next().is_none() => {
@@ -22,8 +31,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             conjet_launch_service::kernel_fixture::check(true)?;
         }
         #[cfg(target_arch = "aarch64")]
-        Some(argument) if argument == "--verify-workload-fixture" && args.next().is_none() => {
+        Some(argument) if argument == "--verify-workload-fixture" => {
+            let mode = match args.next() {
+                None => "once",
+                Some(value) if value == "--hold" && args.next().is_none() => "hold",
+                Some(value) if value == "--fail" && args.next().is_none() => "fail",
+                _ => return Err("invalid workload fixture option".into()),
+            };
             conjet_launch_service::sandbox_fixture::verify_after_exec()?;
+            match mode {
+                "hold" => std::thread::sleep(std::time::Duration::from_secs(10)),
+                "fail" => std::process::exit(23),
+                _ => {}
+            }
             return Ok(());
         }
         _ => return Err("unexpected launchd argument".into()),

@@ -151,6 +151,8 @@ impl NoNetworkFilter {
             libc::SYS_sigaltstack,
             libc::SYS_getrandom,
             libc::SYS_clock_gettime,
+            libc::SYS_clock_nanosleep,
+            libc::SYS_nanosleep,
             libc::SYS_getpid,
             libc::SYS_gettid,
             libc::SYS_getuid,

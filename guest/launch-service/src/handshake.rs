@@ -47,6 +47,10 @@ pub struct Limits {
     pub connections: usize,
     pub queued_control: usize,
     pub payload_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_workloads: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_records: Option<usize>,
 }
 
 pub fn random<const N: usize>() -> Result<[u8; N], WireError> {
@@ -210,6 +214,8 @@ pub fn guest(
                 connections: MAX_CONNECTIONS,
                 queued_control: MAX_QUEUED_CONTROL,
                 payload_bytes: MAX_PAYLOAD,
+                active_workloads: capabilities.contains(&"fresh_arm64_fixture").then_some(1),
+                terminal_records: capabilities.contains(&"fresh_arm64_fixture").then_some(1),
             },
         },
     )

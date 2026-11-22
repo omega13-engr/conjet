@@ -19,6 +19,8 @@ pub struct Server {
     key: Key,
     shutdown: Arc<Shutdown>,
     waiting: AtomicUsize,
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    fresh: Option<Arc<crate::fresh_fixture::FreshFixture>>,
 }
 
 impl Server {
@@ -28,7 +30,27 @@ impl Server {
             key,
             shutdown: Shutdown::new()?,
             waiting: AtomicUsize::new(0),
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            fresh: None,
         }))
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) fn with_fresh(
+        key: Key,
+        fresh: Arc<crate::fresh_fixture::FreshFixture>,
+    ) -> Result<Arc<Self>, WireError> {
+        let mut server = Self::new(key)?;
+        Arc::get_mut(&mut server).expect("unshared server").fresh = Some(fresh);
+        Ok(server)
+    }
+
+    fn capabilities(&self) -> &'static [&'static str] {
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        if self.fresh.is_some() {
+            return &["ping", "shutdown", "fresh_arm64_fixture"];
+        }
+        CAPABILITIES
     }
 
     pub fn shutdown(&self) -> Arc<Shutdown> {
@@ -37,7 +59,7 @@ impl Server {
 
     pub fn serve(&self, mut stream: Stream) -> Result<(), WireError> {
         stream.deadline(Some(Instant::now() + FRAME_TIMEOUT));
-        handshake::guest(&mut stream, &self.key, self.boot_id, CAPABILITIES)?;
+        handshake::guest(&mut stream, &self.key, self.boot_id, self.capabilities())?;
         let boot_id = hex(&self.boot_id);
         let mut pending: Option<Pending<'_>> = None;
         loop {
@@ -78,6 +100,16 @@ impl Server {
                     "fixture wait expired",
                 )?;
             }
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            if let Some(fresh) = &self.fresh
+                && matches!(
+                    frame.kind,
+                    Kind::Launch | Kind::Status | Kind::Wait | Kind::Cancel | Kind::Output
+                )
+            {
+                fresh.dispatch(frame, &mut stream, &boot_id)?;
+                continue;
+            }
             match frame.kind {
                 Kind::Ping | Kind::Shutdown => {
                     let Some(budget) = decode::<Budget>(&frame, &mut stream)? else {
@@ -96,7 +128,21 @@ impl Server {
                             &Pong { boot_id: &boot_id },
                         )?;
                     } else {
-                        // The fixture cannot create workloads. Stop after the authenticated acknowledgement.
+                        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+                        if let Some(fresh) = &self.fresh
+                            && !fresh.drain(deadline)
+                        {
+                            stream.deadline(Some(Instant::now() + FRAME_TIMEOUT));
+                            write_error(
+                                &mut stream,
+                                frame.id,
+                                "cleanup_failed",
+                                "fresh fixture could not drain",
+                            )?;
+                            continue;
+                        }
+                        // Stop after the authenticated acknowledgement and any owned workload drain.
+                        stream.deadline(Some(Instant::now() + FRAME_TIMEOUT));
                         Frame::write(
                             &mut stream,
                             Kind::ShutdownAck,
