@@ -50,7 +50,7 @@ def call(channel, kind, body):
     return receive(channel, correlation)
 
 
-def authenticate(channel, key):
+def authenticate(channel, key, capability="private_bridge_fixture"):
     nonce = secrets.token_bytes(32)
     correlation = secrets.token_bytes(16)
     send(channel, 1, {'versions': [1], 'client_nonce': nonce.hex()}, correlation)
@@ -67,8 +67,8 @@ def authenticate(channel, key):
     # newly generated operation ID.
     send(channel, 3, {'proof': hmac.digest(key, b'CJLS1H' + transcript, 'sha256').hex()}, correlation)
     reply, caps = receive(channel, correlation)
-    if reply != 4 or caps.get('boot_id') != boot_id or 'private_bridge_fixture' not in caps.get('capabilities', []):
-        raise RuntimeError('expected the fresh bridge fixture')
+    if reply != 4 or caps.get('boot_id') != boot_id or capability not in caps.get('capabilities', []):
+        raise RuntimeError(f'native guest lacks {capability}')
     return boot_id
 
 

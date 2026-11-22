@@ -35,7 +35,11 @@ impl Machine {
     }
 
     pub fn run(&self, options: HvfBootOptions) -> HvfBootReport {
-        let virtio_devices = default_virtio_plan(&self.config);
+        let mut virtio_devices = default_virtio_plan(&self.config);
+        if options.native_airgap {
+            virtio_devices
+                .retain(|device| device.kind != crate::devices::virtio::VirtioDeviceKind::Net);
+        }
         HvfBootRunner::new(
             self.config.clone(),
             self.plan.clone(),

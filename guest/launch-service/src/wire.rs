@@ -32,6 +32,7 @@ pub enum Kind {
     Prepare = 17,
     Claim = 18,
     Memory = 19,
+    Inspect = 20,
 }
 
 impl TryFrom<u8> for Kind {
@@ -59,6 +60,7 @@ impl TryFrom<u8> for Kind {
             17 => Ok(Prepare),
             18 => Ok(Claim),
             19 => Ok(Memory),
+            20 => Ok(Inspect),
             _ => Err(WireError::BadHeader),
         }
     }

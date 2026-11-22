@@ -269,6 +269,7 @@ impl Ledger {
 pub(crate) struct FreshFixture {
     image_digest: String,
     benchmark_digest: Option<String>,
+    native: bool,
     trace_benchmark: bool,
     bridge_available: bool,
     allow_crash: bool,
@@ -324,26 +325,45 @@ fn benchmark_image() -> Result<Option<String>, Box<dyn std::error::Error>> {
 }
 
 impl FreshFixture {
-    pub(crate) fn open(allow_crash: bool) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+    pub(crate) fn open(
+        allow_crash: bool,
+        native: bool,
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         if std::process::id() == 1 || unsafe { libc::getppid() } != 1 {
             return Err("fresh fixture requires a supervisor child of guest init".into());
         }
-        let manifest = bounded_file("/etc/conjet/fresh-fixture-image.json", 4_096)?;
+        let (spec_file, executable_file) = if native {
+            (
+                "/etc/conjet/native-image.json",
+                crate::sandbox_fixture::NATIVE_EXECUTABLE,
+            )
+        } else {
+            ("/etc/conjet/fresh-fixture-image.json", "/init")
+        };
+        let manifest = bounded_file(spec_file, 4_096)?;
         let image: Image = serde_json::from_slice(&manifest)?;
-        let executable = bounded_file("/init", 4 * 1024 * 1024)?;
+        let executable = bounded_file(executable_file, 4 * 1024 * 1024)?;
         if image.os != "linux"
             || image.architecture != "arm64"
             || image.executable_sha256 != hex(&Sha256::digest(&executable))
         {
-            return Err("fresh fixture image identity differs from its verified input".into());
+            return Err("launch image identity differs from its verified input".into());
         }
-        let image_digest = format!("sha256:{}", hex(&Sha256::digest(&manifest)));
-        let benchmark_digest = benchmark_image()?;
-        let trace_benchmark = match bounded_file("/etc/conjet/benchmark-timing", 2) {
-            Ok(contents) if contents == b"1\n" => true,
-            Ok(_) => return Err("invalid benchmark timing marker".into()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error.into()),
+        let image_digest = if native {
+            format!("sha256:{}", image.executable_sha256)
+        } else {
+            format!("sha256:{}", hex(&Sha256::digest(&manifest)))
+        };
+        let (benchmark_digest, trace_benchmark) = if native {
+            (None, false)
+        } else {
+            let trace = match bounded_file("/etc/conjet/benchmark-timing", 2) {
+                Ok(contents) if contents == b"1\n" => true,
+                Ok(_) => return Err("invalid benchmark timing marker".into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(error) => return Err(error.into()),
+            };
+            (benchmark_image()?, trace)
         };
         let directory = Path::new(DIRECTORY);
         match fs::DirBuilder::new().mode(0o700).create(directory) {
@@ -362,14 +382,16 @@ impl FreshFixture {
         // Reparent orphans from an interrupted helper here, while the live
         // supervisor still owns their workload intent and cgroup.
         crate::security::checked(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) })?;
-        let bridge_available = Command::new("/init")
-            .arg("--check-bridge-availability")
-            .env_clear()
-            .status()?
-            .success();
+        let bridge_available = !native
+            && Command::new("/init")
+                .arg("--check-bridge-availability")
+                .env_clear()
+                .status()?
+                .success();
         Ok(Arc::new(Self {
             image_digest,
             benchmark_digest,
+            native,
             trace_benchmark,
             bridge_available,
             allow_crash,
@@ -377,6 +399,10 @@ impl FreshFixture {
             ledger: Mutex::new(Ledger::default()),
             changed: Condvar::new(),
         }))
+    }
+
+    pub(crate) fn is_native(&self) -> bool {
+        self.native
     }
 
     pub(crate) fn bridge_available(&self) -> bool {
@@ -401,10 +427,26 @@ impl FreshFixture {
         if ready.request().boot_id != boot {
             return Err(("stale_generation", "unexpected boot ID"));
         }
+        if self.native && ready.request().operation_id.is_none() {
+            return Err(("invalid_spec", "native admission requires an operation ID"));
+        }
         let spec = &ready.request().spec;
         let argv = spec.argv.iter().map(String::as_str).collect::<Vec<_>>();
         let benchmark = self.benchmark_digest.as_ref() == Some(&spec.image_digest);
         let mode = match argv.as_slice() {
+            ["/bin/probe"]
+                if self.native
+                    && spec.network == "none"
+                    && spec.limits == crate::spec::NATIVE_LIMITS =>
+            {
+                "native"
+            }
+            _ if self.native => {
+                return Err((
+                    "unsupported_option",
+                    "native launch requires the fixed, no-network static executable profile",
+                ));
+            }
             ["/bin/probe"] if benchmark => "benchmark",
             ["/bin/probe", "--verify-workload-fixture"] => "once",
             ["/bin/probe", "--verify-workload-fixture", "--hold"] => "hold",
@@ -427,18 +469,18 @@ impl FreshFixture {
         {
             return Err((
                 "unsupported_option",
-                "request does not match the pinned ARM64 fixture",
+                "request does not match the pinned ARM64 executable profile",
             ));
         }
         let bridge = spec.network == "bridge";
         if prepared
             && (bridge
                 || spec.limits.memory_bytes > SLOT_MEMORY_LIMIT
-                || !matches!(mode, "once" | "memory-canary" | "benchmark"))
+                || !matches!(mode, "once" | "memory-canary" | "benchmark" | "native"))
         {
             return Err((
                 "unsupported_option",
-                "prepared fixture supports bounded no-network workloads",
+                "preparation requires no network and at most 32 MiB",
             ));
         }
         if bridge && !self.bridge_available {
@@ -477,7 +519,7 @@ impl FreshFixture {
             if !record.phase.terminal() || record.phase == Phase::CleanupFailed {
                 return Err((
                     "busy",
-                    "fresh fixture already owns a workload or unresolved cleanup",
+                    "native service already owns a workload or unresolved cleanup",
                 ));
             }
         }
@@ -856,6 +898,19 @@ impl FreshFixture {
                 record.change(Phase::Claimed);
                 self.changed.notify_all();
                 Ok((Kind::State, record.state()))
+            }
+            Kind::Inspect if self.native => {
+                let request: crate::server::Budget = parse(frame)?;
+                deadline(request.budget_ms)?;
+                Ok((
+                    Kind::Inspect,
+                    json!({
+                        "boot_id": boot,
+                        "image_digest": self.image_digest,
+                        "last_sequence": guard.highest_sequence,
+                        "workload": guard.record.as_ref().map(Record::state),
+                    }),
+                ))
             }
             Kind::Memory => {
                 let request: MemoryRequest = parse(frame)?;

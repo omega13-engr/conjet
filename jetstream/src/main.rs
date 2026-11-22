@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod native;
+
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use jetstream::hvf::boot::HvfBootOptions;
@@ -17,6 +20,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run the opt-in static Linux workload experiment.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    Native(native::Arguments),
     /// Validate the host can create and run a tiny HVF VM.
     Smoke {
         /// Emit machine-readable JSON.
@@ -91,6 +97,8 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        Command::Native(args) => native::run(args),
         Command::Smoke { json } => {
             let report = HvfSmokeRunner::default().run();
             if json {
@@ -165,6 +173,7 @@ fn main() -> anyhow::Result<()> {
                 memory_control_socket,
                 trace_guest_readiness,
                 enable_native_launch,
+                ..HvfBootOptions::default()
             });
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);

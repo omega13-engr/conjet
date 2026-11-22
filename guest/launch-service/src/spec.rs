@@ -12,6 +12,11 @@ pub const MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIDS: u32 = 64;
 pub const MIN_CPU_MILLICORES: u32 = 10;
 pub const MAX_CPU_MILLICORES: u32 = 1_000;
+pub const NATIVE_LIMITS: ResourceLimits = ResourceLimits {
+    memory_bytes: MIN_MEMORY_BYTES,
+    pids: 4,
+    cpu_millicores: 500,
+};
 const MAX_ENTRIES: usize = 32;
 const MAX_VALUE_BYTES: usize = 1_024;
 const MAX_ARG_ENV_BYTES: usize = 8 * 1_024;
@@ -21,6 +26,8 @@ const MAX_ARG_ENV_BYTES: usize = 8 * 1_024;
 pub struct LaunchRequest {
     pub boot_id: String,
     pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub budget_ms: u64,
     pub spec: LaunchSpec,
 }
@@ -52,6 +59,8 @@ pub enum SpecError {
     BootId,
     #[error("launch sequence must be nonzero")]
     Sequence,
+    #[error("operation ID must be a lowercase 128-bit hexadecimal value")]
+    OperationId,
     #[error("launch budget must be between 1 and 30,000 ms")]
     Budget,
     #[error("image must identify a single lowercase SHA256 digest")]
@@ -101,6 +110,13 @@ impl LaunchRequest {
         handshake::unhex::<16>(&self.boot_id).map_err(|_| SpecError::BootId)?;
         if self.sequence == 0 {
             return Err(SpecError::Sequence);
+        }
+        if self
+            .operation_id
+            .as_ref()
+            .is_some_and(|value| handshake::unhex::<16>(value).is_err())
+        {
+            return Err(SpecError::OperationId);
         }
         if !(1..=30_000).contains(&self.budget_ms) {
             return Err(SpecError::Budget);
@@ -185,6 +201,7 @@ mod tests {
         LaunchRequest {
             boot_id: "42".repeat(16),
             sequence: 1,
+            operation_id: None,
             budget_ms: 500,
             spec: LaunchSpec {
                 image_digest: format!("sha256:{}", "a0".repeat(32)),

@@ -332,3 +332,36 @@ ownership transitions continue to govern backing release.
 - Process identity and signaling. [pidfd_open](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)
 - Enforcement, populated state, and whole-cgroup termination. [Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)
 - Existing engine boundaries. [Speed engineering plan](speed-engineering-plan.md) · [Direct OCI loader](../../Sources/ConjetCore/ConjetContainerRuntime.swift) · [Existing VSOCK framing](../../Sources/ConjetCore/ConjetBinaryFrame.swift)
+
+
+## Experimental product profile
+
+`conjet native --experimental serve` owns a private Jetstream VM in its
+foreground process. Its Unix socket is `native-launch.sock` in the printed
+session directory. Verify its peer PID against the session identity and
+authenticate with the per-session 32-byte key. The negotiated capability
+is `native_static_arm64_v1`. Product sessions expose no Docker endpoint
+or network device.
+
+The profile accepts one SHA-256-pinned static ARM64 Linux executable per
+VM. Specify its digest as `sha256:<hex>`, argv as `["/bin/probe"]`,
+an empty environment, working directory `/work`, UID and GID 65532,
+network `none`, 16 MiB, four PIDs, and 500 millicores. A product Launch
+or Prepare requires a fresh random lowercase 128-bit `operation_id`
+alongside the monotonic sequence. Exact replays retain both values;
+a different operation using the same sequence conflicts. CLI commands
+own a nonblocking local admission lock through terminal state and
+output collection. API clients that mix launches with CLI clients must
+hold the session's `admission.lock` while admitting a request and until
+they read its retained output. Observe or cancel with a separate connection.
+
+Kind 20, Inspect, takes `{"budget_ms":1000}` and replies as kind 20 with
+`boot_id`, `image_digest`, `last_sequence`, and the current or last
+`workload` (or null). Kind 19, Memory, takes `boot_id`, `budget_ms`,
+and `pressure` (null reads, true evicts unused preparation and pauses
+it, false clears the explicit signal). Claim tokens are confined to
+their authenticated boot generation. Run and claim report verified
+cleanup before success and never retry an indeterminate submission.
+The guest can retain an admitted workload after client disconnect. It
+remains cancellable and has a 30-second execution ceiling. A subsequent
+admission can replace the last terminal record.

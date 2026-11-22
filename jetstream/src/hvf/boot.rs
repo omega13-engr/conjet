@@ -122,6 +122,8 @@ pub struct HvfBootOptions {
     pub memory_control_socket: Option<PathBuf>,
     pub trace_guest_readiness: bool,
     pub enable_native_launch: bool,
+    pub native_airgap: bool,
+    pub external_stop: Option<Arc<AtomicBool>>,
 }
 
 impl Default for HvfBootOptions {
@@ -139,6 +141,8 @@ impl Default for HvfBootOptions {
             memory_control_socket: None,
             trace_guest_readiness: false,
             enable_native_launch: false,
+            native_airgap: false,
+            external_stop: None,
         }
     }
 }
@@ -2530,6 +2534,7 @@ impl HvfBootRunner {
             Some(memory_reclaimer),
             trace_started,
             self.options.enable_native_launch,
+            self.options.native_airgap,
         ) {
             Ok(detail) => stage(&mut stages, "virtio-runtime", true, detail),
             Err(error) => {
@@ -2595,7 +2600,7 @@ impl HvfBootRunner {
                 &mut stages,
                 "native-memory-policy",
                 true,
-                "Docker-only idle policy bypassed for the native fixture".to_string(),
+                "Docker-only idle policy bypassed for the native launch session".to_string(),
             );
         }
         let mut core_memory_controller = CoreMemoryController::new(
@@ -2793,6 +2798,7 @@ impl HvfBootRunner {
             let tick_vcpu_ids = vcpu_ids.clone();
             let tick_shared = shared.clone();
             let interval = Duration::from_millis(self.options.host_tick_ms);
+            let external_stop = self.options.external_stop.clone();
             stage(
                 &mut stages,
                 "host-tick",
@@ -2805,6 +2811,15 @@ impl HvfBootRunner {
                     .spawn(move || {
                         while !tick_shared.stop_requested.load(Ordering::SeqCst) {
                             std::thread::sleep(interval);
+                            if external_stop
+                                .as_ref()
+                                .is_some_and(|stop| stop.load(Ordering::Acquire))
+                            {
+                                request_shared_stop(
+                                    &tick_shared,
+                                    "native session stopped".to_string(),
+                                );
+                            }
                             let ids = tick_vcpu_ids
                                 .lock()
                                 .expect("vCPU id mutex poisoned")
@@ -3844,6 +3859,7 @@ fn configure_virtio_runtime(
     memory_reclaimer: Option<Arc<dyn GuestMemoryReclaimer>>,
     trace_started: Option<Instant>,
     enable_native_launch: bool,
+    native_airgap: bool,
 ) -> Result<String, String> {
     let mut block_paths = vec![config.boot_source.root_disk_path.clone()];
     if let Some(path) = config.boot_source.data_disk_path.clone() {
@@ -3888,32 +3904,37 @@ fn configure_virtio_runtime(
                 net_count += 1;
             }
             VirtioDeviceKind::Vsock => {
-                let docker_bridge = if let Some(existing) = vm_state.devices.docker_bridge.as_ref()
-                {
-                    existing.state.clone()
-                } else {
-                    let bridge = HostUnixVsockBridge::bind(&config.boot_source.docker_socket_path)
-                        .map_err(|error| error.to_string())?;
-                    let state = bridge.state.clone();
-                    vm_state.devices.docker_bridge = Some(bridge);
-                    state
-                };
-                let memory_socket_path = memory_socket_path(&config.boot_source.docker_socket_path);
-                let memory_bridge = if let Some(existing) = vm_state.devices.memory_bridge.as_ref()
-                {
-                    existing.state.clone()
-                } else {
-                    let bridge = HostUnixVsockBridge::bind_with_guest_port(
-                        &memory_socket_path,
-                        MEMORY_BRIDGE_PORT,
-                        50_000,
-                    )
-                    .map_err(|error| error.to_string())?;
-                    let state = bridge.state.clone();
-                    vm_state.devices.memory_bridge = Some(bridge);
-                    state
-                };
-                let mut bridges = vec![docker_bridge, memory_bridge];
+                let mut bridges = Vec::new();
+                if !native_airgap {
+                    let docker_bridge =
+                        if let Some(existing) = vm_state.devices.docker_bridge.as_ref() {
+                            existing.state.clone()
+                        } else {
+                            let bridge =
+                                HostUnixVsockBridge::bind(&config.boot_source.docker_socket_path)
+                                    .map_err(|error| error.to_string())?;
+                            let state = bridge.state.clone();
+                            vm_state.devices.docker_bridge = Some(bridge);
+                            state
+                        };
+                    let memory_socket_path =
+                        memory_socket_path(&config.boot_source.docker_socket_path);
+                    let memory_bridge =
+                        if let Some(existing) = vm_state.devices.memory_bridge.as_ref() {
+                            existing.state.clone()
+                        } else {
+                            let bridge = HostUnixVsockBridge::bind_with_guest_port(
+                                &memory_socket_path,
+                                MEMORY_BRIDGE_PORT,
+                                50_000,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            let state = bridge.state.clone();
+                            vm_state.devices.memory_bridge = Some(bridge);
+                            state
+                        };
+                    bridges.extend([docker_bridge, memory_bridge]);
+                }
                 if enable_native_launch {
                     let native_bridge = HostUnixVsockBridge::bind_native_launch(
                         config

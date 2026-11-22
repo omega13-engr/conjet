@@ -10,7 +10,7 @@ use crate::kernel_fixture;
 use crate::sandbox_fixture;
 use crate::security::checked;
 
-pub fn serve(allow_crash: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::Error>> {
     if std::process::id() != 1 {
         return Err("recovery fixture requires a disposable guest init".into());
     }
@@ -18,10 +18,10 @@ pub fn serve(allow_crash: bool) -> Result<(), Box<dyn std::error::Error>> {
     let intent = Intent::open(Path::new(DIRECTORY));
     for attempt in 0..2 {
         let mut service = Command::new("/init")
-            .arg(if allow_crash {
-                "--serve-recovery-child"
-            } else {
-                "--serve-fresh-child"
+            .arg(match profile {
+                crate::guest::Profile::Native => "--serve-native-child",
+                crate::guest::Profile::Fixture { allow_crash: true } => "--serve-recovery-child",
+                _ => "--serve-fresh-child",
             })
             .process_group(0)
             .spawn()?;

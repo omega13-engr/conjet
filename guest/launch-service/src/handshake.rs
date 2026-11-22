@@ -200,6 +200,9 @@ pub fn guest(
         write_error(&mut *stream, frame.id, "unauthorized", "invalid proof")?;
         return Err(WireError::Unauthorized);
     }
+    let has_workload = ["fresh_arm64_fixture", "native_static_arm64_v1"]
+        .iter()
+        .any(|feature| capabilities.contains(feature));
     Frame::write(
         stream,
         Kind::HelloAck,
@@ -214,8 +217,8 @@ pub fn guest(
                 connections: MAX_CONNECTIONS,
                 queued_control: MAX_QUEUED_CONTROL,
                 payload_bytes: MAX_PAYLOAD,
-                active_workloads: capabilities.contains(&"fresh_arm64_fixture").then_some(1),
-                terminal_records: capabilities.contains(&"fresh_arm64_fixture").then_some(1),
+                active_workloads: has_workload.then_some(1),
+                terminal_records: has_workload.then_some(1),
             },
         },
     )

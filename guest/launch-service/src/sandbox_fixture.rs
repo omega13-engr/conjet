@@ -11,6 +11,7 @@ use crate::spec::{WORKLOAD_GID, WORKLOAD_UID};
 
 const BASE: &str = "/run/conjet/workload-probe";
 pub(crate) const BENCHMARK_EXECUTABLE: &str = "/etc/conjet/benchmark-executable";
+pub(crate) const NATIVE_EXECUTABLE: &str = "/etc/conjet/native-executable";
 const UID_BASE: u32 = 100_000;
 const GID_BASE: u32 = 100_000;
 const UID_WIDTH: u32 = 65_536;
@@ -23,18 +24,13 @@ pub(crate) struct Sandbox {
 }
 
 impl Sandbox {
-    pub(crate) fn prepare(bridge: bool, benchmark: bool) -> io::Result<Self> {
+    pub(crate) fn prepare(bridge: bool, executable: &str) -> io::Result<Self> {
         let base = Path::new(BASE);
         std::fs::create_dir(base)?;
         let setup = (|| {
             for entry in ["lower", "lower/bin", "lower/work", "upper", "work", "root"] {
                 std::fs::create_dir(base.join(entry))?;
             }
-            let executable = if benchmark {
-                BENCHMARK_EXECUTABLE
-            } else {
-                "/init"
-            };
             std::fs::copy(executable, base.join("lower/bin/probe"))?;
             std::fs::set_permissions(
                 base.join("lower/bin/probe"),

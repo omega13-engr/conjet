@@ -124,6 +124,13 @@ production on the available M1 Pro. Record contention in those measurements.
 
 ## Architecture and ownership
 
+The experimental product uses a foreground Jetstream process as the host
+session owner. The `conjet native --experimental` CLI connects to its
+private authenticated API. The guest Rust supervisor owns the workload,
+its prepared slot, and teardown. This version uses a separate disposable
+guest with no network device or Docker endpoint. The following diagram
+describes the broader planned architecture with `conjetd` integration.
+
 ```text
 HOST
 +-----------------------+       +-----------------------------+

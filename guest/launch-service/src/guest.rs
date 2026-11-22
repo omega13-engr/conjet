@@ -75,24 +75,28 @@ fn accept(listener: &OwnedFd) -> io::Result<Option<OwnedFd>> {
     Ok(Some(fd))
 }
 
-pub fn serve(
-    key_path: &Path,
-    fresh: bool,
-    allow_crash: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Clone, Copy)]
+pub enum Profile {
+    Transport,
+    Fixture { allow_crash: bool },
+    Native,
+}
+
+pub fn serve(key_path: &Path, profile: Profile) -> Result<(), Box<dyn std::error::Error>> {
     let key = read_key(key_path)?;
-    let server = if fresh {
+    let server = match profile {
+        Profile::Transport => Server::new(key)?,
         #[cfg(target_arch = "aarch64")]
-        {
-            Server::with_fresh(key, crate::fresh_fixture::FreshFixture::open(allow_crash)?)?
+        Profile::Fixture { .. } | Profile::Native => {
+            let allow_crash = matches!(profile, Profile::Fixture { allow_crash: true });
+            let native = matches!(profile, Profile::Native);
+            Server::with_fresh(
+                key,
+                crate::fresh_fixture::FreshFixture::open(allow_crash, native)?,
+            )?
         }
         #[cfg(not(target_arch = "aarch64"))]
-        {
-            let _ = allow_crash;
-            return Err("fresh fixture requires ARM64".into());
-        }
-    } else {
-        Server::new(key)?
+        _ => return Err("native launch requires ARM64".into()),
     };
     let shutdown = server.shutdown();
     let listener = listener()?;

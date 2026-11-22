@@ -37,6 +37,7 @@ fn launch(
     let request = LaunchRequest {
         boot_id: boot_id.into(),
         sequence,
+        operation_id: None,
         budget_ms: 3_000,
         spec: LaunchSpec {
             image_digest,

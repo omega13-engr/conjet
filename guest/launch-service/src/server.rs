@@ -48,6 +48,15 @@ impl Server {
     fn capabilities(&self) -> &'static [&'static str] {
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         if let Some(fresh) = &self.fresh {
+            if fresh.is_native() {
+                return &[
+                    "ping",
+                    "shutdown",
+                    "native_static_arm64_v1",
+                    "prepare",
+                    "memory",
+                ];
+            }
             if fresh.bridge_available() {
                 return &[
                     "ping",
@@ -128,6 +137,7 @@ impl Server {
                         | Kind::Prepare
                         | Kind::Claim
                         | Kind::Memory
+                        | Kind::Inspect
                 )
             {
                 fresh.dispatch(frame, &mut stream, &boot_id)?;

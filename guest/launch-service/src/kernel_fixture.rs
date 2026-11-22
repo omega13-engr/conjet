@@ -114,7 +114,7 @@ pub fn run_helper(
     let mode = mode.to_str().ok_or("invalid fixture helper mode")?;
     if !matches!(
         mode,
-        "once" | "hold" | "fail" | "benchmark" | "memory-canary"
+        "once" | "hold" | "fail" | "benchmark" | "memory-canary" | "native"
     ) && !test_mode(mode)
     {
         return Err("unknown fixture helper mode".into());
@@ -123,7 +123,7 @@ pub fn run_helper(
     let prepared = match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("prepared")
             if network == "none"
-                && matches!(mode, "once" | "memory-canary" | "benchmark")
+                && matches!(mode, "once" | "memory-canary" | "benchmark" | "native")
                 && limits.memory_bytes <= crate::prepared::SLOT_MEMORY_LIMIT =>
         {
             true
@@ -131,7 +131,10 @@ pub fn run_helper(
         Some("fresh") => false,
         _ => return Err("invalid fixture preparation mode".into()),
     };
-    if !matches!(network.to_str(), Some("bridge" | "none")) || args.next().is_some() {
+    if !matches!(network.to_str(), Some("bridge" | "none"))
+        || (mode == "native" && network != "none")
+        || args.next().is_some()
+    {
         return Err("unexpected fixture helper arguments".into());
     }
     run(true, id, limits, true, mode, network == "bridge", prepared)
@@ -158,9 +161,13 @@ fn run(
             return Ok(());
         }
     }
-    let benchmark = mode == "benchmark";
+    let executable = match mode {
+        "native" => crate::sandbox_fixture::NATIVE_EXECUTABLE,
+        "benchmark" => crate::sandbox_fixture::BENCHMARK_EXECUTABLE,
+        _ => "/init",
+    };
     let sandbox = with_sandbox
-        .then(|| Sandbox::prepare(network, benchmark))
+        .then(|| Sandbox::prepare(network, executable))
         .transpose()?;
     inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)
@@ -216,7 +223,7 @@ fn run(
         proc_mount.unmount()?;
     }
     if let Some(sandbox) = sandbox {
-        sandbox.cleanup(!benchmark && matches!(probe, Ok(Some(0))))?;
+        sandbox.cleanup(executable == "/init" && matches!(probe, Ok(Some(0))))?;
     }
     let wait_status = probe?;
     exit_report?;
@@ -332,7 +339,7 @@ fn clone_and_reap(
             }
             let args = [
                 executable.as_ptr(),
-                if mode == "benchmark" {
+                if matches!(mode, "benchmark" | "native") {
                     std::ptr::null()
                 } else {
                     c"--verify-workload-fixture".as_ptr()

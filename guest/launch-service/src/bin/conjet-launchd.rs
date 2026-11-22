@@ -6,34 +6,50 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use conjet_launch_service::guest::Profile;
     use std::path::Path;
     let mut args = std::env::args_os().skip(1);
     match args.next() {
         None => {
-            conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"), false, false)?;
+            conjet_launch_service::guest::serve(
+                Path::new("/etc/conjet/launch.key"),
+                Profile::Transport,
+            )?;
             report_resources()?;
         }
         #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--serve-fresh-fixture" && args.next().is_none() => {
-            conjet_launch_service::recovery_fixture::serve(false)?;
+            conjet_launch_service::recovery_fixture::serve(Profile::Fixture {
+                allow_crash: false,
+            })?;
+            report_resources()?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--serve-native" && args.next().is_none() => {
+            conjet_launch_service::recovery_fixture::serve(Profile::Native)?;
             report_resources()?;
         }
         #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--serve-recovery-fixture" && args.next().is_none() => {
-            conjet_launch_service::recovery_fixture::serve(true)?;
+            conjet_launch_service::recovery_fixture::serve(Profile::Fixture { allow_crash: true })?;
             report_resources()?;
         }
         #[cfg(target_arch = "aarch64")]
         Some(argument)
             if matches!(
                 argument.to_str(),
-                Some("--serve-fresh-child" | "--serve-recovery-child")
+                Some("--serve-fresh-child" | "--serve-recovery-child" | "--serve-native-child")
             ) && args.next().is_none() =>
         {
             conjet_launch_service::guest::serve(
                 Path::new("/etc/conjet/launch.key"),
-                true,
-                argument == "--serve-recovery-child",
+                if argument == "--serve-native-child" {
+                    Profile::Native
+                } else {
+                    Profile::Fixture {
+                        allow_crash: argument == "--serve-recovery-child",
+                    }
+                },
             )?;
             report_resources()?;
         }

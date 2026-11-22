@@ -211,15 +211,38 @@ Approach:
 Evidence: The 2026-11-23 scope revision separates local product and
 release acceptance from the deferred comparative gates. Local and remote
 development heads agreed at `3aaf062` before the revision. Reviewed the
-original qualification criteria and retained evidence references. Product
-integration, automated results, compatibility and rollback evidence are pending.
+original qualification criteria and retained evidence references.
+
+The foreground native session exposes fresh, prepare, claim, status, cancellation,
+memory pressure and stop through the authenticated API and `conjet native
+--experimental`. Its Linux guest accepts a pinned static ARM64 executable with
+no arguments or network. The host creates no Docker or memory socket in this
+mode. CLI admission is nonblocking and it never resubmits an indeterminate
+execution. The independent Docker lane retains its existing ownership.
+
+M1 Pro validation used `swift test --build-system native` (440 tests, two
+skips), `cargo test --locked --workspace` (159 passing, three entitlement
+tests excluded from the default run), strict ARM64 Linux Clippy, Python
+compilation and formatting. The strict host Clippy diagnostics also
+appear on the archived `a9f06d9` baseline. The live product probe
+(`benchmarks/native-product.py`) checked no-network isolation, fresh and
+prepared execution, concurrent claims, eviction, active memory preservation,
+bounded output, disconnect replay/cancellation, expiration and verified
+cleanup. Its two guests both negotiated page reporting with zero
+reclamation errors. The separate branch-built `conjet-speedup` Docker
+smoke passed. Both launchers recorded matching production snapshots.
+Logs, partial runs, raw samples, and Docker evidence are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-012`.
+The development timings were collected with other builds active; final
+packaged measurements and packaging validation are pending.
 
 Source: [Architecture ownership](speed-engineering-plan.md#architecture-and-ownership),
 [final recommendation](speed-engineering-plan.md#final-recommendation),
 [repository instructions](../../AGENTS.md).
 
-Review: Pending; assess product behavior, compatibility, runtime ownership,
-performance claims, and operational cleanup separately.
+Review: Checked native endpoint ownership and key permissions, operation IDs
+and replay, bounded admission and output, expiry, and guest/host cleanup.
+Packaging and final local qualification review remain pending.
 
 Next Action: Integrate the bounded no-network experiment with explicit opt-in
 and exercise the shipping API and CLI before SPEED-011 local acceptance.
