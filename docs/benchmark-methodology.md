@@ -82,6 +82,21 @@ appliance uses it as a boot marker. IDs 3 through 7 are reserved for
 and `process_exited`, respectively. The report keeps status and an event
 code along with the boot ID hash.
 
+The Pulse guest emits IDs 3 through 7 with `conjet.trace_exec=1`. This
+diagnostic mode observes the kernel's ptrace exec event and releases the
+child immediately after that observation. Use trusted fixtures for this mode.
+It changes execution timing and may affect credential transitions. The
+`exec_failed` code carries errno. The `process_exited` code carries the exit
+status when status is zero and the signal number when status is one.
+
+The static `conjet-init` binary doubles as the application fixture when
+execed as `/init --readiness-fixture`. It writes a one-byte readiness marker
+through `CONJET_READY_FD` after exec. The `early-exit` argument exits with
+status 23 before writing that marker. The missing-executable fixture uses
+`/missing`, and the permissions fixture uses `/etc/conjet-release`.
+Use `conjet.qa_exit=1` to power off after the fixture is reaped. The
+launcher retains the legacy fork marker when exec tracing is disabled.
+
 `host_offset_ns` is the elapsed time from the start of the Rust VMM boot
 runner to complete frame receipt. Durations between host observations use
 the same host monotonic clock. `guest_monotonic_ns` is the raw guest clock

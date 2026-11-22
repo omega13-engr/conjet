@@ -86,7 +86,7 @@ final class InitramfsBuilderTests: XCTestCase {
         let readinessEntry = try XCTUnwrap(entries.first { $0.name == "etc/conjet/readiness-vector" })
         let readinessContract = try XCTUnwrap(String(data: readinessEntry.data, encoding: .utf8))
         XCTAssertTrue(readinessContract.contains("vsock_port=1029"))
-        XCTAssertTrue(readinessContract.contains("record_bytes=24"))
+        XCTAssertTrue(readinessContract.contains("record_bytes=32"))
     }
 
     func testBuildConjetInitValidatesStaticAarch64InitAndPackagesReadinessContract() throws {
@@ -115,6 +115,12 @@ final class InitramfsBuilderTests: XCTestCase {
         let readinessContract = try XCTUnwrap(String(data: readinessEntry.data, encoding: .utf8))
         XCTAssertTrue(readinessContract.contains("event_control_ready=1"))
         XCTAssertTrue(readinessContract.contains("event_process_started=2"))
+        XCTAssertTrue(readinessContract.contains("record_bytes=32"))
+        XCTAssertTrue(readinessContract.contains("event_child_created=3"))
+        XCTAssertTrue(readinessContract.contains("event_exec_confirmed=4"))
+        XCTAssertTrue(readinessContract.contains("event_application_ready=5"))
+        XCTAssertTrue(readinessContract.contains("event_exec_failed=6"))
+        XCTAssertTrue(readinessContract.contains("event_process_exited=7"))
     }
 
     func testBuildConjetInitRejectsDynamicOrNonELFInput() throws {

@@ -567,8 +567,23 @@ logs are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-001/host-decoder`.
 Two Swift StartupTimeline tests and 135 Rust tests passed, with three Rust
 tests ignored. The published Docker guest emitted legacy markers only.
-New Pulse events, failure and post-exec fixtures, benchmark wiring, and
-trace overhead measurements remain pending.
+
+Built the static ARM64 Pulse init on the verified candidate Docker endpoint
+using Alpine's GCC 14.2.0 and musl. The guest boot fixture proved control,
+child creation, exec confirmation, application readiness, and normal exit.
+A missing executable returned errno 2 and exit 127. A non-executable file
+returned errno 13 and exit 127. An early exit confirmed exec and returned
+status 23 with no application readiness. Production observations matched.
+The focused Swift guest, initramfs, and timeline suites passed 33 tests.
+
+Ten alternating pairs measured host-monotonic VMM invocation through guest
+poweroff, with the same fixture and host collector enabled in both arms.
+Guest tracing added a median 0.693 ms, with paired differences from -5.342
+to +5.425 ms on this shared host. An initial run had a median of -0.969 ms.
+Boot variance prevents a precise estimate of the tracing cost. Raw
+reports, compiler details, hashes and the replay scripts are under the
+SPEED-001 evidence root in `guest-fixtures` and `initial-guest-fixtures`.
+The existing startup-trace adapter still needs its CLI arguments aligned.
 
 Source: [Measurement contract](speed-engineering-plan.md#measurement-contract),
 [guest init](../../guest/init/conjet-init.c),
@@ -577,10 +592,12 @@ Source: [Measurement contract](speed-engineering-plan.md#measurement-contract),
 Review: Host increment reviewed for bounded frames, guest port and stream
 validation, legacy event classification, and clock boundaries. The boot
 report retains the legacy markers as guest observations. A final review
-requires the new producer and end-to-end fixtures.
+requires the benchmark adapter. Guest review confirmed exec from the
+kernel event and fixture readiness from the inherited descriptor, and
+verified errors and early exit in raw reports.
 
-Next Action: Add reliable guest exec observations and a post-exec fixture,
-then exercise the successful, missing, non-executable, and early-exit cases.
+Next Action: Restore the startup benchmark adapter and verify its host
+timeline and preserved guest records through the usual command.
 
 ## UNDERREVIEW
 
