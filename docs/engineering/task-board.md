@@ -345,6 +345,12 @@ remains a diagnostic flag. All 1,200 measured operations passed fixture
 checks. Evidence and passing production comparisons are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/phase-analysis`.
 
+Grouped synchronous removal halved the measured bridge teardown median
+from roughly 40 ms to 19 ms. Bridge API p50 fell from 64–68 ms to
+42–44 ms. The complete kernel bridge and previous recovery matrices,
+800 follow-up measurements, focused Rust tests, and strict ARM64 Clippy
+passed. Retained evidence is in `SPEED-008/grouped-teardown`.
+
 Source: [Delivery gates](speed-engineering-plan.md#incremental-delivery-and-decision-gates),
 [verification policy](speed-engineering-plan.md#verification-and-claim-policy).
 
@@ -352,9 +358,9 @@ Review: Reviewed the kqueue descriptor lifetime, empty queue idle behavior,
 virtio stream ownership and opt-in scope. Causal attribution beyond
 host wake latency and the fresh gate review remain pending.
 
-Next Action: Batch owned bridge and veth deletion in one synchronous
-kernel operation. Repeat lifecycle and teardown checks and record the
-fresh gate verdict.
+Next Action: Remove the separate peer move by placing the veth directly
+in its target namespace. Repeat focused isolation, cleanup and timing
+checks, then run a longer API churn comparison.
 
 ## UNDERREVIEW
 

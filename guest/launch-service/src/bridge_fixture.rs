@@ -22,6 +22,7 @@ const PEER_IP: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 2);
 const PREFIX: u8 = 30;
 const DNS_PORT: u16 = 53;
 const CANARY_PORT: u16 = 8080;
+const OWNED_LINK_GROUP: u32 = 287;
 pub(crate) const RESOLVER_CONFIG: &str = "nameserver 198.18.0.1\n";
 const DNS_QUERY: &[u8] = b"\x39\xf2\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x05probe\x06conjet\x04test\x00\x00\x01\x00\x01";
 
@@ -135,6 +136,7 @@ impl Route {
     fn create_link(&mut self, name: &CStr, kind: &CStr, data: &[u8]) -> io::Result<u32> {
         let mut link = link_message(0, 0);
         attribute(&mut link, libc::IFLA_IFNAME, name.to_bytes_with_nul());
+        attribute(&mut link, libc::IFLA_GROUP, &OWNED_LINK_GROUP.to_ne_bytes());
         let mut info = Vec::new();
         attribute(&mut info, libc::IFLA_INFO_KIND, kind.to_bytes_with_nul());
         if !data.is_empty() {
@@ -171,6 +173,12 @@ impl Route {
 
     fn remove(&mut self, index: u32) -> io::Result<()> {
         self.request(libc::RTM_DELLINK, 0, &link_message(index, 0))
+    }
+
+    fn remove_owned_group(&mut self) -> io::Result<()> {
+        let mut link = link_message(0, 0);
+        attribute(&mut link, libc::IFLA_GROUP, &OWNED_LINK_GROUP.to_ne_bytes());
+        self.request(libc::RTM_DELLINK, 0, &link)
     }
 }
 
@@ -248,13 +256,13 @@ impl Links {
     }
 
     fn remove(&mut self) -> io::Result<()> {
-        if let Some(port) = self.port {
-            self.route.remove(port)?;
-            self.port = None;
-        }
-        if let Some(bridge) = self.bridge {
-            self.route.remove(bridge)?;
+        if self.bridge.is_some() || self.port.is_some() {
+            // Only the bridge and parent veth are tagged in this workload's
+            // private network namespace. The kernel unregisters both devices
+            // together and the acknowledgement still precedes our checks.
+            self.route.remove_owned_group()?;
             self.bridge = None;
+            self.port = None;
         }
         for link in [PORT, BRIDGE, PEER] {
             assert_link_absent(link)?;

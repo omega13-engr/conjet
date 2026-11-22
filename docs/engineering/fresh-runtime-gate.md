@@ -138,3 +138,19 @@ across the four default-kernel sessions, including 40 warmups each.
 The diagnostic flag remains opt-in. Commands and raw stage records are in
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/phase-analysis`.
 [Linux kernel RCU parameter documentation](https://docs.kernel.org/admin-guide/kernel-parameters.html)
+
+## Grouped bridge teardown
+
+The bridge and its owned parent veth now use one nonzero group in the
+helper's private namespace. One synchronous rtnetlink call removes both
+links. Teardown still verifies link and address removal on both sides,
+and the acknowledgement still precedes the network-complete state.
+
+Two follow-up boots across 800 measured API and CLI operations passed.
+Bridge API p50 fell to 43.689 and 42.222 ms. Median traced network
+teardown fell from about 40 ms to 19.616 and 18.775 ms. Median setup
+remained about 19 ms. The live DNS/TCP, private scope, fault and
+cancellation checks also passed. Production observations matched.
+Evidence is under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/grouped-teardown`.
+[Linux 6.12 group link deletion](https://github.com/torvalds/linux/blob/v6.12/net/core/rtnetlink.c#L3058-L3090)
