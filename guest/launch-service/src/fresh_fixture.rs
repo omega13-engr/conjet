@@ -148,6 +148,7 @@ struct Ledger {
 
 pub(crate) struct FreshFixture {
     image_digest: String,
+    allow_crash: bool,
     intent: Intent,
     ledger: Mutex<Ledger>,
     changed: Condvar,
@@ -177,9 +178,9 @@ fn bounded_file(path: &str, limit: u64) -> io::Result<Vec<u8>> {
 }
 
 impl FreshFixture {
-    pub(crate) fn open() -> Result<Arc<Self>, Box<dyn std::error::Error>> {
-        if std::process::id() != 1 {
-            return Err("fresh fixture requires a disposable guest init".into());
+    pub(crate) fn open(allow_crash: bool) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        if std::process::id() == 1 || unsafe { libc::getppid() } != 1 {
+            return Err("fresh fixture requires a supervisor child of guest init".into());
         }
         let manifest = bounded_file("/etc/conjet/fresh-fixture-image.json", 4_096)?;
         let image: Image = serde_json::from_slice(&manifest)?;
@@ -207,6 +208,7 @@ impl FreshFixture {
         }
         Ok(Arc::new(Self {
             image_digest,
+            allow_crash,
             intent,
             ledger: Mutex::new(Ledger::default()),
             changed: Condvar::new(),
@@ -222,12 +224,20 @@ impl FreshFixture {
     }
 
     fn admit(self: &Arc<Self>, ready: ValidatedLaunch, boot: &str, deadline: Instant) -> Reply {
+        if ready.request().boot_id != boot {
+            return Err(("stale_generation", "unexpected boot ID"));
+        }
         let spec = &ready.request().spec;
         let argv = spec.argv.iter().map(String::as_str).collect::<Vec<_>>();
         let mode = match argv.as_slice() {
             ["/bin/probe", "--verify-workload-fixture"] => "once",
             ["/bin/probe", "--verify-workload-fixture", "--hold"] => "hold",
             ["/bin/probe", "--verify-workload-fixture", "--fail"] => "fail",
+            [
+                "/bin/probe",
+                "--verify-workload-fixture",
+                "--crash-supervisor",
+            ] if self.allow_crash => "crash-supervisor",
             _ => {
                 return Err((
                     "unsupported_option",
@@ -358,11 +368,16 @@ impl FreshFixture {
         let mut child = Command::new("/init")
             .args([
                 "--run-fresh-fixture",
+                &std::process::id().to_string(),
                 &hex(&id),
                 &limits.memory_bytes.to_string(),
                 &limits.pids.to_string(),
                 &limits.cpu_millicores.to_string(),
-                mode,
+                if mode == "crash-supervisor" {
+                    "hold"
+                } else {
+                    mode
+                },
             ])
             .env_clear()
             .stdin(Stdio::from(OwnedFd::from(helper)))
@@ -390,12 +405,24 @@ impl FreshFixture {
                             record.change(Phase::ChildCreated);
                         }
                     }),
-                    b'E' => self.update(|record| {
-                        record.exec = "confirmed";
-                        if !record.cancelled {
-                            record.change(Phase::Running);
+                    b'E' => {
+                        if mode == "crash-supervisor" {
+                            // Only the explicit disposable-guest recovery mode can
+                            // request this self-signal after the confirmed exec.
+                            let result = unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+                            return Err(if result == 0 {
+                                io::Error::other("supervisor crash signal returned")
+                            } else {
+                                io::Error::last_os_error()
+                            });
                         }
-                    }),
+                        self.update(|record| {
+                            record.exec = "confirmed";
+                            if !record.cancelled {
+                                record.change(Phase::Running);
+                            }
+                        });
+                    }
                     b'X' => {
                         let mut status = [0; 4];
                         peer.read_exact(&mut status)?;

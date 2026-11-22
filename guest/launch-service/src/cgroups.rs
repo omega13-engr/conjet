@@ -8,7 +8,7 @@ use crate::handshake::hex;
 use crate::spec::ResourceLimits;
 
 const CPU_PERIOD_US: u64 = 100_000;
-const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
+pub(crate) const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
 
 pub struct WorkloadCgroup {
     directory: File,

@@ -63,7 +63,7 @@ through requests so an idle or slow host cannot produce an unbounded queue.
 | 5 | ping | `budget_ms` |
 | 6 | pong | `boot_id` |
 | 7 | shutdown | `budget_ms` |
-| 8 | launch | `sequence`, `budget_ms`, `spec` |
+| 8 | launch | `boot_id`, `sequence`, `budget_ms`, `spec` |
 | 9 | status | `handle`, `budget_ms` |
 | 10 | wait | `handle`, `after_revision`, `budget_ms` |
 | 11 | cancel | `handle`, `budget_ms` |
@@ -163,7 +163,8 @@ means the request was accepted. Cleanup is confirmed by the `removed`
 state with `cleanup=complete`. Never count a request reply or early exit
 notification as removal.
 
-Every mutating launch request carries an unsigned 64-bit `sequence`, with
+Every mutating launch request carries the authenticated `boot_id` and an
+unsigned 64-bit `sequence`, with
 the first launch at 1. The authenticated profile owner assigns strictly
 increasing sequence numbers within the boot generation. The service commits
 admission and the sequence high-water mark together, before starting any

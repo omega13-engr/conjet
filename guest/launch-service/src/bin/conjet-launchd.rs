@@ -10,12 +10,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
     match args.next() {
         None => {
-            conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"), false)?;
+            conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"), false, false)?;
             report_resources()?;
         }
         #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--serve-fresh-fixture" && args.next().is_none() => {
-            conjet_launch_service::guest::serve(Path::new("/etc/conjet/launch.key"), true)?;
+            conjet_launch_service::recovery_fixture::serve(false)?;
+            report_resources()?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--serve-recovery-fixture" && args.next().is_none() => {
+            conjet_launch_service::recovery_fixture::serve(true)?;
+            report_resources()?;
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument)
+            if matches!(
+                argument.to_str(),
+                Some("--serve-fresh-child" | "--serve-recovery-child")
+            ) && args.next().is_none() =>
+        {
+            conjet_launch_service::guest::serve(
+                Path::new("/etc/conjet/launch.key"),
+                true,
+                argument == "--serve-recovery-child",
+            )?;
             report_resources()?;
         }
         #[cfg(target_arch = "aarch64")]

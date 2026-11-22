@@ -384,18 +384,30 @@ owner, and preservation of corrupt state. Strict Linux ARM64 Clippy passed.
 The pinned ARM64 musl build and live repeat of the fresh lifecycle matrix,
 with before/after production observations, are in
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-006/intent`.
-Supervisor restart, deterministic failure hooks, and leak inventory remain
-pending.
+A separate live ARM64 run killed the guest supervisor after the kernel
+confirmed workload exec. Guest init pinned the exited leader's PID while
+signaling only its process group, reaped the group, and verified removal of
+the recorded cgroup and sandbox before restarting the supervisor. The next
+authenticated generation rejected the original launch and handle, then ran
+a new workload and shut down cleanly. The companion normal boot passed the
+same lifecycle checks without crash injection. Both runs verified production
+snapshots and are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-006/restart`.
+The full allocation-stage, cancellation, resource and VM-loss fault matrix
+remains pending.
 
 Source: [Fresh lane](speed-engineering-plan.md#fresh-launch-lane),
 [verification policy](speed-engineering-plan.md#verification-and-claim-policy).
 
 Review: Reviewed write-before-helper ordering, deterministic cgroup identity,
-and failure to closed admission after an unresolved intent. Comprehensive
-recovery, cancellation race, and PID reuse review remain pending.
+and fail-closed admission after an unresolved intent. Reviewed the
+guest-only process group, PID pinning, stale generation check before
+admission, named cgroup teardown, and private root canaries. Comprehensive
+stage-by-stage fault and cancellation review remains pending.
 
-Next Action: Reconcile the private resource inventory after helper loss and
-validate same-guest supervisor restart with a rotated generation.
+Next Action: Inject helper failure during allocation, exec and cleanup.
+Exercise bounded output, workload resource exhaustion, and disposable
+VM loss while retaining the process, mount and cgroup inventory.
 
 ## UNDERREVIEW
 

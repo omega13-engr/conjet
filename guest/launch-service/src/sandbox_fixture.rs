@@ -172,6 +172,32 @@ impl Sandbox {
     }
 }
 
+pub(crate) fn recover() -> io::Result<()> {
+    let base = Path::new(BASE);
+    for (relative, expected) in [
+        ("lower/work/immutable", &b"verified fixture\n"[..]),
+        ("outside-canary", &b"must stay outside workload root\n"[..]),
+    ] {
+        match std::fs::read(base.join(relative)) {
+            Ok(bytes) if bytes == expected => {}
+            Ok(_) => return Err(io::Error::other("fixture recovery found a modified canary")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if base.try_exists()? {
+        std::fs::remove_dir_all(base)?;
+    }
+    assert_absent()
+}
+
+pub(crate) fn assert_absent() -> io::Result<()> {
+    if Path::new(BASE).try_exists()? {
+        return Err(io::Error::other("unclaimed fixture sandbox"));
+    }
+    Ok(())
+}
+
 pub fn verify_after_exec() -> io::Result<()> {
     if unsafe { libc::geteuid() } != WORKLOAD_UID || unsafe { libc::getegid() } != WORKLOAD_GID {
         return Err(io::Error::other(

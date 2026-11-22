@@ -75,15 +75,22 @@ fn accept(listener: &OwnedFd) -> io::Result<Option<OwnedFd>> {
     Ok(Some(fd))
 }
 
-pub fn serve(key_path: &Path, fresh: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn serve(
+    key_path: &Path,
+    fresh: bool,
+    allow_crash: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let key = read_key(key_path)?;
     let server = if fresh {
         #[cfg(target_arch = "aarch64")]
         {
-            Server::with_fresh(key, crate::fresh_fixture::FreshFixture::open()?)?
+            Server::with_fresh(key, crate::fresh_fixture::FreshFixture::open(allow_crash)?)?
         }
         #[cfg(not(target_arch = "aarch64"))]
-        return Err("fresh fixture requires ARM64".into());
+        {
+            let _ = allow_crash;
+            return Err("fresh fixture requires ARM64".into());
+        }
     } else {
         Server::new(key)?
     };

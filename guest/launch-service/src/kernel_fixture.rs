@@ -6,7 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::cgroups::{WorkloadCgroup, write_control};
+use crate::cgroups::{CGROUP2_SUPER_MAGIC, WorkloadCgroup, write_control};
 use crate::handshake;
 use crate::sandbox_fixture::Sandbox;
 use crate::security;
@@ -14,6 +14,7 @@ use crate::socket::wait;
 use crate::spec::{MIN_MEMORY_BYTES, ResourceLimits};
 
 const CONTROLLERS: &str = "+cpu +memory +pids";
+const CGROUP_MOUNT: &str = "/run/conjet/probe-cgroup";
 
 #[repr(C)]
 #[derive(Default)]
@@ -63,8 +64,9 @@ pub fn run_helper(
             .ok_or("fixture helper bounds required")?
             .parse()?)
     }
-    if unsafe { libc::getppid() } != 1 {
-        return Err("fresh helper requires the guest init supervisor".into());
+    let owner: libc::pid_t = number(&mut args)?;
+    if owner <= 1 || unsafe { libc::getppid() } != owner {
+        return Err("fresh helper requires its guest supervisor".into());
     }
     let id = args.next().ok_or("fresh workload ID required")?;
     let id = handshake::unhex(id.to_str().ok_or("invalid workload ID")?)?;
@@ -97,9 +99,11 @@ fn run(
     workload_option: Option<&'static std::ffi::CStr>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = with_sandbox.then(Sandbox::prepare).transpose()?;
-    let proc_mount = with_sandbox.then(ProcMount::new).transpose()?;
+    let proc_mount = (with_sandbox && !controlled)
+        .then(ProcMount::new)
+        .transpose()?;
     security::clear_supplementary_groups()?;
-    let mount = CgroupMount::new(Path::new("/run/conjet/probe-cgroup"))?;
+    let mount = CgroupMount::new(Path::new(CGROUP_MOUNT))?;
     let root = mount.path.join("conjet-native");
     let workloads = root.join("workloads");
     let active = workloads.join("active");
@@ -480,10 +484,61 @@ impl Drop for CgroupMount {
     }
 }
 
-struct ProcMount(bool);
+pub(crate) fn recover_cgroup(id: [u8; 16]) -> io::Result<()> {
+    let mount = Path::new(CGROUP_MOUNT);
+    match mount.symlink_metadata() {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(io::Error::other("invalid fixture cgroup mountpoint")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let directory = File::open(mount)?;
+    let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    security::checked(unsafe { libc::fstatfs(directory.as_raw_fd(), filesystem.as_mut_ptr()) })?;
+    if unsafe { filesystem.assume_init() }.f_type as u64 == CGROUP2_SUPER_MAGIC {
+        let root = mount.join("conjet-native");
+        let workloads = root.join("workloads");
+        let active = workloads.join("active");
+        let leaf = active.join(handshake::hex(&id));
+        if leaf.try_exists()? {
+            write_control(&leaf, "cgroup.kill", "1")?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match std::fs::remove_dir(&leaf) {
+                    Ok(()) => break,
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::EBUSY)
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        for path in [&active, &workloads, &root] {
+            if path.try_exists()? {
+                std::fs::remove_dir(path)?;
+            }
+        }
+        drop(directory);
+        let target = CString::new(mount.as_os_str().as_bytes())?;
+        security::checked(unsafe { libc::umount(target.as_ptr()) })?;
+    }
+    std::fs::remove_dir(mount)
+}
+
+pub(crate) fn assert_cgroup_absent() -> io::Result<()> {
+    if Path::new(CGROUP_MOUNT).try_exists()? {
+        return Err(io::Error::other("unclaimed fixture cgroup mountpoint"));
+    }
+    Ok(())
+}
+
+pub(crate) struct ProcMount(bool);
 
 impl ProcMount {
-    fn new() -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         security::checked(unsafe {
             libc::mount(
                 c"none".as_ptr(),

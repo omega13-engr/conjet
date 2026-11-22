@@ -8,6 +8,8 @@ pub mod handshake;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub mod kernel_fixture;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub mod recovery_fixture;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub mod sandbox_fixture;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 mod security;

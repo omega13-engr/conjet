@@ -19,6 +19,7 @@ const MAX_ARG_ENV_BYTES: usize = 8 * 1_024;
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchRequest {
+    pub boot_id: String,
     pub sequence: u64,
     pub budget_ms: u64,
     pub spec: LaunchSpec,
@@ -47,6 +48,8 @@ pub struct ResourceLimits {
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum SpecError {
+    #[error("launch requires a valid boot ID")]
+    BootId,
     #[error("launch sequence must be nonzero")]
     Sequence,
     #[error("launch budget must be between 1 and 30,000 ms")]
@@ -95,6 +98,7 @@ impl ValidatedLaunch {
 
 impl LaunchRequest {
     pub fn validate(self) -> Result<ValidatedLaunch, SpecError> {
+        handshake::unhex::<16>(&self.boot_id).map_err(|_| SpecError::BootId)?;
         if self.sequence == 0 {
             return Err(SpecError::Sequence);
         }
@@ -179,6 +183,7 @@ mod tests {
 
     fn valid() -> LaunchRequest {
         LaunchRequest {
+            boot_id: "42".repeat(16),
             sequence: 1,
             budget_ms: 500,
             spec: LaunchSpec {
