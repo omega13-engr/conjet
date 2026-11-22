@@ -47,66 +47,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-000
-
-Title: Build and prove the isolated conjet-speedup environment
-
-Description: Deliver a session-scoped launcher under build-support/ and
-`docs/engineering/speedup-environment.md` with setup, run, benchmark, and cleanup
-commands for separate branch-built Conjet, conjetd, and Core processes.
-
-Is blocked by task: None.
-
-Acceptance Criteria:
-
-- Separate CONJET_HOME, speedup profile, private DOCKER_CONFIG, mutable disks,
-  locks, logs, sockets, and branch-built executables are verified at runtime.
-- The private Docker context is named conjet-speedup; a test container reaches
-  its VM and cannot be confused with the production context.
-- Production PIDs, health, context endpoint and selected context remain unchanged;
-  no app runtime binding, global socket link, builder, DNS, or startup registration changes.
-- Launcher rejects executable fallback, production path overlap, endpoint mismatch,
-  port collisions, and conflicting inherited Docker endpoint variables.
-- Pinned Kiri has a verified separate data/configuration root and explicit benchmark
-  endpoint, or the task remains blocked pending an isolated test host.
-- Normal exit, cancellation, and startup failure clean only owned processes,
-  sockets, mounts, disks, and private contexts. Retain selected evidence first.
-- Smoke comparison records engine identities and production background load;
-  final clean benchmark qualification is not inferred from a contaminated run.
-
-Problem and Evidence: CONJET_HOME and CONJET_PROFILE isolate runtime paths, but
-CLI startup uses makeCurrent: true for Docker context creation. Shared Docker
-configuration or installed-binary fallback could alter the production context.
-
-Approach:
-
-1. Audit startup, executable resolution, configuration persistence, network ports,
-   and teardown; implement a fail-closed launcher with a private environment and
-   task-owned resource manifest.
-2. Build/stage isolated binaries, start separate processes under session ownership,
-   create conjet-speedup in private Docker configuration, and prove routing with
-   a disposable fixture plus before/after production observations.
-3. Verify Kiri isolation and explicit endpoints, run a smoke comparison, exercise
-   failure/cancellation cleanup, and document reproducible commands in the runbook.
-
-Evidence: Official Kiri 0.2.2 app installed privately and checksum/signature verified;
-see [installation receipt and startup blocker](speedup-environment.md). Runtime
-isolation is not qualified and no benchmark has run. Pending launcher tests,
-executable/PID and resource manifests, private
-context inspection, smoke benchmark JSON, production health observations, and
-cleanup results. Do not record setup as complete before live isolation passes.
-
-Source: [Isolated environment](speed-engineering-plan.md#isolated-speedup-environment),
-[paths](../../Sources/ConjetCore/ConjetPaths.swift),
-[environment](../../Sources/ConjetCore/ConjetEnvironment.swift),
-[CLI context configuration](../../Sources/ConjetCLI/main.swift).
-
-Review: Pending; inspect every path that can select production binaries, mutate
-shared settings, stop processes, or benchmark the wrong endpoint.
-
-Next Action: Audit startup and executable resolution and implement the isolation
-preflight before launching any candidate or Kiri process.
-
 ### SPEED-001
 
 Title: Correct process-start events and add a readiness fixture
@@ -617,7 +557,68 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-None. Documentation creation does not start runtime implementation.
+### SPEED-000
+
+Title: Build and prove the isolated conjet-speedup environment
+
+Description: Deliver a session-scoped launcher under build-support/ and
+`docs/engineering/speedup-environment.md` with setup, run, benchmark, and cleanup
+commands for separate branch-built Conjet, conjetd, and Core processes.
+
+Is blocked by task: None.
+
+Acceptance Criteria:
+
+- Separate CONJET_HOME, speedup profile, private DOCKER_CONFIG, mutable disks,
+  locks, logs, sockets, and branch-built executables are verified at runtime.
+- The private Docker context is named conjet-speedup; a test container reaches
+  its VM and cannot be confused with the production context.
+- Production PIDs, health, context endpoint and selected context remain unchanged;
+  no app runtime binding, global socket link, builder, DNS, or startup registration changes.
+- Launcher rejects executable fallback, production path overlap, endpoint mismatch,
+  port collisions, and conflicting inherited Docker endpoint variables.
+- Pinned Kiri uses ExternalSSD test data, a private Docker configuration and
+  explicit endpoint. Per the user-approved scope, official settings may remain
+  in ~/.kiri and official host shares remain; do not claim full filesystem confinement.
+- Normal exit, cancellation, and startup failure stop owned processes and remove
+  transient sockets/mounts. Retain explicitly managed test data, private contexts,
+  and selected evidence for reuse; document their removal separately.
+- Smoke comparison records engine identities and production background load;
+  final clean benchmark qualification is not inferred from a contaminated run.
+
+Problem and Evidence: CONJET_HOME and CONJET_PROFILE isolate runtime paths, but
+CLI startup uses makeCurrent: true for Docker context creation. Shared Docker
+configuration or installed-binary fallback could alter the production context.
+
+Approach:
+
+1. Audit startup, executable resolution, configuration persistence, network ports,
+   and teardown; implement a fail-closed launcher with a private environment and
+   task-owned resource manifest.
+2. Build/stage isolated binaries, start separate processes under session ownership,
+   create conjet-speedup in private Docker configuration, and prove routing with
+   a disposable fixture plus before/after production observations.
+3. Verify Kiri isolation and explicit endpoints, run a smoke comparison, exercise
+   failure/cancellation cleanup, and document reproducible commands in the runbook.
+
+Evidence: Official Kiri 0.2.2 smoke and cancellation tests passed using
+`build-support/run-kiri-speedup.py`; test data and private kiri-speedup context
+reside on ExternalSSD. Production snapshots matched and daemon/VM cleanup passed.
+See [runbook and evidence](speedup-environment.md). User accepted official
+~/.kiri settings and host shares; full filesystem confinement is not claimed.
+Conjet candidate launch, conjet-speedup context, and comparison remain pending.
+
+Source: [Isolated environment](speed-engineering-plan.md#isolated-speedup-environment),
+[paths](../../Sources/ConjetCore/ConjetPaths.swift),
+[environment](../../Sources/ConjetCore/ConjetEnvironment.swift),
+[CLI context configuration](../../Sources/ConjetCLI/main.swift).
+
+Review: Pending; inspect every path that can select production binaries, mutate
+shared settings, stop processes, or benchmark the wrong endpoint.
+
+Next Action: Build the separate Conjet candidate launcher and conjet-speedup
+context, validate its production separation, then connect both verified endpoints
+to the benchmark harness. Kiri runs through the foreground launcher above.
 
 ## UNDERREVIEW
 

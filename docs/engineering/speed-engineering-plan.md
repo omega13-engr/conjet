@@ -106,10 +106,12 @@ candidate PIDs, executable paths, VM identity, sockets, and disks are distinct.
 Run a harmless fixture through the private conjet-speedup context to prove routing.
 If isolation cannot be demonstrated, stop the QA processes and fail the setup.
 
-Pin Kiri's binary/image versions and use an isolated Kiri configuration and data
-root verified from its implementation. Do not assume it supports CONJET_HOME or
-invent an isolation flag. If Kiri cannot run independently without changing an
-existing installation, document the blocker and use a separate test host.
+Pin Kiri's binary/image versions. The user accepted its official settings under
+~/.kiri and official host shares provided test data stays on ExternalSSD and
+production Docker configuration remains unchanged. Use the session-scoped
+[official Kiri launcher](speedup-environment.md) with private Docker configuration
+and the explicit kiri-speedup endpoint. This is data/context separation, not full
+host filesystem confinement. Do not assume Kiri supports CONJET_HOME.
 The benchmark runner must accept explicit candidate and Kiri endpoints and
 validate their identities before each run.
 

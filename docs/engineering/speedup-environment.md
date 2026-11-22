@@ -1,80 +1,117 @@
-# Speedup environment status
+# Speedup environment
 
-## Official Kiri installation
+## Current status
 
-Installed 2026-11-22 from the official libracoder/kiri v0.2.2 release:
+Official Kiri 0.2.2 is runnable for session-scoped tests. Live smoke and
+cancellation checks passed on 2026-11-22. No Kiri process is left running.
+Production Conjet remains running with its existing Docker context selected.
+The branch-built Conjet candidate and `conjet-speedup` context remain pending
+under SPEED-000; comparative performance benchmarks have not run.
 
-- Local app: `.speedup/tools/kiri-0.2.2/Kiri.app` (ignored by Git).
-- Source archive: `https://github.com/libracoder/kiri/releases/download/v0.2.2/Kiri-0.2.2-arm64.tar.gz`.
-- SHA256 verified against official SHA256SUMS:
-  `b08f568ed7dc95e4e1a09acb718daaf21019fb7aad96345c476ff5ed695d77fb`.
-- `codesign --verify --deep --strict --verbose=2` passed.
-- Signature identifier `dev.kiri.app`, team `Z44N5GDT9Q`; executable is ARM64.
-- Archive AppleDouble metadata was merged with dot_clean before signature validation.
-- Official DMG mounting was denied by the environment; the official app archive
-  supplied the same release without mounting or running an installer.
+The user accepted keeping test data on ExternalSSD while allowing the official
+app's normal settings location. This replaces the earlier requirement for full
+filesystem isolation. It does not require a patched competitor or a new account.
 
-No application setup, daemon, UI, startup service, shell modification, or global
-Docker context was launched/installed. Docker context show returned `conjet`
-before and after installation. The app bundle is installed, but runtime isolation
-and benchmark readiness are NOT qualified.
+## Run official Kiri
 
-## Startup blocker
+From the repository root:
 
-Release v0.2.2 source (commit 686bffa5f38ba6ecc3d086c36ec7148cd7fb976a)
-allows KIRI_DATA_DIR and KIRI_SOCKET overrides, but daemon::state_dir always
-resolves beneath HOME to `.kiri`. This holds private settings and CA state.
-Changing only data and socket paths does not fully scope the runtime to speedup.
-The current execution instructions prohibit repurposing HOME. Do not work around
-this by modifying or symlinking existing user state or changing the signed app's
-bundle identity.
+```sh
+# Pull a small test image, verify execution, and stop the daemon/VM.
+python3 build-support/run-kiri-speedup.py --smoke -- ps -a
 
-Normal setup can install a LaunchAgent, shell integration, and Docker integration.
-Do not run setup or open the app through Finder. Even direct daemon startup needs
-an isolation solution and review of DNS, domain ports, Finder mounts, updates,
-and guest shared directories before use.
-
-Required environment location: `/Volumes/ExternalSSD/dev_workspace/tmp`.
-The user explicitly rejected creating a dedicated macOS test account. Keep the
-unmodified official app and do not alter production state. Candidate layout:
-
-```text
-/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-<session>/
-  kiri-data/
-  kiri-state/       # requires a supported state-directory override
-  docker-config/
-  logs/
-  evidence/
+# Run one Docker workload command while the managed Kiri session is alive.
+python3 build-support/run-kiri-speedup.py -- run --rm --network none alpine:3.22 true
 ```
 
-KIRI_DATA_DIR and KIRI_SOCKET alone cannot redirect all state. A private child
-HOME would normally address HOME-relative paths, but current session instructions
-prohibit overriding HOME. No such override has been executed. Qualification needs
-a supported complete state-path override or revised environment permissions;
-do not substitute an altered bundle identity or production-state symlinks.
+The foreground launcher starts the signed official daemon, waits for its API,
+verifies the server identifies itself as Kiri 0.2.2, checks its private context
+endpoint, runs the command, and stops its own daemon. SIGINT/SIGTERM and command
+failure also enter cleanup. It never invokes Kiri setup, opens its UI, or enables
+login services. Use this launcher rather than invoking the app directly.
 
-Keep SPEED-000 incomplete until live isolation and cleanup pass. The
-conjet-speedup candidate context and launcher remain pending. No benchmark ran.
+The launcher rejects concurrent Kiri processes, an existing socket, occupied
+router/DNS ports, and an existing Kiri Finder path. It holds an exclusive session
+lock. It strips inherited Kiri, Docker, Buildx, and Conjet endpoint overrides from
+child processes and uses an explicit private Docker config and context.
 
-## Removal
+## Paths and settings
 
-With no Kiri processes running, remove only the task-owned
-`.speedup/tools/kiri-0.2.2` directory. No global uninstaller is needed because no
-setup integration was run. Download, source-audit, and conversion scratch files
-were removed after preserving this receipt.
+```text
+Repository (ignored local installation)
+  .speedup/tools/kiri-0.2.2/Kiri.app
 
-## Follow-up isolation audit
+/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-kiri/
+  data/                  images, container/volume state, VM disk
+  docker-config/         private context: kiri-speedup
+  docker.sock            session endpoint, removed at shutdown
+  logs/                  launcher-captured daemon output
+  tmp/                   child temporary directory
+  session.lock           prevents overlapping worker sessions
+  last-session.json      latest result and production snapshots
+  smoke-session.json     retained initial smoke evidence
+  cancellation-session.json
+```
 
-The v0.2.2 guest configuration hardcodes host shares for `/Users`, `/Volumes`,
-and `/private` in `crates/kiri/src/guest.rs::mac_share_dirs`. Data and socket
-relocation alone therefore cannot establish complete host filesystem isolation.
-A minimal sandbox-exec invocation succeeded, but confinement of Apple's VM
-helper and guest virtiofs access has not been qualified. No Kiri daemon was run.
+The competitor context is `kiri-speedup`. Reserve `conjet-speedup` for the separate
+Conjet candidate. Neither context should replace the user's current context.
+The official daemon also writes its own settings, diagnostics and untrusted local
+CA under `~/.kiri`; HOME is unchanged. No CA trust operation was run.
+The user-approved exception is recorded here rather than claiming complete isolation.
 
-A same-account implementation path is a source build pinned to the official
-release with narrowly scoped configuration additions: an explicit state root,
-an explicit host-share allowlist restricted to the QA root, and disabled optional
-host integrations. This is a modified competitor build and must be disclosed in
-benchmark evidence. It is not interchangeable with an unmodified official binary
-for claims. Implementing that competitor fork requires agreement on this changed
-benchmark scope. The installed official app remains intact for reference.
+Initial resources: 2 vCPUs, 2048 MiB guest ceiling. HTTP/HTTPS domain routers use
+18080/18443 rather than production ports; official Kiri binds these on wildcard
+addresses. Its local DNS listener uses loopback UDP 53535. No global resolver
+file is installed. Finder mounting is disabled with KIRI_NO_FINDER=1.
+
+Kiri's official VM shares `/Users`, `/Volumes`, and `/private`. This launcher is
+operational separation, not a security sandbox for hostile containers. Test
+workloads must use disposable data and must not bind-mount production data or
+publish conflicting ports. CPU, memory, thermal state, and disk bandwidth remain
+shared with production; record background load in benchmark reports.
+
+## Official artifact verification
+
+- Release: libracoder/kiri v0.2.2; source commit
+  `686bffa5f38ba6ecc3d086c36ec7148cd7fb976a`.
+- Archive: `https://github.com/libracoder/kiri/releases/download/v0.2.2/Kiri-0.2.2-arm64.tar.gz`.
+- SHA256 checked against official SHA256SUMS:
+  `b08f568ed7dc95e4e1a09acb718daaf21019fb7aad96345c476ff5ed695d77fb`.
+- Code signature validation: `codesign --verify --deep --strict` passed;
+  identifier `dev.kiri.app`, team `Z44N5GDT9Q`, ARM64 executable.
+- Archive AppleDouble metadata was merged with dot_clean; no source or app
+  executable was modified. DMG mounting was denied, so the official app archive
+  was used. Download/source-audit scratch directories were removed.
+
+## Verification evidence
+
+- Smoke: Alpine 3.22 returned `kiri-speedup-ok`, exit 0; subsequent `ps -a` was empty.
+- Endpoint: API Platform.Name was Kiri and Kiri component version was 0.2.2.
+  Docker's compatibility Version field is 27.5.1 and is not the Kiri release version.
+- Shutdown: daemon exited, VM-stop log observed, socket removed, and no process
+  held the QA VM disk open after cleanup.
+- Cancellation: SIGTERM to the launcher during `alpine sleep 30` stopped the
+  owned daemon/VM and removed the socket without a forced daemon kill. The guest
+  stopped its workload after its shutdown grace period (exit 137).
+- Production: process IDs and executable paths stayed unchanged; Docker config,
+  context metadata, Conjet persisted runtime binding, LaunchAgent files, and
+  resolver-file hashes matched before/after the final smoke and cancellation runs.
+- Production Docker context remained conjet and its server responded as 29.1.3.
+- Preflight failure tests: occupied router port and concurrent session lock were
+  rejected before daemon startup; neither left a Docker socket.
+- Python syntax, local documentation links, and git diff whitespace checks passed;
+  graphify code graph was updated.
+- No UI was changed or launched, so there is no meaningful screenshot target.
+  JSON evidence and daemon logs provide runtime validation instead.
+
+These checks establish the accepted data/context separation and session cleanup,
+not a speed claim or proof of complete host filesystem confinement.
+
+## Retention and removal
+
+The installed app and managed test-data directory are intentionally retained for
+future worker sessions. No persistent process or scheduled registration is created.
+Temporary source-audit files are removed. To uninstall later, stop the launcher,
+verify no QA processes remain, and remove only the task-owned app and test-data
+directories. Review `~/.kiri` before removing anything there; never delete another
+Kiri installation's settings or use a global Docker prune/uninstall command.
