@@ -37,7 +37,7 @@ ordered before a result can support a performance claim:
 - `T3`: first guest instruction attempted.
 - `T4`: PID 1 control channel or equivalent guest readiness reached.
 - `T5`: OCI bundle/rootfs mounted and configured.
-- `T6`: target process first instruction or process-start record observed.
+- `T6`: process launch observation. The legacy Pulse process-start record marks child creation.
 - `T7`: first useful response or launch exit result.
 - `TD`: Docker API readiness for the resident Docker lane.
 
@@ -65,6 +65,29 @@ Cache-state labels are mandatory:
 Never use a startup microbenchmark to claim full Docker-appliance cold-start
 speed. Docker cold boot, resident Docker operations, and Pulse/direct-OCI
 launches must be reported as separate lanes.
+
+## Guest readiness records
+
+The optional `--trace-guest-readiness` boot flag enables Jetstream's bounded
+guest-to-host readiness stream on VSOCK port 1029. The Rust boot report
+includes `readiness_records`, and the outer `conjet vm backend boot-attempt`
+report preserves those records. An empty array means the host saw no valid
+records. Existing boots omit the field.
+
+The transport accepts the existing v1 readiness envelope and retains at
+most 16 events per boot. The legacy event ID 2 is reported as
+`legacy_process_started`. Pulse uses it for fork completion and the Docker
+appliance uses it as a boot marker. IDs 3 through 7 are reserved for
+`child_created`, `exec_confirmed`, `application_ready`, `exec_failed`,
+and `process_exited`, respectively. The report keeps status and an event
+code along with the boot ID hash.
+
+`host_offset_ns` is the elapsed time from the start of the Rust VMM boot
+runner to complete frame receipt. Durations between host observations use
+the same host monotonic clock. `guest_monotonic_ns` is the raw guest clock
+reading, for guest intervals only. The host offset includes transport and
+decoding, and excludes the outer CLI and VMM process startup. Qualification
+requires a separate paired measurement of tracing overhead.
 
 ## Parallel Wrapper
 

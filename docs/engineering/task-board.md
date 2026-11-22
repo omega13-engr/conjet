@@ -47,40 +47,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-001
-
-Title: Correct process-start events and add a readiness fixture
-
-Description: Update the guest event producer and host decoder; add a fixture that signals readiness only after exec. Deliver trace-schema documentation and failure-path tests.
-
-Is blocked by task: SPEED-000.
-
-Acceptance Criteria:
-
-- Current post-fork notification is not reported as successful application execution.
-- Missing executable, permission failure, and early process exit produce accurate outcomes.
-- End-to-end timing uses one host monotonic clock; guest durations remain separate.
-- Trace schema and benchmark methodology document endpoints and instrumentation overhead.
-
-Problem and Evidence: `guest/init/conjet-init.c` reports PROCESS_STARTED after
-fork before exec success; the existing timeline labels T6 as first instruction.
-
-Approach:
-
-1. Trace PROCESS_STARTED from guest/init/conjet-init.c through its host decoder and replace the false exec-success interpretation.
-2. Add distinct child-created, exec-confirmed, application-ready, and exec-failed outcomes; retain compatibility for existing event consumers.
-3. Run a valid executable, missing path, non-executable file, and immediate exit; verify each trace and measure tracing overhead.
-
-Evidence: Pending implementation, focused tests, raw trace, and overhead measurement.
-
-Source: [Measurement contract](speed-engineering-plan.md#measurement-contract),
-[guest init](../../guest/init/conjet-init.c),
-[timeline](../../Sources/ConjetCore/StartupTimeline.swift).
-
-Review: Pending; check false-positive readiness, ordering, failure paths, and clock boundaries.
-
-Next Action: Locate the PROCESS_STARTED decoder and write the expected event sequence for the four fixture cases.
-
 ### SPEED-002
 
 Title: Add and run the fresh-lifecycle baseline harness
@@ -557,7 +523,64 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-None.
+### SPEED-001
+
+Title: Correct process-start events and add a readiness fixture
+
+Description: Update the guest event producer and host decoder; add a fixture that signals readiness only after exec. Deliver trace-schema documentation and failure-path tests.
+
+Is blocked by task: SPEED-000.
+
+Acceptance Criteria:
+
+- Current post-fork notification is not reported as successful application execution.
+- Missing executable, permission failure, and early process exit produce accurate outcomes.
+- End-to-end timing uses one host monotonic clock; guest durations remain separate.
+- Trace schema and benchmark methodology document endpoints and instrumentation overhead.
+
+Problem and Evidence: `guest/init/conjet-init.c` reports PROCESS_STARTED after
+fork before exec success; the existing timeline labels T6 as first instruction.
+
+Approach:
+
+1. Trace PROCESS_STARTED from guest/init/conjet-init.c through its host decoder and replace the false exec-success interpretation.
+2. Add distinct child-created, exec-confirmed, application-ready, and exec-failed outcomes; retain compatibility for existing event consumers.
+3. Run a valid executable, missing path, non-executable file, and immediate exit; verify each trace and measure tracing overhead.
+
+Evidence: The active Rust VMM had no receiver for guest-initiated readiness
+connections, and the Rust CLI boot command rejected the benchmark's
+`--timeline-jsonl` argument. The host increment adds an explicit
+`--trace-guest-readiness` flag, bounded v1 VSOCK reception, separate host and
+guest timestamps, and labels the legacy event as a launch observation.
+
+Built and signed the branch VMM, then ran `jetstream boot` with the isolated
+Core 1.3.1 manifest, two vCPUs, 2,048 MiB, 25 ms host tick,
+`--require-docker-ready --hold-after-ready-ms 1000 --trace-guest-readiness
+--json`. Docker reached readiness and the host collected `control_ready` and
+`legacy_process_started` records with the same guest boot ID and ordered host
+offsets. The first decode attempt rejected the appliance producer's
+`VMADDR_CID_ANY` envelope. The corrected decoder validates the transport
+CID and accepts that existing envelope marker.
+
+Raw reports, production observations, the VMM hash, and Cargo and Swift test
+logs are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-001/host-decoder`.
+Two Swift StartupTimeline tests and 135 Rust tests passed, with three Rust
+tests ignored. The published Docker guest emitted legacy markers only.
+New Pulse events, failure and post-exec fixtures, benchmark wiring, and
+trace overhead measurements remain pending.
+
+Source: [Measurement contract](speed-engineering-plan.md#measurement-contract),
+[guest init](../../guest/init/conjet-init.c),
+[timeline](../../Sources/ConjetCore/StartupTimeline.swift).
+
+Review: Host increment reviewed for bounded frames, guest port and stream
+validation, legacy event classification, and clock boundaries. The boot
+report retains the legacy markers as guest observations. A final review
+requires the new producer and end-to-end fixtures.
+
+Next Action: Add reliable guest exec observations and a post-exec fixture,
+then exercise the successful, missing, non-executable, and early-exit cases.
 
 ## UNDERREVIEW
 

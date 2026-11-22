@@ -6,10 +6,12 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::devices::readiness;
 use crate::devices::virtio::{VirtioMmioDevice, VirtioQueueState};
 use crate::devices::virtqueue::{
     read_descriptors, write_descriptors, DescriptorChain, QueueError, SplitQueueExecutor,
@@ -28,10 +30,12 @@ const OP_RESET: u16 = 3;
 const OP_SHUTDOWN: u16 = 4;
 const OP_RW: u16 = 5;
 const OP_CREDIT_UPDATE: u16 = 6;
+const OP_CREDIT_REQUEST: u16 = 7;
 const HEADER_LEN: usize = 44;
 const DEFAULT_BUF_ALLOC: u32 = 4 * 1024 * 1024;
 const DEFAULT_GUEST_BUF_ALLOC: u64 = 256 * 1024;
 const MAX_HOST_PAYLOAD: usize = 32 * 1024;
+const MAX_QUEUED_TRACE_REPLIES: usize = 64;
 const TRANSMIT_DRAIN_BATCH_LIMIT: usize = 64;
 const SHUTDOWN_SEND: u32 = 2;
 const MAX_HTTP_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
@@ -184,6 +188,63 @@ pub struct VsockQueueHandler {
     transmit_executor: SplitQueueExecutor,
     pending_host_packets: VecDeque<VsockPacket>,
     bridges: Vec<Arc<Mutex<HostUnixVsockBridgeState>>>,
+    readiness: Option<ReadinessConnection>,
+}
+
+#[derive(Debug)]
+struct ReadinessConnection {
+    trace: readiness::Trace,
+    peer: Option<u32>,
+    forwarded: u32,
+}
+
+impl ReadinessConnection {
+    fn handle(&mut self, packet: &VsockPacket) -> Option<VsockPacket> {
+        let peer = packet.src_port;
+        match packet.op {
+            OP_REQUEST if self.peer.is_none() => {
+                self.peer = Some(peer);
+                self.forwarded = 0;
+                self.trace.reset_stream();
+                Some(VsockPacket::control(
+                    readiness::PORT,
+                    peer,
+                    OP_RESPONSE,
+                    0,
+                    0,
+                ))
+            }
+            OP_RW if self.peer == Some(peer) => {
+                self.forwarded = self.forwarded.wrapping_add(packet.payload.len() as u32);
+                if self.trace.receive(&packet.payload) {
+                    Some(VsockPacket::credit_update(
+                        readiness::PORT,
+                        peer,
+                        self.forwarded,
+                    ))
+                } else {
+                    self.peer = None;
+                    Some(VsockPacket::reset(readiness::PORT, peer, self.forwarded))
+                }
+            }
+            OP_SHUTDOWN if self.peer == Some(peer) => {
+                self.peer = None;
+                Some(VsockPacket::reset(readiness::PORT, peer, self.forwarded))
+            }
+            OP_RESET if self.peer == Some(peer) => {
+                self.peer = None;
+                None
+            }
+            OP_CREDIT_UPDATE if self.peer == Some(peer) => None,
+            OP_CREDIT_REQUEST if self.peer == Some(peer) => Some(VsockPacket::credit_update(
+                readiness::PORT,
+                peer,
+                self.forwarded,
+            )),
+            OP_RESET => None,
+            _ => Some(VsockPacket::reset(readiness::PORT, peer, 0)),
+        }
+    }
 }
 
 impl VsockQueueHandler {
@@ -200,6 +261,20 @@ impl VsockQueueHandler {
             bridges,
             ..Self::default()
         }
+    }
+
+    pub fn enable_readiness_trace(&mut self, started: Instant) {
+        self.readiness = Some(ReadinessConnection {
+            trace: readiness::Trace::new(started),
+            peer: None,
+            forwarded: 0,
+        });
+    }
+
+    pub fn take_readiness_records(&mut self) -> Option<Vec<readiness::Record>> {
+        self.readiness
+            .as_mut()
+            .map(|lane| lane.trace.take_records())
     }
 
     pub fn enqueue_host_packet(&mut self, packet: VsockPacket) {
@@ -245,7 +320,16 @@ impl VsockQueueHandler {
                 memory,
                 guest_base,
                 Some(TRANSMIT_DRAIN_BATCH_LIMIT),
-                |chain| receive_guest_packet(chain, memory, guest_base, &self.bridges),
+                |chain| {
+                    receive_guest_packet(
+                        chain,
+                        memory,
+                        guest_base,
+                        &self.bridges,
+                        self.readiness.as_mut(),
+                        &mut self.pending_host_packets,
+                    )
+                },
             )?;
             let batch_len = batch.len();
             used.extend(batch);
@@ -355,17 +439,34 @@ fn receive_guest_packet(
     memory: &GuestMemory,
     guest_base: u64,
     bridges: &[Arc<Mutex<HostUnixVsockBridgeState>>],
+    readiness: Option<&mut ReadinessConnection>,
+    replies: &mut VecDeque<VsockPacket>,
 ) -> Result<UsedElement, QueueError> {
     let descriptors: Vec<_> = chain.readable_descriptors().copied().collect();
     let bytes = read_descriptors(memory, guest_base, descriptors)?;
     if let Ok(packet) = VsockPacket::decode(&bytes) {
-        for bridge in bridges {
-            if bridge
-                .lock()
-                .expect("vsock bridge mutex poisoned")
-                .handle_guest_packet(packet.clone())
+        match readiness {
+            Some(lane)
+                if packet.src_cid == DEFAULT_GUEST_CID
+                    && packet.dst_cid == HOST_CID
+                    && packet.dst_port == readiness::PORT =>
             {
-                break;
+                if replies.len() < MAX_QUEUED_TRACE_REPLIES {
+                    if let Some(response) = lane.handle(&packet) {
+                        replies.push_back(response);
+                    }
+                }
+            }
+            _ => {
+                for bridge in bridges {
+                    if bridge
+                        .lock()
+                        .expect("vsock bridge mutex poisoned")
+                        .handle_guest_packet(packet.clone())
+                    {
+                        break;
+                    }
+                }
             }
         }
     }

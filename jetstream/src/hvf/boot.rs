@@ -96,6 +96,8 @@ pub struct HvfBootReport {
     pub docker_ready: bool,
     pub docker_probe: Option<DockerProbeReport>,
     pub balloon: BalloonMetrics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_records: Option<Vec<crate::devices::readiness::Record>>,
     pub stages: Vec<HvfBootStage>,
 }
 
@@ -118,6 +120,7 @@ pub struct HvfBootOptions {
     pub hold_after_ready_forever: bool,
     pub balloon_target_mib: Option<u64>,
     pub memory_control_socket: Option<PathBuf>,
+    pub trace_guest_readiness: bool,
 }
 
 impl Default for HvfBootOptions {
@@ -133,6 +136,7 @@ impl Default for HvfBootOptions {
             hold_after_ready_forever: false,
             balloon_target_mib: None,
             memory_control_socket: None,
+            trace_guest_readiness: false,
         }
     }
 }
@@ -2293,6 +2297,7 @@ impl HvfBootRunner {
     }
 
     pub fn run(self) -> HvfBootReport {
+        let trace_started = self.options.trace_guest_readiness.then(Instant::now);
         let mut stages = Vec::new();
         let mut exit_count = 0u64;
         let mut console_output = String::new();
@@ -2521,6 +2526,7 @@ impl HvfBootRunner {
             &self.virtio_devices,
             &mut vm_state,
             Some(memory_reclaimer),
+            trace_started,
         ) {
             Ok(detail) => stage(&mut stages, "virtio-runtime", true, detail),
             Err(error) => {
@@ -3348,13 +3354,15 @@ impl HvfBootRunner {
         } else {
             !console_output.is_empty()
         };
-        let balloon_metrics = shared
-            .vm_state
-            .lock()
-            .expect("VM state mutex poisoned")
+        let mut vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
+        let balloon_metrics = vm_state.devices.balloon_metrics();
+        let readiness_records = vm_state
             .devices
-            .balloon_metrics();
-        self.finish_with_docker_probe(
+            .vsock
+            .values_mut()
+            .find_map(VsockQueueHandler::take_readiness_records);
+        drop(vm_state);
+        let mut report = self.finish_with_docker_probe(
             ok,
             message,
             Some(artifacts),
@@ -3363,7 +3371,9 @@ impl HvfBootRunner {
             docker_probe,
             balloon_metrics,
             stages,
-        )
+        );
+        report.readiness_records = readiness_records;
+        report
     }
 
     fn finish(
@@ -3409,6 +3419,7 @@ impl HvfBootRunner {
             docker_ready,
             docker_probe,
             balloon,
+            readiness_records: None,
             stages,
         }
     }
@@ -3799,6 +3810,7 @@ fn configure_virtio_runtime(
     devices: &[VirtioMmioDevicePlan],
     vm_state: &mut VmState,
     memory_reclaimer: Option<Arc<dyn GuestMemoryReclaimer>>,
+    trace_started: Option<Instant>,
 ) -> Result<String, String> {
     let mut block_paths = vec![config.boot_source.root_disk_path.clone()];
     if let Some(path) = config.boot_source.data_disk_path.clone() {
@@ -3868,10 +3880,12 @@ fn configure_virtio_runtime(
                     vm_state.devices.memory_bridge = Some(bridge);
                     state
                 };
-                vm_state.devices.vsock.insert(
-                    device.mmio_base,
-                    VsockQueueHandler::with_bridges(vec![docker_bridge, memory_bridge]),
-                );
+                let mut handler =
+                    VsockQueueHandler::with_bridges(vec![docker_bridge, memory_bridge]);
+                if let Some(started) = trace_started {
+                    handler.enable_readiness_trace(started);
+                }
+                vm_state.devices.vsock.insert(device.mmio_base, handler);
                 vsock_count += 1;
             }
             VirtioDeviceKind::Balloon => {

@@ -167,6 +167,7 @@ extension ConjetCLI {
         var exitCount: UInt64
         var consoleOutput: String
         var dockerReady: Bool
+        var readinessRecords: [GuestReadinessRecord]?
         var stages: [RustHVFBootStage]
 
         private enum CodingKeys: String, CodingKey {
@@ -175,7 +176,24 @@ extension ConjetCLI {
             case exitCount = "exit_count"
             case consoleOutput = "console_output"
             case dockerReady = "docker_ready"
+            case readinessRecords = "readiness_records"
             case stages
+        }
+    }
+
+    private struct GuestReadinessRecord: Codable {
+        var event: String
+        var status: UInt16
+        var code: UInt32
+        var bootIDHash: UInt64
+        var guestMonotonicNanoseconds: UInt64
+        var hostOffsetNanoseconds: UInt64
+
+        private enum CodingKeys: String, CodingKey {
+            case event, status, code
+            case bootIDHash = "boot_id_hash"
+            case guestMonotonicNanoseconds = "guest_monotonic_ns"
+            case hostOffsetNanoseconds = "host_offset_ns"
         }
     }
 
@@ -191,6 +209,7 @@ extension ConjetCLI {
         let dryRun = bootArgs.removeAllOccurrences("--dry-run")
         let fullMemory = bootArgs.removeAllOccurrences("--full-memory")
         let requireDocker = bootArgs.removeAllOccurrences("--require-docker-ready")
+        let traceGuestReadiness = bootArgs.removeAllOccurrences("--trace-guest-readiness")
         let config = try ConjetConfig.loadOrCreate(paths: paths)
         let memoryMiB = try takeValueOption("--memory-mib", from: &bootArgs).map {
             try parsePositiveInt($0, flag: "--memory-mib")
@@ -229,6 +248,9 @@ extension ConjetCLI {
         }
         if dryRun {
             commandArguments.append("--dry-run")
+        }
+        if traceGuestReadiness {
+            commandArguments.append("--trace-guest-readiness")
         }
         if requireDocker {
             commandArguments += ["--require-docker-ready", "--docker-probe-timeout-ms", "\(Int(timeoutSeconds * 1_000))"]

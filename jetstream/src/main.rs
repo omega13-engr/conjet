@@ -73,6 +73,9 @@ enum Command {
         /// Host Unix socket for live virtio-balloon target updates and metrics.
         #[arg(long)]
         memory_control_socket: Option<PathBuf>,
+        /// Collect bounded guest process observations over the readiness VSOCK port.
+        #[arg(long)]
+        trace_guest_readiness: bool,
         /// Emit pretty JSON boot report.
         #[arg(long)]
         json: bool,
@@ -127,6 +130,7 @@ fn main() -> anyhow::Result<()> {
             hold_after_ready_forever,
             balloon_target_mib,
             memory_control_socket,
+            trace_guest_readiness,
             json,
             dry_run,
         } => {
@@ -155,6 +159,7 @@ fn main() -> anyhow::Result<()> {
                 hold_after_ready_forever,
                 balloon_target_mib,
                 memory_control_socket,
+                trace_guest_readiness,
             });
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
