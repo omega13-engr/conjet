@@ -112,47 +112,6 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-### SPEED-013
-
-Title: Open and qualify the speed enhancement PR to main
-
-Description: Submit the completed enhancement with its final benchmark and
-correctness evidence, then resolve review and CI findings before merging.
-
-Is blocked by task: SPEED-012 and SPEED-011 required experimental checks.
-
-Acceptance Criteria:
-
-- Prior development and required local gates are audited with passing evidence
-  and verified pushed commits. SPEED-008 continues to record its revise verdict.
-- Final qualification reports identify the tested revision and exact claim scope;
-  no required check is skipped or unresolved.
-- PR targets main from enhancement/speed-up and links the plan, board, reports,
-  compatibility limitations, and rollback procedure.
-- Required CI and review pass; changes during review receive applicable validation
-  and are pushed as additional increments before merge.
-
-Problem and Evidence: A pushed implementation branch alone does not establish
-reviewed integration or release readiness.
-
-Approach:
-
-1. Audit every task and final gate against the remote branch revision.
-2. Open the PR with concrete behavior, benchmark results, and validation evidence.
-3. Resolve findings, rerun affected checks, push increments, and merge only when
-   repository review and CI requirements are satisfied.
-
-Evidence: Pending gate audit, remote revision, PR URL, CI results, and merge revision.
-
-Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-policy),
-[release process](../release.md).
-
-Review: Pending; verify all development gates before opening the PR and all CI
-and review requirements before merge.
-
-Next Action: Open the final experimental PR after the local acceptance
-audit. Collect required CI and independent review before merging.
-
 ### SPEED-008
 
 Title: Run the fresh-runtime comparison and record the gate decision
@@ -260,7 +219,49 @@ acceptance without changing the SPEED-008 verdict.
 
 ## UNDERREVIEW
 
-None.
+### SPEED-013
+
+Title: Open and qualify the speed enhancement PR to main
+
+Description: Submit the completed enhancement with its final benchmark and
+correctness evidence, then resolve review and CI findings before merging.
+
+Is blocked by task: SPEED-012 and SPEED-011 required experimental checks.
+
+Acceptance Criteria:
+
+- Prior development and required local gates are audited with passing evidence
+  and verified pushed commits. SPEED-008 continues to record its revise verdict.
+- Final qualification reports identify the tested revision and exact claim scope;
+  no required check is skipped or unresolved.
+- PR targets main from enhancement/speed-up and links the plan, board, reports,
+  compatibility limitations, and rollback procedure.
+- Required CI and review pass; changes during review receive applicable validation
+  and are pushed as additional increments before merge.
+
+Problem and Evidence: A pushed implementation branch alone does not establish
+reviewed integration or release readiness.
+
+Approach:
+
+1. Audit every task and final gate against the remote branch revision.
+2. Open the PR with concrete behavior, benchmark results, and validation evidence.
+3. Resolve findings, rerun affected checks, push increments, and merge only when
+   repository review and CI requirements are satisfied.
+
+Evidence: The final local gate was audited against `cb1f80f` and the
+remote enhancement branch matched. [PR #33](https://github.com/omega13-engr/conjet/pull/33)
+targets main and discloses the experimental scope, local measurements,
+rollback procedure and deferred comparative work. Independent review,
+required CI and merge remain pending.
+
+Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-policy),
+[release process](../release.md).
+
+Review: Pending; verify all development gates before opening the PR and all CI
+and review requirements before merge.
+
+Next Action: Collect required CI and independent review before merging.
 
 ## DONE
 
