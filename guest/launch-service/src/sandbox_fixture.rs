@@ -100,7 +100,7 @@ impl Sandbox {
         )
     }
 
-    pub(crate) fn enter(&self) -> io::Result<()> {
+    pub(crate) fn enter(&self, before_filter: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
         fn step(name: &str, result: io::Result<()>) -> io::Result<()> {
             result.map_err(|error| io::Error::other(format!("{name}: {error}")))
         }
@@ -164,6 +164,7 @@ impl Sandbox {
             "credentials and capabilities",
             security::drop_workload_identity(),
         )?;
+        before_filter()?;
         step("seccomp", self.filter.install())
     }
 

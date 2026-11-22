@@ -293,9 +293,10 @@ specification identify the slot.
 The fixture owns at most one fresh or prepared workload, has no
 preparation queue, and caps the prepared cgroup at 32 MiB. It stages
 the private root inputs, creates the private namespaces and cgroup,
-and parks the child at the authorization barrier. Final sandbox setup,
-security restrictions, and exec follow a successful claim. The supervisor
-serializes the READY-to-CLAIMED transition before writing the release byte.
+mounts the private root, and installs limits and restricted credentials.
+The trusted child then stops under its owned tracer. Seccomp installation
+and exec follow a successful claim. The supervisor serializes the
+READY-to-CLAIMED transition before writing the release byte.
 Exact prepare retries keep the same handle. Consumed slots cannot return
 to ready, and a disconnected claimant can query the original handle.
 

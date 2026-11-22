@@ -317,21 +317,16 @@ fn clone_and_reap(
                 );
                 unsafe { libc::_exit(124) }
             }
-            // The raw clone does not update libc's cached thread identity.
-            // Read the new namespace IDs from the kernel for the trace stop.
-            let stopped = unsafe {
-                libc::syscall(
-                    libc::SYS_tgkill,
-                    libc::syscall(libc::SYS_getpid),
-                    libc::syscall(libc::SYS_gettid),
-                    libc::SIGSTOP,
-                )
-            };
-            if stopped != 0 {
-                eprintln!("workload trace stop failed: {}", io::Error::last_os_error());
+            if let Err(error) = stop_for_tracer() {
+                eprintln!("workload trace stop failed: {error}");
                 unsafe { libc::_exit(124) }
             }
-            if let Err(error) = sandbox.enter() {
+            if let Err(error) = sandbox.enter(|| {
+                if prepared {
+                    stop_for_tracer()?;
+                }
+                Ok(())
+            }) {
                 eprintln!("workload sandbox setup failed: {error}");
                 unsafe { libc::_exit(126) }
             }
@@ -376,15 +371,12 @@ fn clone_and_reap(
                     return Ok(false);
                 }
             }
-            if prepared && !wait_for_claim()? {
-                return Ok(false);
-            }
             parent_ready.write_all(&[1])?;
             Ok(true)
         });
     drop(parent_ready);
     if matches!(authorization, Ok(true)) && sandbox.is_some() {
-        match confirm_exec(pid) {
+        match confirm_exec(pid, prepared) {
             Ok(ExecObservation::Confirmed) => {
                 if controlled {
                     if let Err(error) = notify_control(b'E', &[]) {
@@ -428,6 +420,19 @@ fn clone_and_reap(
     ready?;
     authorization?;
     Ok(Some(status))
+}
+
+fn stop_for_tracer() -> io::Result<()> {
+    // The raw clone does not update libc's cached thread identity.
+    let stopped = unsafe {
+        libc::syscall(
+            libc::SYS_tgkill,
+            libc::syscall(libc::SYS_getpid),
+            libc::syscall(libc::SYS_gettid),
+            libc::SIGSTOP,
+        )
+    };
+    security::checked(stopped as libc::c_int)
 }
 
 fn wait_for_claim() -> io::Result<bool> {
@@ -608,7 +613,7 @@ enum ExecObservation {
     Reaped(i32),
 }
 
-fn confirm_exec(pid: libc::pid_t) -> io::Result<ExecObservation> {
+fn confirm_exec(pid: libc::pid_t, prepared: bool) -> io::Result<ExecObservation> {
     let mut status = reap(pid)?;
     if !libc::WIFSTOPPED(status) {
         return Ok(ExecObservation::Reaped(status));
@@ -629,19 +634,26 @@ fn confirm_exec(pid: libc::pid_t) -> io::Result<ExecObservation> {
     {
         return Err(io::Error::last_os_error());
     }
+    if prepared {
+        // The first stop established tracing and EXITKILL. The second
+        // stop is after sandbox setup, before seccomp installation and
+        // exec. The child can proceed only after consuming its claim.
+        resume_trace(pid, 0)?;
+        status = reap(pid)?;
+        if !libc::WIFSTOPPED(status) {
+            return Ok(ExecObservation::Reaped(status));
+        }
+        if libc::WSTOPSIG(status) != libc::SIGSTOP || status >> 16 != 0 {
+            return Err(io::Error::other("unexpected prepared workload trace stop"));
+        }
+        if !wait_for_claim()? {
+            security::checked(unsafe { libc::kill(pid, libc::SIGKILL) })?;
+            return reap(pid).map(ExecObservation::Reaped);
+        }
+    }
     let mut signal = 0;
     loop {
-        if unsafe {
-            libc::ptrace(
-                libc::PTRACE_CONT,
-                pid,
-                none,
-                signal as usize as *mut libc::c_void,
-            )
-        } != 0
-        {
-            return Err(io::Error::last_os_error());
-        }
+        resume_trace(pid, signal)?;
         status = reap(pid)?;
         if !libc::WIFSTOPPED(status) {
             return Ok(ExecObservation::Reaped(status));
@@ -654,6 +666,18 @@ fn confirm_exec(pid: libc::pid_t) -> io::Result<ExecObservation> {
         }
         signal = libc::WSTOPSIG(status);
     }
+}
+
+fn resume_trace(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
+    let result = unsafe {
+        libc::ptrace(
+            libc::PTRACE_CONT,
+            pid,
+            std::ptr::null_mut::<libc::c_void>(),
+            signal as usize as *mut libc::c_void,
+        )
+    };
+    security::checked(result as libc::c_int)
 }
 
 fn reap(pid: libc::pid_t) -> io::Result<i32> {

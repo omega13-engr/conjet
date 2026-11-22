@@ -75,8 +75,9 @@ Approach:
 2. Record preparation/refill, misses, failures, CPU, memory, energy, contention, and pressure; profile and change one demonstrated bottleneck at a time.
 3. Evaluate the sub-1 ms prepared p99 gate and equivalent-work fresh superiority independently; document failed targets and uncertainty.
 
-Evidence: Pending raw JSON, stage profiles, repeated comparison reports, power
-measurements, and a reviewed claim-by-claim verdict.
+Evidence: The [qualification preflight](speed-qualification.md) links
+the local experimental reports and lists the missing inputs. The
+required raw qualifying matrix and reviewed claim verdict remain pending.
 
 Source: [Latency budget](speed-engineering-plan.md#experimental-latency-budget),
 [claim policy](speed-engineering-plan.md#verification-and-claim-policy),
@@ -392,8 +393,8 @@ Review: Checked accounting through cleanup, active protection at claim,
 serialization with pressure, and the opt-in scope of the host guard.
 
 Next Action: Keep local measurements experimental and prepare the final
-qualification matrix. The paired preparation trace identifies guest
-setup after claim as the largest remaining median component.
+qualification matrix. The paired preparation trace led to the preclaim sandbox experiment
+recorded in SPEED-009.
 
 ### SPEED-009
 
@@ -442,6 +443,18 @@ Clippy, Python byte compilation, formatting and diff review passed.
 Raw samples, commands, binary hashes and production snapshots are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-009`.
 These are local implementation checks. Final qualification remains open.
+
+The follow-up experiment parks the trusted child with the private root
+mounted, limits applied, and credentials dropped. Seccomp and exec
+remain behind the claim. Two final boots measured 200 operations each.
+The traced guest claim-to-exec median fell from 1.080 to 0.768 ms.
+Untraced host claim-to-exec p50/p99 was 1.338/2.478 ms, with preparation
+p50/p99 of 1.472/3.024 ms. Record the extra preparation cost explicitly.
+Both runs passed the prepared safety cases. Fresh API/CLI, live pressure,
+and the balloon guard passed on the revised guest. The final workspace
+run passed 159 tests. The three ignored-by-default tests ran separately
+with the required entitlement in SPEED-010. See
+`SPEED-009/preclaim-sandbox` for raw runs and checks.
 
 Source: [Prepared lane](speed-engineering-plan.md#prepared-launch-lane),
 [latency budget](speed-engineering-plan.md#experimental-latency-budget).
