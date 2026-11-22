@@ -53,6 +53,72 @@ The outcome may be a useful improvement that does not meet the research target.
 These observations describe the source inspected during planning, not installed
 runtime qualification. Preserve the existing Docker lane throughout development.
 
+## Isolated speedup environment
+
+SPEED-000 is a mandatory prerequisite for every runtime test. Deliver a
+session-scoped environment launcher and runbook using the enhancement branch's
+own Conjet CLI, conjetd, and Core VMM executables. Do not use or replace installed
+production binaries. The launcher owns child processes and cleans them up on
+normal exit, cancellation, or failure; no launchd registration or detached helper.
+
+```text
+Production (untouched)                Speedup QA session
+Installed Conjet / conjetd / Core     Branch-built Conjet / conjetd / Core
+Existing home, disks and sockets     Separate home, disks, locks and sockets
+Existing Docker context             Docker context: conjet-speedup
+Existing Docker configuration        Private Docker configuration directory
+                                     |
+                                     +-- benchmark adapter: candidate
+                                     +-- benchmark adapter: pinned Kiri
+```
+
+Use these explicit environment bindings in every candidate child process:
+
+- `CONJET_HOME`: a task-owned directory under the external SSD QA root.
+- `CONJET_PROFILE=speedup`: current CLI naming produces `conjet-speedup`.
+- `DOCKER_CONFIG`: a private QA directory; never the user's Docker configuration.
+- `CONJET_DISABLE_BACKGROUND_SERVICE_REGISTRATION=1` and
+  `CONJET_DISABLE_MENU_BAR_APP=1`.
+- Resolve executable overrides to staged branch-built binaries and verify actual
+  process executable paths; do not allow installed-binary fallback.
+
+The CLI currently configures its Docker context with `makeCurrent: true`.
+A private DOCKER_CONFIG is therefore required even with a separate CONJET_HOME.
+Do not call `docker context use` against the user's configuration or persist QA
+runtime bindings into the production app's runtime-environment.json.
+
+The runbook must provide a wrapper that always passes the private Docker config
+and `--context conjet-speedup`, with conflicting DOCKER_HOST/DOCKER_CONTEXT
+removed from its child environment. Derive socket paths from ConjetPaths or the
+runtime manifest: long paths can resolve to hashed directories under /tmp.
+Inventory and clean only those task-owned paths.
+
+Use fresh mutable root/data disks and volumes. Verified immutable boot assets
+may be copied or shared read-only. Never attach production mutable disks, mount
+production databases, import secrets, or run global Docker pruning. Reserve
+nonconflicting loopback ports and network ranges; fail on collisions rather than
+stopping another process. Do not change global DNS, Docker socket symlinks, app
+registration, production contexts, or default builders.
+
+Before launch and after shutdown, record production process identities, context
+endpoint/current-context selection, and a read-only health observation. Verify
+candidate PIDs, executable paths, VM identity, sockets, and disks are distinct.
+Run a harmless fixture through the private conjet-speedup context to prove routing.
+If isolation cannot be demonstrated, stop the QA processes and fail the setup.
+
+Pin Kiri's binary/image versions and use an isolated Kiri configuration and data
+root verified from its implementation. Do not assume it supports CONJET_HOME or
+invent an isolation flag. If Kiri cannot run independently without changing an
+existing installation, document the blocker and use a separate test host.
+The benchmark runner must accept explicit candidate and Kiri endpoints and
+validate their identities before each run.
+
+Production remains running. Alternate candidate and Kiri measurement windows,
+stop only task-owned competitor instances, and report production/background load.
+Logical isolation cannot eliminate shared CPU, memory, thermal, and disk
+contention. Clean performance qualification requires a dedicated host or an
+explicitly authorized quiet window; a contaminated run cannot pass the final gate.
+
 ## Architecture and ownership
 
 ```text
@@ -266,6 +332,7 @@ to those differences without profiling.
 
 Follow [the task board](task-board.md) in dependency order:
 
+0. Prove the isolated conjet-speedup environment and competitor routing.
 1. Correct tracing and establish equivalent baselines.
 2. Specify lifecycle, ownership, protocol, recovery, and runtime support.
 3. Implement isolated transport and a narrow fresh runtime.

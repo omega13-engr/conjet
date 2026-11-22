@@ -30,7 +30,7 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
   Use ordinary pushes; do not force-push or include unrelated working-tree files.
 - A failing increment stays INPROGRESS or UNDERREVIEW until fixed. Never mark it
   DONE or claim a passing benchmark because its code was committed or pushed.
-- Open the PR to `main` only after SPEED-001 through SPEED-012 are DONE and all
+- Open the PR to `main` only after SPEED-000 through SPEED-012 are DONE and all
   required final benchmark, correctness, compatibility, and review gates pass.
   Missing hardware coverage, skipped required checks, and failed speed targets
   remain blockers under this workflow; any scope change must be explicit.
@@ -47,13 +47,70 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
+### SPEED-000
+
+Title: Build and prove the isolated conjet-speedup environment
+
+Description: Deliver a session-scoped launcher under build-support/ and
+`docs/engineering/speedup-environment.md` with setup, run, benchmark, and cleanup
+commands for separate branch-built Conjet, conjetd, and Core processes.
+
+Is blocked by task: None.
+
+Acceptance Criteria:
+
+- Separate CONJET_HOME, speedup profile, private DOCKER_CONFIG, mutable disks,
+  locks, logs, sockets, and branch-built executables are verified at runtime.
+- The private Docker context is named conjet-speedup; a test container reaches
+  its VM and cannot be confused with the production context.
+- Production PIDs, health, context endpoint and selected context remain unchanged;
+  no app runtime binding, global socket link, builder, DNS, or startup registration changes.
+- Launcher rejects executable fallback, production path overlap, endpoint mismatch,
+  port collisions, and conflicting inherited Docker endpoint variables.
+- Pinned Kiri has a verified separate data/configuration root and explicit benchmark
+  endpoint, or the task remains blocked pending an isolated test host.
+- Normal exit, cancellation, and startup failure clean only owned processes,
+  sockets, mounts, disks, and private contexts. Retain selected evidence first.
+- Smoke comparison records engine identities and production background load;
+  final clean benchmark qualification is not inferred from a contaminated run.
+
+Problem and Evidence: CONJET_HOME and CONJET_PROFILE isolate runtime paths, but
+CLI startup uses makeCurrent: true for Docker context creation. Shared Docker
+configuration or installed-binary fallback could alter the production context.
+
+Approach:
+
+1. Audit startup, executable resolution, configuration persistence, network ports,
+   and teardown; implement a fail-closed launcher with a private environment and
+   task-owned resource manifest.
+2. Build/stage isolated binaries, start separate processes under session ownership,
+   create conjet-speedup in private Docker configuration, and prove routing with
+   a disposable fixture plus before/after production observations.
+3. Verify Kiri isolation and explicit endpoints, run a smoke comparison, exercise
+   failure/cancellation cleanup, and document reproducible commands in the runbook.
+
+Evidence: Pending launcher tests, executable/PID and resource manifests, private
+context inspection, smoke benchmark JSON, production health observations, and
+cleanup results. Do not record setup as complete before live isolation passes.
+
+Source: [Isolated environment](speed-engineering-plan.md#isolated-speedup-environment),
+[paths](../../Sources/ConjetCore/ConjetPaths.swift),
+[environment](../../Sources/ConjetCore/ConjetEnvironment.swift),
+[CLI context configuration](../../Sources/ConjetCLI/main.swift).
+
+Review: Pending; inspect every path that can select production binaries, mutate
+shared settings, stop processes, or benchmark the wrong endpoint.
+
+Next Action: Audit startup and executable resolution and implement the isolation
+preflight before launching any candidate or Kiri process.
+
 ### SPEED-001
 
 Title: Correct process-start events and add a readiness fixture
 
 Description: Update the guest event producer and host decoder; add a fixture that signals readiness only after exec. Deliver trace-schema documentation and failure-path tests.
 
-Is blocked by task: None.
+Is blocked by task: SPEED-000.
 
 Acceptance Criteria:
 
@@ -102,7 +159,7 @@ its exit notification and cleanup boundaries differ.
 
 Approach:
 
-1. Add scenario manifests for native ARM64 Alpine true with no-network and bridge modes, using the same image digest and resource limits.
+1. Use the SPEED-000 private conjet-speedup and verified Kiri endpoints; add scenario manifests for native ARM64 Alpine true with no-network and bridge modes, using the same image digest and resource limits.
 2. Measure API create/start/wait/remove and CLI invocation separately; record API removal and observable cleanup independently.
 3. Run isolated baseline sessions and write configuration, raw samples, failures, and percentiles under benchmarks/reports/; mark cleanup unknown if it cannot be observed.
 
@@ -484,7 +541,7 @@ Is blocked by task: SPEED-012 and all required final gates COMPLETE and PASSED.
 
 Acceptance Criteria:
 
-- SPEED-001 through SPEED-012 are DONE with passing evidence and pushed commits.
+- SPEED-000 through SPEED-012 are DONE with passing evidence and pushed commits.
 - Final qualification reports identify the tested revision and exact claim scope;
   no required check is skipped or unresolved.
 - PR targets main from enhancement/speed-up and links the plan, board, reports,
@@ -510,7 +567,7 @@ Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-
 Review: Pending; verify all development gates before opening the PR and all CI
 and review requirements before merge.
 
-Next Action: Audit SPEED-001 through SPEED-012 after their final passing evidence is available.
+Next Action: Audit SPEED-000 through SPEED-012 after their final passing evidence is available.
 
 ### SPEED-014
 
