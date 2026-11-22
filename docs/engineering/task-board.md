@@ -47,39 +47,6 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 ## BACKLOG
 
-### SPEED-008
-
-Title: Run the fresh-runtime comparison and record the gate decision
-
-Description: Create docs/engineering/fresh-runtime-gate.md linking the baseline and candidate reports and a proceed/revise/stop verdict.
-
-Is blocked by task: SPEED-007.
-
-Acceptance Criteria:
-
-- Measure equivalent no-network and bridge lifecycle scenarios, including cleanup.
-- Report latency distributions, sustainable churn, CPU, memory, failures, and uncertainty.
-- Attribute observed bottlenecks with traces; do not infer that all savings belong to Jetstream.
-- Record a proceed/revise/stop decision and preserve any regression evidence.
-
-Problem and Evidence: The architecture plausibly removes launch overhead, but
-neither its performance nor superiority has been measured.
-
-Approach:
-
-1. Run the SPEED-002 scenarios against original Conjet, the candidate, and pinned Kiri with matching cache and network modes.
-2. Compare API-visible and cleanup-complete latency, throughput, CPU, memory, and failures; profile the dominant stages.
-3. Record which gains are demonstrated, any regressions, and whether prepared-launch work is justified; block it on a revise/stop verdict.
-
-Evidence: Pending raw comparative reports, profiles, and recorded gate decision.
-
-Source: [Delivery gates](speed-engineering-plan.md#incremental-delivery-and-decision-gates),
-[verification policy](speed-engineering-plan.md#verification-and-claim-policy).
-
-Review: Pending; assess causal attribution, regressions, and whether preparation remains worthwhile.
-
-Next Action: Run the no-network baseline scenario against the qualified candidate and retain its raw trace.
-
 ### SPEED-009
 
 Title: Implement prepare, claim, expire, and destroy for one-use slots
@@ -313,7 +280,58 @@ Next Action: After the PR merges, inspect current versions and release workflows
 
 ## INPROGRESS
 
-None.
+### SPEED-008
+
+Title: Run the fresh-runtime comparison and record the gate decision
+
+Description: Create docs/engineering/fresh-runtime-gate.md linking the baseline and candidate reports and a proceed/revise/stop verdict.
+
+Is blocked by task: SPEED-007.
+
+Acceptance Criteria:
+
+- Measure equivalent no-network and bridge lifecycle scenarios, including cleanup.
+- Report latency distributions, sustainable churn, CPU, memory, failures, and uncertainty.
+- Attribute observed bottlenecks with traces; do not infer that all savings belong to Jetstream.
+- Record a proceed/revise/stop decision and preserve any regression evidence.
+
+Problem and Evidence: The architecture plausibly removes launch overhead, but
+neither its performance nor superiority has been measured.
+
+Approach:
+
+1. Run the SPEED-002 scenarios against original Conjet, the candidate, and pinned Kiri with matching cache and network modes.
+2. Compare API-visible and cleanup-complete latency, throughput, CPU, memory, and failures; profile the dominant stages.
+3. Record which gains are demonstrated, any regressions, and whether prepared-launch work is justified; block it on a revise/stop verdict.
+
+Evidence: The signed native VSOCK diagnostic with 25 ms host ticks
+showed a 17.062 ms idle ping p50 and 27.426 ms p99. Without ticks eight
+pings returned before the session stopped. The Darwin native socket
+watcher now waits on kqueue and wakes the VMM on accept or incoming data.
+With the same tick setting, idle ping p50/p99 became 1.610/7.361 ms.
+The tick-disabled variant completed 200 pings in both trials, but the
+first stalled on a bridge lifecycle. Preserve that failure and keep the
+tick-enabled fixture for comparative work. Raw RPCs, commands, hashes,
+and matching production snapshots are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/transport`.
+
+The workspace passed 156 Rust tests with three existing opt-in tests
+ignored. The focused VSOCK suite passed 29 tests. The branch-built
+candidate's separate Docker smoke passed. The [fresh runtime gate](fresh-runtime-gate.md)
+records the comparison method and the limited diagnostic results.
+Equivalent image and boundaries, sustainable churn and the gate verdict
+remain pending.
+
+Source: [Delivery gates](speed-engineering-plan.md#incremental-delivery-and-decision-gates),
+[verification policy](speed-engineering-plan.md#verification-and-claim-policy).
+
+Review: Reviewed the kqueue descriptor lifetime, empty queue idle behavior,
+virtio stream ownership and opt-in scope. Causal attribution beyond
+host wake latency and the fresh gate review remain pending.
+
+Next Action: Stage a common verified ARM64 fixture image for original
+Conjet, official Kiri and the native candidate. Measure matching API
+work and identify the observable cleanup and resource boundaries.
 
 ## UNDERREVIEW
 

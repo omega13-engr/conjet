@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "macos")]
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -491,6 +493,32 @@ struct NativeListener {
     stop: UnixStream,
     thread: thread::JoinHandle<()>,
     identity: (u64, u64),
+    #[cfg(target_os = "macos")]
+    wake: Arc<NativeWake>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct NativeWake(Mutex<Option<Arc<WakeVcpus>>>);
+
+#[cfg(target_os = "macos")]
+type WakeVcpus = dyn Fn() + Send + Sync;
+
+#[cfg(target_os = "macos")]
+impl std::fmt::Debug for NativeWake {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("NativeWake").finish_non_exhaustive()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl NativeWake {
+    fn signal(&self) {
+        let action = self.0.lock().expect("native wake mutex poisoned").clone();
+        if let Some(action) = action {
+            action();
+        }
+    }
 }
 
 impl HostUnixVsockBridge {
@@ -558,15 +586,31 @@ impl HostUnixVsockBridge {
                 false,
             )));
             let worker_state = Arc::clone(&state);
+            #[cfg(target_os = "macos")]
+            let (queue, notifications) = {
+                let queue = NativeEvents::open()?;
+                queue.watch(listener.as_raw_fd(), false)?;
+                queue.watch(wake.as_raw_fd(), false)?;
+                (queue, Arc::new(NativeWake::default()))
+            };
+            #[cfg(target_os = "macos")]
+            let worker_notifications = Arc::clone(&notifications);
             let thread = thread::Builder::new()
                 .name("jetstream-launch-vsock".into())
-                .spawn(move || accept_native_launch(listener, wake, worker_state))?;
+                .spawn(move || {
+                    #[cfg(target_os = "macos")]
+                    serve_native_events(listener, wake, worker_state, queue, worker_notifications);
+                    #[cfg(not(target_os = "macos"))]
+                    accept_native_launch(listener, wake, worker_state);
+                })?;
             Ok((
                 state,
                 NativeListener {
                     stop,
                     thread,
                     identity: (metadata.dev(), metadata.ino()),
+                    #[cfg(target_os = "macos")]
+                    wake: notifications,
                 },
             ))
         })();
@@ -586,6 +630,13 @@ impl HostUnixVsockBridge {
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_native_wake(&self, action: impl Fn() + Send + Sync + 'static) {
+        if let Some(listener) = &self.native_listener {
+            *listener.wake.0.lock().expect("native wake mutex poisoned") = Some(Arc::new(action));
+        }
+    }
 }
 
 impl Drop for HostUnixVsockBridge {
@@ -604,6 +655,7 @@ impl Drop for HostUnixVsockBridge {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn accept_native_launch(
     listener: UnixListener,
     wake: UnixStream,
@@ -642,6 +694,133 @@ fn accept_native_launch(
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(_) => break,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct NativeEvents(OwnedFd);
+
+#[cfg(target_os = "macos")]
+impl NativeEvents {
+    fn open() -> std::io::Result<Self> {
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let queue = Self(unsafe { OwnedFd::from_raw_fd(fd) });
+        if unsafe { libc::fcntl(queue.0.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(queue)
+    }
+
+    fn watch(&self, descriptor: RawFd, edge: bool) -> std::io::Result<()> {
+        let mut flags = libc::EV_ADD;
+        if edge {
+            flags |= libc::EV_CLEAR;
+        }
+        let change = libc::kevent {
+            ident: descriptor as libc::uintptr_t,
+            filter: libc::EVFILT_READ,
+            flags,
+            fflags: 0,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // kqueue removes a stream's registration when the owning FD closes.
+        let result = unsafe {
+            libc::kevent(
+                self.0.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn wait(&self, events: &mut [libc::kevent]) -> std::io::Result<usize> {
+        let count = unsafe {
+            libc::kevent(
+                self.0.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                events.as_mut_ptr(),
+                events.len() as libc::c_int,
+                std::ptr::null(),
+            )
+        };
+        if count < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(count as usize)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn serve_native_events(
+    listener: UnixListener,
+    stop: UnixStream,
+    state: Arc<Mutex<HostUnixVsockBridgeState>>,
+    queue: NativeEvents,
+    notifications: Arc<NativeWake>,
+) {
+    // kevent is a C record and the kernel fills only the reported elements.
+    let mut events: [libc::kevent; MAX_NATIVE_BRIDGE_STREAMS + 2] = unsafe { std::mem::zeroed() };
+    loop {
+        let events = match queue.wait(&mut events) {
+            Ok(count) => &events[..count],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                eprintln!("native launch socket notification failed: {error}");
+                return;
+            }
+        };
+        if events
+            .iter()
+            .any(|event| event.ident as RawFd == stop.as_raw_fd())
+        {
+            return;
+        }
+        let mut wake_vm = false;
+        for event in events {
+            if event.ident as RawFd != listener.as_raw_fd() {
+                // Readiness wakes the vCPU. The existing virtio queue owner
+                // still reads the bytes and applies its own credit limits.
+                wake_vm = true;
+                continue;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let mut state = state.lock().expect("vsock bridge mutex poisoned");
+                    if state.streams.len() < MAX_NATIVE_BRIDGE_STREAMS {
+                        match queue.watch(stream.as_raw_fd(), true) {
+                            Ok(()) => {
+                                state.accept_stream(stream);
+                                wake_vm = true;
+                            }
+                            Err(error) => {
+                                eprintln!("native launch stream could not be watched: {error}")
+                            }
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    eprintln!("native launch socket accept failed: {error}");
+                    return;
+                }
+            }
+        }
+        if wake_vm {
+            notifications.signal();
         }
     }
 }
@@ -2142,6 +2321,45 @@ mod tests {
         assert!(endpoint.exists());
         drop(bridge);
         assert!(!endpoint.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_listener_notifies_on_ingress_without_consuming_or_polling_bytes() {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = dir.path().join("launch.sock");
+        let bridge = HostUnixVsockBridge::bind_native_launch(endpoint.clone()).unwrap();
+        let (wake, observed) = std::sync::mpsc::channel();
+        bridge.set_native_wake(move || {
+            let _ = wake.send(());
+        });
+        let mut client = UnixStream::connect(endpoint).unwrap();
+        let deadline = Duration::from_secs(2);
+        let quiet = Duration::from_millis(40);
+        observed.recv_timeout(deadline).unwrap();
+        assert_eq!(observed.recv_timeout(quiet), Err(RecvTimeoutError::Timeout));
+
+        client.write_all(b"native data").unwrap();
+        observed.recv_timeout(deadline).unwrap();
+        // Unread bytes remain in the transport but do not spin the watcher.
+        assert_eq!(observed.recv_timeout(quiet), Err(RecvTimeoutError::Timeout));
+        {
+            let mut state = bridge.state.lock().unwrap();
+            state.poll_host_streams();
+            assert_eq!(
+                state.pending_guest_packets.pop_front().unwrap().op,
+                OP_REQUEST
+            );
+            let data = state.pending_guest_packets.pop_front().unwrap();
+            assert_eq!(data.op, OP_RW);
+            assert_eq!(data.payload, b"native data");
+        }
+        client.write_all(b"next").unwrap();
+        observed.recv_timeout(deadline).unwrap();
     }
 
     #[test]
