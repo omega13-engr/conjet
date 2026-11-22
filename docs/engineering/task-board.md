@@ -167,8 +167,15 @@ Approach:
 3. Publish the appropriate tags from qualified revisions, monitor workflows, and
    verify release assets, Homebrew output, and cleanup.
 
-Evidence: Pending version decision, packaging QA, signed artifact checks, tags,
-workflow URLs, published checksums, and release URLs.
+Evidence: Local rehearsal and Homebrew rendering are recorded under
+SPEED-012. The static guest is distributed in the app; the verified Core
+v1.3.1 kernel remains compatible, so a separate Core release is unnecessary.
+The production workflow fails closed on missing signing and notarization
+credentials. The repository Actions secrets endpoint reports zero
+repository secrets and the environments endpoint reports no environments.
+Developer ID certificate and Apple notarization credentials must be
+configured or their organization-level availability verified before
+production publication. Tags, workflow evidence and published assets are pending.
 
 Source: [Release process](../release.md), [Homebrew](../homebrew.md),
 [repository instructions](../../AGENTS.md).
@@ -233,8 +240,18 @@ reclamation errors. The separate branch-built `conjet-speedup` Docker
 smoke passed. Both launchers recorded matching production snapshots.
 Logs, partial runs, raw samples, and Docker evidence are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-012`.
-The development timings were collected with other builds active; final
-packaged measurements and packaging validation are pending.
+The development timings were collected with other builds active. The
+source implementation was pushed as `ff1877c`.
+
+The release stage builds and bundles the static Linux guest beside the VMM.
+An isolated ARM64 app and DMG built with the repository scripts passed
+deep signature validation, byte comparison of the DMG-extracted CLI, VMM
+and guest against staging, DMG verification, SHA-256 verification, and
+Formula/Cask Ruby validation. `diskutil image attach --readOnly` mounted the
+DMG on this macOS host after legacy `hdiutil attach` returned permission
+denied. The local artifact used ad-hoc signing for rehearsal only.
+Logs are in the SPEED-012 evidence directory. No app was registered or
+launched. Final measurements use the packaged CLI and the app-sealed guest.
 
 Source: [Architecture ownership](speed-engineering-plan.md#architecture-and-ownership),
 [final recommendation](speed-engineering-plan.md#final-recommendation),

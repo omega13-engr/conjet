@@ -39,6 +39,7 @@ The DMG contains:
 - `bin/conjetd`
 - `bin/ConjetCoreVMM/Conjet Core`
 - `bin/ConjetCoreVMM/conjet-network`
+- `bin/ConjetCoreVMM/conjet-launchd-linux-arm64`
 - an `/Applications` alias for drag-install users
 
 The formula installs the CLI tools and a keg-local app copy. The cask installs
@@ -51,6 +52,16 @@ macOS DNS, bundles it beside the VMM in both app copies, and signs it without
 hypervisor privileges. The helper is an app-lane artifact; this networking change
 does not require a new Core/kernel image.
 
+The experimental native executable path bundles its own static Linux
+supervisor as an app resource. The release workflow builds it from the
+same revision with `rustup target add aarch64-unknown-linux-musl` and
+`CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build
+--locked --release --target aarch64-unknown-linux-musl -p
+conjet-launch-service --bin conjet-launchd`. Pass the artifact to
+the stage script with `--native-guest`. The experiment uses the
+existing verified Conjet Core v1.3.1 kernel; no Core release is needed.
+See [experimental native execution](engineering/speed-release-scope.md).
+
 Production notarized releases require these repository secrets:
 
 - `MACOS_CERTIFICATE_P12`: base64-encoded Developer ID Application `.p12`
@@ -62,9 +73,9 @@ Production notarized releases require these repository secrets:
 Optional release automation secret:
 
 - `CONJET_RELEASE_PR_TOKEN`: fine-grained token with contents write permission
-  and any required branch-protection bypass permission for committing generated
-  Homebrew updates to the default branch. If omitted, the release workflow uses
-  the default GitHub Actions token.
+  for pushing generated Homebrew updates through the repository's normal
+  Git and pull request rules. If omitted, the release workflow uses the
+  default GitHub Actions token.
 
 Manual release:
 

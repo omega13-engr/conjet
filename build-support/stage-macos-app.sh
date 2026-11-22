@@ -14,6 +14,8 @@ Options:
   --disable-sandbox                Pass --disable-sandbox to swift build
   --scratch-path DIR               Swift build artifacts directory
   --rust-target-dir DIR            Rust and network helper build directory
+  --native-guest PATH              Include the built static ARM64 guest supervisor
+  --swift-build-system NAME        Override the SwiftPM build system
 USAGE
 }
 
@@ -26,6 +28,8 @@ ENTITLEMENTS="$ROOT_DIR/build-support/conjet-release.entitlements"
 DISABLE_SANDBOX=0
 SWIFT_SCRATCH_PATH=""
 RUST_TARGET_DIR="$ROOT_DIR/target"
+NATIVE_GUEST=""
+SWIFT_BUILD_SYSTEM=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -59,6 +63,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --rust-target-dir)
       RUST_TARGET_DIR="${2:?missing value for --rust-target-dir}"
+      shift 2
+      ;;
+    --native-guest)
+      NATIVE_GUEST="${2:?missing value for --native-guest}"
+      shift 2
+      ;;
+    --swift-build-system)
+      SWIFT_BUILD_SYSTEM="${2:?missing value for --swift-build-system}"
       shift 2
       ;;
     -h|--help)
@@ -120,9 +132,19 @@ if [ ! -f "$ENTITLEMENTS" ]; then
   exit 1
 fi
 
+if [ -n "$NATIVE_GUEST" ]; then
+  case "$(file -b "$NATIVE_GUEST")" in
+    "ELF 64-bit LSB "*"ARM aarch64"*"statically linked"*) ;;
+    *) echo "expected a static AArch64 Linux guest supervisor at $NATIVE_GUEST" >&2; exit 1 ;;
+  esac
+fi
+
 cd "$ROOT_DIR"
 
 swift_build_args=("-c" "$CONFIGURATION")
+if [ -n "$SWIFT_BUILD_SYSTEM" ]; then
+  swift_build_args+=(--build-system "$SWIFT_BUILD_SYSTEM")
+fi
 if [ -n "$SWIFT_SCRATCH_PATH" ]; then
   swift_build_args+=(--scratch-path "$SWIFT_SCRATCH_PATH")
 fi
@@ -163,6 +185,9 @@ if [ -x "$RUST_TARGET_DIR/release/jetstream" ]; then
   /usr/bin/ditto "$RUST_TARGET_DIR/release/jetstream" "$HELPER_VMM_TOOLS/$VMM_BINARY_NAME"
   /usr/bin/ditto "$RUST_TARGET_DIR/release/$NETWORK_BINARY_NAME" "$APP_VMM_TOOLS/$NETWORK_BINARY_NAME"
   /usr/bin/ditto "$RUST_TARGET_DIR/release/$NETWORK_BINARY_NAME" "$HELPER_VMM_TOOLS/$NETWORK_BINARY_NAME"
+  if [ -n "$NATIVE_GUEST" ]; then
+    install -m 0644 "$NATIVE_GUEST" "$APP_VMM_TOOLS/conjet-launchd-linux-arm64"
+  fi
 fi
 
 /usr/bin/ditto "$ROOT_DIR/Sources/ConjetApp/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"

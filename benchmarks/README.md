@@ -162,3 +162,22 @@ reported with their actual topology metadata.
 - Strict bind claims require strict-bind workloads.
 - SmartMount/native-overlay claims require smart-bind workloads.
 - Kubernetes is intentionally out of scope for this benchmark generation.
+
+## Experimental product path
+
+`native-product.py` boots the packaged `conjet native --experimental`
+surface and separately measures its persistent authenticated API and
+CLI. It also exercises the native guest with the ARM64 canary, including
+its memory, isolation, output, cleanup and one-use checks. Keep inputs
+and output under ExternalSSD. Use the published kernel and its sidecar,
+the package's CLI/VMM pair, and the same pinned workload for repeat runs.
+
+The timer for API execution starts at launch or claim submission and
+ends at verified guest cleanup. CLI timing includes process startup and
+captured-output collection. Preparation through ready is recorded
+separately. Serial prepared throughput includes every refill. Raw
+outputs are written even when a check fails. See the
+[qualification report](../docs/engineering/speed-qualification.md)
+for the documented M1 Pro runs and the
+[experimental feature](../docs/engineering/speed-release-scope.md)
+for the supported configuration.

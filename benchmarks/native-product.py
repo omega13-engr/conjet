@@ -303,6 +303,7 @@ def main():
         'files': {name: {'path': str(path), 'sha256': hash_file(path)}
                   for name in ('cli','vmm','kernel','executable','canary','guest_init')
                   if (path := getattr(args, name)) is not None},
+        'guest_supervisor_sha256': hash_file(args.guest_init or args.vmm.with_name('conjet-launchd-linux-arm64')),
         'timing': 'Host monotonic, API admission or claim until verified cleanup; CLI process through exit and output.',
         'vm': {'vcpus': 2, 'memory_mib': 2048, 'host_tick_ms': 25, 'network': 'none'},
     }

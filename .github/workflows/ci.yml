@@ -13,6 +13,9 @@ on:
       - Sources/**
       - Tests/**
       - build-support/**
+      - Cargo.toml
+      - Cargo.lock
+      - guest/launch-service/**
       - jetstream/**
       - network-helper/**
       - benchmarks/**
@@ -27,6 +30,9 @@ on:
       - Sources/**
       - Tests/**
       - build-support/**
+      - Cargo.toml
+      - Cargo.lock
+      - guest/launch-service/**
       - jetstream/**
       - network-helper/**
       - benchmarks/**
@@ -75,10 +81,18 @@ jobs:
       - name: Test host networking
         run: |
           go test -C network-helper ./...
-          cargo test --manifest-path jetstream/Cargo.toml
+          cargo test --locked --workspace
 
       - name: Test Conjet
         run: swift test
+
+      - name: Build native Linux guest supervisor
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+            cargo build --locked --release --target aarch64-unknown-linux-musl \
+            -p conjet-launch-service --bin conjet-launchd
 
       - name: Stage Conjet app bundle
         run: |
@@ -87,6 +101,7 @@ jobs:
             --configuration release \
             --version "$(cat VERSION)" \
             --dist-dir dist \
+            --native-guest target/aarch64-unknown-linux-musl/release/conjet-launchd \
             --signing-identity - \
             --entitlements build-support/conjet-release.entitlements
 
@@ -121,6 +136,9 @@ jobs:
           test -x "${mount_dir}/bin/conjetd"
           test -x "${mount_dir}/bin/ConjetCoreVMM/Conjet Core"
           test -x "${mount_dir}/bin/ConjetCoreVMM/conjet-network"
+          guest="Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-launchd-linux-arm64"
+          cmp "${mount_dir}/Conjet.app/${guest}" "${mount_dir}/bin/ConjetCoreVMM/conjet-launchd-linux-arm64"
+          "${mount_dir}/bin/conjet" native --help
           test -x "${mount_dir}/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-network"
           "${mount_dir}/bin/ConjetCoreVMM/conjet-network" --version
           /usr/bin/codesign --verify --deep --strict "${mount_dir}/Conjet.app"
