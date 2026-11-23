@@ -164,7 +164,7 @@ def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None, group
                 adapter['run_workloads'](mode, manifest, report, output, connection, docker, env, group)
             elif mode != 'preflight':
                 matrix = runpy.run_path(str(REPO / 'benchmarks/docker-comparison-matrix.py'))
-                matrix['run_matrix'](mode, manifest, report, output, docker, env, build_bases)
+                matrix['run_matrix'](mode, manifest, report, output, docker, env, build_bases, connection)
         finally:
             connection.close()
         report['host_after'] = TOOLS['sample_host'](peer_args, output / 'footprint-after.json')

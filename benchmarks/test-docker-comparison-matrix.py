@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 import runpy
+import struct
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -88,6 +90,38 @@ class WorkloadTests(unittest.TestCase):
             (root / 'rust/index.json').write_text('{"manifests":[{"digest":"wrong"}]}')
             with self.assertRaisesRegex(ValueError, 'frozen manifest'):
                 MATRIX['build_context_args'](root, MANIFEST, 'rust')
+
+    def test_direct_exec_validates_real_exit_and_streams(self):
+        calls = []
+
+        class Connection:
+            def request(self, method, path, body, headers):
+                calls.append((method, path, json.loads(body)))
+
+            def getresponse(self):
+                return self
+
+            status = 200
+
+            def read(self, _size):
+                return (struct.pack('>B3xI', 1, 8) + b'exec-out'
+                        + struct.pack('>B3xI', 2, 8) + b'exec-err')
+
+        workload = runpy.run_path(str(HERE / 'docker-comparison-workloads.py'))
+        identifier = 'a' * 64
+
+        def api(_connection, method, path, statuses, body=None):
+            if method == 'POST':
+                return {'Id': identifier}
+            if path.startswith('/v1.44/exec/'):
+                return {'ExitCode': 23, 'Running': False}
+            return {'Id': identifier, 'State': {'Running': True}}
+
+        workload['TOOLS']['api'] = api
+        docker = SimpleNamespace(rows=[])
+        MATRIX['control_api'](docker, Connection(), workload, '1.44', identifier, 'sample')
+        self.assertEqual(calls, [('POST', '/v1.44/exec/' + identifier + '/start', {'Detach': False, 'Tty': False})])
+        self.assertEqual([row['error'] for row in docker.rows], [None, None])
 
 
 if __name__ == '__main__':

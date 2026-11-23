@@ -3,9 +3,11 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
+import http.client
 import io
 import json
 import re
+import runpy
 import subprocess
 import tarfile
 import time
@@ -625,17 +627,55 @@ def run_attach(docker, image, options, phase, index):
             raise RuntimeError('could not remove the owned attach container')
 
 
-def run_control(docker, manifest):
+def control_api(docker, connection, workloads, api_version, identifier, phase):
+    prefix = '/v' + api_version
+    api = workloads['TOOLS']['api']
+
+    def exec_canary():
+        created = api(connection, 'POST', f'{prefix}/containers/{identifier}/exec', (201,), {
+            'AttachStdout': True, 'AttachStderr': True, 'Tty': False, 'Cmd': [
+                'sh', '-c', 'printf exec-out; printf exec-err >&2; exit 23']})
+        exec_id = created['Id']
+        if not re.fullmatch(r'[0-9a-f]{12,64}', exec_id):
+            raise ValueError('API returned an invalid exec ID')
+        path = f'{prefix}/exec/{exec_id}'
+        streams = workloads['docker_streams'](connection, 'POST', path + '/start', {'Detach': False, 'Tty': False})
+        state = api(connection, 'GET', path + '/json', (200,))
+        return streams == (b'exec-out', b'exec-err') and state['ExitCode'] == 23 and not state['Running']
+
+    def inspect_canary():
+        state = api(connection, 'GET', f'{prefix}/containers/{identifier}/json', (200,))
+        return state['Id'] == identifier and state['State']['Running']
+
+    for case, action in [('exec.api', exec_canary), ('inspect.api', inspect_canary)]:
+        start = time.monotonic_ns()
+        error = None
+        try:
+            if not action():
+                error = 'Docker API canary failed'
+        except (OSError, http.client.HTTPException, RuntimeError, ValueError, KeyError) as failure:
+            error = str(failure)
+            connection.close()
+        docker.rows.append({'scenario': case, 'phase': phase, 'error': error,
+                            'elapsed_ns': time.monotonic_ns() - start})
+
+
+def run_control(docker, manifest, connection):
     budget = manifest['suites']['control']
     image = manifest['images']['alpine']['ref']
     if docker.call('control-prepull', ['pull', '--platform', 'linux/arm64', image], phase='setup') is None:
         return
     target = f'{docker.token}-control'
     args = ['--network', 'none', '--label', f'{LABEL}={docker.token}']
-    if docker.call('control-start', ['run', '-d', '--name', target, *args, image, 'sleep', '1800'],
-                   phase='setup') is None:
+    started = docker.call('control-start', ['run', '-d', '--name', target, *args, image, 'sleep', '1800'],
+                          phase='setup')
+    if started is None:
         return
     try:
+        identifier = started.decode().strip()
+        if not re.fullmatch(r'[0-9a-f]{12,64}', identifier):
+            raise ValueError('client returned an invalid control container ID')
+        workloads = runpy.run_path(str(Path(__file__).with_name('docker-comparison-workloads.py')))
         docker.call('exec.large-output', ['exec', target, 'dd', 'if=/dev/zero', 'bs=1024', 'count=128'],
                     expected=bytes(128 * 1024), phase='verification')
         docker.call('exec.tty', ['exec', '-t', target, 'sh', '-c', 'test -t 1 && printf tty-ok'],
@@ -656,6 +696,7 @@ def run_control(docker, manifest):
                         phase=phase, expected=b'exec-out', expected_code=23, expected_stderr=b'exec-err')
             docker.call('inspect.one', ['inspect', target], phase=phase)
             docker.call('list.one', ['ps', '-aq', '--filter', f'label={LABEL}={docker.token}'], phase=phase)
+            control_api(docker, connection, workloads, manifest['docker_api'], identifier, phase)
             run_attach(docker, image, args, phase, i)
             # File data is deterministic. Its transfers and integrity checks
             # are distinct from CLI execution timing.
@@ -679,14 +720,14 @@ def run_control(docker, manifest):
             raise RuntimeError('could not remove owned persistent container')
 
 
-def run_matrix(mode, manifest, report, output, prefix, env, build_bases=None):
+def run_matrix(mode, manifest, report, output, prefix, env, build_bases=None, connection=None):
     docker = Docker(prefix, env, output, report)
     context = {'conjet': 'conjet-speedup', 'kiri': 'kiri-speedup'}[report['engine']]
     actions = {
         'images': lambda: run_images(docker, manifest),
         'builds': lambda: run_builds(docker, manifest, context, build_bases),
         'compose': lambda: run_compose(docker, manifest),
-        'control': lambda: run_control(docker, manifest),
+        'control': lambda: run_control(docker, manifest, connection),
         'storage_network': lambda: run_storage(docker, manifest),
         'stress': lambda: run_stress(docker, manifest),
     }

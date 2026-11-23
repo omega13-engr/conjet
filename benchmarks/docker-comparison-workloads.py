@@ -28,12 +28,18 @@ def require(result, code=0, stdout=None, stderr=None):
 
 
 def logs(connection, path):
-    connection.request('GET', path)
+    return docker_streams(connection, 'GET', path)
+
+
+def docker_streams(connection, method, path, body=None):
+    payload = json.dumps(body).encode() if body is not None else None
+    headers = {'Content-Type': 'application/json'} if payload is not None else {}
+    connection.request(method, path, body=payload, headers=headers)
     response = connection.getresponse()
     data = response.read(64 * 1024 + 1)
     if response.status != 200 or len(data) > 64 * 1024:
         connection.close()
-        raise RuntimeError(f'Docker logs returned {response.status} or exceeded the output limit')
+        raise RuntimeError(f'Docker stream returned {response.status} or exceeded the output limit')
     streams = [bytearray(), bytearray()]
     cursor = 0
     while cursor < len(data):

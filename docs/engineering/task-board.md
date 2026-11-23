@@ -87,7 +87,7 @@ Acceptance Criteria:
 - Measure inspect/list latency with fixed owned-container counts and event delivery/order under churn; do not query or manipulate production containers.
 - Measure docker cp in/out with checksummed small-file and large-file sets. Record unsupported native or Kiri behavior without substituting another operation.
 
-Problem and Evidence: The matrix implements persistent exec streams and exit code, bounded output, inspect/list and checksummed file copies. The control fixture adds stdin-driven attach, logs, ordered Docker lifecycle events, TTY and idle attach disconnect recovery. Paired runtime evidence and direct API control remain open.
+Problem and Evidence: The matrix implements persistent CLI exec streams and exit code, bounded output, inspect/list and checksummed file copies. The control fixture adds stdin-driven attach, logs, ordered Docker lifecycle events, TTY and idle attach disconnect recovery. Direct API exec creation, stream demultiplexing, exit inspection and container inspection have executable canaries. Paired runtime evidence remains open.
 
 Raw evidence: Interactive development and tooling depend on control-plane and stream behavior beyond launch latency.
 
