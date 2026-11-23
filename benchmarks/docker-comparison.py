@@ -112,7 +112,7 @@ def observed_disks(engine, peer, disks):
     return observations
 
 
-def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None, group=None):
+def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None, group=None, build_bases=None):
     """Called by the launcher after it has proved its own runtime identity."""
     output = private_path(output)
     output.mkdir(mode=0o700)
@@ -164,7 +164,7 @@ def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None, group
                 adapter['run_workloads'](mode, manifest, report, output, connection, docker, env, group)
             elif mode != 'preflight':
                 matrix = runpy.run_path(str(REPO / 'benchmarks/docker-comparison-matrix.py'))
-                matrix['run_matrix'](mode, manifest, report, output, docker, env)
+                matrix['run_matrix'](mode, manifest, report, output, docker, env, build_bases)
         finally:
             connection.close()
         report['host_after'] = TOOLS['sample_host'](peer_args, output / 'footprint-after.json')
@@ -221,6 +221,8 @@ def run_pair(args, output, order):
                    '--comparison-mode', args.mode]
         if args.group:
             command += ['--comparison-group', args.group]
+        if args.build_bases:
+            command += ['--comparison-build-bases', str(args.build_bases)]
         if engine == 'conjet':
             command += ['--image', contract()['images']['alpine']['ref']]
             for name in ('swift_bin', 'core', 'network_helper', 'core_assets'):
@@ -268,6 +270,7 @@ def main():
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--pair', type=int, choices=range(1, 6), default=1)
     parser.add_argument('--timeout', type=int, default=900)
+    parser.add_argument('--build-bases', type=Path, help='verified ExternalSSD OCI layouts for offline Buildx input')
     lifecycle = contract()['suites']['lifecycle']
     parser.add_argument('--group', choices=[f'{workload}/{network}/{lane}'
                          for workload in lifecycle['workloads']
@@ -278,6 +281,10 @@ def main():
     args = parser.parse_args()
     if args.group and args.mode != 'lifecycle':
         parser.error('--group is only valid with lifecycle mode')
+    if args.build_bases:
+        args.build_bases = args.build_bases.resolve(strict=True)
+        if args.mode != 'builds' or not args.build_bases.is_dir() or not args.build_bases.is_relative_to(SCRATCH):
+            parser.error('--build-bases requires builds mode and an ExternalSSD directory')
     for name in ('swift_bin', 'core', 'network_helper', 'core_assets'):
         path = getattr(args, name).resolve(strict=True)
         if not path.is_relative_to(SCRATCH):

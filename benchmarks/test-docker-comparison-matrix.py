@@ -74,6 +74,21 @@ class WorkloadTests(unittest.TestCase):
         self.assertFalse(check(b'134217728\n64\nmax 100000\n', limits))
         self.assertFalse(check(b'134217728\n64\n25000 100000\n', limits))
 
+    def test_build_named_context_requires_the_original_pinned_manifest(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            root = Path(temporary)
+            for name in ('alpine', 'rust'):
+                layout = root / name
+                layout.mkdir()
+                pin = MANIFEST['images'][name]['ref'].split('@')[1]
+                (layout / 'index.json').write_text(json.dumps({'manifests': [{'digest': pin}]}))
+            compiler, runtime, args = MATRIX['build_context_args'](root, MANIFEST, 'rust')
+            self.assertEqual((compiler, runtime), ('compiler-base', 'runtime-base'))
+            self.assertIn('compiler-base=oci-layout://' + str(root / 'rust') + '@' + pin, args)
+            (root / 'rust/index.json').write_text('{"manifests":[{"digest":"wrong"}]}')
+            with self.assertRaisesRegex(ValueError, 'frozen manifest'):
+                MATRIX['build_context_args'](root, MANIFEST, 'rust')
+
 
 if __name__ == '__main__':
     unittest.main()

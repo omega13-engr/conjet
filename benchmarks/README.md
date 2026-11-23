@@ -212,7 +212,17 @@ The image suite separates public image pulls, known-warm load/save,
 and locally staged registry reimports. Registry reimports remain labeled
 with unknown layer-transfer state. The build suite uses a uniquely named
 pinned BuildKit worker with its own guest volume and separates preloading,
-build/export, load and output validation. Compose uses Node and Redis with
+build/export, load and output validation. To keep guest registry egress out
+of that experiment, stage the same pinned build bases once outside any
+timing session, then pass `--build-bases "$speed_build/oci-bases"` with
+`--mode builds` for both halves. Buildx reads the bases as local OCI named
+contexts. [Buildx named contexts](https://docs.docker.com/reference/cli/docker/buildx/build/#build-context)
+
+```sh
+python3 benchmarks/fetch-comparison-build-bases.py --output "$speed_build/oci-bases"
+```
+
+Compose uses Node and Redis with
 functional readiness and a persistent transaction counter. No benchmark
 rewrites the installed Docker context or prunes a shared store.
 

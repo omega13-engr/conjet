@@ -290,7 +290,7 @@ def session(args, root):
             comparison = runpy.run_path(str(REPO / 'benchmarks/docker-comparison.py'))
             comparison['run_suite']('conjet', docker_socket, docker_config, docker_peer,
                                     args.comparison_output, args.comparison_mode, evidence['vm_paths'],
-                                    args.comparison_group)
+                                    args.comparison_group, args.comparison_build_bases)
         if args.benchmark_output:
             benchmark = runpy.run_path(str(REPO / 'benchmarks/fresh-lifecycle.py'))
             benchmark['main']([
@@ -338,6 +338,7 @@ def main():
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
+    parser.add_argument('--comparison-build-bases', type=Path)
     parser.add_argument('--comparison-mode', choices=('preflight', 'pilot', 'probes', 'lifecycle', 'images', 'builds', 'compose', 'control',
                                                          'storage_network', 'stress'), default='preflight')
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')

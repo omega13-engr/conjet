@@ -88,7 +88,7 @@ Acceptance Criteria:
 - Report build wall time, cache hits, CPU, memory peak, disk I/O and resulting image size. Record whether BuildKit uses the native runtime, Docker/containerd, or another backend.
 - No native build speed claim is allowed merely because a native launch microbenchmark is fast; unsupported Kiri build configurations remain explicit.
 
-Problem and Evidence: The first Conjet half of `SPEED-021/pair-1` completed all Rust and Go build/export, load and execution canaries. Node failed its first exported image canary in all three repetitions with `MODULE_NOT_FOUND`. npm linked the local package outside the exported dependency directory. The fixture now uses `--install-links` to install the package contents, and build/load rows explicitly fail when the exported image fails its canary. Preserve pair 1 and rerun the corrected workload with both engines.
+Problem and Evidence: The first Conjet half of `SPEED-021/pair-1` completed all Rust and Go build/export, load and execution canaries. Node failed its first exported image canary in all three repetitions with `MODULE_NOT_FOUND`. npm linked the local package outside the exported dependency directory. The fixture now uses `--install-links` to install the package contents, and build/load rows explicitly fail when the exported image fails its canary. Kiri bootstrapped BuildKit but its worker timed out on Docker Hub HTTPS for all three base preloads. Stage the verified registry manifests and blobs once on ExternalSSD and provide the same offline OCI named contexts to both workers. Preserve pair 1 and rerun the corrected workload with both engines.
 
 Raw evidence: Build performance depends on BuildKit, filesystem behavior and caching; the new native launch service is not itself a build engine.
 

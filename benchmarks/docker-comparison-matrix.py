@@ -279,11 +279,32 @@ def prepare_files(language, directory):
     ]
 
 
-def run_builds(docker, manifest, context):
+def build_context_args(build_bases, manifest, language):
+    compiler = {'rust': 'rust', 'go': 'golang', 'node': 'node'}[language]
+    runtime = 'node' if language == 'node' else 'alpine'
+    if build_bases is None:
+        return manifest['images'][compiler]['ref'], manifest['images'][runtime]['ref'], []
+    root = build_bases.resolve(strict=True)
+    if not root.is_relative_to(Path('/Volumes/ExternalSSD/dev_workspace/tmp')):
+        raise ValueError('OCI build bases must be on ExternalSSD')
+    contexts = []
+    for alias, key in (('compiler-base', compiler), ('runtime-base', runtime)):
+        layout = (root / key).resolve(strict=True)
+        digest = manifest['images'][key]['ref'].split('@')[1]
+        locator = layout / 'index.json'
+        if not layout.is_relative_to(root) or locator.is_symlink():
+            raise ValueError('OCI build base index must stay inside the bundle')
+        index = json.loads(locator.read_bytes())
+        if [row['digest'] for row in index['manifests']] != [digest]:
+            raise ValueError('OCI build base index does not match the frozen manifest')
+        contexts.extend(['--build-context', f'{alias}=oci-layout://{layout}@{digest}'])
+    return 'compiler-base', 'runtime-base', contexts
+
+
+def run_builds(docker, manifest, context, build_bases=None):
     budget = manifest['suites']['builds']
-    base = {language: manifest['images'][key]['ref']
-            for language, key in [('rust', 'rust'), ('go', 'golang'), ('node', 'node')]}
-    for language, image in base.items():
+    for language in budget['workloads']:
+        image, runtime, image_contexts = build_context_args(build_bases, manifest, language)
         for repetition in range(budget['samples_per_session']):
             builder = f'{docker.token}-{language}-{repetition}'
             pin = manifest['images']['buildkit']['ref']
@@ -321,11 +342,10 @@ def run_builds(docker, manifest, context):
                 # A new builder has no application cache. Preload only base
                 # images inside that builder, outside the measured interval.
                 sources, source, dependency, actions = prepare_files(language, directory)
-                runtime = image if language == 'node' else manifest['images']['alpine']['ref']
                 dockerfile = directory / 'Dockerfile'
                 dockerfile.write_text(f'FROM {image} AS compiler\nFROM {runtime}\nCOPY --from=compiler /etc/os-release /base-release\n')
                 prefix = ['buildx', 'build', '--builder', builder, '--platform', 'linux/arm64',
-                          '--network', 'none', '--progress', 'plain']
+                          '--network', 'none', '--progress', 'plain', *image_contexts]
                 if docker.call('preload-builder-bases', [*prefix, '--output', 'type=cacheonly', directory],
                                timeout=budget['timeout_seconds'], phase='setup') is None:
                     break
@@ -638,12 +658,12 @@ def run_control(docker, manifest):
             raise RuntimeError('could not remove owned persistent container')
 
 
-def run_matrix(mode, manifest, report, output, prefix, env):
+def run_matrix(mode, manifest, report, output, prefix, env, build_bases=None):
     docker = Docker(prefix, env, output, report)
     context = {'conjet': 'conjet-speedup', 'kiri': 'kiri-speedup'}[report['engine']]
     actions = {
         'images': lambda: run_images(docker, manifest),
-        'builds': lambda: run_builds(docker, manifest, context),
+        'builds': lambda: run_builds(docker, manifest, context, build_bases),
         'compose': lambda: run_compose(docker, manifest),
         'control': lambda: run_control(docker, manifest),
         'storage_network': lambda: run_storage(docker, manifest),
