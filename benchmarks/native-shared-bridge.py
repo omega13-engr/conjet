@@ -12,6 +12,7 @@ import tempfile
 REPO = Path(__file__).resolve().parent.parent
 TOOLS = runpy.run_path(str(REPO / 'build-support/run-conjet-speedup.py'))
 MARKER = 'conjet-launchd verified shared bridge TCP, rollback, address reuse and isolated teardown'
+DNS_MARKER = 'conjet-launchd verified live DNS aliases, duplicate rejection and removal on peer detach'
 
 
 def main():
@@ -72,8 +73,13 @@ def main():
             report['vmm_exit'] = result.returncode
             boot = json.loads((args.output / 'vmm.json').read_text())
             report['guest_marker'] = MARKER in boot['console_output']
+            report['dns_marker'] = DNS_MARKER in boot['console_output']
+            report['no_guest_nic'] = any(stage['name'] == 'virtio-runtime'
+                                         and '0 net backend(s)' in stage['detail']
+                                         for stage in boot['stages'])
             report['guest_shutdown'] = boot['message']
-            if (not report['guest_marker'] or result.returncode
+            if (not all(report[key] for key in ('guest_marker', 'dns_marker', 'no_guest_nic'))
+                    or result.returncode
                     or report['guest_shutdown'] != 'guest requested PSCI SYSTEM_OFF'):
                 raise RuntimeError(f'shared bridge proof failed: {args.output}')
             report['passed'] = True

@@ -10,6 +10,7 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::bridge_dns;
 use crate::security::checked;
 use crate::socket::wait;
 
@@ -409,6 +410,7 @@ struct BridgePort {
     name: CString,
     target: File,
     address: Ipv4Addr,
+    alias: Option<String>,
 }
 
 struct SharedLinks {
@@ -437,7 +439,23 @@ impl SharedLinks {
         Ok(links)
     }
 
-    fn attach(&mut self, slot: usize, target: File) -> io::Result<Ipv4Addr> {
+    fn attach(&mut self, slot: usize, target: File, alias: &str) -> io::Result<Ipv4Addr> {
+        if !bridge_dns::valid_name(alias) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid bridge alias",
+            ));
+        }
+        if self.ports.iter().flatten().any(|port| {
+            port.alias
+                .as_ref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(alias))
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "bridge alias is occupied",
+            ));
+        }
         let owner = self
             .ports
             .get_mut(slot)
@@ -456,6 +474,7 @@ impl SharedLinks {
             name,
             target,
             address,
+            alias: None,
         });
         let port = owner.as_ref().expect("owned bridge port");
         let result = (|| {
@@ -478,7 +497,33 @@ impl SharedLinks {
             self.detach(slot)?;
             return Err(error);
         }
+        owner.as_mut().expect("owned bridge port").alias = Some(alias.to_ascii_lowercase());
         Ok(address)
+    }
+
+    fn receive_dns(&self, socket: &UdpSocket) -> io::Result<()> {
+        let mut packet = [0; bridge_dns::MAX_MESSAGE + 1];
+        let (count, source) = socket.recv_from(&mut packet)?;
+        if !self
+            .ports
+            .iter()
+            .flatten()
+            .any(|port| port.alias.is_some() && source.ip() == port.address)
+        {
+            return Ok(());
+        }
+        let reply = bridge_dns::answer(&packet[..count], |name| {
+            self.ports
+                .iter()
+                .flatten()
+                .find_map(|port| (port.alias.as_deref() == Some(name)).then_some(port.address))
+        });
+        if let Some(reply) = reply
+            && socket.send_to(&reply, source)? != reply.len()
+        {
+            return Err(io::ErrorKind::WriteZero.into());
+        }
+        Ok(())
     }
 
     fn detach(&mut self, slot: usize) -> io::Result<()> {
@@ -683,6 +728,8 @@ pub fn check_shared() -> io::Result<()> {
     let _proc = crate::kernel_fixture::ProcMount::new()?;
     let untouched = File::open("/proc/self/ns/net")?;
     let mut bridge = SharedLinks::create()?;
+    let dns = UdpSocket::bind((BRIDGE_IP, DNS_PORT))?;
+    dns.set_read_timeout(Some(TIMEOUT))?;
     let target =
         |process: &FixtureProcess| File::open(format!("/proc/{}/ns/net", process.child.id()));
     let mut server = FixtureProcess::spawn("--check-shared-bridge-peer")?;
@@ -694,14 +741,17 @@ pub fn check_shared() -> io::Result<()> {
     });
     enter_namespace(&bridge.namespace)?;
     configured?;
-    if bridge.attach(1, target(&failed)?).is_ok() || bridge.ports[1].is_some() {
+    if bridge.attach(1, target(&failed)?, "client").is_ok() || bridge.ports[1].is_some() {
         return Err(io::Error::other(
             "partial peer allocation did not roll back",
         ));
     }
-    let server_ip = bridge.attach(0, target(&server)?)?;
-    let client_ip = bridge.attach(1, target(&client)?)?;
-    if bridge.attach(1, target(&failed)?).is_ok() || server_ip == client_ip {
+    let server_ip = bridge.attach(0, target(&server)?, "service")?;
+    let client_ip = bridge.attach(1, target(&client)?, "client")?;
+    if bridge.attach(1, target(&failed)?, "retry").is_ok()
+        || bridge.attach(2, target(&failed)?, "Service").is_ok()
+        || server_ip == client_ip
+    {
         return Err(io::Error::other(
             "bridge did not preserve distinct address ownership",
         ));
@@ -711,6 +761,8 @@ pub fn check_shared() -> io::Result<()> {
         return Err(io::Error::other("bridge server did not bind"));
     }
     client.control.write_all(&[2])?;
+    bridge.receive_dns(&dns)?;
+    bridge.receive_dns(&dns)?;
     if read_byte(&mut client.control)? != 1 || read_byte(&mut server.control)? != 2 {
         return Err(io::Error::other("bridge TCP verification failed"));
     }
@@ -720,15 +772,18 @@ pub fn check_shared() -> io::Result<()> {
     // A replacement inherits the free address while the server and its
     // listening socket remain live.
     let mut replacement = FixtureProcess::spawn("--check-shared-bridge-peer")?;
-    if bridge.attach(1, target(&replacement)?)? != client_ip {
+    if bridge.attach(1, target(&replacement)?, "replacement")? != client_ip {
         return Err(io::Error::other("bridge address was not reused"));
     }
-    replacement.control.write_all(&[2])?;
+    replacement.control.write_all(&[4])?;
+    bridge.receive_dns(&dns)?;
+    bridge.receive_dns(&dns)?;
     if read_byte(&mut replacement.control)? != 1 || read_byte(&mut server.control)? != 2 {
         return Err(io::Error::other(
             "sibling listener did not survive replacement",
         ));
     }
+    drop(dns);
     bridge.close()?;
     for peer in [&mut server, &mut replacement] {
         peer.control.write_all(&[3])?;
@@ -740,7 +795,36 @@ pub fn check_shared() -> io::Result<()> {
     println!(
         "conjet-launchd verified shared bridge TCP, rollback, address reuse and isolated teardown"
     );
+    println!(
+        "conjet-launchd verified live DNS aliases, duplicate rejection and removal on peer detach"
+    );
     Ok(())
+}
+
+fn resolve_peer(name: &[u8], own: Ipv4Addr) -> io::Result<Option<Ipv4Addr>> {
+    let dns = UdpSocket::bind((own, 0))?;
+    dns.set_read_timeout(Some(TIMEOUT))?;
+    dns.connect((BRIDGE_IP, DNS_PORT))?;
+    let mut query = vec![0x4a, 0x1b, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, name.len() as u8];
+    query.extend_from_slice(name);
+    query.extend_from_slice(&[0, 0, 1, 0, 1]);
+    dns.send(&query)?;
+    let mut reply = [0; bridge_dns::MAX_MESSAGE];
+    let count = dns.recv(&mut reply)?;
+    if count != query.len() && count != query.len() + 16
+        || reply[..2] != query[..2]
+        || reply[2] != 0x85
+        || reply[12..query.len()] != query[12..]
+    {
+        return Err(io::Error::other("unexpected DNS canary response"));
+    }
+    match (reply[3], reply[7], count - query.len()) {
+        (0, 1, 16) => Ok(Some(Ipv4Addr::from(
+            <[u8; 4]>::try_from(&reply[count - 4..count]).unwrap(),
+        ))),
+        (3, 0, 0) => Ok(None),
+        _ => Err(io::Error::other("unexpected DNS canary answer")),
+    }
 }
 
 pub fn check_shared_peer(parent: u32) -> io::Result<()> {
@@ -748,7 +832,8 @@ pub fn check_shared_peer(parent: u32) -> io::Result<()> {
     let server = Ipv4Addr::new(198, 18, 0, 2);
     let client = Ipv4Addr::new(198, 18, 0, 3);
     assert_link_absent(BRIDGE)?;
-    let own = match read_byte(&mut control)? {
+    let role = read_byte(&mut control)?;
+    let own = match role {
         1 => {
             let listener = TcpListener::bind((server, CANARY_PORT))?;
             control.write_all(&[1])?;
@@ -772,8 +857,15 @@ pub fn check_shared_peer(parent: u32) -> io::Result<()> {
             }
             server
         }
-        2 => {
-            let mut stream = TcpStream::connect_timeout(&(server, CANARY_PORT).into(), TIMEOUT)?;
+        2 | 4 => {
+            let endpoint = resolve_peer(b"SeRvIcE", client)?
+                .filter(|ip| *ip == server)
+                .ok_or_else(|| io::Error::other("DNS did not resolve the service peer"))?;
+            let expected = (role == 2).then_some(client);
+            if resolve_peer(b"client", client)? != expected {
+                return Err(io::Error::other("DNS alias did not follow peer detach"));
+            }
+            let mut stream = TcpStream::connect_timeout(&(endpoint, CANARY_PORT).into(), TIMEOUT)?;
             stream.set_read_timeout(Some(TIMEOUT))?;
             stream.set_write_timeout(Some(TIMEOUT))?;
             stream.write_all(b"ping")?;

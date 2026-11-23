@@ -837,8 +837,51 @@ subprocesses and covers the link primitive. Native OCI ownership and
 Docker DNS remain in SPEED-035. Production snapshots matched and owned
 scratch was removed. Independent PR review remains required.
 
-Next Action: Wire bridge leases and DNS names to native OCI lifecycle and
-Docker network operations in SPEED-035.
+Next Action: Give each bridge lease a scoped DNS name in SPEED-035B.
+
+### SPEED-035B
+
+Title: Bind private DNS aliases to peer leases
+
+Description: Resolve a service name to a live bridge peer without an
+external resolver or DNS forwarding.
+
+Is blocked by task: SPEED-035A (DONE).
+
+Acceptance Criteria:
+
+- Resolve a service alias using UDP from a second guest network namespace
+  and connect to the returned address.
+- Reject case-insensitive duplicate aliases, malformed questions and
+  requests outside the bounded DNS message format.
+- Remove the DNS record on detach, including when a replacement reuses
+  the address.
+
+Problem and Evidence: The existing single-peer fixture answered only one
+hardcoded name with the bridge gateway address.
+
+Approach: Serve authoritative A records from the bounded peer table.
+Reserve an alias only once link setup succeeds and answer only requests
+from live peers. Return NXDOMAIN for an absent name.
+
+Evidence: DONE. Guest tests cover mixed-case lookups, AAAA with no IPv6
+answer, NXDOMAIN and malformed messages. ARM64 Clippy and the release
+guest build passed. `python3 benchmarks/native-shared-bridge.py` on
+`9249789` plus this change verified mixed-case DNS, TCP via the returned
+address and NXDOMAIN for the detached peer after address reuse.
+Boot output, commands, artifact hashes and cleanup are retained under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-035B`.
+
+Source: [Guest DNS responder](../../guest/launch-service/src/bridge_dns.rs),
+[bridge fixture](../../guest/launch-service/src/bridge_fixture.rs).
+
+Review: Local diff and isolated checks passed. The guest had zero virtio
+network backends and powered off cleanly. Production was unchanged and
+the launcher removed its owned scratch directory. Docker network
+ownership remains open. Independent PR review remains required.
+
+Next Action: Route private bridge peer leases and resolver configuration
+through the real OCI workload supervisor in SPEED-035.
 
 ### SPEED-035
 
@@ -846,7 +889,7 @@ Title: Connect native containers to one private bridge and DNS
 
 Description: Wire the verified guest bridge implementation to native Docker network ownership.
 
-Is blocked by task: SPEED-035A (DONE).
+Is blocked by task: SPEED-035B (DONE).
 
 Acceptance Criteria:
 
