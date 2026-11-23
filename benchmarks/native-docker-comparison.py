@@ -230,6 +230,12 @@ def run_pair(args, root, pair, participants):
             raise RuntimeError(f'{engine} failed capture or cleanup; see {root}')
 
 
+def interrupt(_signum, _frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    raise KeyboardInterrupt
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ('swift-bin', 'core', 'native-kernel', 'native-guest', 'native-package', 'native-receipt', 'output'):
@@ -248,7 +254,8 @@ def main():
     descriptor = os.open(lock_path, os.O_CREAT | os.O_NOFOLLOW | os.O_WRONLY, 0o600)
     with os.fdopen(descriptor, 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        signal.signal(signal.SIGTERM, lambda *_: signal.raise_signal(signal.SIGINT))
+        signal.signal(signal.SIGTERM, interrupt)
+        signal.signal(signal.SIGINT, interrupt)
         if args.all_pairs:
             output.mkdir(mode=0o700)
             for pair in range(1, 6):
@@ -258,4 +265,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)

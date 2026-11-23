@@ -373,6 +373,13 @@ Kiri guest teardown, and sub-1 ms p99 target are deferred research. Their
 criteria remain in force for future performance claims. The experimental
 release carries no comparative claim or broad hardware qualification.
 
+The subsequent Docker program uses native OCI by default inside the isolated
+`conjet-speedup` launcher for the verified subset. The installed runtime
+continues to own the production endpoint. Candidate compatibility gaps
+remain promotion gates. The [Docker comparison contract](docker-benchmark-plan.md)
+and [results](docker-benchmark-results.md) cover its own M1 Pro timing
+boundaries, with the original SPEED-008 verdict preserved.
+
 ## Verification and claim policy
 
 - Run at least 10,000 measured operations per microbenchmark scenario across

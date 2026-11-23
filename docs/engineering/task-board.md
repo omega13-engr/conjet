@@ -179,6 +179,14 @@ wait timed out and its OOM flag stayed false despite the matched effective
 limits. Both passed survivor, recovery and owner cleanup. Further Kiri
 qualification needs a verified termination or OOM witness for this load.
 
+The release-build native static run at `cabbea9` passed 8,000 timings
+and the active-data, one-use, expiry, pressure, output, backpressure,
+disconnect and shutdown canaries. Both VM directories were removed and
+production observations matched. Fresh and prepared API p99 were 4.100
+and 3.201 ms, with 3.394 ms refill p99. See raw samples and summary under
+`SPEED-025/native-product-release-cabbea9`. The Docker stress matrix
+coverage remains open.
+
 
 ### SPEED-024
 
@@ -383,7 +391,10 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Build the coverage and claim audit from the completed suite reports.
+Next Action: Keep the published coverage and claim audit current. Complete the
+remaining broad-program scenario repetitions only when that scope resumes.
+The revised native-first lane has a reviewed local measurement row in
+`SPEED-019/native-kiri-release-cabbea9`; independent PR review remains open.
 
 ### SPEED-019
 
@@ -428,9 +439,9 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Run the matched release-build native/Kiri comparison, profile the
-adapter and remeasure justified changes. Legacy repetitions stopped on the
-user's direction at pair 3, leaving its partial report and verified cleanup.
+Next Action: Preserve the final native-first row and the historical baseline.
+Legacy repetitions stopped on the user's direction at pair 3, leaving its
+partial report and verified cleanup.
 The earlier source adapter runner verifies one-use guest
 cleanup on every operation and uses UID/GID 65532. The baseline uses the
 image-default user, so their measurements remain distinct.
@@ -440,10 +451,10 @@ The no-network Alpine `true` CLI series at `eb31229` completed pair 1 with
 2,000 samples per engine and no failures. It retained a canceled next boot
 with verified cleanup to allow local validation of the hosted CI fix without
 overlapping compilation and timing.
-Pairs 2 through 5 resumed on that same harness under the series' `remaining`
-directory. The canceled preliminary boot is preserved outside the counted
-pair set.
-Complete pair 2 retained two exit-127 errors on the existing Conjet path
+Repetition resumed at pair 2 on that same harness under the series'
+`remaining` directory. Pair 3 was canceled. Pairs 4 and 5 are outstanding.
+The canceled preliminary boot is preserved outside the counted pair set.
+Pair 2 retained two exit-127 errors on the existing Conjet path
 and zero on Kiri. Both Conjet errors reported Go thread creation failure
 under the declared four-PID cap and cleaned up successfully. Investigate
 the guest runc startup path using a separate diagnostic and keep the
@@ -456,8 +467,7 @@ limits with zero failures. Native p50/p95/p99 were 34.201/39.674/43.706 ms
 (API) and 47.845/52.008/52.984 ms (CLI). Kiri recorded
 4.116/4.776/5.204 ms (API) and 21.341/22.796/23.813 ms (CLI).
 The native API's median observed adapter sleep was 27.393 ms.
-Profiling and final independent sessions remain open. Kiri guest cleanup
-is unknown.
+Kiri guest cleanup is unknown.
 
 The adapter now waits for the terminal guest revision in cancellable
 100 ms slices. The release pilot in `SPEED-019/native-default-wait-pilot`
@@ -468,6 +478,17 @@ verified cancellation without resubmitting Launch. The real OCI suite
 in `SPEED-018/native-default-wait-live` and the Kiri-first serial
 orchestrator pilot in `SPEED-019/native-default-orchestrated-pilot` passed.
 The 25 ms host tick remains enabled.
+
+The final five alternating, independent pairs used measurement revision
+`cabbea9` and matching release binaries. All 40,000 measurements and 200
+warmups passed. The native API p50 ratio to Kiri was 0.841 (95% interval
+0.818–0.855); p99 was inconclusive at the practical threshold. Native
+CLI p50/p99 ratios were 1.076 and 1.099 and slower at that threshold.
+The native witness verified each workload and its cleanup. Production
+and owned session cleanup checks passed for all ten boots. See the
+[release-build lifecycle results](docker-benchmark-results.md#release-build-native-docker-lifecycle)
+and `SPEED-019/native-kiri-release-cabbea9/summary.json`. The matched warm
+no-network `true` row is complete. Broader lifecycle coverage remains open.
 
 
 ### SPEED-008
@@ -815,6 +836,17 @@ The coordinator can run all five frozen pairs under a single foreground
 lock. New session reports record `/info` after VM readiness and probe the
 container view of guest memory outside timing. A second verified backing
 snapshot exposes allocated disk changes across the complete suite.
+
+The release-build coordinator's cancellation check initially exposed an
+inherited ignored SIGINT that prevented TERM from stopping the series. The
+worker stopped the task-owned launcher and verified cleanup. The coordinator
+now handles TERM directly. The repeated Kiri-first check returned 130,
+retained 841 partial API samples, verified unchanged production and released
+the daemon, socket and disk holder before a native launcher could start.
+Evidence is in `SPEED-019/native-default-matched-kiri-cancel{,-fixed}`.
+A post-fix pilot completed both lanes on both engines under
+`SPEED-019/native-default-post-cancel-fix-pilot`. Its samples are excluded
+from the five-pair series measured at `cabbea9`.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),

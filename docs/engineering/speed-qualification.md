@@ -138,3 +138,9 @@ The historical 200-sample SPEED-009 trace was recomputed from its
 untraced retained sample file. Its host claim-to-exec p50/p99 was
 1.338/2.478 ms. That fixture result uses a different endpoint from
 the product's claim-through-cleanup distributions.
+
+The later [isolated Docker candidate results](docker-benchmark-results.md#release-build-native-docker-lifecycle)
+report five release-build native/Kiri pairs for a pinned, no-network Alpine
+workload. They cover Docker acknowledgement and client exit on the M1 Pro.
+Kiri guest teardown remains unobservable, and the original SPEED-008
+comparative qualification stays unresolved.

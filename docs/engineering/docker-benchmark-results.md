@@ -1,8 +1,8 @@
 # Docker and native comparison results
 
 This report covers the M1 Pro experiments completed to date. It separates
-the existing Docker engines, static native API/CLI and the opt-in Docker
-adapter backed by native OCI. The program's frozen comparison contract
+the existing Docker engines, static native API/CLI and the isolated Docker
+candidate backed by native OCI. The program's frozen comparison contract
 requires five independent pairs. The retained local data support
 descriptive results at the stated boundaries. SPEED-008 remains unresolved.
 
@@ -26,6 +26,121 @@ the measured binaries and host conditions.
 | Conjet candidate VMM | `49992b4166bd4692fd8226e29e935046fab3f344dbf1ad89e73980da7e5f13d6` |
 | Candidate native supervisor | `6a3839855383e674e59a854fa197e56c2489c09d2594665b702dbcd733f0f42a` |
 | Official Kiri daemon | `c5cd8edefc69d3e4de4cf38a8149d07d6c4c4f1d522167c890541c17f2630884` |
+
+## Release-build native Docker lifecycle
+
+The private `conjet-speedup` launcher defaults to Jetstream native OCI.
+The release-optimized CLI, VMM and guest supervisor were built from
+`98d4148380ce3c6cadd4cf1b8b217d9aea76a47e`. The measured harness and
+adapter were `cabbea99f1fe1ee18219ff0a9e27245358ef36bf`. The Swift and Rust
+sources and lockfiles are identical at these revisions. The VMM used
+local QA signing with the hypervisor entitlement.
+
+| Release artifact | SHA-256 |
+| --- | --- |
+| Conjet CLI | `29a3e4840aa71416c4a56394c26812bd5b6988e60cb9842920ef47c925293d5a` |
+| Jetstream VMM | `2279de55d31f4acd5c32d37c25e66c5f64de528e16f2069b9df993e838e3ef05` |
+| Conjet native supervisor | `6a3839855383e674e59a854fa197e56c2489c09d2594665b702dbcd733f0f42a` |
+| Core 1.3.1 kernel | `efc2fc2150594bcd481b81ee24fe3f2c96360ea7507b4e71a28bbcf077b379b1` |
+| Admitted Alpine package | `7e002bd9c01ad6b50c34c1df8c13975ed422fe9484780870e3ac1439548161eb` |
+| Docker 29.10.0 client | `cd9e0b149e447af504421ac7117044d8e17d695d66846a5c4df1312c417c22a3` |
+
+The [matched runner](../../benchmarks/README.md#paired-docker-comparison)
+used `--all-pairs` with the 2,000-sample budget per engine, transport and
+boot, plus ten separate warmups per lane. Both engines used the manifest's
+pinned ARM64 Alpine config and `/bin/true`, UID/GID 65532, no network,
+16 MiB, four PIDs and 500 millicores, with capabilities dropped and
+no-new-privileges requested. A separate canary checked UID, GID, both
+streams and deliberate exit 23. Conjet's guest applies the cgroup controls
+before exec. Kiri's canary read back the three controls. The guests had two
+vCPUs and 2 GiB configured, with kernels `6.12.86-conjet` and `6.18-kiri`.
+Both image roots were ready before timing. Kiri's disk was held by its
+attributed Virtualization process on ExternalSSD. Jetstream used a
+disposable session disk and staged root on ExternalSSD.
+
+API time covers create, start, wait and removal acknowledgement over API
+1.44. CLI time covers the unmodified `docker run --rm` client through
+process exit. Every Conjet sample had a unique native execution ID and
+verified guest cleanup. The witness lookup happens after the measured
+operation and is charged to session throughput. Kiri guest cleanup
+remains unknown. All 40,000 measured operations and 200 warmups completed
+with zero failures.
+
+| Pair | Engine | API p50 / p95 / p99 (ms) | API ops/s | CLI p50 / p95 / p99 (ms) | CLI ops/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Conjet native | 3.443 / 4.633 / 5.626 | 262.2 | 22.900 / 24.901 / 28.989 | 42.2 |
+| 1 | Kiri | 4.047 / 4.886 / 5.985 | 240.8 | 21.280 / 22.919 / 25.878 | 46.6 |
+| 2 | Kiri | 4.053 / 4.975 / 8.263 | 237.1 | 21.352 / 22.796 / 24.921 | 46.5 |
+| 2 | Conjet native | 3.472 / 4.707 / 5.655 | 260.7 | 22.979 / 24.835 / 27.942 | 42.1 |
+| 3 | Conjet native | 3.467 / 4.554 / 5.409 | 262.8 | 22.939 / 24.623 / 27.896 | 42.2 |
+| 3 | Kiri | 4.052 / 4.871 / 5.555 | 240.6 | 21.147 / 22.801 / 25.533 | 46.8 |
+| 4 | Kiri | 4.494 / 5.585 / 7.501 | 216.0 | 21.740 / 24.112 / 27.247 | 45.4 |
+| 4 | Conjet native | 3.587 / 4.735 / 5.765 | 253.8 | 23.038 / 25.235 / 27.756 | 41.9 |
+| 5 | Conjet native | 3.408 / 4.424 / 5.369 | 265.9 | 23.091 / 24.801 / 28.367 | 41.9 |
+| 5 | Kiri | 4.045 / 4.893 / 5.707 | 241.7 | 21.268 / 22.685 / 24.709 | 46.7 |
+
+The geometric mean of paired Conjet/Kiri latency ratios and independent
+boot-pair bootstrap intervals use 10,000 resamples with seed 615026.
+
+| Boundary | Percentile | Ratio | 95% interval | Verdict at the declared 5% threshold |
+| --- | --- | ---: | ---: | --- |
+| Docker API removal acknowledgement | p50 | 0.841 | 0.818–0.855 | Conjet lower |
+| Docker API removal acknowledgement | p99 | 0.854 | 0.746–0.954 | Inconclusive |
+| Docker CLI process exit | p50 | 1.076 | 1.068–1.084 | Conjet slower |
+| Docker CLI process exit | p99 | 1.099 | 1.058–1.132 | Conjet slower |
+
+One-minute host load ranged from 2.95 to 7.07 with production active.
+Attributed host CPU across each two-lane session was 21.64–22.18 CPU-s
+for Conjet and 21.86–23.47 CPU-s for Kiri. Combined end-of-session RSS
+snapshots were 234–398 MiB and 317–450 MiB, respectively. These are
+process-level point observations. Guest memory decomposition and energy
+are unavailable at equivalent boundaries.
+
+In the 100-sample release pilot before optimization, the adapter spent a
+median 27.393 ms sleeping while observing the API workload. The switch to
+a bounded terminal wait kept cancellation and cleanup semantics and used
+one Wait request in each final operation. Across final API sessions, stage
+medians were 0.452–0.478 ms for authentication, 0.166–0.172 ms for admission,
+1.751–1.828 ms for terminal observation, and 0.251–0.264 ms for output.
+The 25 ms host tick stayed enabled. The legacy repetitions
+stopped at the user's direction and remain as historical evidence.
+Two earlier canary attempts are retained in
+`SPEED-019/native-default-pilot-{1,2}`. The sandbox denied the pipe used
+by shell command substitution, and the second canary requested an absent
+`/bin/id`. The final probes use the verified BusyBox applet and separate
+stream canaries.
+
+A later coordinator fix handles TERM directly when the launching shell
+ignores SIGINT. The corrected cancellation run exited 130, preserved 841
+partial Kiri API samples, and finished cleanup before the other engine
+started. A separate 100-sample-per-lane post-fix pilot passed. The table
+above remains tied to the frozen `cabbea9` series.
+
+## Release-build static native API and CLI
+
+A separate release-build run used `cabbea9`, the same CLI, VMM, kernel and
+guest digests, and the pinned static ARM64 payload. The
+[`native-product.py` harness](../../benchmarks/README.md#experimental-product-path)
+ran 2,000 operations per lane and retained ten warmups each. Native API
+latency ends at verified guest cleanup. CLI latency includes client
+startup and output collection. Prepared latency starts at claim and
+the throughput window includes each slot refill.
+
+| Lane | Launch p50 / p95 / p99 (ms) | Refill p50 / p95 / p99 (ms) | Completed/s |
+| --- | ---: | ---: | ---: |
+| Fresh API | 2.017 / 2.938 / 4.100 | — | 440.7 |
+| Prepared API | 1.292 / 1.873 / 3.201 | 1.027 / 1.515 / 3.394 | 373.2 |
+| Fresh CLI | 20.308 / 22.412 / 26.894 | — | 48.5 |
+| Prepared CLI | 19.181 / 20.922 / 24.293 | 18.738 / 20.404 / 22.396 | 26.0 |
+
+All 8,000 measured operations succeeded. The CLI one-use and expired
+claim misses took 18.390 and 40.983 ms. The VMM used 34.85 CPU-s across
+the timing boot. Its RSS snapshots were 107.9 MiB before and 75.8 MiB
+after the measurement. The active-memory preservation canary, slot
+eviction, concurrent claim, admission backpressure, bounded output,
+disconnect and timeout recovery, and shutdown passed. Both VM directories
+were removed and the production observations matched. Kiri has no
+corresponding prepared API, so the static native results stand alone.
 
 ## Existing Docker lifecycle
 
@@ -482,7 +597,7 @@ and a different cleanup boundary from existing Docker and Kiri.
 | --- | --- | --- |
 | Docker API and CLI launch | Existing Conjet Docker/containerd and official Kiri | Full no-network API pair and pilot rows. Complete CLI series and remaining API/bridge pairs pending |
 | Static fresh and prepared CLI/API | Conjet Rust native guest | Full-budget product session and live correctness. Kiri has no corresponding prepared API |
-| No-network Docker OCI | Conjet opt-in source adapter and native guest | Full-budget CLI/API session with per-operation cleanup. Prepared OCI and general Docker options outside the subset |
+| No-network Docker OCI | Isolated Conjet native candidate and official Kiri | Five matched release-build pairs. Conjet had lower API p50 and slower CLI p50/p99. Kiri verified guest cleanup remains unknown |
 | Controlled registry | Both existing Docker engines | Five complete pairs. Kiri faster for the declared pull boundaries |
 | Image save/load/inspect | Both existing Docker engines | Five complete suites with pinned image identities and executable canaries |
 | Rust, Go and Node Buildx | Pinned BuildKit worker on each existing engine | Two validated pairs with differing harness versions. Worker resource and comparable repetition evidence pending |
@@ -509,7 +624,8 @@ failed attempts and shutdown checks.
 | Full paired no-network API row | `SPEED-019/alpine-true-none-api-pair-2` |
 | First full CLI pair and canceled next-boothalf evidence | `SPEED-019/alpine-true-none-cli-series` |
 | Resumed CLI pair with retained Conjet startup failures | `SPEED-019/alpine-true-none-cli-series/remaining/pair-2` |
-| Full-budget Docker-to-native OCI run with per-operation cleanup witnesses | `SPEED-019/native-oci-full-1` |
+| Historical full-budget Docker-to-native OCI run | `SPEED-019/native-oci-full-1` |
+| Release-build native/Kiri pairs, raw samples, production and cleanup evidence, and paired analysis | `SPEED-019/native-kiri-release-cabbea9` |
 | First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
 | Pinned image and loopback registry results with asymmetric transfer proof | `SPEED-020/pair-2` |
 | Complete paired registry transfer and labeled-store cleanup | `SPEED-020/pair-3` |
@@ -528,6 +644,7 @@ failed attempts and shutdown checks.
 | Read-only effective memory and swap validation on Kiri | `SPEED-025/kiri-effective-swap.log` |
 | Matched guest pressure limits, successful recovery and reproduced Kiri wait timeout | `SPEED-025/pair-3` |
 | Full-budget native static product and active-shutdown canaries | `SPEED-025/native-product-full-1` |
+| Release-build static native API/CLI, refill, misses and pressure canaries | `SPEED-025/native-product-release-cabbea9` |
 
 Production stayed in service throughout. The records preserve unknown
 guest teardown, unmeasured energy and observed contention. The original

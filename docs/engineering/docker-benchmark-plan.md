@@ -13,9 +13,9 @@ and record hashes of the actual executables in every report.
 
 ```text
 Docker CLI or HTTP -> kiri-speedup Unix socket -> official Kiri -> Kiri guest
-Docker CLI or HTTP -> conjet-speedup Unix socket -> Jetstream bridge -> guest Docker/containerd
+Docker CLI or HTTP -> explicit legacy baseline session -> Jetstream bridge -> guest Docker/containerd
 Native CLI or authenticated API -> private native socket -> Jetstream -> Rust launch service
-Docker CLI or HTTP -> dedicated source-adapter socket -> one native Docker owner -> qualified OCI sandbox
+Docker CLI or HTTP -> isolated conjet-speedup Unix socket -> one native Docker owner -> qualified OCI sandbox
 ```
 
 | Surface | Official Kiri | Existing Conjet Docker | Conjet native | Docker-to-native source adapter |
@@ -28,7 +28,8 @@ Docker CLI or HTTP -> dedicated source-adapter socket -> one native Docker owner
 | Fresh and one-use prepared native launch | Unsupported | Separate endpoint | Supported for static ARM64, no network | Verified fresh OCI execution. Prepared OCI is outside the subset |
 | Verified guest cleanup | Unknown at Docker acknowledgement | Unknown unless independently verified | Explicit terminal cleanup | Explicit terminal cleanup, recorded with the native workload ID |
 
-The source adapter column reflects the subsequent SPEED-018 verification.
+The final column reflects the subsequent SPEED-018 verification and the
+native-first default inside the isolated launcher.
 The separate adapter procedure defines the documented limits and required
 operation flags. [Native Docker adapter](docker-native-adapter.md)
 
