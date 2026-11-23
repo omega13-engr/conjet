@@ -70,6 +70,7 @@ impl Handle {
 
 pub(super) struct Connection {
     boot: String,
+    oci: bool,
     stream: Stream,
 }
 
@@ -98,8 +99,12 @@ impl Connection {
         let mut stream = Stream::unix(unix, None)?;
         stream.deadline(Some(Instant::now() + Duration::from_secs(1)));
         let hello = host(&mut stream, key)?;
+        let oci = hello
+            .capabilities
+            .iter()
+            .any(|value| value == "native_oci_arm64_v1");
         ensure!(
-            hello
+            oci || hello
                 .capabilities
                 .iter()
                 .any(|value| value == "native_static_arm64_v1"),
@@ -107,6 +112,7 @@ impl Connection {
         );
         Ok(Self {
             boot: hello.boot_id,
+            oci,
             stream,
         })
     }
@@ -304,6 +310,10 @@ pub(super) fn invoke(target: Target, op: Operation) -> anyhow::Result<()> {
             emit("memory", observation)
         }
         Operation::Run | Operation::Prepare | Operation::Claim(_) => {
+            ensure!(
+                !peer.oci,
+                "OCI launch requires an explicit process spec over the authenticated API"
+            );
             let lock = open_private(&target.session.join(LOCK))?;
             if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
                 let error = std::io::Error::last_os_error();

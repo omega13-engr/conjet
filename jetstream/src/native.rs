@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 
 mod client;
+mod oci;
 mod session;
 
 #[derive(Debug, Args)]

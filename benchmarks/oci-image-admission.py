@@ -2,6 +2,7 @@
 """Verify a bounded, single-layer Docker save archive without extracting its filesystem."""
 
 import argparse
+import base64
 import gzip
 import hashlib
 import io
@@ -104,7 +105,7 @@ def process_config(config):
     return process
 
 
-def admit(path, expected_config):
+def admit(path, expected_config, package=None):
     if not SHA256.fullmatch(expected_config):
         raise ValueError('require a lowercase sha256 image config digest')
     if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_ARCHIVE:
@@ -131,20 +132,50 @@ def admit(path, expected_config):
                 layer = compressed.read(MAX_ARCHIVE + 1)
         if len(layer) > MAX_ARCHIVE or image_digest(layer) != diff_ids[0]:
             raise ValueError('uncompressed rootfs size or diff ID mismatch')
-        return {'config_digest': expected_config, 'diff_id': diff_ids[0],
-                'rootfs_bytes': len(layer), 'rootfs_entries': verify_rootfs(layer),
-                'process': process_config(config), 'platform': 'linux/arm64'}
+        receipt = {'config_digest': expected_config, 'diff_id': diff_ids[0],
+                   'rootfs_bytes': len(layer), 'rootfs_entries': verify_rootfs(layer),
+                   'process': process_config(config), 'platform': 'linux/arm64'}
+        if package is not None:
+            write_package(package, expected_config, layer)
+        return receipt
+
+
+def write_package(path, digest, layer):
+    records = []
+    with tarfile.open(fileobj=io.BytesIO(layer), mode='r:') as archive:
+        entries = index(archive)
+        for name, item in entries.items():
+            if name == '.':
+                continue
+            record = {'path': name, 'mode': item.mode, 'uid': item.uid, 'gid': item.gid,
+                      'data': '', 'kind': 'directory', 'target': ''}
+            if item.issym():
+                record.update(kind='symlink', target=item.linkname)
+            elif item.islnk():
+                raise ValueError('native OCI package does not support rootfs hard links')
+            elif item.isfile():
+                record.update(kind='file', data=base64.b64encode(
+                    read_regular(archive, entries, name, MAX_ARCHIVE)).decode('ascii'))
+            records.append(record)
+    # The host verifies this externally pinned package before boot. Rootfs
+    # paths are interpreted only in the VM, never materialized on macOS.
+    with path.open('x') as stream:
+        json.dump({'config_digest': digest, 'records': records}, stream,
+                  separators=(',', ':'), sort_keys=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('archive', type=Path)
     parser.add_argument('--config-digest', required=True)
+    parser.add_argument('--native-package', type=Path)
     args = parser.parse_args()
     if not args.archive.resolve().is_relative_to(SCRATCH):
         parser.error('expected Docker save archive under ExternalSSD scratch')
+    if args.native_package and not args.native_package.parent.resolve().is_relative_to(SCRATCH):
+        parser.error('native package must be on ExternalSSD')
     try:
-        print(json.dumps(admit(args.archive, args.config_digest), indent=2))
+        print(json.dumps(admit(args.archive, args.config_digest, args.native_package), indent=2))
     except (ValueError, OSError, KeyError, TypeError, tarfile.TarError) as error:
         parser.error(str(error))
 

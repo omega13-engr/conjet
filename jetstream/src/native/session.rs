@@ -36,9 +36,16 @@ pub(super) struct Options {
     #[arg(long)]
     kernel_sha512: String,
     /// Static Linux ARM64 executable to run without arguments.
-    #[arg(long)]
-    executable: PathBuf,
-    /// Expected SHA-256 of the executable.
+    #[arg(
+        long,
+        required_unless_present = "oci_package",
+        conflicts_with = "oci_package"
+    )]
+    executable: Option<PathBuf>,
+    /// Experimental preverified Linux ARM64 OCI staging package.
+    #[arg(long, value_name = "PATH")]
+    oci_package: Option<PathBuf>,
+    /// Expected SHA-256 of the executable or OCI staging package.
     #[arg(long)]
     sha256: String,
     /// Trusted branch-built guest supervisor, for development builds.
@@ -63,12 +70,28 @@ extern "C" fn interrupted(_: libc::c_int) {
 pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     let kernel_expected = unhex::<64>(&options.kernel_sha512).context("invalid kernel SHA-512")?;
     let expected = unhex::<32>(&options.sha256).context("invalid executable SHA-256")?;
-    let workload = read_regular(&options.executable, WORKLOAD_LIMIT)?;
-    ensure!(
-        Sha256::digest(&workload)[..] == expected,
-        "workload SHA-256 mismatch"
-    );
-    validate_executable(&workload)?;
+    let (workload, oci, image_digest) = if let Some(path) = options.oci_package {
+        let package = read_regular(&path, super::oci::PACKAGE_LIMIT)?;
+        ensure!(
+            Sha256::digest(&package)[..] == expected,
+            "OCI staging package SHA-256 mismatch"
+        );
+        let root = super::oci::Root::read(&package)?;
+        let image_digest = root.config_digest.clone();
+        (Vec::new(), Some(root), image_digest)
+    } else {
+        let path = options
+            .executable
+            .as_ref()
+            .context("missing workload executable")?;
+        let workload = read_regular(path, WORKLOAD_LIMIT)?;
+        ensure!(
+            Sha256::digest(&workload)[..] == expected,
+            "workload SHA-256 mismatch"
+        );
+        validate_executable(&workload)?;
+        (workload, None, format!("sha256:{}", hex(&expected)))
+    };
     let guest_path = match options.guest_init {
         Some(path) => path,
         None => std::env::current_exe()?.with_file_name("conjet-launchd-linux-arm64"),
@@ -97,7 +120,6 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         "scratch path leaves no room for the private Unix socket"
     );
     let key = random::<32>()?;
-    let image_digest = format!("sha256:{}", hex(&expected));
     let identity = Identity {
         pid: std::process::id().try_into()?,
         image_digest,
@@ -116,6 +138,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         &workload,
         &descriptor,
         &key,
+        oci.as_ref(),
     )?;
     let machine = MachineBuilder::new(JetstreamConfig {
         memory_mib: 2048,
@@ -351,6 +374,7 @@ fn build_archive(
     workload: &[u8],
     descriptor: &[u8],
     key: &[u8],
+    oci: Option<&super::oci::Root>,
 ) -> anyhow::Result<()> {
     let mut archive = OpenOptions::new()
         .write(true)
@@ -362,11 +386,13 @@ fn build_archive(
                       mode: u32,
                       data: &[u8],
                       major: u32,
-                      minor: u32|
+                      minor: u32,
+                      uid: u32,
+                      gid: u32|
      -> std::io::Result<()> {
         inode += 1;
         write!(archive,
-            "070701{inode:08x}{mode:08x}00000000000000000000000100000000{:08x}0000000000000000{major:08x}{minor:08x}{:08x}00000000",
+            "070701{inode:08x}{mode:08x}{uid:08x}{gid:08x}0000000100000000{:08x}0000000000000000{major:08x}{minor:08x}{:08x}00000000",
             data.len(), name.len() + 1
         )?;
         archive.write_all(name.as_bytes())?;
@@ -383,14 +409,43 @@ fn build_archive(
         "etc",
         "etc/conjet",
     ] {
-        append(name, 0o040755, &[], 0, 0)?;
+        append(name, 0o040755, &[], 0, 0, 0, 0)?;
     }
-    append("dev/console", 0o020600, &[], 5, 1)?;
-    append("dev/null", 0o020666, &[], 1, 3)?;
-    append("init", 0o100755, guest, 0, 0)?;
-    append("etc/conjet/launch.key", 0o100600, key, 0, 0)?;
-    append("etc/conjet/native-executable", 0o100500, workload, 0, 0)?;
-    append("etc/conjet/native-image.json", 0o100400, descriptor, 0, 0)?;
-    append("TRAILER!!!", 0, &[], 0, 0)?;
+    append("dev/console", 0o020600, &[], 5, 1, 0, 0)?;
+    append("dev/null", 0o020666, &[], 1, 3, 0, 0)?;
+    append("init", 0o100755, guest, 0, 0, 0, 0)?;
+    append("etc/conjet/launch.key", 0o100600, key, 0, 0, 0, 0)?;
+    if let Some(root) = oci {
+        append(
+            "etc/conjet/native-oci-image",
+            0o100400,
+            root.config_digest.as_bytes(),
+            0,
+            0,
+            0,
+            0,
+        )?;
+        root.append(|name, mode, uid, gid, data| append(name, mode, data, 0, 0, uid, gid))?;
+    } else {
+        append(
+            "etc/conjet/native-executable",
+            0o100500,
+            workload,
+            0,
+            0,
+            0,
+            0,
+        )?;
+        append(
+            "etc/conjet/native-image.json",
+            0o100400,
+            descriptor,
+            0,
+            0,
+            0,
+            0,
+        )?;
+    }
+    append("TRAILER!!!", 0, &[], 0, 0, 0, 0)?;
     Ok(())
 }

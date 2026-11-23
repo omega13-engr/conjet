@@ -48,6 +48,9 @@ impl Server {
     fn capabilities(&self) -> &'static [&'static str] {
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         if let Some(fresh) = &self.fresh {
+            if fresh.is_oci() {
+                return &["ping", "shutdown", "native_oci_arm64_v1", "memory"];
+            }
             if fresh.is_native() {
                 return &[
                     "ping",

@@ -66,17 +66,20 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
         return Err("kernel fixture must be PID 1 in a disposable Linux guest".into());
     }
     run(
-        with_sandbox,
         handshake::random()?,
         ResourceLimits {
             memory_bytes: MIN_MEMORY_BYTES,
             pids: 4,
             cpu_millicores: 500,
         },
-        false,
-        "once",
-        false,
-        false,
+        RunProfile {
+            with_sandbox,
+            controlled: false,
+            mode: "once",
+            network: false,
+            prepared: false,
+            process: None,
+        },
     )
 }
 
@@ -114,7 +117,7 @@ pub fn run_helper(
     let mode = mode.to_str().ok_or("invalid fixture helper mode")?;
     if !matches!(
         mode,
-        "once" | "hold" | "fail" | "benchmark" | "memory-canary" | "native"
+        "once" | "hold" | "fail" | "benchmark" | "memory-canary" | "native" | "native-oci"
     ) && !test_mode(mode)
     {
         return Err("unknown fixture helper mode".into());
@@ -131,24 +134,59 @@ pub fn run_helper(
         Some("fresh") => false,
         _ => return Err("invalid fixture preparation mode".into()),
     };
+    let process = if mode == "native-oci" {
+        let spec = args.next().ok_or("missing OCI process spec")?;
+        let spec: crate::spec::LaunchSpec =
+            serde_json::from_str(spec.to_str().ok_or("invalid OCI process spec")?)?;
+        if spec.network != "none" || spec.limits != limits || prepared {
+            return Err("invalid OCI helper limits or mode".into());
+        }
+        Some(spec)
+    } else {
+        None
+    };
     if !matches!(network.to_str(), Some("bridge" | "none"))
-        || (mode == "native" && network != "none")
+        || (matches!(mode, "native" | "native-oci") && network != "none")
         || args.next().is_some()
     {
         return Err("unexpected fixture helper arguments".into());
     }
-    run(true, id, limits, true, mode, network == "bridge", prepared)
+    run(
+        id,
+        limits,
+        RunProfile {
+            with_sandbox: true,
+            controlled: true,
+            mode,
+            network: network == "bridge",
+            prepared,
+            process: process.as_ref(),
+        },
+    )
+}
+
+struct RunProfile<'a> {
+    with_sandbox: bool,
+    controlled: bool,
+    mode: &'a str,
+    network: bool,
+    prepared: bool,
+    process: Option<&'a crate::spec::LaunchSpec>,
 }
 
 fn run(
-    with_sandbox: bool,
     id: [u8; 16],
     limits: ResourceLimits,
-    controlled: bool,
-    mode: &str,
-    network: bool,
-    prepared: bool,
+    profile: RunProfile<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let RunProfile {
+        with_sandbox,
+        controlled,
+        mode,
+        network,
+        prepared,
+        process,
+    } = profile;
     if controlled {
         notify_control(b'P', &[])?;
         pause_for_cancel(mode, "pause-prepare")?;
@@ -167,7 +205,7 @@ fn run(
         _ => "/init",
     };
     let sandbox = with_sandbox
-        .then(|| Sandbox::prepare(network, executable))
+        .then(|| Sandbox::prepare(network, executable, process.map(|spec| spec.cwd.as_str())))
         .transpose()?;
     inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)
@@ -195,6 +233,7 @@ fn run(
         mode,
         bridge.as_mut(),
         prepared,
+        process,
     );
     if mode == "exhaust-memory" {
         eprintln!("workload memory.events: {}", cgroup.memory_events()?);
@@ -223,7 +262,8 @@ fn run(
         proc_mount.unmount()?;
     }
     if let Some(sandbox) = sandbox {
-        sandbox.cleanup(executable == "/init" && matches!(probe, Ok(Some(0))))?;
+        sandbox
+            .cleanup(process.is_none() && executable == "/init" && matches!(probe, Ok(Some(0))))?;
     }
     let wait_status = probe?;
     exit_report?;
@@ -249,6 +289,7 @@ fn clone_and_reap(
     mode: &str,
     mut bridge: Option<&mut Bridge>,
     prepared: bool,
+    process: Option<&crate::spec::LaunchSpec>,
 ) -> io::Result<Option<i32>> {
     if controlled && cancellation_ready()? {
         return Ok(None);
@@ -268,6 +309,27 @@ fn clone_and_reap(
         "memory-canary" => Some(c"--memory-canary"),
         _ => None,
     };
+    let encode = |strings: &[String]| -> io::Result<Vec<std::ffi::CString>> {
+        strings
+            .iter()
+            .map(|value| std::ffi::CString::new(value.as_str()).map_err(Into::into))
+            .collect()
+    };
+    let oci = process
+        .map(|spec| Ok::<_, io::Error>((encode(&spec.argv)?, encode(&spec.env)?)))
+        .transpose()?;
+    // Allocate the pointer vectors before clone and keep their strings alive
+    // through execve. The pointers reference only the helper's own allocations.
+    let oci_pointers = oci.as_ref().map(|(args, env)| {
+        let ptrs = |values: &[std::ffi::CString]| {
+            values
+                .iter()
+                .map(|value| value.as_ptr())
+                .chain([std::ptr::null()])
+                .collect::<Vec<_>>()
+        };
+        (ptrs(args), ptrs(env))
+    });
     let mut barrier = [-1; 2];
     // pipe2 writes two fresh descriptors which are each taken by one File.
     security::checked(unsafe { libc::pipe2(barrier.as_mut_ptr(), libc::O_CLOEXEC) })?;
@@ -336,6 +398,10 @@ fn clone_and_reap(
             }) {
                 eprintln!("workload sandbox setup failed: {error}");
                 unsafe { libc::_exit(126) }
+            }
+            if let Some((args, env)) = &oci_pointers {
+                unsafe { libc::execve(args[0], args.as_ptr(), env.as_ptr()) };
+                unsafe { libc::_exit(127) }
             }
             let args = [
                 executable.as_ptr(),

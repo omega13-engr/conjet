@@ -270,6 +270,7 @@ pub(crate) struct FreshFixture {
     image_digest: String,
     benchmark_digest: Option<String>,
     native: bool,
+    oci: bool,
     trace_benchmark: bool,
     bridge_available: bool,
     allow_crash: bool,
@@ -332,27 +333,49 @@ impl FreshFixture {
         if std::process::id() == 1 || unsafe { libc::getppid() } != 1 {
             return Err("fresh fixture requires a supervisor child of guest init".into());
         }
-        let (spec_file, executable_file) = if native {
-            (
-                "/etc/conjet/native-image.json",
-                crate::sandbox_fixture::NATIVE_EXECUTABLE,
-            )
+        let oci_marker = if native {
+            match bounded_file("/etc/conjet/native-oci-image", 71) {
+                Ok(marker) => Some(String::from_utf8(marker)?),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            }
         } else {
-            ("/etc/conjet/fresh-fixture-image.json", "/init")
+            None
         };
-        let manifest = bounded_file(spec_file, 4_096)?;
-        let image: Image = serde_json::from_slice(&manifest)?;
-        let executable = bounded_file(executable_file, 4 * 1024 * 1024)?;
-        if image.os != "linux"
-            || image.architecture != "arm64"
-            || image.executable_sha256 != hex(&Sha256::digest(&executable))
-        {
-            return Err("launch image identity differs from its verified input".into());
-        }
-        let image_digest = if native {
-            format!("sha256:{}", image.executable_sha256)
+        let oci = oci_marker.is_some();
+        let image_digest = if let Some(digest) = oci_marker {
+            let hex = digest
+                .strip_prefix("sha256:")
+                .ok_or("invalid OCI config digest")?;
+            crate::handshake::unhex::<32>(hex)?;
+            let root = fs::symlink_metadata(crate::sandbox_fixture::OCI_ROOT)?;
+            if !root.is_dir() || root.uid() != 0 || root.mode() & 0o022 != 0 {
+                return Err("OCI root must be installed by the trusted guest image".into());
+            }
+            digest
         } else {
-            format!("sha256:{}", hex(&Sha256::digest(&manifest)))
+            let (spec_file, executable_file) = if native {
+                (
+                    "/etc/conjet/native-image.json",
+                    crate::sandbox_fixture::NATIVE_EXECUTABLE,
+                )
+            } else {
+                ("/etc/conjet/fresh-fixture-image.json", "/init")
+            };
+            let manifest = bounded_file(spec_file, 4_096)?;
+            let image: Image = serde_json::from_slice(&manifest)?;
+            let executable = bounded_file(executable_file, 4 * 1024 * 1024)?;
+            if image.os != "linux"
+                || image.architecture != "arm64"
+                || image.executable_sha256 != hex(&Sha256::digest(&executable))
+            {
+                return Err("launch image identity differs from its verified input".into());
+            }
+            if native {
+                format!("sha256:{}", image.executable_sha256)
+            } else {
+                format!("sha256:{}", hex(&Sha256::digest(&manifest)))
+            }
         };
         let (benchmark_digest, trace_benchmark) = if native {
             (None, false)
@@ -392,6 +415,7 @@ impl FreshFixture {
             image_digest,
             benchmark_digest,
             native,
+            oci,
             trace_benchmark,
             bridge_available,
             allow_crash,
@@ -399,6 +423,10 @@ impl FreshFixture {
             ledger: Mutex::new(Ledger::default()),
             changed: Condvar::new(),
         }))
+    }
+
+    pub(crate) fn is_oci(&self) -> bool {
+        self.oci
     }
 
     pub(crate) fn is_native(&self) -> bool {
@@ -434,6 +462,19 @@ impl FreshFixture {
         let argv = spec.argv.iter().map(String::as_str).collect::<Vec<_>>();
         let benchmark = self.benchmark_digest.as_ref() == Some(&spec.image_digest);
         let mode = match argv.as_slice() {
+            _ if self.oci
+                && spec.network == "none"
+                && spec.limits == crate::spec::NATIVE_LIMITS
+                && !prepared =>
+            {
+                "native-oci"
+            }
+            _ if self.oci => {
+                return Err((
+                    "unsupported_option",
+                    "OCI requires a fresh, constrained no-network launch",
+                ));
+            }
             ["/bin/probe"]
                 if self.native
                     && spec.network == "none"
@@ -464,8 +505,7 @@ impl FreshFixture {
             }
         };
         if (mode != "benchmark" && spec.image_digest != self.image_digest)
-            || spec.cwd != "/work"
-            || !spec.env.is_empty()
+            || (!self.oci && (spec.cwd != "/work" || !spec.env.is_empty()))
         {
             return Err((
                 "unsupported_option",
@@ -580,9 +620,14 @@ impl FreshFixture {
         let owner = Arc::clone(self);
         let limits = spec.limits;
         let mode = mode.to_owned();
+        let oci_process = self
+            .oci
+            .then(|| serde_json::to_string(spec).expect("validated OCI spec"));
         if thread::Builder::new()
             .name("fresh-workload".into())
-            .spawn(move || owner.run_workload(id, limits, &mode, bridge, prepared))
+            .spawn(move || {
+                owner.run_workload(id, limits, &mode, bridge, prepared, oci_process.as_deref())
+            })
             .is_err()
         {
             let record = ledger.record.as_mut().expect("reserved record");
@@ -603,6 +648,7 @@ impl FreshFixture {
         mode: &str,
         bridge: bool,
         prepared: bool,
+        oci_process: Option<&str>,
     ) {
         {
             let mut ledger = self.ledger.lock().expect("fresh ledger");
@@ -618,7 +664,7 @@ impl FreshFixture {
             }
         }
         let result = self.intent.record(id).and_then(|()| {
-            let output = self.run_helper(id, limits, mode, bridge, prepared)?;
+            let output = self.run_helper(id, limits, mode, bridge, prepared, oci_process)?;
             self.intent.complete(id)?;
             Ok(output)
         });
@@ -661,6 +707,7 @@ impl FreshFixture {
         mode: &str,
         bridge: bool,
         prepared: bool,
+        oci_process: Option<&str>,
     ) -> io::Result<(Capture, Capture, bool)> {
         let (mut peer, helper) = UnixStream::pair()?;
         peer.set_read_timeout(Some(Duration::from_secs(32)))?;
@@ -681,6 +728,7 @@ impl FreshFixture {
                 if bridge { "bridge" } else { "none" },
                 if prepared { "prepared" } else { "fresh" },
             ])
+            .args(oci_process)
             .env_clear()
             .stdin(Stdio::from(OwnedFd::from(helper)))
             .stdout(Stdio::piped())

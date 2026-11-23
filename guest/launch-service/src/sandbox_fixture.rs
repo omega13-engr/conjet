@@ -11,6 +11,7 @@ use crate::spec::{WORKLOAD_GID, WORKLOAD_UID};
 
 const BASE: &str = "/run/conjet/workload-probe";
 pub(crate) const BENCHMARK_EXECUTABLE: &str = "/etc/conjet/benchmark-executable";
+pub(crate) const OCI_ROOT: &str = "/etc/conjet/oci-root";
 pub(crate) const NATIVE_EXECUTABLE: &str = "/etc/conjet/native-executable";
 const UID_BASE: u32 = 100_000;
 const GID_BASE: u32 = 100_000;
@@ -19,23 +20,30 @@ const UID_WIDTH: u32 = 65_536;
 pub(crate) struct Sandbox {
     new_root: CString,
     overlay: CString,
+    cwd: CString,
     filter: WorkloadFilter,
     stdin: File,
 }
 
 impl Sandbox {
-    pub(crate) fn prepare(bridge: bool, executable: &str) -> io::Result<Self> {
+    pub(crate) fn prepare(
+        bridge: bool,
+        executable: &str,
+        oci_cwd: Option<&str>,
+    ) -> io::Result<Self> {
         let base = Path::new(BASE);
         std::fs::create_dir(base)?;
         let setup = (|| {
             for entry in ["lower", "lower/bin", "lower/work", "upper", "work", "root"] {
                 std::fs::create_dir(base.join(entry))?;
             }
-            std::fs::copy(executable, base.join("lower/bin/probe"))?;
-            std::fs::set_permissions(
-                base.join("lower/bin/probe"),
-                std::fs::Permissions::from_mode(0o555),
-            )?;
+            if oci_cwd.is_none() {
+                std::fs::copy(executable, base.join("lower/bin/probe"))?;
+                std::fs::set_permissions(
+                    base.join("lower/bin/probe"),
+                    std::fs::Permissions::from_mode(0o555),
+                )?;
+            }
             std::fs::write(base.join("lower/work/immutable"), b"verified fixture\n")?;
             if bridge {
                 std::fs::create_dir(base.join("lower/etc"))?;
@@ -68,10 +76,16 @@ impl Sandbox {
                 base.join("outside-canary"),
                 b"must stay outside workload root\n",
             )?;
+            let lower = if oci_cwd.is_some() {
+                OCI_ROOT
+            } else {
+                concat!("/run/conjet/workload-probe", "/lower")
+            };
             Ok(Self {
+                cwd: CString::new(oci_cwd.unwrap_or("/work"))?,
                 new_root: CString::new(base.join("root").as_os_str().as_bytes())?,
                 overlay: CString::new(format!(
-                    "lowerdir={BASE}/lower,upperdir={BASE}/upper,workdir={BASE}/work,userxattr"
+                    "lowerdir={lower},upperdir={BASE}/upper,workdir={BASE}/work,userxattr"
                 ))?,
                 filter: WorkloadFilter::new(bridge),
                 stdin: File::open("/dev/null")?,
@@ -146,7 +160,7 @@ impl Sandbox {
         )?;
         step(
             "working directory",
-            security::checked(unsafe { libc::chdir(c"/work".as_ptr()) }),
+            security::checked(unsafe { libc::chdir(self.cwd.as_ptr()) }),
         )?;
         // Only stdio may survive. The fixture's syscall code needs no inherited directory handle.
         if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } != 0 {

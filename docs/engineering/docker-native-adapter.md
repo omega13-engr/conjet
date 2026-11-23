@@ -1,13 +1,14 @@
 # Docker-to-native adapter contract
 
-The opt-in adapter requires a separate private Unix socket, explicit identity
-and one lifecycle owner. A Docker context must opt into that socket. The
+The tested opt-in source adapter connects a private Docker socket to one
+authenticated Jetstream OCI session. A Docker context explicitly selects that
+socket. The
 normal Docker endpoint and its containerd owner continue to operate as before.
 The candidate subset is one pinned Linux ARM64 OCI image, no network and one
 active container. Image content must be admitted before the adapter advertises
 readiness.
 
-## Runtime work required
+## Runtime architecture
 
 1. Bind a pinned OCI manifest to the verified config digest and uncompressed
    rootfs layer digests. Stage the bounded image in an immutable guest root.
@@ -45,12 +46,47 @@ loader/preparation lifecycle. Removing the ELF interpreter check alone still
 leaves no image root, default process configuration or Docker lifecycle.
 
 `benchmarks/oci-image-admission.py` verifies a single-layer Docker-save
-archive's pinned config and uncompressed layer digest, checks its rootfs
-metadata and reports OCI process defaults without extracting anything on the
-host. This supplies an image admission receipt. The guest staging and Docker
-HTTP owner remain implementation prerequisites. No Docker operation uses the
-native backend at this revision.
+archive's pinned config and uncompressed layer digest. Its optional native
+package preserves file modes, ownership and symlinks without extracting a
+host tree. The Jetstream staging command checks the package hash and validates
+every CPIO path before boot. The guest mounts that rootfs as an immutable
+overlay lower directory. The native launch request still applies the cgroup
+limits, process credentials, namespace permissions and output cap.
 
-The reproduction is retained at
+The unmodified Docker 29.10.0 CLI exercised `run --rm`, `create`, `start`,
+`wait`, `inspect`, and `rm -f` as applicable. The adapter negotiates Docker API
+1.44, delivers bounded noninteractive attach frames after cleanup, preserves
+actual exit codes, publishes a bounded event snapshot and refuses to replay a
+start after its response is lost. The test verifies real Jetstream workload
+handles and guest cleanup in terminal event attributes. On an unresolved
+backend disposition the session rejects new admission.
+
+## Supported source experiment
+
+Use a private context and the explicitly opted-in foreground processes.
+The workload uses the staged immutable image reference, `--pull never`,
+`--network none`, `--user 65532:65532`, `--memory 16m`, `--pids-limit 4`,
+and `--cpus 0.5`. Commands use an absolute executable path. The verified
+subset supports inherited OCI Entrypoint, Cmd and Env defaults and the tested
+explicit argv, environment and working directory. It permits regular files,
+directories and symlinks in a single rootfs layer. It declines unsupported
+permissions, multiple layers and hard links during staging.
+
+This is a source-operated experiment. The existing app release scope,
+official Docker context, default routing and existing prepare/claim API are
+unchanged. Live streaming, interactive input, Compose, networking, build,
+persistent exec, full event streaming, guest root credentials and prepared
+OCI are outside the tested route.
+
+The retained live test command is:
+
+```sh
+python3 benchmarks/test-native-oci-live.py \
+  --vmm "$vmm" --kernel "$kernel" --guest "$guest" \
+  --package "$native_package" --receipt "$oci_receipt" --image "$pinned_image" \
+  --output "$evidence/docker-native"
+```
+
+The first rejection and later native and Docker proofs are retained under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-018`.
-The existing native static lane keeps its own benchmark boundary.
+Small timing pilots remain distinct from qualification.
