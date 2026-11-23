@@ -71,44 +71,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 
 ## BACKLOG
 
-### SPEED-016
-
-Title: Make the benchmark orchestrator safe and reproducible
-
-Description: Extend the isolated launchers and reporting harness to execute the frozen suite serially with explicit engine identities.
-
-Is blocked by task: SPEED-015.
-
-Acceptance Criteria:
-
-- Use private DOCKER_CONFIG and explicit contexts/endpoints: conjet-speedup for the candidate and kiri-speedup for Kiri. Identify actual binaries, servers, builders and VM disk holders; reject production endpoints.
-- Store all images, volumes, build contexts, caches, logs and scratch artifacts on ExternalSSD; verify backing paths. Use unique labels, Compose project names and task-owned builders.
-- Alternate engine order between paired sessions; run timing suites without overlapping builds or other benchmark engines. Preserve production and record its contention.
-- Exercise interruption, timeout and partial-report recovery. Cleanup only owned resources; no global prune/context switch, persistent jobs or global credential changes. Verify production snapshots and no owned process/disk/socket holders.
-
-Problem and Evidence: The existing combined runner can run suites in parallel and requires energy privileges; this comparison needs controlled sequencing and nonprivileged measurements that can proceed independently.
-
-Approach:
-
-1. Reuse existing launchers and add manifest-driven adapters and explicit identity checks.
-2. Add failure/timeout/cancellation checks and machine-readable raw results with status and provenance.
-3. Run a short smoke on each supported lane and verify cleanup before full measurements.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-016`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Implement the manifest loader and production-endpoint refusal checks.
-
 ### SPEED-017
 
 Title: Capture current Docker and native baselines
@@ -712,6 +674,44 @@ and review requirements before merge.
 Next Action: Collect required CI and independent review before merging.
 
 ## DONE
+
+### SPEED-016
+
+Title: Make the benchmark orchestrator safe and reproducible
+
+Description: Extend the isolated launchers and reporting harness to execute the frozen suite serially with explicit engine identities.
+
+Is blocked by task: SPEED-015.
+
+Acceptance Criteria:
+
+- Use private DOCKER_CONFIG and explicit contexts/endpoints: conjet-speedup for the candidate and kiri-speedup for Kiri. Identify actual binaries, servers, builders and VM disk holders; reject production endpoints.
+- Store all images, volumes, build contexts, caches, logs and scratch artifacts on ExternalSSD; verify backing paths. Use unique labels, Compose project names and task-owned builders.
+- Alternate engine order between paired sessions; run timing suites without overlapping builds or other benchmark engines. Preserve production and record its contention.
+- Exercise interruption, timeout and partial-report recovery. Cleanup only owned resources; no global prune/context switch, persistent jobs or global credential changes. Verify production snapshots and no owned process/disk/socket holders.
+
+Problem and Evidence: The isolated launchers now run the comparison coordinator with
+pinned clients, a private context and an endpoint peer check. The serial
+preflight passed in Kiri-then-Conjet order, verified that the actual VM
+processes held only the designated backing files, and confirmed shutdown
+and unchanged production. The first attempt established that Kiri can
+answer metadata before its VM boots; the runner now uses an untimed pinned
+launch before measuring disks. A one-second timeout stopped the owned Kiri
+daemon and removed its socket while retaining partial evidence. Three new
+safety tests and the five existing adapter tests passed. Evidence is under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-016`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Checked mounted storage paths, process and context attribution,
+serial pairing, cancellation, partial evidence and lease scope. Builder
+execution and effective workload limits are checked by the workload probes.
+
+Next Action: Run the SPEED-017 pilot with the frozen endpoints.
 
 ### SPEED-015
 

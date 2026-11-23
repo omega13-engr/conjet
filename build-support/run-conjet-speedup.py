@@ -286,6 +286,10 @@ def session(args, root):
         if evidence['smoke'] != 'conjet-speedup-ok':
             raise RuntimeError('unexpected fixture output')
         print(evidence['smoke'], flush=True)
+        if args.comparison_output:
+            comparison = runpy.run_path(str(REPO / 'benchmarks/docker-comparison.py'))
+            comparison['run_suite']('conjet', docker_socket, docker_config, docker_peer,
+                                    args.comparison_output, args.comparison_mode, evidence['vm_paths'])
         if args.benchmark_output:
             benchmark = runpy.run_path(str(REPO / 'benchmarks/fresh-lifecycle.py'))
             benchmark['main']([
@@ -331,6 +335,8 @@ def main():
     parser.add_argument('--core', required=True, type=Path)
     parser.add_argument('--network-helper', required=True, type=Path)
     parser.add_argument('--image', default='alpine:3.22')
+    parser.add_argument('--comparison-output', type=Path)
+    parser.add_argument('--comparison-mode', choices=('preflight', 'pilot'), default='preflight')
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
     parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
     parser.add_argument('--benchmark-scenario', type=Path, help='use a staged lifecycle scenario')

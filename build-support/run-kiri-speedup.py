@@ -44,6 +44,8 @@ def production_snapshot():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--smoke', action='store_true', help='pull Alpine and run an ephemeral container')
+    parser.add_argument('--comparison-output', type=Path)
+    parser.add_argument('--comparison-mode', choices=('preflight', 'pilot'), default='preflight')
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
     parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
     parser.add_argument('--benchmark-scenario', type=Path, help='use a staged lifecycle scenario')
@@ -74,7 +76,10 @@ def main():
         with socket.socket(socket.AF_INET, kind) as probe:
             probe.bind(('0.0.0.0', port))
     for name in ('data', 'docker-config', 'logs', 'tmp'):
-        (ROOT / name).mkdir(mode=0o700, exist_ok=True)
+        owned = ROOT / name
+        owned.mkdir(mode=0o700, exist_ok=True)
+        if owned.resolve(strict=True) != owned or not owned.is_dir():
+            parser.error(f'expected private Kiri directory: {owned}')
     endpoint = ROOT / 'docker.sock'
     if endpoint.exists():
         parser.error(f'existing socket requires ownership review: {endpoint}')
@@ -144,6 +149,10 @@ def main():
                     raise RuntimeError('unexpected smoke result')
                 result['smoke'] = output.stdout.strip()
                 print(output.stdout, end='', flush=True)
+            if args.comparison_output:
+                comparison = runpy.run_path(str(REPO / 'benchmarks/docker-comparison.py'))
+                comparison['run_suite']('kiri', endpoint, Path(env['DOCKER_CONFIG']), proc.pid,
+                                        args.comparison_output, args.comparison_mode)
             if args.benchmark_output:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                     client.settimeout(3)
