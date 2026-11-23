@@ -25,6 +25,17 @@ class WorkloadTests(unittest.TestCase):
                 self.assertEqual(len(config['rootfs']['diff_ids']), 3)
                 self.assertEqual(config['architecture'], 'arm64')
 
+    def test_registry_transfer_requires_an_owned_successful_get(self):
+        log = (
+            'http.request.method=GET http.request.uri="/v2/owner/small/blobs/sha256:aa" '
+            'http.response.status=200 http.response.written=31\n'
+            'http.request.method=HEAD http.request.uri="/v2/owner/small/blobs/sha256:bb" '
+            'http.response.status=200 http.response.written=12\n'
+            'http.request.method=GET http.request.uri="/v2/other/small/blobs/sha256:cc" '
+            'http.response.status=200 http.response.written=42\n'
+        )
+        self.assertEqual(MATRIX['received_blobs'](log, 'owner/small'), {'sha256:aa': 31})
+
     def test_build_inputs_separate_source_and_local_dependency(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             for language in ('go', 'node', 'rust'):

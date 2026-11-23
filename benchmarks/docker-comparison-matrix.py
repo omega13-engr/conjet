@@ -1,9 +1,11 @@
 """Extended Docker workloads for verified, launcher-owned sessions."""
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import hashlib
 import io
 import json
+import re
 import subprocess
 import tarfile
 import time
@@ -70,10 +72,11 @@ def run_images(docker, manifest):
                        timeout=budget['timeout_seconds'], phase='setup') is None:
             continue
         source = docker.inspect(image)
-        if source is None or not any(ref.endswith('@' + image.split('@')[1])
-                                     for ref in source.get('RepoDigests') or []):
-            docker.rows[-1]['error'] = 'pinned image digest not reported by engine'
+        if source is None or source['Id'] != manifest['images'][name]['config_digest']:
+            docker.rows[-1]['error'] = 'image config digest does not match the frozen platform manifest'
             continue
+        docker.rows[-1]['pinned_manifest_advertised'] = any(
+            ref.endswith('@' + image.split('@')[1]) for ref in source.get('RepoDigests') or [])
         for repetition in range(budget['samples_per_session'] + budget['warmups']):
             phase = 'warmup' if repetition < budget['warmups'] else 'sample'
             tag = f'{docker.token}:{name}-{repetition}'
@@ -146,6 +149,20 @@ def registry_image(path, tag, executable, size, layers, repetition):
     return 'sha256:' + digest
 
 
+def received_blobs(log, repository):
+    matched = {}
+    for line in log.splitlines():
+        if 'http.request.method=GET ' not in line or 'http.response.status=200 ' not in line:
+            continue
+        uri = re.search(r'http.request.uri="([^"]+)"', line)
+        written = re.search(r'http.response.written=(\d+)', line)
+        if not uri or not written or not uri[1].startswith(f'/v2/{repository}/blobs/'):
+            continue
+        digest = uri[1].rsplit('/', 1)[-1]
+        matched[digest] = max(matched.get(digest, 0), int(written[1]))
+    return matched
+
+
 def run_registry(docker, manifest):
     budget = manifest['suites']['images']
     path = Path('/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/common-image/image/workload')
@@ -182,9 +199,16 @@ def run_registry(docker, manifest):
                         return
                     if docker.call('registry-remove-seed', ['image', 'rm', tag], phase='setup') is None:
                         return
+                    since = datetime.now(timezone.utc).isoformat()
                     if docker.call(f'registry.{label}.reimport', ['pull', tag], phase=phase, timeout=180) is None:
                         continue
-                    docker.rows[-1]['cache_state'] = 'tag absent; layer transfer unverified'
+                    reimport = docker.rows[-1]
+                    reimport['cache_state'] = 'tag absent; pristine layer cache unverified'
+                    docker.call('registry-transfer-observation', ['logs', '--since', since, name],
+                                phase='verification')
+                    logs = docker.rows[-1]
+                    reimport['registry_blobs_returned'] = received_blobs(
+                        logs.get('stderr', '') + logs.get('stdout', ''), f'{docker.token}/{label}')
                     checked = docker.inspect(tag)
                     if checked is None or checked['Id'] != identity:
                         docker.rows[-1]['error'] = 'registry reimport changed image identity'

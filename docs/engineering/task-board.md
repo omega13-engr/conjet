@@ -71,45 +71,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 
 ## BACKLOG
 
-### SPEED-020
-
-Title: Benchmark Docker image and registry operations
-
-Description: Measure pull, local load/save, image inspection and removal with controlled registry and cache conditions.
-
-Is blocked by task: SPEED-019.
-
-Acceptance Criteria:
-
-- Use identical immutable images and architecture; separate manifest lookup, transfer, decompression/unpack and ready-to-run where observable.
-- Measure cold and cached pulls using a task-owned local registry when supported; report public-network pulls separately without attributing network variation to the runtime.
-- Verify digest and runnable contents after pull/load; measure save/load throughput and disk expansion. Delete only task-owned images and artifacts.
-- Record unsupported image-management operations for native-only endpoints; image preparation is included in native readiness cost where relevant.
-
-Problem and Evidence: The matrix implements actual image pulls, verified archive save/load, tag removal, runnable proof and a loopback registry fixture. Layer-level cold evidence still requires validation.
-
-Raw evidence: Container startup with cached layers says nothing about image acquisition or unpack cost.
-
-Approach:
-
-1. Create small and multilayer pinned image fixtures and an isolated registry topology.
-2. Run cold/cache-hit pull and load/save cycles with scoped cache resets.
-3. Verify hashes and report latency, bytes, storage and errors.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-020`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Create the image fixture and cache-state inventory.
 
 ### SPEED-021
 
@@ -369,6 +330,42 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: After the PR merges, inspect current versions and release workflows to select the release scope.
 
 ## INPROGRESS
+
+### SPEED-020
+
+Title: Benchmark Docker image and registry operations
+
+Description: Measure pull, local load/save, image inspection and removal with controlled registry and cache conditions.
+
+Is blocked by task: SPEED-019.
+
+Acceptance Criteria:
+
+- Use identical immutable images and architecture; separate manifest lookup, transfer, decompression/unpack and ready-to-run where observable.
+- Measure cold and cached pulls using a task-owned local registry when supported; report public-network pulls separately without attributing network variation to the runtime.
+- Verify digest and runnable contents after pull/load; measure save/load throughput and disk expansion. Delete only task-owned images and artifacts.
+- Record unsupported image-management operations for native-only endpoints; image preparation is included in native readiness cost where relevant.
+
+Problem and Evidence: The first serial image pair completed and verified cleanup.
+It produced pinned Node save/load and runnable proofs on both engines
+and loopback registry reimports. Kiri's reused Alpine config advertised
+the historical index digest while returning the exact pinned ARM64 config
+digest. The runner now checks that pinned config digest independently
+and retains advertised-manifest status. Registry reimports separately
+record observed blob transfers and keep pristine layer cache unknown.
+Four fixture tests passed. Retained raw data under ExternalSSD
+`SPEED-020/pair-1`; repeat the affected Alpine row and the remaining pairs.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Rerun with the verified image config pins and retain the layer observability results.
 
 ### SPEED-026
 
