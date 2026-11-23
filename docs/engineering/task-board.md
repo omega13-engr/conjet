@@ -58,7 +58,482 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 | SPEED-008 | Original revise verdict recorded and unresolved. Comparative requirements deferred. |
 | SPEED-009, SPEED-010 | One-slot fixture and backing-ownership evidence retained. SPEED-012 integrates the relevant semantics with the product session. |
 
+## Docker and native benchmark extension
+
+SPEED-015 through SPEED-026 form a new sequential benchmark program requested
+by the user. They do not mark SPEED-008 passed or change the previously authorized
+experimental release gate. SPEED-015 can start without waiting for release/signing;
+each following task depends on the preceding task. A valid slower result or an
+explicitly unsupported operation is evidence, not a reason to fabricate a pass.
+Do not call the native API Docker-compatible until actual Docker client operations
+and their semantics are verified. Integration work in SPEED-018 must stay isolated
+and opt-in; broader support gaps become explicit implementation tasks.
+
 ## BACKLOG
+
+### SPEED-015
+
+Title: Freeze the Docker comparison contract and capability matrix
+
+Description: Create benchmarks/scenarios/docker-comparison-v1.json and docs/engineering/docker-benchmark-plan.md defining the workloads, adapters, timing boundaries, and qualification rules.
+
+Is blocked by task: None; uses completed SPEED-000 through SPEED-012 evidence. Does not wait for SPEED-014.
+
+Acceptance Criteria:
+
+- List four separate lanes: official Kiri Docker API/CLI, existing Conjet Docker API/CLI, native fresh/prepared API, and any verified Docker-to-native adapter. Record supported/unsupported operations per lane; never substitute native execution for docker build or Compose.
+- Pin official Kiri version/hash, candidate revision, ARM64 image digests, Docker/Compose/Buildx clients, guest resources, storage placement, network behavior, and cache policies. Record effective limits, not only requested values.
+- Predeclare warmups, repetitions, concurrency, timeouts, failure treatment, session ordering and statistics. Lifecycle qualification retains at least 10,000 operations per scenario across five sessions; declare practical independent-session counts for expensive builds/Compose before measuring.
+- Scope local conclusions to the M1 Pro. Preserve the deferred second-host, energy and equivalent-teardown requirements; unavailable observability must produce unknown, not pass.
+
+Problem and Evidence: Previous comparisons mixed native and Docker endpoints; the experimental native product cannot yet run general OCI images, bridge workloads, or Docker commands.
+
+Approach:
+
+1. Inventory the existing harnesses and runtime capabilities without changing production.
+2. Write the scenario manifest and an ASCII diagram for each execution path; identify integration gaps as separate implementation prerequisites.
+3. Review the manifest against each requested Docker operation and freeze the initial measurement policy.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-015`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Write the lane/capability table and pinned workload manifest.
+
+### SPEED-016
+
+Title: Make the benchmark orchestrator safe and reproducible
+
+Description: Extend the isolated launchers and reporting harness to execute the frozen suite serially with explicit engine identities.
+
+Is blocked by task: SPEED-015.
+
+Acceptance Criteria:
+
+- Use private DOCKER_CONFIG and explicit contexts/endpoints: conjet-speedup for the candidate and kiri-speedup for Kiri. Identify actual binaries, servers, builders and VM disk holders; reject production endpoints.
+- Store all images, volumes, build contexts, caches, logs and scratch artifacts on ExternalSSD; verify backing paths. Use unique labels, Compose project names and task-owned builders.
+- Alternate engine order between paired sessions; run timing suites without overlapping builds or other benchmark engines. Preserve production and record its contention.
+- Exercise interruption, timeout and partial-report recovery. Cleanup only owned resources; no global prune/context switch, persistent jobs or global credential changes. Verify production snapshots and no owned process/disk/socket holders.
+
+Problem and Evidence: The existing combined runner can run suites in parallel and requires energy privileges; this comparison needs controlled sequencing and nonprivileged measurements that can proceed independently.
+
+Approach:
+
+1. Reuse existing launchers and add manifest-driven adapters and explicit identity checks.
+2. Add failure/timeout/cancellation checks and machine-readable raw results with status and provenance.
+3. Run a short smoke on each supported lane and verify cleanup before full measurements.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-016`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Implement the manifest loader and production-endpoint refusal checks.
+
+### SPEED-017
+
+Title: Capture current Docker and native baselines
+
+Description: Run a bounded pilot of the unchanged engines and native product before implementing an accelerated Docker adapter.
+
+Is blocked by task: SPEED-016.
+
+Acceptance Criteria:
+
+- Capture direct Docker API and actual Docker CLI lifecycle on both engines, plus separately labeled native fresh/prepared timings for the same supported payload.
+- Probe build, Compose, exec, volumes and networking capabilities; record unsupported/error outcomes explicitly and retain them in coverage.
+- Record native preparation/refill and misses separately; retain original data and do not combine pilot samples with final qualification.
+- Identify which Docker operations reach Docker/containerd and which, if any, reach the native service using runtime dispatch evidence.
+
+Problem and Evidence: Native fixture speed does not establish that Docker clients receive the improvement.
+
+Approach:
+
+1. Run small pinned pilot workloads through each adapter.
+2. Validate outputs, exit codes, selected backend and timing endpoints.
+3. Publish the baseline and concrete Docker-to-native integration gaps.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-017`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Run the no-network pilot with the existing fresh-lifecycle harness.
+
+### SPEED-018
+
+Title: Qualify Docker-to-native routing before claiming Docker acceleration
+
+Description: Define and, for the explicitly supported subset, implement an opt-in Docker-compatible route to the new native execution service; qualify it before performance measurement.
+
+Is blocked by task: SPEED-017.
+
+Acceptance Criteria:
+
+- Write a supported Docker operation/option contract and single-owner lifecycle design before implementation. General Alpine/OCI execution requires verified image/rootfs admission and execution support, not a static-binary substitution.
+- Support the selected real docker run lifecycle, including API negotiation, create/start, attach/output, actual exit status, wait conditions, inspect and removal. Test event ordering, names/IDs, cancellation and disconnect recovery.
+- Record backend selection per container. Reject unsupported requests clearly or route them explicitly to the existing Docker backend before allocation/start; never silently ignore flags or retry after ambiguous execution.
+- Verify isolation, bounded resources, image semantics and no leaks on success/failure. Keep the experimental route isolated and opt-in; ordinary production routing is unchanged.
+- If integration is not viable within the declared subset, record an unavailable accelerated Docker lane and a reviewed follow-up implementation task. Benchmark existing Docker and native lanes separately; do not claim this benchmark work created Docker acceleration.
+
+Problem and Evidence: The present native product accepts restricted static ARM64 workloads and is not a Docker-compatible general container engine. Routing is an engineering prerequisite, not a benchmark switch.
+
+Approach:
+
+1. Design the smallest meaningful supported Docker workload subset and tests using the pilot gaps.
+2. Implement and validate the selected subset with the real Docker client and ordinary pinned image; avoid special-casing true or benchmark identifiers.
+3. Review lifecycle ownership and capture proof of the selected backend before freezing the adapter.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-018`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Write the Docker-to-native contract and estimate the concrete implementation gaps.
+
+### SPEED-019
+
+Title: Benchmark Docker run and container lifecycle
+
+Description: Measure fresh Docker API and docker run end-to-end against Kiri, retaining native API measurements as a distinct comparison.
+
+Is blocked by task: SPEED-018.
+
+Acceptance Criteria:
+
+- Measure create/start/wait/removal through HTTP and docker run --rm through the same pinned CLI separately. Validate nonzero exits and output; include true and a small observable application.
+- Cover warm-image no-network and supported bridge cases; separate first-use/image acquisition from cached runs. Keep VM cold boot outside warm lifecycle timing.
+- Report p50/p95/p99, raw failures, wall time, throughput and per-session distributions. Record API removal and verified guest cleanup separately; do not infer one from the other.
+- Compare native fresh/prepared only where workload semantics match; include preparation/refill, missed claims and actual dispatch backend. Do not label a native RPC measurement docker run.
+- Exercise create/start of pre-created containers, stop/kill/restart and remove; mark unsupported lifecycle operations explicitly.
+
+Problem and Evidence: The headline Kiri measurement is a Docker API lifecycle, while the existing fast Conjet measurement is native submission through cleanup.
+
+Approach:
+
+1. Extend the lifecycle scenario with actual CLI and nonzero/output canaries.
+2. Run alternating paired sessions at the frozen counts and collect bounded-concurrency data separately.
+3. Verify raw percentiles and publish API and CLI results without cross-lane ratios presented as equivalent work.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-019`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Add the real Docker CLI lifecycle and backend-attribution rows.
+
+### SPEED-020
+
+Title: Benchmark Docker image and registry operations
+
+Description: Measure pull, local load/save, image inspection and removal with controlled registry and cache conditions.
+
+Is blocked by task: SPEED-019.
+
+Acceptance Criteria:
+
+- Use identical immutable images and architecture; separate manifest lookup, transfer, decompression/unpack and ready-to-run where observable.
+- Measure cold and cached pulls using a task-owned local registry when supported; report public-network pulls separately without attributing network variation to the runtime.
+- Verify digest and runnable contents after pull/load; measure save/load throughput and disk expansion. Delete only task-owned images and artifacts.
+- Record unsupported image-management operations for native-only endpoints; image preparation is included in native readiness cost where relevant.
+
+Problem and Evidence: Container startup with cached layers says nothing about image acquisition or unpack cost.
+
+Approach:
+
+1. Create small and multilayer pinned image fixtures and an isolated registry topology.
+2. Run cold/cache-hit pull and load/save cycles with scoped cache resets.
+3. Verify hashes and report latency, bytes, storage and errors.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-020`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Create the image fixture and cache-state inventory.
+
+### SPEED-021
+
+Title: Benchmark Docker build and BuildKit
+
+Description: Measure real docker build/buildx build workflows and verify resulting images.
+
+Is blocked by task: SPEED-020.
+
+Acceptance Criteria:
+
+- Pin Dockerfiles, source trees, build arguments, BuildKit versions/driver where controllable, CPU/RAM and package dependencies. Record engine-managed differences.
+- Measure empty builder cache with base preloaded, unchanged rebuild, source-only change, dependency change and multi-stage build. Separate image pull, build execution and image export/load.
+- Use representative small Rust, Go and Node projects with correctness checks and consistent dependency availability. Verify produced binaries or service responses.
+- Report build wall time, cache hits, CPU, memory peak, disk I/O and resulting image size. Record whether BuildKit uses the native runtime, Docker/containerd, or another backend.
+- No native build speed claim is allowed merely because a native launch microbenchmark is fast; unsupported Kiri build configurations remain explicit.
+
+Problem and Evidence: Build performance depends on BuildKit, filesystem behavior and caching; the new native launch service is not itself a build engine.
+
+Approach:
+
+1. Reuse the polyglot fixtures and define private builders with explicit endpoints.
+2. Execute the cache matrix serially and validate each output image.
+3. Publish per-project and per-cache-state comparisons with builder provenance.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-021`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Pin the three build fixtures and builder configurations.
+
+### SPEED-022
+
+Title: Benchmark Docker Compose application workflows
+
+Description: Measure a real multi-service Compose application from up through readiness and down.
+
+Is blocked by task: SPEED-021.
+
+Acceptance Criteria:
+
+- Pin the same Compose plugin/file/images and use unique project names, isolated networks, volumes and host ports for each engine.
+- Measure pre-pulled up --wait, no-change up, one-service recreate, scale, restart and down; separate build/pull cost from startup. Record unsupported commands.
+- Use an app plus database/cache fixture with health checks and a functional transaction; readiness requires working dependencies, not only running containers.
+- Validate logs, service DNS, published ports and expected data persistence across restart; separately measure down --volumes using only owned volumes.
+- Report critical-path readiness, per-service latency, resources and verified cleanup. Attribute mixed native/legacy execution per service.
+
+Problem and Evidence: Compose includes orchestration, network dependencies and storage behavior absent from the single-container native fixture.
+
+Approach:
+
+1. Create the deterministic application fixture and readiness/data canaries.
+2. Run the workflow matrix in alternating engine sessions.
+3. Verify application correctness and project-scoped cleanup after every cycle.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-022`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Add the Compose fixture and transaction-based readiness check.
+
+### SPEED-023
+
+Title: Benchmark exec, streams and control-plane operations
+
+Description: Measure Docker exec, attach/logs, inspect/list/events and file copy for supported workloads.
+
+Is blocked by task: SPEED-022.
+
+Acceptance Criteria:
+
+- Separate persistent-container docker exec from fresh docker run; measure API and CLI overhead where supported.
+- Validate stdout/stderr separation, bounded large output, exit codes, stdin/TTY behavior where supported, and cancellation without deadlocks.
+- Measure inspect/list latency with fixed owned-container counts and event delivery/order under churn; do not query or manipulate production containers.
+- Measure docker cp in/out with checksummed small-file and large-file sets. Record unsupported native or Kiri behavior without substituting another operation.
+
+Problem and Evidence: Interactive development and tooling depend on control-plane and stream behavior beyond launch latency.
+
+Approach:
+
+1. Add long-lived fixture containers and deterministic stream/file workloads.
+2. Run operation-specific latency and throughput cases with correctness assertions.
+3. Inspect backpressure, cancellation and cleanup evidence before publishing results.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-023`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Create exec and output-integrity fixtures.
+
+### SPEED-024
+
+Title: Benchmark filesystem, networking and sustained workloads
+
+Description: Measure storage and network performance plus realistic long-running service throughput.
+
+Is blocked by task: SPEED-023.
+
+Acceptance Criteria:
+
+- Test named volumes, supported host bind mounts and container writable layers separately: metadata/small files, sequential/random I/O, and fsync durability. Keep datasets and backing files on ExternalSSD.
+- Measure container-to-container DNS/TCP, published host ports, connection churn, request latency and throughput with identical topology/payload; record unsupported native networking.
+- Validate checksums, acknowledged durable writes and application responses. Use task-owned services and ports; record filesystem/cache settings and client placement.
+- Run at least one sustained application workload with latency under load and active-data canaries. Capture CPU, memory and disk growth with a declared steady-state interval.
+- Keep raw transport throughput, application readiness and launch latency as separate metrics.
+
+Problem and Evidence: Bridge creation timings do not measure packet performance, and static no-network execution does not establish Docker workload compatibility.
+
+Approach:
+
+1. Reuse existing filesystem/network benchmark utilities with the pinned datasets.
+2. Run storage and networking cases independently, then the application load fixture.
+3. Verify data integrity and publish topology, throughput, latency and resource observations.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-024`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Define the bind/volume/writable-layer and network topology matrix.
+
+### SPEED-025
+
+Title: Qualify concurrency, pressure, recovery and efficiency
+
+Description: Run the cross-workload stress matrix and quantify whether speed gains persist under realistic contention.
+
+Is blocked by task: SPEED-024.
+
+Acceptance Criteria:
+
+- Sweep declared concurrency levels for launches and representative builds/services; bound queues and report rejected, failed and timed-out work as well as successful latency.
+- Exercise CPU and guest-memory pressure, prepared-slot exhaustion/refill and active-data preservation without inducing unsafe host-wide pressure or stopping production.
+- Test request cancellation, client disconnect and task-owned runtime crash/restart with leak inventories and explicit recovery outcomes; use only disposable test state.
+- Collect host plus attributed guest CPU/memory, idle footprint, disk growth and reclamation with measurement limitations. Run energy sampling separately only when authorized and available; otherwise mark it unavailable.
+- Observe cleanup lag and steady-state resource growth independently from API acknowledgement. Unknown Kiri guest teardown remains unknown.
+
+Problem and Evidence: Fast sequential medians can hide queueing, memory reservation, deferred cleanup and recovery costs.
+
+Approach:
+
+1. Freeze safe resource ceilings and deterministic fault points.
+2. Run bounded stress and recovery sessions with canaries and before/after inventories.
+3. Analyze scaling, tails, failure rates, resource reclamation and optional energy without discarding adverse sessions.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-025`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Add the concurrency matrix and owned-resource leak inventory.
+
+### SPEED-026
+
+Title: Publish the Docker and native comparison verdict
+
+Description: Create docs/engineering/docker-benchmark-results.md with reproducible results and a reviewed claim for each workload.
+
+Is blocked by task: SPEED-025.
+
+Acceptance Criteria:
+
+- Publish exact revisions, hashes, commands, effective resources, cache states, timing boundaries, raw evidence links and per-session results for every planned row.
+- Report Kiri versus Conjet Docker API, Docker CLI/build/Compose, and native API as separate comparisons. Distinguish accelerated, legacy, mixed and unsupported paths.
+- Compute predeclared confidence intervals from independent sessions; avoid treating repeated operations as independent hardware/session evidence. Report failures and missing coverage alongside speed.
+- Use per-workload pass/fail/inconclusive/unsupported verdicts. Task completion means valid measurements and an honest report, not a mandatory Conjet win.
+- Scope claims to observed M1 Pro conditions; retain deferred cross-host, energy and guest-teardown requirements. Do not use this report to silently expand the earlier release scope or declare all Docker operations accelerated.
+- Review findings, create concrete follow-up tasks for regressions/gaps, verify production and cleanup, and commit/push the report without automatically merging or publishing a release.
+
+Problem and Evidence: The current comparison cannot support a general Docker performance claim, and the requested suite must expose both wins and regressions.
+
+Approach:
+
+1. Freeze the measured candidate and audit every scenario against raw evidence.
+2. Generate comparable tables and uncertainty estimates; explain backend attribution and missing features.
+3. Review the final verdict and evidence links, update the board accurately and record follow-up implementation needs.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-026`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Build the coverage and claim audit from the completed suite reports.
 
 ### SPEED-014
 
