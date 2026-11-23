@@ -101,7 +101,8 @@ class NativeDockerTests(unittest.TestCase):
     def test_unmodified_docker_cli_negotiates_attaches_and_waits_once(self):
         docker = Path('/opt/homebrew/bin/docker')
         transport = TransportStub()
-        owner = SERVER['Owner'](transport, IMAGE, METADATA)
+        trace = SERVER['Trace']()
+        owner = SERVER['Owner'](transport, IMAGE, METADATA, trace)
         with tempfile.TemporaryDirectory(dir=SERVER['SCRATCH']) as temporary:
             root = Path(temporary)
             endpoint = root / 'docker.sock'
@@ -128,6 +129,15 @@ class NativeDockerTests(unittest.TestCase):
                     bridge.shutdown()
                     worker.join(2)
             endpoint.unlink()
+            records = list(trace.rows)
+            requests = [row for row in records if row['event'] == 'http_request']
+            self.assertTrue(any(row['path'] == '/_ping' for row in requests))
+            for event in ('attach_headers', 'wait_headers', 'worker_enter', 'die', 'destroy',
+                          'attach_output_written', 'wait_body_written'):
+                self.assertEqual(sum(row['event'] == event for row in records), 1, event)
+            self.assertGreaterEqual(len({row['connection'] for row in requests}), 2)
+            self.assertEqual([row['host_ns'] for row in records],
+                             sorted(row['host_ns'] for row in records))
 
 
 if __name__ == '__main__':

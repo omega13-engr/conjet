@@ -117,20 +117,31 @@ Approach:
 2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
 3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
 
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
+Evidence: DONE. Built the optimized Swift CLI, Jetstream and ARM64 musl guest
+with the environment runbook commands from `cf0a94e`. Ran
+`python3 build-support/run-conjet-speedup.py --diagnostics {control,trace}`
+with the pinned release assets in control/trace/trace/control order, then
+`python3 benchmarks/native-docker-diagnostic.py` on the four output folders.
+All 704 operations (640 measured, 64 warmups) verified unique native workload
+IDs and completed cleanup. Each CLI canary checked exact streams and exit code.
+`python3 benchmarks/test-native-docker-adapter.py` passed four tests.
+Build logs, artifact hashes, complete command vectors, observations and
+cleanup records are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-027`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [adapter contract](docker-native-adapter.md),
 [benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
+[diagnostic results](docker-benchmark-results.md#speed-027-native-docker-critical-path-diagnostics),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local diff and isolated runtime checks passed. Trace capture is opt-in,
+bounded and flushed after handler shutdown. All four launchers verified unchanged
+production and removal of the owned VM session and Docker socket. This is a
+headless diagnostic and uses JSON evidence. Independent PR review is separate.
 
-Next Action: Instrument the existing native Docker handler and collect one diagnostic pair plus untraced controls.
+Next Action: Reuse the authenticated connection in SPEED-028 and repeat both
+diagnostic canaries to measure the change in handshake count and latency.
 
 ### SPEED-028
 

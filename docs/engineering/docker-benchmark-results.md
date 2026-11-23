@@ -116,6 +116,62 @@ partial Kiri API samples, and finished cleanup before the other engine
 started. A separate 100-sample-per-lane post-fix pilot passed. The table
 above remains tied to the frozen `cabbea9` series.
 
+## SPEED-027 native Docker critical path diagnostics
+
+Four native-only boots used control/trace/trace/control order. The CLI, VMM and
+guest were built in release mode from `cf0a94e` with the runbook commands. The
+launcher records the instrumented adapter hash, exact VM invocation and release
+asset hashes. Each boot ran four warmups and 40 measured operations per lane
+and canary. All 704 operations completed, with exact CLI output and exit status,
+unique native workload IDs and verified guest cleanup. The native API lane
+validated both exit codes through wait and explicit removal. CLI used normal
+negotiation with the same pinned Docker executable and ran through process exit.
+
+| Lane and canary | Control 1 median (ms) | Trace 1 median (ms) | Trace 2 median (ms) | Control 2 median (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| API true | 4.263 | 3.935 | 4.652 | 4.264 |
+| API both streams, exit 23 | 4.279 | 4.169 | 4.324 | 4.329 |
+| CLI true | 24.996 | 24.377 | 26.207 | 24.836 |
+| CLI both streams, exit 23 | 25.002 | 24.617 | 25.274 | 24.665 |
+
+The trace-minus-control differences within the two adjacent boot pairs ranged
+from −0.329 to +0.388 ms for API true and −0.619 to +1.371 ms for CLI true.
+The both-streams differences ranged from −0.111 to −0.004 ms for API and
+−0.385 to +0.609 ms for CLI. Boot variation leaves the cost of tracing
+inconclusive. The frozen qualification series remains separate.
+
+Each observed CLI run issued two HEAD pings and one request each for create,
+attach, wait and start across three HTTP connections and three handler
+threads. Direct API issued create, start, wait and remove across two
+connections and two handler threads. Each lane used one launch worker and
+one fresh authenticated guest channel per operation. Guest witness retrieval
+occurred outside each measured interval.
+
+| Ranked CLI host spans | Range of traced canary medians (ms) |
+| --- | ---: |
+| Client invocation to first HTTP request | 17.119–18.166 |
+| Native worker entry to verified cleanup | 2.874–3.082 |
+| Last attach socket close or wait body write to CLI exit | 1.589–1.675 |
+| Docker create to start event, including attach and wait handshake | 1.223–1.338 |
+| First HTTP request to Docker create | 0.763–0.833 |
+| Verified cleanup to owner exit, including two native output reads | 0.325–0.358 |
+
+Within the native worker span, authentication took 0.578–0.596 ms and
+admission 0.192–0.222 ms. Admission to verified terminal observation took
+2.078–2.190 ms and includes guest execution and cleanup. The guest
+boundary is a terminal protocol observation. The trace has no
+guest-local decomposition of execution and teardown. Host socket close
+witnesses attach EOF generation, while client completion covers its read
+and shutdown. The trace does not split Docker startup into process
+scheduling, client initialization and context loading, or attribute the
+historical Kiri delta to any one span. SPEED-028 targets the measured
+per-launch authentication cost and SPEED-029 targets the output reads.
+
+Raw traces, client rows, hashes, commands and launcher cleanup witnesses
+are retained under `conjet-speedup-evidence/SPEED-027` on ExternalSSD.
+Every launcher verified unchanged production and removal of its native
+session and Docker socket.
+
 ## Release-build static native API and CLI
 
 A separate release-build run used `cabbea9`, the same CLI, VMM, kernel and

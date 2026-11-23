@@ -29,6 +29,26 @@ LIMITS = {'memory_bytes': 16777216, 'pids': 4, 'cpu_millicores': 500}
 NAME = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}')
 
 
+class Trace:
+    """Bound diagnostic memory and keep payloads and credentials out of the trace."""
+
+    def __init__(self):
+        self.rows = deque(maxlen=16384)
+        self.lock = threading.Lock()
+        self.count = 0
+
+    def mark(self, event, **fields):
+        with self.lock:
+            self.rows.append({'host_ns': time.monotonic_ns(), 'event': event,
+                              'thread': threading.get_native_id(), **fields})
+            self.count += 1
+
+    def write(self, path):
+        with path.open('x') as stream:
+            json.dump({'dropped': self.count - len(self.rows), 'events': list(self.rows)}, stream)
+            stream.write('\n')
+
+
 class Rejected(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
@@ -36,7 +56,9 @@ class Rejected(ValueError):
 
 
 class Native:
-    def __init__(self, session, digest):
+    trace = None
+
+    def __init__(self, session, digest, trace=None):
         if (session.resolve() != session or not session.is_relative_to(SCRATCH)
                 or not session.is_dir() or session.stat().st_mode & 0o077):
             raise Rejected('native session directory is not private')
@@ -47,6 +69,7 @@ class Native:
         identity = json.loads((session / 'native-session.json').read_text())
         self.pid = identity['pid']
         self.digest = digest
+        self.trace = trace
         if identity['image_digest'] != digest:
             raise Rejected('staged OCI digest differs from the receipt')
         with self.channel() as (channel, boot):
@@ -74,6 +97,9 @@ class Native:
 
     def execute(self, process, cancellation):
         began = time.monotonic_ns()
+        trace = self.trace
+        if trace:
+            trace.mark('native_connect')
         with self.channel() as (channel, boot):
             authenticated = time.monotonic_ns()
             if boot != self.boot:
@@ -83,11 +109,15 @@ class Native:
                        'budget_ms': 1000, 'spec': process}
             if cancellation.is_set():
                 return 137, b'', b'', {'cancelled_before_admission': True}
+            if trace:
+                trace.mark('native_launch_request', operation=request['operation_id'])
             state = self.call(channel, 8, request, 13)
             admitted = time.monotonic_ns()
             wait_calls = 0
             bound = time.monotonic() + 32
             handle = state['handle']
+            if trace:
+                trace.mark('native_admitted', workload=handle['workload_id'])
             sent_cancel = False
             while state['cleanup'] != 'complete':
                 if state['cleanup'] == 'failed' or time.monotonic() >= bound:
@@ -107,6 +137,8 @@ class Native:
                     raise RuntimeError(f'native terminal wait rejected: {result}')
                 state = result
             terminal = time.monotonic_ns()
+            if trace:
+                trace.mark('native_cleanup_verified', wait_calls=wait_calls, exit=state['exit'])
             output = []
             for name in ('stdout', 'stderr'):
                 data = bytearray()
@@ -118,6 +150,8 @@ class Native:
                     if chunk['dropped_bytes'] or len(data) > 65536:
                         raise RuntimeError('OCI output exceeds the Docker adapter limit')
                     if chunk['eof']:
+                        if trace:
+                            trace.mark('native_stream_eof', stream=name, size=len(data))
                         break
                     if not piece:
                         raise RuntimeError('native output did not advance')
@@ -218,7 +252,7 @@ class Container:
 
 
 class Owner:
-    def __init__(self, native, image, metadata):
+    def __init__(self, native, image, metadata, trace=None):
         self.native = native
         self.image = image
         self.metadata = metadata
@@ -228,8 +262,11 @@ class Owner:
         self.events = deque(maxlen=16)
         self.worker = None
         self.poisoned = False
+        self.trace = trace
 
     def event(self, action, item):
+        if self.trace:
+            self.trace.mark(action, container=item.id)
         attributes = {'name': item.name, 'image': self.image, 'conjet.backend': 'jetstream-native-oci'}
         if action == 'die':
             attributes.update({'exitCode': str(item.code),
@@ -272,6 +309,8 @@ class Owner:
             self.event('start', item)
 
     def run(self, item):
+        if self.trace:
+            self.trace.mark('worker_enter', container=item.id)
         try:
             code, stdout, stderr, native = self.native.execute(item.process, item.cancellation)
         except Exception as error:
@@ -333,6 +372,18 @@ class Handler(BaseHTTPRequestHandler):
     def setup(self):
         self.request.settimeout(38)
         super().setup()
+        if self.server.owner.trace:
+            self.connection_id = uuid.uuid4().hex
+            self.server.owner.trace.mark('http_connect', connection=self.connection_id)
+
+    def finish(self):
+        super().finish()
+        if hasattr(self, 'connection_id'):
+            self.trace_mark('http_finish')
+
+    def trace_mark(self, event, **fields):
+        if self.server.owner.trace:
+            self.server.owner.trace.mark(event, connection=self.connection_id, **fields)
 
     def log_message(self, *_):
         pass
@@ -372,6 +423,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Upgrade', 'tcp')
         self.send_header('Content-Type', 'application/vnd.docker.multiplexed-stream')
         self.end_headers()
+        self.trace_mark('attach_headers', container=item.id)
         self.close_connection = True
         owner = self.server.owner
         with owner.cv:
@@ -382,6 +434,7 @@ class Handler(BaseHTTPRequestHandler):
             if not stream or query.get(key, ['1'])[0] in ('0', 'false'):
                 continue
             self.wfile.write(struct.pack('>B3xI', index, len(stream)) + stream)
+        self.trace_mark('attach_output_written', container=item.id)
 
     def inspect(self, item):
         if item.removed:
@@ -461,12 +514,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Connection', 'close')
             self.end_headers()
+            self.trace_mark('wait_headers', container=item.id)
             self.close_connection = True
             try:
                 result = {'StatusCode': owner.wait(item, condition), 'Error': None}
             except Rejected as error:
                 result = {'StatusCode': 125, 'Error': {'Message': str(error)}}
             self.wfile.write(json.dumps(result).encode())
+            self.trace_mark('wait_body_written', container=item.id, status=result['StatusCode'])
         elif self.command == 'POST' and action == 'attach':
             self.attach(item, query)
         elif self.command == 'GET' and action == 'json':
@@ -481,6 +536,8 @@ class Handler(BaseHTTPRequestHandler):
             raise Rejected('unsupported container operation', 501)
 
     def handle_docker_request(self):
+        if self.server.owner.trace:
+            self.trace_mark('http_request', method=self.command, path=urlsplit(self.path).path[:256])
         try:
             self.dispatch()
         except Rejected as error:
@@ -489,6 +546,9 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(400, {'message': 'invalid or unsupported Docker request'})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
+        finally:
+            if self.server.owner.trace:
+                self.trace_mark('http_response', method=self.command)
 
     do_GET = handle_docker_request
     do_HEAD = handle_docker_request
@@ -521,6 +581,11 @@ class Server(socketserver.ThreadingUnixStreamServer):
         finally:
             self.admission.release()
 
+    def shutdown_request(self, request):
+        super().shutdown_request(request)
+        if self.owner.trace:
+            self.owner.trace.mark('http_socket_closed')
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -529,6 +594,7 @@ def main():
     parser.add_argument('--receipt', required=True, type=Path)
     parser.add_argument('--image', required=True)
     parser.add_argument('--socket', required=True, type=Path)
+    parser.add_argument('--trace', type=Path)
     args = parser.parse_args()
     endpoint = args.socket
     if (endpoint.parent.resolve(strict=True) != endpoint.parent
@@ -540,8 +606,12 @@ def main():
             or not re.fullmatch(r'[^@]+@sha256:[a-f0-9]{64}', args.image)):
         parser.error('require an immutable image reference and bounded ExternalSSD admission receipt')
     metadata = json.loads(args.receipt.read_text())
-    native = Native(args.native_session, metadata['config_digest'])
-    owner = Owner(native, args.image, metadata)
+    if args.trace and (not args.trace.parent.resolve(strict=True).is_relative_to(SCRATCH)
+                       or os.path.lexists(args.trace)):
+        parser.error('trace must be a new file on ExternalSSD')
+    trace = Trace() if args.trace else None
+    native = Native(args.native_session, metadata['config_digest'], trace)
+    owner = Owner(native, args.image, metadata, trace)
     stop = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
@@ -566,6 +636,8 @@ def main():
             finally:
                 server.server_close()
                 endpoint.unlink(missing_ok=True)
+                if trace:
+                    trace.write(args.trace)
 
 
 if __name__ == '__main__':

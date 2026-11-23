@@ -36,7 +36,7 @@ def invoke(docker, env, args, *, code=0, stdout=b'', stderr=b''):
                            f'stdout={result.stdout[:300]!r}, stderr={result.stderr[:300]!r}')
 
 
-def lifecycle(connection, name, stages):
+def lifecycle(connection, name, stages, *, argv=('/bin/true',), code=0):
     def call(label, method, path, expected, body=None):
         start = time.monotonic_ns()
         try:
@@ -46,15 +46,15 @@ def lifecycle(connection, name, stages):
 
     path = '/containers/' + name
     call('create', 'POST', '/containers/create?name=' + name, (201,), {
-        'Image': IMAGE['ref'], 'User': USER, 'Cmd': ['/bin/true'], 'HostConfig': HOST_CONFIG})
+        'Image': IMAGE['ref'], 'User': USER, 'Cmd': list(argv), 'HostConfig': HOST_CONFIG})
     call('start', 'POST', path + '/start', (204,))
     result = call('wait', 'POST', path + '/wait?condition=not-running', (200,))
-    if result['StatusCode'] != 0 or result.get('Error'):
-        raise RuntimeError(f'API workload did not exit zero: {result}')
+    if result['StatusCode'] != code or result.get('Error'):
+        raise RuntimeError(f'API workload did not exit {code}: {result}')
     call('remove', 'DELETE', path, (204,))
 
 
-def native_terminal(connection, name, handles):
+def native_terminal(connection, name, handles, code=0):
     connection.request('GET', PREFIX + '/events')
     response = connection.getresponse()
     raw = response.read(65537)
@@ -67,7 +67,7 @@ def native_terminal(connection, name, handles):
     attributes = owned[2]['Actor']['Attributes']
     handle = attributes['conjet.native_handle']
     if (attributes['conjet.backend'] != 'jetstream-native-oci' or attributes['conjet.guest_cleanup'] != 'complete'
-            or attributes['exitCode'] != '0' or not handle or handle in handles):
+            or attributes['exitCode'] != str(code) or not handle or handle in handles):
         raise RuntimeError('native execution or cleanup lacks a unique guest witness')
     handles.add(handle)
     return attributes

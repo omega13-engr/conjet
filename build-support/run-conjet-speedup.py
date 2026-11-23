@@ -399,6 +399,8 @@ def native_session(args, root):
         docker += ['--context', CONTEXT]
         bridge_command = [sys.executable, adapter, '--native-session', directory,
                           '--receipt', args.native_receipt, '--image', args.image, '--socket', endpoint]
+        if args.diagnostics == 'trace':
+            bridge_command += ['--trace', output / 'adapter-trace.json']
         report['adapter_command'] = list(map(str, bridge_command))
         with (output / 'adapter.stderr').open('w') as log:
             bridge = subprocess.Popen(bridge_command, env=env, stdin=subprocess.DEVNULL,
@@ -416,7 +418,10 @@ def native_session(args, root):
             raise RuntimeError('native endpoint reported the wrong backend')
         report['backend'] = version['Platform']['Name']
         print(f'Native Docker ready: {host}', flush=True)
-        if args.matched_output:
+        if args.diagnostics:
+            diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-diagnostic.py'))
+            diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
+        elif args.matched_output:
             bench = runpy.run_path(str(REPO / 'benchmarks/native-docker-comparison.py'))
             bench['measure']('native', endpoint, bridge.pid, docker, env, args.matched_output,
                              args.matched_samples, vm.pid)
@@ -427,7 +432,7 @@ def native_session(args, root):
                 report['docker_exit'] = child.wait(timeout=120)
             finally:
                 stop_child(child, 3)
-        elif not args.matched_output:
+        elif not args.matched_output and not args.diagnostics:
             smoke = run(docker + ['run', '--rm', '--pull', 'never', '--network', 'none',
                                   '--user', '65532:65532', '--memory', '16m', '--pids-limit', '4',
                                   '--cpus', '0.5', args.image, '/bin/echo', 'conjet-native-ok'], env=env)
@@ -487,6 +492,7 @@ def main():
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
+    parser.add_argument('--diagnostics', choices=('trace', 'control'), help='run the native-only diagnostic canaries')
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
@@ -519,10 +525,12 @@ def main():
     if any(key in os.environ for key in ('DOCKER_HOST', 'DOCKER_CONTEXT', 'BUILDX_BUILDER')):
         parser.error('unset inherited Docker endpoint and builder overrides before running')
     if args.legacy_baseline:
-        if not args.network_helper or args.docker_args or args.matched_output or args.native_evidence or any(
+        if not args.network_helper or args.docker_args or args.diagnostics or args.matched_output or args.native_evidence or any(
                 getattr(args, name) for name in native_assets):
             parser.error('legacy baseline requires its network helper and accepts no native options')
     else:
+        if args.diagnostics and (args.matched_output or args.docker_args):
+            parser.error('run diagnostics separately from qualification or a custom workload')
         if any((args.network_helper, args.core_assets, args.benchmark_output, args.comparison_output)):
             parser.error('legacy settings require --legacy-baseline')
         if not args.native_evidence or not all(getattr(args, name) for name in native_assets):
