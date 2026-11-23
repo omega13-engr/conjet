@@ -315,45 +315,6 @@ measurement boundaries, statistical scope, and production preservation.
 
 Next Action: Add the concurrency matrix and owned-resource leak inventory.
 
-### SPEED-026
-
-Title: Publish the Docker and native comparison verdict
-
-Description: Create docs/engineering/docker-benchmark-results.md with reproducible results and a reviewed claim for each workload.
-
-Is blocked by task: SPEED-025.
-
-Acceptance Criteria:
-
-- Publish exact revisions, hashes, commands, effective resources, cache states, timing boundaries, raw evidence links and per-session results for every planned row.
-- Report Kiri versus Conjet Docker API, Docker CLI/build/Compose, and native API as separate comparisons. Distinguish accelerated, legacy, mixed and unsupported paths.
-- Compute predeclared confidence intervals from independent sessions; avoid treating repeated operations as independent hardware/session evidence. Report failures and missing coverage alongside speed.
-- Use per-workload pass/fail/inconclusive/unsupported verdicts. Task completion means valid measurements and an honest report, not a mandatory Conjet win.
-- Scope claims to observed M1 Pro conditions; retain deferred cross-host, energy and guest-teardown requirements. Do not use this report to silently expand the earlier release scope or declare all Docker operations accelerated.
-- Review findings, create concrete follow-up tasks for regressions/gaps, verify production and cleanup, and commit/push the report without automatically merging or publishing a release.
-
-Problem and Evidence: The current comparison cannot support a general Docker performance claim, and the requested suite must expose both wins and regressions.
-
-Approach:
-
-1. Freeze the measured candidate and audit every scenario against raw evidence.
-2. Generate comparable tables and uncertainty estimates; explain backend attribution and missing features.
-3. Review the final verdict and evidence links, update the board accurately and record follow-up implementation needs.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-026`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Build the coverage and claim audit from the completed suite reports.
 
 ### SPEED-014
 
@@ -408,6 +369,40 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: After the PR merges, inspect current versions and release workflows to select the release scope.
 
 ## INPROGRESS
+
+### SPEED-026
+
+Title: Publish the Docker and native comparison verdict
+
+Description: Create docs/engineering/docker-benchmark-results.md with reproducible results and a reviewed claim for each workload.
+
+Is blocked by task: SPEED-025.
+
+Acceptance Criteria:
+
+- Publish exact revisions, hashes, commands, effective resources, cache states, timing boundaries, raw evidence links and per-session results for every planned row.
+- Report Kiri versus Conjet Docker API, Docker CLI/build/Compose, and native API as separate comparisons. Distinguish accelerated, legacy, mixed and unsupported paths.
+- Compute predeclared confidence intervals from independent sessions; avoid treating repeated operations as independent hardware/session evidence. Report failures and missing coverage alongside speed.
+- Use per-workload pass/fail/inconclusive/unsupported verdicts. Task completion means valid measurements and an honest report, not a mandatory Conjet win.
+- Scope claims to observed M1 Pro conditions; retain deferred cross-host, energy and guest-teardown requirements. Do not use this report to silently expand the earlier release scope or declare all Docker operations accelerated.
+- Review findings, create concrete follow-up tasks for regressions/gaps, verify production and cleanup, and commit/push the report without automatically merging or publishing a release.
+
+Problem and Evidence: [Interim outcome and coverage audit](docker-benchmark-results.md).
+The report separates the first complete lifecycle pair, existing-engine
+pilots and native OCI/static timing. The summary tool verifies per-session
+counts and refuses a lifecycle paired interval before five complete pairs.
+The remaining modes and claim review are still in progress.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Build the coverage and claim audit from the completed suite reports.
 
 ### SPEED-019
 
