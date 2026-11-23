@@ -72,6 +72,10 @@ class WorkloadTests(unittest.TestCase):
         MATRIX['remove_registry_image'](SimpleNamespace(call=call), repo, identity)
         self.assertEqual(calls[1], ['image', 'rm', identity])
         self.assertEqual(calls[0], calls[2])
+        foreign = dict(image, Repository='unowned')
+        replies = iter((json.dumps(foreign).encode(),))
+        with self.assertRaisesRegex(RuntimeError, 'unexpected image'):
+            MATRIX['remove_registry_image'](SimpleNamespace(call=call), repo, identity)
 
     def test_build_inputs_separate_source_and_local_dependency(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:

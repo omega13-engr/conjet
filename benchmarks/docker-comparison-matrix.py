@@ -213,10 +213,12 @@ def remove_registry_image(docker, name, config_digest):
         data = docker.call('registry-fixture-inventory', inventory, phase='cleanup')
         if data is None or len(data) > 1024 * 1024:
             raise RuntimeError('could not verify owned registry image cleanup')
-        return [row for line in data.splitlines() if (row := json.loads(line))['Repository'] == name]
+        return [row for line in data.splitlines() if (row := json.loads(line))['Repository'] == name
+                or row['ID'] == config_digest]
 
     present = find()
-    if any(row['ID'] != config_digest or row['Tag'] != '<none>' for row in present):
+    if any(row['ID'] != config_digest or row['Tag'] != '<none>' or row['Repository'] not in (name, '<none>')
+           for row in present):
         raise RuntimeError('unexpected image in the task-owned registry repository')
     if present:
         if docker.call('registry-fixture-remove', ['image', 'rm', config_digest], phase='cleanup') is None:
