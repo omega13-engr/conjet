@@ -631,6 +631,15 @@ configuration skips in the full suite. Failure and regression logs are retained 
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-013`.
 Independent review, passing hosted CI and merge remain pending.
 
+New hosted runs `45101948820` and `45102608771` reproduced separate
+image-pulse timing failures. The tests now await the scheduled refresh.
+The queued case uses an explicit command gate so the initial container
+refresh stays in flight until the deferred event queues. Assertions are
+unchanged or stronger. Seven pulse tests passed three consecutive local
+runs. The full native SwiftPM suite executed 440 with two skips and zero
+failures. The logs and the two hosted failures are kept in
+`SPEED-026/final-local`. Hosted verification of the correction is pending.
+
 Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-policy),
 [release process](../release.md).
 
