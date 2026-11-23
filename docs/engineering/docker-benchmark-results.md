@@ -98,6 +98,30 @@ pair. The correction uses npm's local package install mode and provides
 both workers with the same verified OCI bases outside the timing window.
 Buildx comparisons remain inconclusive.
 
+## Compose first pair
+
+Both existing Docker engines completed the real Node/Redis workload in
+pair 1 on harness `4a6de79`. Each transition had five measured repetitions
+and zero failures. The service checked loopback HTTP access, Redis DNS and
+persisted writes across recreation, scaling and restart. The project-label
+inventories confirmed container, volume and network removal. Recovered
+application readiness after restart has two observations per repetition.
+
+| Operation | Conjet p50 / p95 / p99 (ms) | Kiri p50 / p95 / p99 (ms) |
+| --- | ---: | ---: |
+| Pre-pulled up through readiness | 3862.057/3880.813/3880.813 | 3084.952/3088.987/3088.987 |
+| No-change up | 807.818/822.755/822.755 | 568.551/572.975/572.975 |
+| Recreate application | 12230.160/12244.529/12244.529 | 11596.764/11603.672/11603.672 |
+| Scale application to two replicas | 2036.748/2081.174/2081.174 | 1579.969/1583.479/1583.479 |
+| Redis restart acknowledgement | 440.526/486.949/486.949 | 156.248/205.001/205.001 |
+| Application readiness after restart | 17.690/41.309/41.309 | 2.670/22.628/22.628 |
+| Down through Compose exit | 3125.345/3175.384/3175.384 | 2168.131/2190.062/2190.062 |
+
+This pair observed lower Kiri timings for these scenarios. The Compose
+verdict remains inconclusive until the remaining four independent pairs
+and effective-resource equivalence checks are available. The native routes
+have no Compose implementation.
+
 ## Separate native timings
 
 The static workload uses the same pinned payload bytes as the
@@ -148,6 +172,7 @@ failed attempts and shutdown checks.
 | Full paired no-network API row | `SPEED-019/alpine-true-none-api-pair-2` |
 | First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
+| First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
 
 Production stayed in service throughout. The records preserve unknown
 guest teardown, unmeasured energy and observed contention. The original

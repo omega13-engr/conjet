@@ -72,88 +72,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 ## BACKLOG
 
 
-### SPEED-021
-
-Title: Benchmark Docker build and BuildKit
-
-Description: Measure real docker build/buildx build workflows and verify resulting images.
-
-Is blocked by task: SPEED-020.
-
-Acceptance Criteria:
-
-- Pin Dockerfiles, source trees, build arguments, BuildKit versions/driver where controllable, CPU/RAM and package dependencies. Record engine-managed differences.
-- Measure empty builder cache with base preloaded, unchanged rebuild, source-only change, dependency change and multi-stage build. Separate image pull, build execution and image export/load.
-- Use representative small Rust, Go and Node projects with correctness checks and consistent dependency availability. Verify produced binaries or service responses.
-- Report build wall time, cache hits, CPU, memory peak, disk I/O and resulting image size. Record whether BuildKit uses the native runtime, Docker/containerd, or another backend.
-- No native build speed claim is allowed merely because a native launch microbenchmark is fast; unsupported Kiri build configurations remain explicit.
-
-Problem and Evidence: The first Conjet half of `SPEED-021/pair-1` completed all Rust and Go build/export, load and execution canaries. Node failed its first exported image canary in all three repetitions with `MODULE_NOT_FOUND`. npm linked the local package outside the exported dependency directory. The fixture now uses `--install-links` to install the package contents, and build/load rows explicitly fail when the exported image fails its canary. Kiri bootstrapped BuildKit but its worker timed out on Docker Hub HTTPS for all three base preloads. Stage the verified registry manifests and blobs once on ExternalSSD and provide the same offline OCI named contexts to both workers. Preserve pair 1 and rerun the corrected workload with both engines.
-
-Raw evidence: Build performance depends on BuildKit, filesystem behavior and caching; the new native launch service is not itself a build engine.
-
-Approach:
-
-1. Reuse the polyglot fixtures and define private builders with explicit endpoints.
-2. Execute the cache matrix serially and validate each output image.
-3. Publish per-project and per-cache-state comparisons with builder provenance.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-021`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Validate the repaired Node export using both engines and complete the paired sessions.
-
-### SPEED-022
-
-Title: Benchmark Docker Compose application workflows
-
-Description: Measure a real multi-service Compose application from up through readiness and down.
-
-Is blocked by task: SPEED-021.
-
-Acceptance Criteria:
-
-- Pin the same Compose plugin/file/images and use unique project names, isolated networks, volumes and host ports for each engine.
-- Measure pre-pulled up --wait, no-change up, one-service recreate, scale, restart and down; separate build/pull cost from startup. Record unsupported commands.
-- Use an app plus database/cache fixture with health checks and a functional transaction; readiness requires working dependencies, not only running containers.
-- Validate logs, service DNS, published ports and expected data persistence across restart; separately measure down --volumes using only owned volumes.
-- Report critical-path readiness, per-service latency, resources and verified cleanup. Attribute mixed native/legacy execution per service.
-
-Problem and Evidence: The full fixture uses pinned Node and Redis, real dependency readiness, transactions, scaling, published loopback ports and project cleanup. End-to-end timings are pending.
-
-Raw evidence: Compose includes orchestration, network dependencies and storage behavior absent from the single-container native fixture.
-
-Approach:
-
-1. Create the deterministic application fixture and readiness/data canaries.
-2. Run the workflow matrix in alternating engine sessions.
-3. Verify application correctness and project-scoped cleanup after every cycle.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-022`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Add the Compose fixture and transaction-based readiness check.
-
 ### SPEED-023
 
 Title: Benchmark exec, streams and control-plane operations
@@ -330,6 +248,86 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: After the PR merges, inspect current versions and release workflows to select the release scope.
 
 ## INPROGRESS
+
+### SPEED-021
+
+Title: Benchmark Docker build and BuildKit
+
+Description: Measure real docker build/buildx build workflows and verify resulting images.
+
+Is blocked by task: SPEED-020.
+
+Acceptance Criteria:
+
+- Pin Dockerfiles, source trees, build arguments, BuildKit versions/driver where controllable, CPU/RAM and package dependencies. Record engine-managed differences.
+- Measure empty builder cache with base preloaded, unchanged rebuild, source-only change, dependency change and multi-stage build. Separate image pull, build execution and image export/load.
+- Use representative small Rust, Go and Node projects with correctness checks and consistent dependency availability. Verify produced binaries or service responses.
+- Report build wall time, cache hits, CPU, memory peak, disk I/O and resulting image size. Record whether BuildKit uses the native runtime, Docker/containerd, or another backend.
+- No native build speed claim is allowed merely because a native launch microbenchmark is fast; unsupported Kiri build configurations remain explicit.
+
+Problem and Evidence: The first Conjet half of `SPEED-021/pair-1` completed all Rust and Go build/export, load and execution canaries. Node failed its first exported image canary in all three repetitions with `MODULE_NOT_FOUND`. npm linked the local package outside the exported dependency directory. The fixture now uses `--install-links` to install the package contents, and build/load rows explicitly fail when the exported image fails its canary. Kiri bootstrapped BuildKit but its worker timed out on Docker Hub HTTPS for all three base preloads. Stage the verified registry manifests and blobs once on ExternalSSD and provide the same offline OCI named contexts to both workers. Preserve pair 1 and rerun the corrected workload with both engines.
+
+Raw evidence: Build performance depends on BuildKit, filesystem behavior and caching; the new native launch service is not itself a build engine.
+
+Approach:
+
+1. Reuse the polyglot fixtures and define private builders with explicit endpoints.
+2. Execute the cache matrix serially and validate each output image.
+3. Publish per-project and per-cache-state comparisons with builder provenance.
+
+Evidence: Pending implementation where applicable, commands, pinned revisions,
+raw measurements, validation results, and cleanup verification under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-021`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Validate the repaired Node export using both engines and complete the paired sessions.
+
+### SPEED-022
+
+Title: Benchmark Docker Compose application workflows
+
+Description: Measure a real multi-service Compose application from up through readiness and down.
+
+Is blocked by task: SPEED-021.
+
+Acceptance Criteria:
+
+- Pin the same Compose plugin/file/images and use unique project names, isolated networks, volumes and host ports for each engine.
+- Measure pre-pulled up --wait, no-change up, one-service recreate, scale, restart and down; separate build/pull cost from startup. Record unsupported commands.
+- Use an app plus database/cache fixture with health checks and a functional transaction; readiness requires working dependencies, not only running containers.
+- Validate logs, service DNS, published ports and expected data persistence across restart; separately measure down --volumes using only owned volumes.
+- Report critical-path readiness, per-service latency, resources and verified cleanup. Attribute mixed native/legacy execution per service.
+
+Problem and Evidence: The full fixture uses pinned Node and Redis, real dependency readiness, transactions, scaling, published loopback ports and project cleanup. End-to-end timings are pending.
+
+Raw evidence: Compose includes orchestration, network dependencies and storage behavior absent from the single-container native fixture.
+
+Approach:
+
+1. Create the deterministic application fixture and readiness/data canaries.
+2. Run the workflow matrix in alternating engine sessions.
+3. Verify application correctness and project-scoped cleanup after every cycle.
+
+Evidence: `SPEED-022/pair-1` contains raw reports from harness `4a6de79`. Both existing engines passed five measured repetitions of each Compose operation and all functional and cleanup canaries. Four independent pairs and effective-resource verification remain. The [interim report](docker-benchmark-results.md#compose-first-pair) records the timings.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Verify effective per-service cgroup values and repeat the workload at the remaining pair indices.
 
 ### SPEED-020
 
