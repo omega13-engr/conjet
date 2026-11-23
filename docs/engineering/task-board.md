@@ -236,6 +236,11 @@ repository secrets and the environments endpoint reports no environments.
 Developer ID certificate and Apple notarization credentials must be
 configured or their organization-level availability verified before
 production publication. Tags, workflow evidence and published assets are pending.
+The remote already publishes `conjet-v3.0.0` at `f1df932`, while this branch
+still has `VERSION=3.0.0`. An additive release that includes a qualifying
+experimental feature would use the next available minor version. The source
+Docker adapter does not add a kernel or Core image dependency. The final
+package scope and version remain pending independent review and qualification.
 
 Source: [Release process](../release.md), [Homebrew](../homebrew.md),
 [repository instructions](../../AGENTS.md).
@@ -243,7 +248,7 @@ Source: [Release process](../release.md), [Homebrew](../homebrew.md),
 Review: Pending; verify production artifact readiness, version/tag consistency,
 asset compatibility, and evidence supporting every release claim.
 
-Next Action: After the PR merges, inspect current versions and release workflows to select the release scope.
+Next Action: Set matching version metadata and release notes for the reviewed package scope before tagging an independently approved, qualified revision. Confirm Developer ID and notarization credential availability through the release environment.
 
 ## INPROGRESS
 
