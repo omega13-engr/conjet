@@ -984,7 +984,55 @@ production and removed their task-owned processes, sessions and sockets.
 Independent PR review remains required.
 
 Next Action: Forward one loopback TCP port to a scoped native target
-in SPEED-036.
+in SPEED-036A.
+
+### SPEED-036A
+
+Title: Verify a bounded authenticated TCP relay to a native workload
+
+Description: Connect one authenticated native stream to an active
+workload's owned bridge endpoint. Preserve bytes and both half-closes.
+
+Is blocked by task: SPEED-035 (DONE).
+
+Acceptance Criteria:
+
+- Deliver a stream to a real pinned OCI listener using its boot and
+  workload identity. Reject invalid ports, stale boots and refused targets.
+- Preserve byte integrity above the relay's retained memory bound and
+  propagate EOF before the guest sends its reply.
+- Saturate the two relay slots, close a client, and verify the remaining
+  stream and subsequent workload cleanup.
+
+Problem and Evidence: The private guest bridge has no network device
+leading to the host. The existing authenticated native control connection
+has no workload-scoped TCP byte stream.
+
+Approach: Add a one-way protocol upgrade from an authenticated Dial
+request to a bidirectional stream. Resolve the destination from the
+workload's live bridge lease. Use a fixed 8 KiB buffer per direction and
+bound guest slots, dialing and idle waits.
+
+Evidence: DONE. Guest relay tests passed a 1 MiB half-close transfer and
+cancellation and idle checks. ARM64 guest Clippy and the release build
+passed. On `234e513` with the release guest change,
+`run-conjet-speedup.py --diagnostics tcp-relay` passed a 131,073-byte
+round trip after request EOF, invalid port, stale boot, refusal, cap
+exhaustion, disconnected client and guest cleanup. Logs, commands and
+artifact hashes are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-036A`.
+
+Source: [Launch service contract](launch-service-contract.md),
+[bounded relay](../../guest/launch-service/src/relay.rs).
+
+Review: Local diff and isolated checks passed. The destination IP
+comes from the current guest lease. The launcher verified unchanged
+production and removed its session and Docker socket. Host loopback
+listeners and Docker port inspection remain in SPEED-036.
+Independent PR review remains required.
+
+Next Action: Bind the loopback listener to Docker lifecycle ownership
+and verify publication and teardown in SPEED-036.
 
 ### SPEED-036
 
@@ -992,7 +1040,7 @@ Title: Publish one native container port on host loopback
 
 Description: Implement a scoped loopback port mapping for the Node/Redis application fixture.
 
-Is blocked by task: SPEED-035 (DONE).
+Is blocked by task: SPEED-036A (DONE).
 
 Acceptance Criteria:
 

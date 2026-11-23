@@ -682,6 +682,24 @@ impl NetworkOwner {
         Ok(())
     }
 
+    pub(crate) fn dial(
+        &self,
+        owner: [u8; 16],
+        port: u16,
+        timeout: Duration,
+    ) -> io::Result<TcpStream> {
+        let slot = self
+            .workloads
+            .iter()
+            .position(|entry| *entry == Some(owner))
+            .ok_or(io::ErrorKind::NotFound)?;
+        self.in_bridge(|links| {
+            let peer = links.ports[slot].as_ref().ok_or(io::ErrorKind::NotFound)?;
+            let endpoint = SocketAddrV4::new(peer.address, port);
+            TcpStream::connect_timeout(&endpoint.into(), timeout)
+        })
+    }
+
     fn in_bridge<T>(
         &self,
         operation: impl FnOnce(&mut SharedLinks) -> io::Result<T>,

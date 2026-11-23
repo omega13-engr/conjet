@@ -125,6 +125,14 @@ enum NetworkOperation {
     Remove,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Dial {
+    handle: Handle,
+    budget_ms: u64,
+    port: u16,
+}
+
 const OUTPUT_CHUNK_LIMIT: usize = 8192;
 const OCI_CONCURRENCY: usize = 8;
 const OCI_RECORDS: usize = 24;
@@ -1229,6 +1237,59 @@ impl FreshFixture {
         let response = json!({"network_address":record.network_address});
         self.changed.notify_all();
         Ok((Kind::Network, response))
+    }
+
+    pub(crate) fn dial(&self, frame: &Frame, boot: &str) -> Result<std::net::TcpStream, Failure> {
+        let arrival = Instant::now();
+        let request: Dial = frame
+            .decode()
+            .map_err(|_| ("malformed", "invalid native TCP target"))?;
+        if !(1..=500).contains(&request.budget_ms) || request.port == 0 {
+            return Err(("malformed", "native TCP port or connect budget is invalid"));
+        }
+        if request.handle.boot_id != boot {
+            return Err(("stale_generation", "unexpected native workload boot ID"));
+        }
+        // Acquire bridge ownership before observing the workload, the same
+        // order used by peer admission and live network operations.
+        let network = self.private_network.lock().expect("private bridge");
+        let ledger = self.ledger.lock().expect("fresh ledger");
+        let active = ledger
+            .record(&request.handle.workload_id)
+            .is_some_and(|record| {
+                record.handle == request.handle
+                    && record.phase == Phase::Running
+                    && record.network_address.is_some()
+            });
+        if ledger.closing || !active {
+            return Err((
+                "not_running",
+                "native TCP target has no active bridge lease",
+            ));
+        }
+        drop(ledger);
+        let budget = Duration::from_millis(request.budget_ms).saturating_sub(arrival.elapsed());
+        if budget.is_zero() {
+            return Err(("deadline_exceeded", "native TCP connect budget expired"));
+        }
+        let id = crate::handshake::unhex::<16>(&request.handle.workload_id)
+            .map_err(|_| ("malformed", "invalid native workload ID"))?;
+        network
+            .as_ref()
+            .ok_or(("not_running", "private bridge is absent"))?
+            .dial(id, request.port, budget)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::ConnectionRefused => {
+                    ("connection_refused", "native TCP target refused connection")
+                }
+                io::ErrorKind::TimedOut => {
+                    ("deadline_exceeded", "native TCP connect budget expired")
+                }
+                _ => (
+                    "connection_failed",
+                    "native TCP target could not be reached",
+                ),
+            })
     }
 
     fn operation(self: &Arc<Self>, frame: &Frame, boot: &str, connection: ConnectionId) -> Reply {

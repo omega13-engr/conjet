@@ -21,6 +21,8 @@ pub struct Server {
     waiting: AtomicUsize,
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     fresh: Option<Arc<crate::fresh_fixture::FreshFixture>>,
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    relays: AtomicUsize,
 }
 
 impl Server {
@@ -32,6 +34,8 @@ impl Server {
             waiting: AtomicUsize::new(0),
             #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
             fresh: None,
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            relays: AtomicUsize::new(0),
         }))
     }
 
@@ -135,6 +139,38 @@ impl Server {
                     "deadline_exceeded",
                     "fixture wait expired",
                 )?;
+            }
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            if let Some(fresh) = &self.fresh
+                && fresh.is_oci()
+                && frame.kind == Kind::Dial
+            {
+                let Some(_slot) = RelaySlot::reserve(&self.relays) else {
+                    write_error(
+                        &mut stream,
+                        frame.id,
+                        "busy",
+                        "native TCP slots are occupied",
+                    )?;
+                    continue;
+                };
+                match fresh.dial(&frame, &boot_id) {
+                    Ok(target) => {
+                        Frame::write(
+                            &mut stream,
+                            Kind::Dial,
+                            frame.id,
+                            &serde_json::json!({"connected":true}),
+                        )?;
+                        let _ =
+                            crate::relay::pump(&stream, &target, Duration::from_secs(15), || {
+                                self.shutdown.requested()
+                            });
+                        return Ok(());
+                    }
+                    Err((code, message)) => write_error(&mut stream, frame.id, code, message)?,
+                }
+                continue;
             }
             #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
             if let Some(fresh) = &self.fresh
@@ -292,6 +328,28 @@ impl Server {
                 )?,
             }
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+struct RelaySlot<'a>(&'a AtomicUsize);
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+impl<'a> RelaySlot<'a> {
+    fn reserve(slots: &'a AtomicUsize) -> Option<Self> {
+        slots
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < 2).then_some(count + 1)
+            })
+            .ok()?;
+        Some(Self(slots))
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+impl Drop for RelaySlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
     }
 }
 

@@ -114,6 +114,12 @@ pub struct Stream {
     deadline: Option<Instant>,
 }
 
+impl AsRawFd for Stream {
+    fn as_raw_fd(&self) -> RawFd {
+        self.descriptor.as_raw_fd()
+    }
+}
+
 impl Stream {
     pub fn unix(stream: UnixStream, shutdown: Option<Arc<Shutdown>>) -> io::Result<Self> {
         stream.set_nonblocking(true)?;

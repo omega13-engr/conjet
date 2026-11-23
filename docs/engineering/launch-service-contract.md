@@ -419,3 +419,11 @@ the live `handle` and `alias` and requires a previously bridged
 workload with a detached endpoint. They return `network_address`,
 which is null after detach. `remove` requires no owned peers and
 replies `{"removed":true}` after verified bridge and DNS teardown.
+
+Kind 24, Dial, takes a live `handle`, a nonzero TCP `port`, and a
+connect `budget_ms` of at most 500. The guest derives the destination
+address from the current workload's attached bridge lease. A successful
+reply is `{"connected":true}`. The authenticated connection then carries
+raw TCP payload until EOF. Each direction has an 8 KiB buffer and the
+guest allows two relays with a 15-second idle deadline. The relay
+propagates each half-close after draining that direction.
