@@ -209,8 +209,12 @@ and retain failed operations. A successful launcher exit confirms capture and
 cleanup. Check each scenario's errors and coverage before using its timings.
 
 The image suite separates public image pulls, known-warm load/save,
-and locally staged registry reimports. Registry reimports remain labeled
-with unknown layer-transfer state. The build suite uses a uniquely named
+and private registry pulls. A host HTTP client seeds the owned loopback
+registry directly. The first-pull result records which config and layer
+bytes were served, and describes the transfer as unknown when the witness
+is incomplete. [Registry HTTP API](https://distribution.github.io/distribution/spec/api/)
+
+The build suite uses a uniquely named
 pinned BuildKit worker with its own guest volume and separates preloading,
 build/export, load and output validation. To keep guest registry egress out
 of that experiment, stage the same pinned build bases once outside any

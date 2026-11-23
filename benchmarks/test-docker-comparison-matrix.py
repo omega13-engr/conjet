@@ -1,8 +1,9 @@
 import json
+import gzip
+import hashlib
 from pathlib import Path
 import runpy
 import struct
-import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -14,18 +15,16 @@ SCRATCH = Path('/Volumes/ExternalSSD/dev_workspace/tmp')
 
 
 class WorkloadTests(unittest.TestCase):
-    def test_registry_fixture_has_same_identity_for_both_engine_tags(self):
-        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
-            root = Path(temporary)
-            registry = MATRIX['registry_image']
-            left = registry(root / 'left.tar', 'localhost:5000/case:one', b'canary', 1024, 3, 1)
-            right = registry(root / 'right.tar', 'localhost:5001/case:one', b'canary', 1024, 3, 1)
-            self.assertEqual(left, right)
-            with tarfile.open(root / 'left.tar') as archive:
-                config = json.load(archive.extractfile(left[7:] + '.json'))
-                self.assertEqual(config['rootfs']['type'], 'layers')
-                self.assertEqual(len(config['rootfs']['diff_ids']), 3)
-                self.assertEqual(config['architecture'], 'arm64')
+    def test_registry_fixture_is_identical_within_pair_and_distinct_across_pairs(self):
+        registry = MATRIX['registry_image']
+        config, layers = registry(b'canary', 1024, 3, 2, 1)
+        self.assertEqual((config, layers), registry(b'canary', 1024, 3, 2, 1))
+        self.assertNotEqual((config, layers), registry(b'canary', 1024, 3, 3, 1))
+        parsed = json.loads(config)
+        self.assertEqual(parsed['rootfs']['type'], 'layers')
+        self.assertEqual(parsed['rootfs']['diff_ids'],
+                         ['sha256:' + hashlib.sha256(gzip.decompress(layer)).hexdigest() for layer in layers])
+        self.assertEqual(parsed['architecture'], 'arm64')
 
     def test_registry_transfer_requires_an_owned_successful_get(self):
         log = (
@@ -37,6 +36,27 @@ class WorkloadTests(unittest.TestCase):
             'http.response.status=200 http.response.written=42\n'
         )
         self.assertEqual(MATRIX['received_blobs'](log, 'owner/small'), {'sha256:aa': 31})
+
+    def test_registry_seed_refuses_an_upload_url_outside_the_owned_endpoint(self):
+        class Connection:
+            status = 202
+
+            def request(self, method, path, body, headers):
+                self.requested = (method, path)
+
+            def getresponse(self):
+                return self
+
+            def read(self, _size):
+                return b''
+
+            def getheader(self, _name, _default):
+                return 'http://127.0.0.1:9999/v2/owner/fixture/blobs/uploads/1'
+
+        connection = Connection()
+        with self.assertRaisesRegex(RuntimeError, 'unexpected upload location'):
+            MATRIX['seed_registry'](connection, '127.0.0.1:5000', 'owner/fixture', '0', b'config', [])
+        self.assertEqual(connection.requested, ('POST', '/v2/owner/fixture/blobs/uploads/'))
 
     def test_build_inputs_separate_source_and_local_dependency(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:

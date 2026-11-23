@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import gzip
 import hashlib
 import http.client
 import io
@@ -129,35 +130,70 @@ def archive_member(archive, name, data, mode=0o644):
     archive.addfile(entry, io.BytesIO(data))
 
 
-def registry_image(path, tag, executable, size, layers, repetition):
-    bodies = []
+def registry_image(executable, size, layers, pair, repetition):
+    parts = []
+    diff_ids = []
     for index in range(layers):
         content = io.BytesIO()
         with tarfile.open(fileobj=content, mode='w') as archive:
             if index == 0:
                 archive_member(archive, 'probe', executable, 0o555)
-            data = hashlib.shake_256(f'conjet-registry-v1:{size}:{layers}:{repetition}:{index}'.encode()).digest(size)
+            seed = f'conjet-registry-v2:{size}:{layers}:{pair}:{repetition}:{index}'
+            data = hashlib.shake_256(seed.encode()).digest(size)
             archive_member(archive, f'payload-{index}', data)
-        bodies.append(content.getvalue())
-    diff_ids = ['sha256:' + hashlib.sha256(body).hexdigest() for body in bodies]
+        body = content.getvalue()
+        diff_ids.append('sha256:' + hashlib.sha256(body).hexdigest())
+        parts.append(gzip.compress(body, mtime=0))
     config = json.dumps({'architecture': 'arm64', 'os': 'linux', 'config': {'Cmd': ['/probe']},
                          'rootfs': {'type': 'layers', 'diff_ids': diff_ids}},
                         sort_keys=True, separators=(',', ':')).encode()
-    digest = hashlib.sha256(config).hexdigest()
-    entries = [f'layer-{index}.tar' for index in range(layers)]
-    with tarfile.open(path, mode='w') as archive:
-        archive_member(archive, digest + '.json', config)
-        for name, body in zip(entries, bodies):
-            archive_member(archive, name, body)
-        archive_member(archive, 'manifest.json', json.dumps([{'Config': digest + '.json',
-                       'RepoTags': [tag], 'Layers': entries}]).encode())
-    return 'sha256:' + digest
+    return config, parts
+
+
+def registry_request(connection, method, path, expected, body=None, media_type=None):
+    headers = {'Content-Type': media_type} if media_type else {}
+    connection.request(method, path, body=body, headers=headers)
+    response = connection.getresponse()
+    data = response.read(8193)
+    if response.status != expected or len(data) > 8192:
+        connection.close()
+        raise RuntimeError(f'owned registry {method} returned {response.status}: {data[:400]!r}')
+    return response
+
+
+def seed_registry(connection, address, repository, tag, config, layers):
+    image_type = 'application/vnd.docker.distribution.manifest.v2+json'
+
+    def blob(data, media_type):
+        digest = 'sha256:' + hashlib.sha256(data).hexdigest()
+        prefix = f'/v2/{repository}/blobs/uploads/'
+        reply = registry_request(connection, 'POST', prefix, 202, b'')
+        upload = urlsplit(reply.getheader('Location', ''))
+        if ((upload.netloc and upload.netloc != address) or upload.scheme not in ('', 'http')
+                or not upload.path.startswith(prefix) or not upload.path.removeprefix(prefix)):
+            raise RuntimeError('registry returned an unexpected upload location')
+        query = upload.query + '&' if upload.query else ''
+        reply = registry_request(connection, 'PUT', upload.path + '?' + query + 'digest=' + digest,
+                                 201, data, 'application/octet-stream')
+        if reply.getheader('Docker-Content-Digest') != digest:
+            raise RuntimeError('registry blob digest does not match uploaded bytes')
+        return {'mediaType': media_type, 'digest': digest, 'size': len(data)}
+
+    image = {'schemaVersion': 2, 'mediaType': image_type,
+             'config': blob(config, 'application/vnd.docker.container.image.v1+json'),
+             'layers': [blob(layer, 'application/vnd.docker.image.rootfs.diff.tar.gzip') for layer in layers]}
+    body = json.dumps(image, separators=(',', ':')).encode()
+    response = registry_request(connection, 'PUT', f'/v2/{repository}/manifests/{tag}', 201, body, image_type)
+    manifest_id = 'sha256:' + hashlib.sha256(body).hexdigest()
+    if response.getheader('Docker-Content-Digest') != manifest_id:
+        raise RuntimeError('registry manifest digest does not match uploaded bytes')
+    return manifest_id, image
 
 
 def received_blobs(log, repository):
     matched = {}
     for line in log.splitlines():
-        if 'http.request.method=GET ' not in line or 'http.response.status=200 ' not in line:
+        if 'http.request.method=GET ' not in line or not re.search(r'http\.response\.status=200(?:\s|$)', line):
             continue
         uri = re.search(r'http.request.uri="([^"]+)"', line)
         written = re.search(r'http.response.written=(\d+)', line)
@@ -182,6 +218,7 @@ def run_registry(docker, manifest):
                   '--label', f'{LABEL}={docker.token}', '--publish', '127.0.0.1::5000', image],
                    phase='setup') is None:
         return
+    connection = None
     try:
         address = docker.call('registry-port', ['port', name, '5000/tcp'], phase='verification')
         if address is None:
@@ -191,46 +228,62 @@ def run_registry(docker, manifest):
         if parsed.hostname != '127.0.0.1' or parsed.port is None:
             docker.rows[-1]['error'] = 'owned registry did not publish a loopback port'
             return
+        pair = json.loads((docker.output.parent / 'pair.json').read_text())['pair']
+        if pair not in range(1, 6):
+            raise ValueError('controlled registry requires a declared pair index')
+        connection = http.client.HTTPConnection('127.0.0.1', parsed.port, timeout=10)
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                registry_request(connection, 'GET', '/v2/', 200)
+                break
+            except (OSError, RuntimeError, http.client.HTTPException):
+                connection.close()
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.25)
         for label, size, layers in (('small', 64 * 1024, 1), ('multilayer', 1024 * 1024, 3)):
             for repetition in range(budget['samples_per_session'] + budget['warmups']):
                 phase = 'warmup' if repetition < budget['warmups'] else 'sample'
-                tag = f'{address}/{docker.token}/{label}:{repetition}'
-                archive = docker.output / 'registry-seed.tar'
-                identity = registry_image(archive, tag, executable, size, layers, repetition)
+                repository = f'{docker.token}/{label}'
+                base, contents = registry_image(executable, size, layers, pair, repetition)
+                manifest_id, descriptors = seed_registry(connection, address, repository, str(repetition), base, contents)
+                expected = {item['digest']: item['size'] for item in [descriptors['config'], *descriptors['layers']]}
+                reference = f'{address}/{repository}@{manifest_id}'
                 try:
-                    if docker.call('registry-load-seed', ['image', 'load', '--input', archive], phase='setup') is None:
-                        return
-                    if docker.call('registry-push-seed', ['push', tag], phase='setup', timeout=180) is None:
-                        return
-                    if docker.call('registry-remove-seed', ['image', 'rm', tag], phase='setup') is None:
-                        return
                     since = datetime.now(timezone.utc).isoformat()
-                    if docker.call(f'registry.{label}.reimport', ['pull', tag], phase=phase, timeout=180) is None:
+                    if docker.call(f'registry.{label}.first-pull', ['pull', reference], phase=phase, timeout=180) is None:
                         continue
-                    reimport = docker.rows[-1]
-                    reimport['cache_state'] = 'tag absent; pristine layer cache unverified'
+                    first = docker.rows[-1]
+                    first.update(cache_state='no engine-side seed; transfer unknown', expected_registry_blobs=expected)
                     docker.call('registry-transfer-observation', ['logs', '--since', since, name],
                                 phase='verification')
                     logs = docker.rows[-1]
-                    reimport['registry_blobs_returned'] = received_blobs(
-                        logs.get('stderr', '') + logs.get('stdout', ''), f'{docker.token}/{label}')
-                    checked = docker.inspect(tag)
-                    if checked is None or checked['Id'] != identity:
-                        docker.rows[-1]['error'] = 'registry reimport changed image identity'
+                    returned = received_blobs(logs.get('stderr', '') + logs.get('stdout', ''), repository)
+                    first['registry_blobs_returned'] = returned
+                    if all(returned.get(digest) == length for digest, length in expected.items()):
+                        first['cache_state'] = 'complete config and layer transfer observed'
+                    checked = docker.inspect(reference)
+                    if checked is None or checked['Id'] != descriptors['config']['digest']:
+                        first['error'] = 'registry pull changed image identity'
                         continue
-                    docker.call(f'registry.{label}.cached', ['pull', tag], phase=phase, timeout=180)
-                    docker.call('registry-run-proof', ['run', '--rm', '--pull', 'never', '--network',
-                                'none', '--label', f'{LABEL}={docker.token}', tag],
-                                phase='verification', expected=b'')
+                    docker.call(f'registry.{label}.cached', ['pull', reference], phase=phase, timeout=180)
+                    if docker.call('registry-run-proof', ['run', '--rm', '--pull', 'never', '--network',
+                                   'none', '--label', f'{LABEL}={docker.token}', reference],
+                                   phase='verification', expected=b'') is None:
+                        first['error'] = 'registry runnable layers failed the canary'
                 finally:
-                    archive.unlink(missing_ok=True)
-                    existing = docker.call('registry-fixture-inventory', ['image', 'ls', '-q', tag], phase='cleanup')
+                    existing = docker.call('registry-fixture-inventory', ['image', 'ls', '--digests',
+                                           '--format', '{{.Repository}}@{{.Digest}}', f'{address}/{repository}'],
+                                           phase='cleanup')
                     if existing is None:
                         raise RuntimeError('could not verify registry fixture cleanup')
-                    if existing and docker.call('registry-fixture-remove', ['image', 'rm', tag],
-                                               phase='cleanup') is None:
+                    if reference.encode() in existing.splitlines() and docker.call(
+                            'registry-fixture-remove', ['image', 'rm', reference], phase='cleanup') is None:
                         raise RuntimeError('could not remove registry fixture')
     finally:
+        if connection is not None:
+            connection.close()
         docker.call('registry-log', ['logs', '--tail', '100', name], phase='verification')
         if docker.call('registry-stop', ['stop', '--time', '2', name], phase='cleanup') is None:
             raise RuntimeError('could not stop the owned registry')

@@ -363,7 +363,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Rerun with the verified image config pins and retain the layer observability results.
+Next Action: Rerun with verified image config pins and the controlled-registry correction. The fixture seeds the owned registry through host HTTP rather than loading into the tested engine. It records each expected and observed blob digest and size and keeps unknown transfer outcomes visible.
 
 ### SPEED-026
 
