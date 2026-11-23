@@ -236,7 +236,7 @@ struct Ledger {
 }
 
 impl Ledger {
-    fn memory_snapshot(&self) -> Value {
+    fn memory_snapshot(&self, oci: bool) -> Value {
         let available = crate::memory::available_bytes();
         let mut snapshot = json!({
             "active": null, "prepared": null,
@@ -255,6 +255,7 @@ impl Ledger {
             let observed = crate::kernel_fixture::cgroup_observation(
                 &record.handle.workload_id,
                 prepared_scope,
+                oci,
             )
             .ok();
             snapshot[if active { "active" } else { "prepared" }] = json!({
@@ -265,6 +266,15 @@ impl Ledger {
                 "current_bytes": observed.map(|(bytes, _)| bytes),
                 "populated": observed.map(|(_, populated)| populated),
             });
+            if oci && let Ok(id) = crate::handshake::unhex::<16>(&record.handle.workload_id) {
+                let (mount, scope) =
+                    crate::kernel_fixture::cgroup_paths(&record.handle.workload_id, true);
+                let overlay = crate::sandbox_fixture::owned_path(id, true);
+                snapshot["active"]["paths"] = json!({
+                    "cgroup_mount":mount,"cgroup_scope":scope,"overlay":overlay,
+                    "overlay_present":overlay.is_dir(),
+                });
+            }
         }
         snapshot
     }
@@ -703,6 +713,10 @@ impl FreshFixture {
         }
         let result = self.intent.record(id).and_then(|()| {
             let output = self.run_helper(id, limits, mode, bridge, prepared, oci_process)?;
+            if oci_process.is_some() {
+                crate::kernel_fixture::assert_owned_cgroup_absent(id)?;
+                crate::sandbox_fixture::assert_owned_absent(id)?;
+            }
             self.intent.complete(id)?;
             Ok(output)
         });
@@ -892,9 +906,9 @@ impl FreshFixture {
         let finished = child.wait()?;
         let recovered = result.is_err() || !finished.success() || !removed;
         if recovered {
-            crate::kernel_fixture::recover_cgroup(id)?;
+            crate::kernel_fixture::recover_cgroup(id, oci_process.is_some())?;
             crate::recovery_fixture::reap_owned_children(-1)?;
-            crate::sandbox_fixture::recover()?;
+            crate::sandbox_fixture::recover(id, oci_process.is_some())?;
             println!("conjet-launchd recovered helper failure for {}", hex(&id));
         }
         let stdout = stdout
@@ -1035,7 +1049,7 @@ impl FreshFixture {
                     guard.set_pressure(pressure);
                     self.changed.notify_all();
                 }
-                Ok((Kind::Memory, guard.memory_snapshot()))
+                Ok((Kind::Memory, guard.memory_snapshot(self.oci)))
             }
             Kind::Status | Kind::Cancel => {
                 let request: Control = parse(frame)?;

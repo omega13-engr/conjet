@@ -16,6 +16,18 @@ use crate::spec::{MIN_MEMORY_BYTES, ResourceLimits};
 
 const CONTROLLERS: &str = "+cpu +memory +pids";
 const CGROUP_MOUNT: &str = "/run/conjet/probe-cgroup";
+const CGROUP_ROOT: &str = "conjet-native";
+
+pub(crate) fn cgroup_paths(id: &str, oci: bool) -> (PathBuf, String) {
+    if oci {
+        (
+            PathBuf::from(format!("{CGROUP_MOUNT}-{id}")),
+            format!("{CGROUP_ROOT}-{id}"),
+        )
+    } else {
+        (PathBuf::from(CGROUP_MOUNT), CGROUP_ROOT.into())
+    }
+}
 
 pub(crate) fn test_mode(mode: &str) -> bool {
     matches!(
@@ -205,16 +217,17 @@ fn run(
         _ => "/init",
     };
     let sandbox = with_sandbox
-        .then(|| Sandbox::prepare(network, executable, process))
+        .then(|| Sandbox::prepare(network, executable, process, id))
         .transpose()?;
     inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)
         .then(ProcMount::new)
         .transpose()?;
     security::clear_supplementary_groups()?;
-    let mount = CgroupMount::new(Path::new(CGROUP_MOUNT))?;
+    let (mount_path, root_name) = cgroup_paths(&handshake::hex(&id), process.is_some());
+    let mount = CgroupMount::new(&mount_path)?;
     inject(mode, "fault-mount");
-    let root = mount.path.join("conjet-native");
+    let root = mount.path.join(root_name);
     let workloads = root.join("workloads");
     let scope = workloads.join(if prepared { "prepared" } else { "active" });
     write_control(&mount.path, "cgroup.subtree_control", CONTROLLERS)?;
@@ -815,19 +828,19 @@ impl Drop for CgroupMount {
     }
 }
 
-pub(crate) fn recover_cgroup(id: [u8; 16]) -> io::Result<()> {
-    let mount = Path::new(CGROUP_MOUNT);
+pub(crate) fn recover_cgroup(id: [u8; 16], oci: bool) -> io::Result<()> {
+    let (mount, root_name) = cgroup_paths(&handshake::hex(&id), oci);
     match mount.symlink_metadata() {
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => return Err(io::Error::other("invalid fixture cgroup mountpoint")),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     }
-    let directory = File::open(mount)?;
+    let directory = File::open(&mount)?;
     let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
     security::checked(unsafe { libc::fstatfs(directory.as_raw_fd(), filesystem.as_mut_ptr()) })?;
     if i128::from(unsafe { filesystem.assume_init() }.f_type) == CGROUP2_SUPER_MAGIC {
-        let root = mount.join("conjet-native");
+        let root = mount.join(root_name);
         let workloads = root.join("workloads");
         for name in ["active", "prepared"] {
             let scope = workloads.join(name);
@@ -864,9 +877,11 @@ pub(crate) fn recover_cgroup(id: [u8; 16]) -> io::Result<()> {
     std::fs::remove_dir(mount)
 }
 
-pub(crate) fn cgroup_observation(id: &str, prepared: bool) -> io::Result<(u64, bool)> {
-    let path = Path::new(CGROUP_MOUNT)
-        .join("conjet-native/workloads")
+pub(crate) fn cgroup_observation(id: &str, prepared: bool, oci: bool) -> io::Result<(u64, bool)> {
+    let (mount, root) = cgroup_paths(id, oci);
+    let path = mount
+        .join(root)
+        .join("workloads")
         .join(if prepared { "prepared" } else { "active" })
         .join(id);
     crate::cgroups::observation(&path)
@@ -875,6 +890,14 @@ pub(crate) fn cgroup_observation(id: &str, prepared: bool) -> io::Result<(u64, b
 pub(crate) fn assert_cgroup_absent() -> io::Result<()> {
     if Path::new(CGROUP_MOUNT).try_exists()? {
         return Err(io::Error::other("unclaimed fixture cgroup mountpoint"));
+    }
+    Ok(())
+}
+
+pub(crate) fn assert_owned_cgroup_absent(id: [u8; 16]) -> io::Result<()> {
+    let (mount, _) = cgroup_paths(&handshake::hex(&id), true);
+    if mount.try_exists()? {
+        return Err(io::Error::other("owned OCI cgroup mountpoint remains"));
     }
     Ok(())
 }

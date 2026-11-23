@@ -458,13 +458,58 @@ Independent PR review is separate.
 Next Action: Separate per-workload guest resource ownership before increasing
 admission in SPEED-033.
 
+### SPEED-033A
+
+Title: Give each native OCI workload its own guest resource paths
+
+Description: Scope the writable overlay, cgroup mount and cgroup tree to
+one native workload ID before allowing overlapping lifecycle records.
+
+Is blocked by task: SPEED-032 (DONE).
+
+Acceptance Criteria:
+
+- Observe two successive real OCI workloads with different populated
+  cgroup and overlay paths derived from their workload IDs.
+- Verify complete removal of owned paths after cancellation and failed
+  execution. Keep the static fixture's existing recovery paths working.
+
+Problem and Evidence: Until SPEED-032, OCI launches reused the static
+fixture's fixed guest overlay directory and cgroup mount and tree.
+Overlapping helpers would conflict at those resources.
+
+Approach: Use identity-derived resource paths for native OCI, and assert
+their absence before terminal cleanup acknowledges removal.
+
+Evidence: DONE. Rebuilt the release ARM64 guest on `7104f53` and ran
+`python3 build-support/run-conjet-speedup.py --diagnostics oci-import`.
+The two sequential hold canaries each observed a populated cgroup and
+present overlay at their distinct paths, then verified cancellation and
+cleanup. A missing executable returned failed exec and completed cleanup.
+The subsequent Docker hard-link and writable-overlay canaries passed.
+Guest formatting, tests and ARM64 Clippy are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-033A`,
+along with launcher commands, hashes, and raw witnesses.
+
+Source: [Launch service contract](launch-service-contract.md),
+[`kernel_fixture.rs`](../../guest/launch-service/src/kernel_fixture.rs),
+[`sandbox_fixture.rs`](../../guest/launch-service/src/sandbox_fixture.rs).
+
+Review: Local diff and isolated runtime checks passed. Both successful and
+recovery paths address the exact workload ID. The launcher verified unchanged
+production and removed its guest and socket. The owner still admits one
+workload. Independent PR review is separate.
+
+Next Action: Bound independent intent and terminal records, scope recovery
+to the owning helper, and qualify simultaneous admission in SPEED-033.
+
 ### SPEED-033
 
 Title: Replace the single workload slot with bounded lifecycle records
 
 Description: Implement native create/start/wait/stop/kill/restart/remove for up to eight admitted containers.
 
-Is blocked by task: SPEED-032.
+Is blocked by task: SPEED-033A (DONE).
 
 Acceptance Criteria:
 

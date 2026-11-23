@@ -109,15 +109,37 @@ def postflight(session, pid, digest, expected_boot, output):
         original = terminal(stream, original['handle'])
         if original['cleanup'] != 'complete' or original['exit'] != {'code': 0}:
             raise RuntimeError('the original boot image no longer runs')
-        imported = launch(stream, inspect(stream), digest, ['/bin/busybox', 'sleep', '30'])
-        removal = image(stream, boot, {'action': 'remove', 'config_digest': digest}, error='busy')
-        exchange(stream, 11, {'handle': imported['handle'], 'budget_ms': 1000}, 13)
-        imported = terminal(stream, imported['handle'])
-        if imported['cleanup'] != 'complete':
-            raise RuntimeError('cancelled imported image did not verify cleanup')
+        scopes = []
+        for _ in range(2):
+            imported = launch(stream, inspect(stream), digest, ['/bin/busybox', 'sleep', '30'])
+            handle = imported['handle']
+            deadline = time.monotonic() + 2
+            while True:
+                active = exchange(stream, 19, {'budget_ms': 1000, 'boot_id': boot}, 19)['active']
+                if active and active['sample_valid'] and active['populated'] and active['paths']['overlay_present']:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('populated OCI cgroup or overlay was not observed')
+                time.sleep(0.01)
+            if not all(str(value).endswith(handle['workload_id'])
+                       for key, value in active['paths'].items() if key != 'overlay_present'):
+                raise RuntimeError('active OCI paths are not qualified by the workload ID')
+            scopes.append(active)
+            removal = image(stream, boot, {'action': 'remove', 'config_digest': digest}, error='busy')
+            exchange(stream, 11, {'handle': handle, 'budget_ms': 1000}, 13)
+            imported = terminal(stream, handle)
+            if imported['cleanup'] != 'complete':
+                raise RuntimeError('cancelled imported image did not verify cleanup')
+        if scopes[0]['paths'] == scopes[1]['paths']:
+            raise RuntimeError('two OCI workloads acquired the same resource paths')
+        failed = launch(stream, inspect(stream), digest, ['/bin/cj-not-present'])
+        failed = terminal(stream, failed['handle'])
+        if failed['exec'] == 'confirmed' or failed['cleanup'] != 'complete':
+            raise RuntimeError('failed OCI exec did not reclaim its own paths')
         state = inspect(stream)
     result = {'boot_id': boot, 'original_boot_image': original, 'remove_while_active': removal,
-              'cancelled_imported_image': imported, 'image_store': state['installed_images']}
+              'cancelled_imported_image': imported, 'image_store': state['installed_images'],
+              'active_scopes': scopes, 'failed_exec': failed}
     (output / 'installation-lifecycle.json').write_text(json.dumps(result, indent=2) + '\n')
 
 

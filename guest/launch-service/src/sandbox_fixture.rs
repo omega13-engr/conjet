@@ -5,7 +5,7 @@ use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::security::{self, WorkloadFilter};
 use crate::spec::{GID_BASE, ID_MAP_WIDTH, LaunchSpec, UID_BASE, WORKLOAD_GID, WORKLOAD_UID};
@@ -18,6 +18,7 @@ const OCI_LINKS: &str = "/etc/conjet/native-oci-hardlinks.json";
 pub(crate) const NATIVE_EXECUTABLE: &str = "/etc/conjet/native-executable";
 
 pub(crate) struct Sandbox {
+    base: PathBuf,
     new_root: CString,
     overlay: CString,
     cwd: CString,
@@ -30,9 +31,10 @@ impl Sandbox {
         bridge: bool,
         executable: &str,
         oci: Option<&LaunchSpec>,
+        id: [u8; 16],
     ) -> io::Result<Self> {
-        let base = Path::new(BASE);
-        std::fs::create_dir(base)?;
+        let base = owned_path(id, oci.is_some());
+        std::fs::create_dir(&base)?;
         let setup = (|| {
             for entry in ["lower", "lower/bin", "lower/work", "upper", "work", "root"] {
                 std::fs::create_dir(base.join(entry))?;
@@ -74,7 +76,7 @@ impl Sandbox {
                 let path = CString::new(base.join(directory).as_os_str().as_bytes())?;
                 security::checked(unsafe { libc::chown(path.as_ptr(), UID_BASE, GID_BASE) })?;
                 std::fs::set_permissions(
-                    Path::new(BASE).join(directory),
+                    base.join(directory),
                     std::fs::Permissions::from_mode(if directory != "work" {
                         0o755
                     } else {
@@ -95,18 +97,21 @@ impl Sandbox {
                 b"must stay outside workload root\n",
             )?;
             Ok(Self {
+                base: base.clone(),
                 cwd: CString::new(oci.map_or("/work", |spec| spec.cwd.as_str()))?,
                 new_root: CString::new(base.join("root").as_os_str().as_bytes())?,
                 overlay: CString::new(format!(
-                    "lowerdir={},upperdir={BASE}/upper,workdir={BASE}/work,userxattr",
-                    lower.display()
+                    "lowerdir={},upperdir={}/upper,workdir={}/work,userxattr",
+                    lower.display(),
+                    base.display(),
+                    base.display()
                 ))?,
                 filter: WorkloadFilter::new(bridge),
                 stdin: File::open("/dev/null")?,
             })
         })();
         if setup.is_err() {
-            let _ = std::fs::remove_dir_all(base);
+            let _ = std::fs::remove_dir_all(&base);
         }
         setup
     }
@@ -193,25 +198,33 @@ impl Sandbox {
     }
 
     pub(crate) fn cleanup(self, verify_write: bool) -> io::Result<()> {
-        if std::fs::read(Path::new(BASE).join("lower/work/immutable"))? != b"verified fixture\n" {
+        if std::fs::read(self.base.join("lower/work/immutable"))? != b"verified fixture\n" {
             return Err(io::Error::other(
                 "fixture modified its immutable lower root",
             ));
         }
         if verify_write
-            && (std::fs::read(Path::new(BASE).join("upper/work/new-proof"))? != b"private write\n"
-                || Path::new(BASE).join("lower/work/new-proof").exists())
+            && (std::fs::read(self.base.join("upper/work/new-proof"))? != b"private write\n"
+                || self.base.join("lower/work/new-proof").exists())
         {
             return Err(io::Error::other(
                 "fixture write did not stay in its private upper root",
             ));
         }
-        std::fs::remove_dir_all(BASE)
+        std::fs::remove_dir_all(self.base)
     }
 }
 
-pub(crate) fn recover() -> io::Result<()> {
-    let base = Path::new(BASE);
+pub(crate) fn owned_path(id: [u8; 16], oci: bool) -> PathBuf {
+    if oci {
+        PathBuf::from(format!("{BASE}-{}", crate::handshake::hex(&id)))
+    } else {
+        PathBuf::from(BASE)
+    }
+}
+
+pub(crate) fn recover(id: [u8; 16], oci: bool) -> io::Result<()> {
+    let base = owned_path(id, oci);
     for (relative, expected) in [
         ("lower/work/immutable", &b"verified fixture\n"[..]),
         ("outside-canary", &b"must stay outside workload root\n"[..]),
@@ -224,13 +237,21 @@ pub(crate) fn recover() -> io::Result<()> {
         }
     }
     if base.try_exists()? {
-        std::fs::remove_dir_all(base)?;
+        std::fs::remove_dir_all(&base)?;
     }
-    assert_absent()
+    check_absent(&base)
 }
 
 pub(crate) fn assert_absent() -> io::Result<()> {
-    if Path::new(BASE).try_exists()? {
+    check_absent(Path::new(BASE))
+}
+
+pub(crate) fn assert_owned_absent(id: [u8; 16]) -> io::Result<()> {
+    check_absent(&owned_path(id, true))
+}
+
+fn check_absent(path: &Path) -> io::Result<()> {
+    if path.try_exists()? {
         return Err(io::Error::other("unclaimed fixture sandbox"));
     }
     Ok(())

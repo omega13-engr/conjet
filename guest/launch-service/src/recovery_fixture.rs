@@ -38,8 +38,8 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
             return Ok(());
         }
         if let Some(id) = intent.read()? {
-            kernel_fixture::recover_cgroup(id)?;
-            sandbox_fixture::recover()?;
+            kernel_fixture::recover_cgroup(id, false)?;
+            sandbox_fixture::recover(id, false)?;
             kernel_fixture::assert_cgroup_absent()?;
             intent.complete(id)?;
             println!("conjet-launchd reconciled workload {}", hex(&id));
