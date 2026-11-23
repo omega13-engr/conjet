@@ -86,7 +86,9 @@ Acceptance Criteria:
 - Verify digest and runnable contents after pull/load; measure save/load throughput and disk expansion. Delete only task-owned images and artifacts.
 - Record unsupported image-management operations for native-only endpoints; image preparation is included in native readiness cost where relevant.
 
-Problem and Evidence: Container startup with cached layers says nothing about image acquisition or unpack cost.
+Problem and Evidence: The matrix implements actual image pulls, verified archive save/load, tag removal, runnable proof and a loopback registry fixture. Layer-level cold evidence still requires validation.
+
+Raw evidence: Container startup with cached layers says nothing about image acquisition or unpack cost.
 
 Approach:
 
@@ -125,7 +127,9 @@ Acceptance Criteria:
 - Report build wall time, cache hits, CPU, memory peak, disk I/O and resulting image size. Record whether BuildKit uses the native runtime, Docker/containerd, or another backend.
 - No native build speed claim is allowed merely because a native launch microbenchmark is fast; unsupported Kiri build configurations remain explicit.
 
-Problem and Evidence: Build performance depends on BuildKit, filesystem behavior and caching; the new native launch service is not itself a build engine.
+Problem and Evidence: The matrix implements actual pinned Buildx with private builder volumes, base preloading, four cache states and artifact export/load for Rust, Go and Node. Hosted execution evidence is pending.
+
+Raw evidence: Build performance depends on BuildKit, filesystem behavior and caching; the new native launch service is not itself a build engine.
 
 Approach:
 
@@ -164,7 +168,9 @@ Acceptance Criteria:
 - Validate logs, service DNS, published ports and expected data persistence across restart; separately measure down --volumes using only owned volumes.
 - Report critical-path readiness, per-service latency, resources and verified cleanup. Attribute mixed native/legacy execution per service.
 
-Problem and Evidence: Compose includes orchestration, network dependencies and storage behavior absent from the single-container native fixture.
+Problem and Evidence: The full fixture uses pinned Node and Redis, real dependency readiness, transactions, scaling, published loopback ports and project cleanup. End-to-end timings are pending.
+
+Raw evidence: Compose includes orchestration, network dependencies and storage behavior absent from the single-container native fixture.
 
 Approach:
 
@@ -202,7 +208,9 @@ Acceptance Criteria:
 - Measure inspect/list latency with fixed owned-container counts and event delivery/order under churn; do not query or manipulate production containers.
 - Measure docker cp in/out with checksummed small-file and large-file sets. Record unsupported native or Kiri behavior without substituting another operation.
 
-Problem and Evidence: Interactive development and tooling depend on control-plane and stream behavior beyond launch latency.
+Problem and Evidence: The matrix implements persistent exec streams and exit code, bounded output, inspect/list and checksummed file copies. Attach/events and further cancellation coverage remain open.
+
+Raw evidence: Interactive development and tooling depend on control-plane and stream behavior beyond launch latency.
 
 Approach:
 
@@ -241,7 +249,9 @@ Acceptance Criteria:
 - Run at least one sustained application workload with latency under load and active-data canaries. Capture CPU, memory and disk growth with a declared steady-state interval.
 - Keep raw transport throughput, application readiness and launch latency as separate metrics.
 
-Problem and Evidence: Bridge creation timings do not measure packet performance, and static no-network execution does not establish Docker workload compatibility.
+Problem and Evidence: The matrix implements writable-layer, volume and bind integrity workloads and a sustained Node/Redis service with DNS and HTTP transaction checks. Timing and additional network coverage are pending.
+
+Raw evidence: Bridge creation timings do not measure packet performance, and static no-network execution does not establish Docker workload compatibility.
 
 Approach:
 
@@ -280,7 +290,9 @@ Acceptance Criteria:
 - Collect host plus attributed guest CPU/memory, idle footprint, disk growth and reclamation with measurement limitations. Run energy sampling separately only when authorized and available; otherwise mark it unavailable.
 - Observe cleanup lag and steady-state resource growth independently from API acknowledgement. Unknown Kiri guest teardown remains unknown.
 
-Problem and Evidence: Fast sequential medians can hide queueing, memory reservation, deferred cleanup and recovery costs.
+Problem and Evidence: The matrix implements a bounded Docker launch concurrency sweep. Pressure, recovery and sustained validity evidence are still pending.
+
+Raw evidence: Fast sequential medians can hide queueing, memory reservation, deferred cleanup and recovery costs.
 
 Approach:
 

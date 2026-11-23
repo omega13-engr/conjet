@@ -159,9 +159,12 @@ def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None, group
             report['vm_backing'] = observed_disks(engine, peer, disks)
             report['host_before'] = TOOLS['sample_host'](peer_args, output / 'footprint-before.json')
             report['backend'] = ('official Kiri 0.2.2' if engine == 'kiri' else 'Conjet Core Docker/containerd')
-            if mode != 'preflight':
+            if mode in ('pilot', 'probes', 'lifecycle'):
                 adapter = runpy.run_path(str(REPO / 'benchmarks/docker-comparison-workloads.py'))
                 adapter['run_workloads'](mode, manifest, report, output, connection, docker, env, group)
+            elif mode != 'preflight':
+                matrix = runpy.run_path(str(REPO / 'benchmarks/docker-comparison-matrix.py'))
+                matrix['run_matrix'](mode, manifest, report, output, docker, env)
         finally:
             connection.close()
         report['host_after'] = TOOLS['sample_host'](peer_args, output / 'footprint-after.json')
@@ -260,7 +263,8 @@ def run_pair(args, output, order):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=('preflight', 'pilot', 'probes', 'lifecycle'), default='preflight')
+    parser.add_argument('--mode', choices=('preflight', 'pilot', 'probes', 'lifecycle', 'images', 'builds', 'compose', 'control',
+                                                         'storage_network', 'stress'), default='preflight')
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--pair', type=int, choices=range(1, 6), default=1)
     parser.add_argument('--timeout', type=int, default=900)

@@ -44,7 +44,7 @@ or different resource enforcement limits equivalence conclusions.
   include ready-slot refill in the throughput window. Never use this payload
   as a substitute for Docker build, Compose, or an ordinary Alpine lifecycle.
 - For images, use pinned Alpine and Node (small and multilayer) with a
-  task-owned registry where both engines can reach it. Keep public pulls
+  task-owned registry where both engines can reach it. The controlled fixtures use the same pinned executable and deterministic one- and three-layer payloads. Keep public pulls
   separate. Cold requires absence of the manifest and relevant layers in an
   isolated store. Removing only a tag or selecting a fresh VM with a reused
   image store does not establish a cold sample.
@@ -54,10 +54,10 @@ or different resource enforcement limits equivalence conclusions.
   Record builder/driver/version, preload bases before the cold-builder case
   and verify both built output and export/load. If isolating a builder cache
   requires pruning another workload, stop that scenario.
-- Compose uses a two-service app and Redis, pinned Alpine and Redis, a
+- Compose uses a two-service app and Redis, pinned Node and Redis, a
   dedicated project network and named volume. Readiness requires the app to
   perform a write/read transaction through its Redis dependency. Use a unique
-  loopback host port only for the publish test. Pre-pull both images.
+  loopback host port only for the publish test. Pre-pull both images. The service churn profile offers at most 100 fresh HTTP connections per second.
 - Persistent exec/control uses Alpine and hashes deterministic files across
   copies. Storage distinguishes writable layers, named volumes and host
   bind mounts; use verified 4 KiB records and a 16 MiB dataset. Use a 60 s

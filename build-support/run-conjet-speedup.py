@@ -338,7 +338,8 @@ def main():
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
-    parser.add_argument('--comparison-mode', choices=('preflight', 'pilot', 'probes', 'lifecycle'), default='preflight')
+    parser.add_argument('--comparison-mode', choices=('preflight', 'pilot', 'probes', 'lifecycle', 'images', 'builds', 'compose', 'control',
+                                                         'storage_network', 'stress'), default='preflight')
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
     parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
     parser.add_argument('--benchmark-scenario', type=Path, help='use a staged lifecycle scenario')

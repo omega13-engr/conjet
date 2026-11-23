@@ -181,3 +181,41 @@ outputs are written even when a check fails. See the
 for the documented M1 Pro runs and the
 [experimental feature](../docs/engineering/speed-release-scope.md)
 for the supported configuration.
+
+## Paired Docker comparison
+
+The [frozen protocol](../docs/engineering/docker-benchmark-plan.md) controls
+the Docker comparison. Use the build outputs and verified Core assets from
+the [isolated environment runbook](../docs/engineering/speedup-environment.md).
+Run each command in the foreground. Outputs must be new directories under
+ExternalSSD.
+
+```sh
+python3 benchmarks/docker-comparison.py --mode lifecycle \
+  --group alpine-true/none/api --pair 2 --timeout 3600 \
+  --output "$evidence/alpine-true-none-api-pair-2" \
+  --swift-bin "$speed_build/swift/debug" \
+  --core "$speed_build/cargo/debug/jetstream" \
+  --network-helper "$speed_build/conjet-network" \
+  --core-assets "$core_assets"
+```
+
+Use `--mode preflight` before a new environment, `pilot` for annotated pilot
+timings, and `probes` for capability checks. A selected lifecycle group runs
+its full per-session budget. Repeat at every pair index for a qualifying
+series. The other modes are `images`, `builds`, `compose`, `control`,
+`storage_network` and `stress`. They run their own frozen per-session counts
+and retain failed operations. A successful launcher exit confirms capture and
+cleanup. Check each scenario's errors and coverage before using its timings.
+
+The image suite separates public image pulls, known-warm load/save,
+and locally staged registry reimports. Registry reimports remain labeled
+with unknown layer-transfer state. The build suite uses a uniquely named
+pinned BuildKit worker with its own guest volume and separates preloading,
+build/export, load and output validation. Compose uses Node and Redis with
+functional readiness and a persistent transaction counter. No benchmark
+rewrites the installed Docker context or prunes a shared store.
+
+`docker-comparison-summary.py` emits per-session percentiles and failure
+counts from retained reports. Use the paired estimator only with five
+complete, independent, semantically matched pairs.
