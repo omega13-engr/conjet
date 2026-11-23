@@ -8,7 +8,7 @@ use crate::handshake::hex;
 use crate::spec::ResourceLimits;
 
 const CPU_PERIOD_US: u64 = 100_000;
-pub(crate) const CGROUP2_SUPER_MAGIC: u64 = 0x6367_7270;
+pub(crate) const CGROUP2_SUPER_MAGIC: i128 = 0x6367_7270;
 
 pub struct WorkloadCgroup {
     directory: File,
@@ -30,7 +30,7 @@ impl WorkloadCgroup {
         if unsafe { libc::fstatfs(parent_descriptor.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        if unsafe { filesystem.assume_init() }.f_type as u64 != CGROUP2_SUPER_MAGIC {
+        if i128::from(unsafe { filesystem.assume_init() }.f_type) != CGROUP2_SUPER_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "cgroup v2 required",

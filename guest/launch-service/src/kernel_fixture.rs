@@ -826,7 +826,7 @@ pub(crate) fn recover_cgroup(id: [u8; 16]) -> io::Result<()> {
     let directory = File::open(mount)?;
     let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
     security::checked(unsafe { libc::fstatfs(directory.as_raw_fd(), filesystem.as_mut_ptr()) })?;
-    if unsafe { filesystem.assume_init() }.f_type as u64 == CGROUP2_SUPER_MAGIC {
+    if i128::from(unsafe { filesystem.assume_init() }.f_type) == CGROUP2_SUPER_MAGIC {
         let root = mount.join("conjet-native");
         let workloads = root.join("workloads");
         for name in ["active", "prepared"] {

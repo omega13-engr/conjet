@@ -388,6 +388,12 @@ warmup and artifact-verification failures alongside measured rows.
 Controlled-registry intervals additionally require complete witnessed config
 and layer transfer for every first-pull sample in each accepted pair.
 The remaining modes and claim review are still in progress.
+The local full check retained the default SwiftPM Metal failure and passed
+all 440 Swift tests on the documented native build system with two skips.
+ARM64 musl strict Clippy exposed two redundant kernel filesystem casts.
+The portable comparison passes Clippy and produced the same SHA-256 as
+the measured release guest supervisor. Rust workspace tests and formatting
+also passed. Logs and the rebuilt hash are in `SPEED-026/final-local`.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),
