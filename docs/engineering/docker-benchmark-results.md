@@ -289,6 +289,16 @@ The follow-up fixture verifies the actual guest memory ceiling and
 disables swap before imposing pressure. The raw counts above cover launch
 concurrency. They do not qualify memory-pressure behavior.
 
+The corrected pressure run in `SPEED-025/pair-2` verified Conjet's
+64 MiB memory ceiling and zero swap inside the workload cgroup. Conjet
+returned exit 137 with `State.OOMKilled=true`. It preserved the active
+sibling's marker and passed the subsequent fresh recovery launch. Kiri's
+Docker inspection returned `MemorySwap=0` after the harness requested
+64 MiB total memory plus swap. The harness rejected that configuration
+before allocating memory. Kiri therefore has no equivalent pressure
+measurement with verified limits in this run. The pair still retained
+both existing engines' bounded concurrency timings.
+
 ## Separate native timings
 
 The static workload uses the same pinned payload bytes as the
@@ -395,6 +405,7 @@ failed attempts and shutdown checks.
 | Canceled historical-event run and corrected paired control matrix | `SPEED-023/pair-1`, `SPEED-023/pair-2` |
 | Storage, guest transport and the sustained services | `SPEED-024/pair-1` |
 | Launch concurrency, memory attribution and recovery attempts | `SPEED-025/pair-1` |
+| Second concurrency pair and corrected Conjet OOM attribution | `SPEED-025/pair-2` |
 | Full-budget native static product and active-shutdown canaries | `SPEED-025/native-product-full-1` |
 
 Production stayed in service throughout. The records preserve unknown

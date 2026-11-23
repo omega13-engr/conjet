@@ -168,7 +168,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Rerun the pressure probe with swap disabled and verify the effective guest cgroup before allocating. In `SPEED-025/pair-1`, all 400 launches per engine passed. Conjet exit 137 lacked Docker OOM attribution. Kiri's wait timed out. Both survivor and recovery canaries passed. The native runner now verifies cleanup after a task-owned SIGTERM with an admitted workload and tests that its old handle cannot be claimed after reboot.
+Next Action: Repeat remaining concurrency pairs and keep the Kiri pressure boundary unresolved. `SPEED-025/pair-2` demonstrated Conjet exit 137 and `OOMKilled=true` with verified 64 MiB memory and disabled swap. The sibling and recovery canaries passed. Kiri reported `MemorySwap=0` instead of the requested 64 MiB, so the guard stopped its pressure workload before allocation. Both engines ran the bounded launch sweep. Preserve pair 1's timeout and OOM attribution failure.
 
 
 ### SPEED-024
