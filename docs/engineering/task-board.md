@@ -364,7 +364,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Run the corrected transfer observation at the next pair index. `SPEED-020/pair-2` passed both pins, warm save/load, byte-verified image run and owner cleanup. Kiri witnessed all ten measured first-pull transfers. Conjet's CLI indicated downloads, but guest registry clock skew made the host timestamp filter lose its witnesses. The correction uses a dedicated repository per repetition and a bounded log tail to correlate each exact blob without cross-clock timestamps. The prior unknowns remain in the evidence.
+Next Action: Run the corrected transfer observation at the next pair index. `SPEED-020/pair-2` passed both pins, warm save/load, byte-verified image run and owner cleanup. Kiri witnessed all ten measured first-pull transfers. Conjet's CLI indicated downloads, but guest registry clock skew made the host timestamp filter lose its witnesses. The correction uses a dedicated repository per repetition and a bounded log tail to correlate each exact blob without cross-clock timestamps. The registry store has a labeled volume with explicit session cleanup. The prior unknowns remain in the evidence.
 
 ### SPEED-026
 

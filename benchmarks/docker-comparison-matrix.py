@@ -216,12 +216,19 @@ def run_registry(docker, manifest):
     if docker.call('registry-prepull', ['pull', '--platform', 'linux/arm64', image], phase='setup') is None:
         return
     name = docker.token + '-registry'
-    if docker.call('registry-start', ['run', '--rm', '-d', '--name', name, '--pull', 'never',
-                  '--label', f'{LABEL}={docker.token}', '--publish', '127.0.0.1::5000', image],
-                   phase='setup') is None:
+    volume = name + '-store'
+    if docker.call('registry-volume-create', ['volume', 'create', '--label', f'{LABEL}={docker.token}',
+                                             volume], phase='setup') is None:
         return
     connection = None
+    started = False
     try:
+        started = docker.call('registry-start', ['run', '--rm', '-d', '--name', name, '--pull', 'never',
+                              '--label', f'{LABEL}={docker.token}', '--publish', '127.0.0.1::5000',
+                              '--mount', f'type=volume,source={volume},target=/var/lib/registry', image],
+                              phase='setup') is not None
+        if not started:
+            return
         address = docker.call('registry-port', ['port', name, '5000/tcp'], phase='verification')
         if address is None:
             return
@@ -285,9 +292,17 @@ def run_registry(docker, manifest):
     finally:
         if connection is not None:
             connection.close()
-        docker.call('registry-log', ['logs', '--tail', '100', name], phase='verification')
-        if docker.call('registry-stop', ['stop', '--time', '2', name], phase='cleanup') is None:
-            raise RuntimeError('could not stop the owned registry')
+        if started:
+            docker.call('registry-log', ['logs', '--tail', '100', name], phase='verification')
+            docker.call('registry-stop', ['stop', '--time', '2', name], phase='cleanup')
+        active = docker.call('registry-container-inventory', ['ps', '-aq', '--filter', f'name={name}',
+                             '--filter', f'label={LABEL}={docker.token}'], phase='cleanup')
+        if active is None:
+            raise RuntimeError('could not inspect the owned registry container')
+        if active and docker.call('registry-container-recover', ['rm', '-f', name], phase='cleanup') is None:
+            raise RuntimeError('could not remove the owned registry after an incomplete stop')
+        if docker.call('registry-volume-remove', ['volume', 'rm', volume], phase='cleanup') is None:
+            raise RuntimeError('could not remove the owned registry store')
 
 
 
