@@ -278,7 +278,7 @@ Approach:
 2. Execute the cache matrix serially and validate each output image.
 3. Publish per-project and per-cache-state comparisons with builder provenance.
 
-Evidence: `SPEED-021/pair-2` records harness `1253da3`. Both existing engines completed all 36 pinned Buildx build/export and load rows and 36 artifact canaries each. Raw reports, builder endpoint/driver/version and cleanup witnesses are retained with failed `pair-1`. Four independent pairs with the corrected workload and detailed peak CPU, memory and I/O attribution remain.
+Evidence: `SPEED-021/pair-2` records harness `1253da3`. Both existing engines completed all 36 pinned Buildx build/export and load rows and 36 artifact canaries each. Pair 3 on `b3f0ffc` repeated those results and verified removal of 36 per-case image tags and nine private builders per engine. Raw reports, builder endpoint/driver/version and cleanup witnesses are retained with failed `pair-1`. Compatible independent pairs and the new worker resource observations remain open.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),
@@ -425,6 +425,8 @@ cleanup on every operation and uses UID/GID 65532. The baseline uses the
 image-default user, so their measurements remain distinct.
 The full-sample runner handles cancellation through its Docker adapter and
 VM ownership cleanup and retains partial rows.
+The full no-network Alpine `true` CLI series is running serially on harness
+`eb31229` under `SPEED-019/alpine-true-none-cli-series`.
 
 
 ### SPEED-008

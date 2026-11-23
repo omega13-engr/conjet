@@ -211,6 +211,14 @@ median was lower for every workload in this pair. The Buildx verdict
 remains inconclusive until the remaining compatible pairs and matched
 builder resource evidence are available.
 
+Pair 3 used `b3f0ffc` with distinct tags for every exported image. Each
+engine completed all 72 build/export and load samples, passed 36 runnable
+image checks and removed all 36 result tags and nine workers. The empty
+build/export medians for Rust, Go and Node were 1.438, 5.159 and 9.720 s
+on Conjet and 1.071, 4.464 and 5.985 s on Kiri. `SPEED-021/pair-3/summary.json`
+contains the per-session distributions. This adds cleanup evidence. Detailed
+worker counters and compatible independent pairs remain open.
+
 ## Compose first pair
 
 Both existing Docker engines completed the real Node/Redis workload in
@@ -447,6 +455,7 @@ failed attempts and shutdown checks.
 | Image inspect distributions and whole-suite backing allocation | `SPEED-020/cleanup-qualified/inspect-distributions.json`, `SPEED-020/backing-observation` |
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
 | Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
+| Buildx per-case output-tag and worker cleanup verification | `SPEED-021/pair-3`, `SPEED-021/pair-3/summary.json` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
 | Compose repeat with effective service resource verification | `SPEED-022/pair-2` |
 | Canceled historical-event run and corrected paired control matrix | `SPEED-023/pair-1`, `SPEED-023/pair-2` |
