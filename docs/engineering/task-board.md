@@ -692,8 +692,55 @@ protocol; Docker live attach/log delivery and exec remain open.
 Production snapshots matched, with session and endpoint removal.
 Independent PR review is separate.
 
-Next Action: Wire bounded live output into the Rust Docker owner and
-qualify native exec in SPEED-034.
+Next Action: Wire bounded live output into the Docker endpoint in SPEED-034B.
+
+### SPEED-034B
+
+Title: Stream native stdout and stderr through Docker attach and logs
+
+Description: Feed bounded guest output to Docker subscribers while the
+workload is running, with independent stream cursors and explicit overflow.
+
+Is blocked by task: SPEED-034A (DONE).
+
+Acceptance Criteria:
+
+- Read exact stdout and stderr through unmodified Docker attach and
+  `logs --follow` while the workload is still running, then verify exit,
+  final bytes and cleanup.
+- Return 64 KiB of retained data and an explicit overflow error, and
+  demonstrate that a slow or disconnected subscriber cannot prevent cleanup.
+
+Problem and Evidence: Guest capture exposed live bytes after SPEED-034A.
+The Docker owner still waited for the complete terminal result before
+writing any output to its clients.
+
+Approach: Carry optional cursors in the existing native wait call,
+preserve the per-run capture and write Docker frames outside the
+lifecycle lock.
+
+Evidence: DONE. Built release guest and Jetstream from the working tree
+on `cdf5753`. Ran `python3 build-support/run-conjet-speedup.py
+--diagnostics streaming` and `--diagnostics control` in separate boots.
+The unmodified CLI received early and late stdout and stderr through
+attach and live logs. The attach command returned 23. Log replay retained
+exact output, and a 65 KiB fixture returned exactly 64 KiB plus an explicit
+failure. The control suite verified empty output, mixed streams, output
+boundaries, slow readers and disconnects. Guest tests, ARM64 Clippy,
+formatting and Jetstream tests passed. Commands and raw evidence are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-034B`.
+
+Source: [Adapter contract](docker-native-adapter.md),
+[`http.rs`](../../jetstream/src/native/docker/http.rs).
+
+Review: Local diff and live checks passed. The host maintains independent
+cursors and bounded subscriber writes. Terminal cleanup remains the
+condition for successful removal. Both launchers verified unchanged
+production and removal of their guests and sockets. Independent PR
+review is separate.
+
+Next Action: Implement persistent exec in an already-running OCI workload
+and qualify its isolation and exit semantics in SPEED-034.
 
 ### SPEED-034
 
@@ -701,7 +748,7 @@ Title: Add native exec and bounded live attach/log streams
 
 Description: Implement Docker exec and streaming output for one running native service fixture.
 
-Is blocked by task: SPEED-034A (DONE).
+Is blocked by task: SPEED-034B (DONE).
 
 Acceptance Criteria:
 

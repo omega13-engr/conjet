@@ -79,6 +79,14 @@ struct Wait {
     after_revision: u64,
     #[serde(default)]
     terminal_output: bool,
+    live_output: Option<OutputCursors>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputCursors {
+    stdout: usize,
+    stderr: usize,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +112,14 @@ fn output_chunk(output: &Capture, offset: usize, limit: usize, terminal: bool) -
         "data": base64::engine::general_purpose::STANDARD.encode(&output.bytes[offset..next]),
         "eof": terminal && next == output.bytes.len(),
         "dropped_bytes": output.dropped,
+    })
+}
+
+fn output_bundle(record: &Record, stdout: usize, stderr: usize, terminal: bool) -> Value {
+    let stdout_limit = (record.stdout.bytes.len() - stdout).min(OUTPUT_CHUNK_LIMIT);
+    json!({
+        "stdout":output_chunk(&record.stdout, stdout, stdout_limit, terminal),
+        "stderr":output_chunk(&record.stderr, stderr, OUTPUT_CHUNK_LIMIT - stdout_limit, terminal),
     })
 }
 
@@ -1190,17 +1206,29 @@ impl FreshFixture {
                     let record = guard
                         .record(&request.handle.workload_id)
                         .expect("checked record");
+                    let cursors = request.live_output.as_ref();
+                    if cursors.is_some_and(|cursors| {
+                        cursors.stdout > record.stdout.bytes.len()
+                            || cursors.stderr > record.stderr.bytes.len()
+                    }) {
+                        break Err(("malformed", "live output cursor exceeds captured data"));
+                    }
                     if record.revision > request.after_revision || record.phase.terminal() {
                         let mut state = record.state();
                         if request.terminal_output && record.phase == Phase::Removed {
-                            // Share the chunk budget across streams to preserve
-                            // space for terminal metadata in the 16 KiB frame.
-                            let stdout_limit = record.stdout.bytes.len().min(OUTPUT_CHUNK_LIMIT);
-                            state["terminal_output"] = json!({
-                                "stdout": output_chunk(&record.stdout, 0, stdout_limit, true),
-                                "stderr": output_chunk(&record.stderr, 0, OUTPUT_CHUNK_LIMIT - stdout_limit, true),
-                            });
+                            let (stdout, stderr) =
+                                cursors.map_or((0, 0), |cursors| (cursors.stdout, cursors.stderr));
+                            state["terminal_output"] = output_bundle(record, stdout, stderr, true);
                         }
+                        break Ok((Kind::State, state));
+                    }
+                    if let Some(cursors) = cursors.filter(|cursors| {
+                        cursors.stdout < record.stdout.bytes.len()
+                            || cursors.stderr < record.stderr.bytes.len()
+                    }) {
+                        let mut state = record.state();
+                        state["live_output"] =
+                            output_bundle(record, cursors.stdout, cursors.stderr, false);
                         break Ok((Kind::State, state));
                     }
                     let remaining = expires.saturating_duration_since(Instant::now());

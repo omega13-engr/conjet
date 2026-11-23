@@ -279,10 +279,11 @@ fn read_stream(
     handle: &Value,
     name: &str,
     inline: Option<Value>,
+    mut data: Vec<u8>,
     calls: &mut u32,
 ) -> anyhow::Result<(Vec<u8>, bool)> {
-    let mut data = Vec::new();
     let mut initial = inline;
+    let mut truncated = false;
     loop {
         let from_bundle = initial.is_some();
         let chunk = match initial.take() {
@@ -308,16 +309,13 @@ fn read_stream(
                 && next <= STREAM_LIMIT,
             "invalid native output cursor or chunk bound"
         );
-        if chunk["dropped_bytes"]
+        truncated |= chunk["dropped_bytes"]
             .as_u64()
             .context("missing dropped-byte count")?
-            > 0
-        {
-            return Ok((Vec::new(), true));
-        }
+            > 0;
         data.extend_from_slice(&piece);
         if chunk["eof"].as_bool().context("missing native EOF flag")? {
-            return Ok((data, false));
+            return Ok((data, truncated));
         }
         ensure!(
             from_bundle || !piece.is_empty(),
@@ -387,7 +385,11 @@ impl Native {
     }
 }
 
-fn wait_for_native(admission: &mut Admission, cancellation: &AtomicU8) -> anyhow::Result<Terminal> {
+fn wait_for_native(
+    admission: &mut Admission,
+    item: &Item,
+    generation: u64,
+) -> anyhow::Result<Terminal> {
     let mut state = std::mem::take(&mut admission.state);
     let peer = &mut admission.peer;
     let began = admission.began;
@@ -400,7 +402,7 @@ fn wait_for_native(admission: &mut Admission, cancellation: &AtomicU8) -> anyhow
             state["cleanup"] != "failed" && admitted.elapsed() < Duration::from_secs(32),
             "native guest cleanup remains unresolved"
         );
-        let requested = cancellation.load(Ordering::Acquire);
+        let requested = item.container.cancel.load(Ordering::Acquire);
         let result = if requested != 0 && requested != sent_signal {
             sent_signal = requested;
             peer.exchange(
@@ -411,9 +413,14 @@ fn wait_for_native(admission: &mut Admission, cancellation: &AtomicU8) -> anyhow
             )
         } else {
             waits += 1;
+            let (stdout, stderr) = {
+                let status = item.state();
+                (status.live[0].len(), status.live[1].len())
+            };
             peer.exchange(
                 Kind::Wait, Kind::State,
-                &json!({"handle":handle,"after_revision":u64::MAX,"budget_ms":100,"terminal_output":true}),
+                &json!({"handle":handle,"after_revision":u64::MAX,"budget_ms":100,"terminal_output":true,
+                        "live_output":{"stdout":stdout,"stderr":stderr}}),
                 Duration::from_secs(2),
             )
         };
@@ -425,6 +432,9 @@ fn wait_for_native(admission: &mut Admission, cancellation: &AtomicU8) -> anyhow
             state["handle"] == handle,
             "native workload identity changed"
         );
+        if let Some(live) = state.get("live_output") {
+            item.publish_output(generation, live)?;
+        }
     }
     let terminal = Instant::now();
     let code = if sent_signal != 0 && state["exit"].is_null() && state["helper_failed"] == false {
@@ -460,25 +470,25 @@ fn wait_for_native(admission: &mut Admission, cancellation: &AtomicU8) -> anyhow
         })
         .transpose()?
         .unwrap_or_default();
-    let (mut stdout, stdout_dropped) = read_stream(
+    let [live_stdout, live_stderr] = item.state().live.clone();
+    let (stdout, stdout_dropped) = read_stream(
         peer,
         &handle,
         "stdout",
         streams.remove("stdout"),
+        live_stdout,
         &mut calls,
     )?;
-    let (mut stderr, stderr_dropped) = read_stream(
+    let (stderr, stderr_dropped) = read_stream(
         peer,
         &handle,
         "stderr",
         streams.remove("stderr"),
+        live_stderr,
         &mut calls,
     )?;
-    let delivery_error = (stdout_dropped || stderr_dropped).then(|| {
-        stdout.clear();
-        stderr.clear();
-        "OCI output exceeds the Docker adapter limit".into()
-    });
+    let delivery_error = (stdout_dropped || stderr_dropped)
+        .then(|| "OCI output exceeds the Docker adapter limit".into());
     state["adapter_timings_ns"] = json!({
         "authenticate":0, "admit":(admitted-began).as_nanos(),
         "terminal":(terminal-admitted).as_nanos(), "output":terminal.elapsed().as_nanos(),
@@ -523,6 +533,7 @@ struct Lifecycle {
     removed: bool,
     generation: u64,
     previous: VecDeque<(u64, Arc<Terminal>)>,
+    live: [Vec<u8>; 2],
 }
 
 impl Lifecycle {
@@ -548,6 +559,35 @@ struct Item {
 impl Item {
     fn state(&self) -> MutexGuard<'_, Lifecycle> {
         self.state.lock().unwrap()
+    }
+
+    fn publish_output(&self, generation: u64, bundle: &Value) -> anyhow::Result<()> {
+        let mut state = self.state();
+        ensure!(
+            state.generation == generation,
+            "live output generation changed"
+        );
+        let mut total = 0;
+        for (index, name) in ["stdout", "stderr"].iter().enumerate() {
+            let chunk = &bundle[*name];
+            let stream = &mut state.live[index];
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(chunk["data"].as_str().context("missing live output data")?)?;
+            let next = stream.len() + data.len();
+            total += data.len();
+            ensure!(
+                chunk["offset"].as_u64() == Some(stream.len() as u64)
+                    && chunk["next_offset"].as_u64() == Some(next as u64)
+                    && chunk["eof"] == false
+                    && next <= STREAM_LIMIT
+                    && total <= CHUNK,
+                "invalid live output cursor or bounds"
+            );
+            stream.extend(data);
+        }
+        ensure!(total != 0, "native live output did not advance");
+        self.changed.notify_all();
+        Ok(())
     }
 
     fn wait_for(
@@ -850,7 +890,7 @@ impl Owner {
         let owner = self.clone();
         let work = item.clone();
         let worker = thread::Builder::new()
-            .spawn(move || owner.run(work))
+            .spawn(move || owner.run(work, generation))
             .map_err(|_| Rejected::internal("native worker allocation failed"))?;
         ledger.workers.push(worker);
         if let Some(terminal) = state.terminal.take() {
@@ -861,6 +901,7 @@ impl Owner {
             state.previous.push_back((previous, terminal));
         }
         state.generation = generation;
+        state.live = Default::default();
         state.started = true;
         if restart {
             self.event(&mut ledger, "restart", item, None);
@@ -870,7 +911,7 @@ impl Owner {
         Ok(())
     }
 
-    fn run(&self, item: Arc<Item>) {
+    fn run(&self, item: Arc<Item>, generation: u64) {
         let signal = item.container.cancel.load(Ordering::Acquire);
         let terminal = if signal != 0 {
             Ok(Terminal {
@@ -883,7 +924,7 @@ impl Owner {
         } else {
             let admitted = self.native.lock().unwrap().begin(&item.container.spec);
             admitted.and_then(|mut admitted| {
-                let result = wait_for_native(&mut admitted, &item.container.cancel);
+                let result = wait_for_native(&mut admitted, &item, generation);
                 self.native.lock().unwrap().finish(admitted, result.is_ok());
                 result
             })
@@ -893,6 +934,7 @@ impl Owner {
         match terminal {
             Ok(terminal) => {
                 self.event(&mut ledger, "die", &item, Some(&terminal));
+                state.live = Default::default();
                 state.terminal = Some(Arc::new(terminal));
                 if item.container.auto_remove {
                     self.retire(&mut ledger, &item, &mut state);

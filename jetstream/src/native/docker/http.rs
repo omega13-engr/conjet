@@ -262,6 +262,7 @@ enum Action {
     Reply(Reply),
     Wait(Arc<Item>, String, u64),
     Attach(Arc<Item>, [bool; 2], u64),
+    Logs(Arc<Item>, [bool; 2], u64, bool),
 }
 
 fn stop_grace(query: &BTreeMap<String, String>) -> Result<u64> {
@@ -401,6 +402,16 @@ fn container(
     let item = owner.lookup(id)?;
     let allowed_query: &[&str] = match (method, action) {
         ("POST", "attach") => &["stdin", "stdout", "stderr", "logs", "stream"],
+        ("GET", "logs") => &[
+            "stdout",
+            "stderr",
+            "follow",
+            "tail",
+            "since",
+            "until",
+            "timestamps",
+            "details",
+        ],
         ("POST", "wait") => &["condition"],
         ("POST", "stop" | "restart") => &["t", "signal"],
         ("POST", "kill") => &["signal"],
@@ -467,6 +478,24 @@ fn container(
                 .map(|name| query.get(name).is_none() || !disabled(query.get(name)));
             let generation = item.state().generation;
             return Ok(Action::Attach(item, streams, generation));
+        }
+        ("GET", "logs") => {
+            if !disabled(query.get("timestamps"))
+                || !disabled(query.get("details"))
+                || query.get("tail").is_some_and(|value| value != "all")
+                || ["since", "until"]
+                    .iter()
+                    .any(|key| query.get(*key).is_some_and(|value| value != "0"))
+            {
+                return Err(Rejected::bad(
+                    "log time, duration, formatting and tail filters are unsupported",
+                ));
+            }
+            let enabled = ["stdout", "stderr"]
+                .map(|name| query.get(name).is_none() || !disabled(query.get(name)));
+            let follow = !disabled(query.get("follow"));
+            let generation = item.state().generation;
+            return Ok(Action::Logs(item, enabled, generation, follow));
         }
         ("GET", "json") => {
             let state = item.state();
@@ -578,36 +607,85 @@ fn attach(
     writer: &mut UnixStream,
 ) -> io::Result<()> {
     header(writer, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
-    let terminal = item
-        .wait_for(
-            |state| {
-                state.generation != generation
-                    || state.terminal.is_some()
-                    || state.removed
-                    || state.error.is_some()
-            },
-            35,
-        )
-        .ok()
-        .and_then(|state| state.terminal_for(generation).cloned());
-    let Some(terminal) = terminal else {
-        return Ok(());
-    };
-    for (index, (enabled, stream)) in enabled
-        .into_iter()
-        .zip([&terminal.stdout, &terminal.stderr])
-        .enumerate()
-    {
-        if !enabled || stream.is_empty() {
-            continue;
+    send_output(item, enabled, generation, true, writer)
+}
+
+fn send_output(
+    item: &Item,
+    enabled: [bool; 2],
+    generation: u64,
+    follow: bool,
+    writer: &mut UnixStream,
+) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(35);
+    let mut cursors = [0; 2];
+    loop {
+        let mut state = item.state();
+        let (frames, finished, failure) = loop {
+            let terminal = state.terminal_for(generation);
+            let same_generation = state.generation == generation;
+            let streams = match terminal {
+                Some(terminal) => [&terminal.stdout[..], &terminal.stderr[..]],
+                _ if same_generation => [&state.live[0][..], &state.live[1][..]],
+                _ => [&[][..], &[][..]],
+            };
+            let complete =
+                !same_generation || terminal.is_some() || state.removed || state.error.is_some();
+            let chunks: [Vec<u8>; 2] = std::array::from_fn(|index| {
+                if !enabled[index] {
+                    return Vec::new();
+                }
+                let begin = cursors[index].min(streams[index].len());
+                let end = if follow {
+                    (begin + super::CHUNK).min(streams[index].len())
+                } else {
+                    streams[index].len()
+                };
+                streams[index][begin..end].to_vec()
+            });
+            if chunks.iter().any(|chunk| !chunk.is_empty()) || complete || !follow {
+                let failure = terminal
+                    .and_then(|terminal| terminal.delivery_error.clone())
+                    .or_else(|| same_generation.then(|| state.error.clone()).flatten());
+                break (chunks, complete, failure);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            let (next, _) = item.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+        };
+        drop(state);
+        let empty = frames.iter().all(Vec::is_empty);
+        for (index, chunk) in frames.into_iter().enumerate() {
+            if chunk.is_empty() {
+                continue;
+            }
+            send_frame(writer, index as u8 + 1, &chunk)?;
+            cursors[index] += chunk.len();
         }
-        let mut frame = [0; 8];
-        frame[0] = index as u8 + 1;
-        frame[4..].copy_from_slice(&(stream.len() as u32).to_be_bytes());
-        writer.write_all(&frame)?;
-        writer.write_all(stream)?;
+        if !follow || (empty && finished) {
+            if let Some(error) = failure {
+                send_frame(writer, 3, error.as_bytes())?;
+            }
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "output subscriber deadline elapsed",
+            ));
+        }
     }
-    Ok(())
+}
+
+fn send_frame(writer: &mut UnixStream, kind: u8, data: &[u8]) -> io::Result<()> {
+    let mut frame = [0; 8];
+    frame[0] = kind;
+    frame[4..].copy_from_slice(&(data.len() as u32).to_be_bytes());
+    writer.write_all(&frame)?;
+    writer.write_all(data)
 }
 
 fn await_request(reader: &BufReader<UnixStream>) -> io::Result<bool> {
@@ -660,6 +738,11 @@ pub(super) fn serve(mut stream: UnixStream, owner: &Arc<Owner>) -> io::Result<()
             }
             Ok(Action::Attach(item, streams, generation)) => {
                 attach(&item, streams, generation, &mut stream)?;
+                break;
+            }
+            Ok(Action::Logs(item, streams, generation, follow)) => {
+                header(&mut stream, 200, "Connection: close\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
+                send_output(&item, streams, generation, follow, &mut stream)?;
                 break;
             }
         }

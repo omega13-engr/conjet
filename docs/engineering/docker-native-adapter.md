@@ -98,8 +98,11 @@ verified scope.
 The Docker control fixture verifies retained-container restart, graceful
 SIGTERM stop, escalation after the requested grace, SIGKILL, and removal
 after verified cleanup. The candidate is managed from source and general
-promotion requires broader compatibility. Live streaming, interactive input,
-Compose, networking, build, persistent exec, full event streaming, guest
+promotion requires broader compatibility. The Rust owner streams bounded
+stdout and stderr through noninteractive attach and `docker logs`, including
+follow mode, after the guest captures each chunk. Log filters and timestamps
+are outside the verified subset. Interactive input, Compose, networking,
+build, persistent exec, full event streaming, guest
 root credentials and prepared OCI remain outside the verified subset.
 
 The retained live test command is:

@@ -165,6 +165,12 @@ publishes bounded capture chunks while the workload runs and continues
 draining its pipes when there is no reader. Idle followers share the
 bounded wait pool with terminal waiters.
 
+Wait may carry `live_output` cursors for stdout and stderr. It returns a
+bounded bundle as soon as either stream advances, or a terminal bundle
+beginning at the supplied cursors. Both streams share the existing 8 KiB
+inline budget. Terminal state, exit, EOF and verified cleanup remain
+distinct observations.
+
 The native OCI image control operation uses an authenticated, boot-bound
 transfer. One connection owns the upload with a unique transfer ID and
 strict successive offsets. The guest admits at most three extra images
