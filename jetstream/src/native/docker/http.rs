@@ -592,7 +592,9 @@ fn container(
                     "RestartCount":state.generation,
                     "State":{"Status":status,"Running":status=="running","ExitCode":code,
                              "Error":state.error.as_deref().unwrap_or("")},
-                    "Config":config,"HostConfig":host,"NetworkSettings":{"Networks":networks},
+                    "Config":config,"HostConfig":host,"NetworkSettings":{
+                        "Networks":networks, "Ports":item.port_metadata(state.network_address.is_some())
+                    },
                 }),
             );
             reply.attributed = true;

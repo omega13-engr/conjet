@@ -3,6 +3,7 @@ mod exec;
 mod http;
 mod image;
 mod network;
+mod port;
 mod registry;
 mod request;
 
@@ -443,6 +444,9 @@ fn wait_for_native(
             let mut lifecycle = item.state();
             if lifecycle.network.is_some() && lifecycle.network_address.is_none() {
                 lifecycle.network_address = Some(checked_network_address(address)?);
+                if let Some(port) = item.published.lock().unwrap().as_ref() {
+                    port.set_target(Some(handle.clone()));
+                }
             }
             awaiting_address = false;
         }
@@ -571,11 +575,20 @@ struct Item {
     state: Mutex<Lifecycle>,
     control: Mutex<()>,
     changed: Condvar,
+    published: Mutex<Option<port::PublishedPort>>,
 }
 
 impl Item {
     fn state(&self) -> MutexGuard<'_, Lifecycle> {
         self.state.lock().unwrap()
+    }
+
+    fn port_metadata(&self, active: bool) -> Value {
+        self.published
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or_else(|| json!({}), |published| published.inspect(active))
     }
 
     fn publish_output(&self, generation: u64, bundle: &Value) -> anyhow::Result<()> {
@@ -865,6 +878,15 @@ impl Owner {
             match address {
                 Ok(address) if address.is_some() == attachment.is_some() => {
                     state.network_address = address;
+                    if let Some(published) = item.published.lock().unwrap().as_ref() {
+                        published.set_target(state.network_address.as_ref().map(|_| {
+                            state
+                                .native_handle
+                                .as_ref()
+                                .expect("confirmed native handle")
+                                .clone()
+                        }));
+                    }
                 }
                 _ => {
                     ledger.poisoned = true;
@@ -1056,14 +1078,56 @@ impl Owner {
         if let Some(attachment) = &network {
             Self::check_network_alias(&ledger, &attachment.alias)?;
         }
+        let publication = port::RequestedPort::parse(&config)?;
+        if publication.is_some() {
+            if network.is_none() {
+                return Err(Rejected::bad(
+                    "loopback port publication requires an internal bridge",
+                ));
+            }
+            if ledger
+                .active
+                .iter()
+                .any(|entry| entry.published.lock().unwrap().is_some())
+            {
+                return Err(Rejected(
+                    409,
+                    "the native loopback binding is already owned".into(),
+                ));
+            }
+        }
         let spec = if network.is_some() {
             let mut process = config.clone();
             process["HostConfig"]["NetworkMode"] = json!("none");
             process["NetworkingConfig"] = Value::Null;
+            if publication.is_some() {
+                process["HostConfig"]
+                    .as_object_mut()
+                    .expect("Docker host config")
+                    .remove("PortBindings");
+                process
+                    .as_object_mut()
+                    .expect("Docker config")
+                    .remove("ExposedPorts");
+            }
             self.process(&process)?
         } else {
             self.process(&config)?
         };
+        let published = publication
+            .map(|request| {
+                let endpoint = {
+                    let native = self.native.lock().unwrap();
+                    port::Endpoint {
+                        directory: native.peer_directory.clone(),
+                        identity: native.identity.clone(),
+                        key: native.key,
+                        boot: native.boot.clone(),
+                    }
+                };
+                port::PublishedPort::bind(request, endpoint)
+            })
+            .transpose()?;
         let auto_remove = config["HostConfig"]["AutoRemove"] == true;
         let item = Arc::new(Item {
             container: Container {
@@ -1080,6 +1144,7 @@ impl Owner {
             }),
             control: Mutex::new(()),
             changed: Condvar::new(),
+            published: Mutex::new(published),
         });
         ledger.active.push(item.clone());
         self.event(&mut ledger, "create", &item, None);
@@ -1194,6 +1259,9 @@ impl Owner {
         let mut state = item.state();
         state.native_handle = None;
         state.network_address = None;
+        if let Some(published) = item.published.lock().unwrap().as_ref() {
+            published.set_target(None);
+        }
         match terminal {
             Ok(terminal) => {
                 self.event(&mut ledger, "die", &item, Some(&terminal));
@@ -1212,6 +1280,7 @@ impl Owner {
     }
 
     fn retire(&self, ledger: &mut Ledger, item: &Arc<Item>, state: &mut Lifecycle) {
+        drop(item.published.lock().unwrap().take());
         state.removed = true;
         ledger
             .active
@@ -1326,6 +1395,10 @@ impl Owner {
         };
         for worker in worker {
             let _ = worker.join();
+        }
+        let ledger = self.ledger.lock().unwrap();
+        for item in &ledger.active {
+            drop(item.published.lock().unwrap().take());
         }
     }
 }

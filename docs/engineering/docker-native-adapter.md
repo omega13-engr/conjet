@@ -117,8 +117,13 @@ and resolved one scoped DNS alias per container. The pinned Alpine
 workloads completed an HTTP transaction across the bridge. Container
 inspection reports the guest address after exec confirmation. Live
 connect requires a workload that was started with bridge permissions.
-The verified scope uses the fixed private subnet and no guest egress,
-custom IPAM, host networking or port publication.
+The verified scope uses the fixed private subnet with no guest egress,
+custom IPAM or host networking. One bridged container can publish one
+TCP port on `127.0.0.1`, with an explicit or OS-assigned host port.
+Docker inspect reports the effective mapping after exec confirmation.
+It stays reserved across restart and is released on container removal.
+The isolated Alpine HTTP fixture passed byte-exact stream delivery
+and port reuse. The full Node/Redis Compose fixture is tracked separately.
 
 The retained live test command is:
 

@@ -56,7 +56,7 @@ pub(super) struct Options {
     lifetime_seconds: u64,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Identity {
     pub(super) pid: libc::pid_t,

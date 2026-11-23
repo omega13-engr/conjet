@@ -144,6 +144,21 @@ impl Connection {
         Ok(status)
     }
 
+    pub(super) fn dial(mut self, handle: &Value, port: u16) -> anyhow::Result<Stream> {
+        let response = self.exchange(
+            Kind::Dial,
+            Kind::Dial,
+            &json!({"handle":handle, "budget_ms":500, "port":port}),
+            Duration::from_secs(2),
+        )?;
+        ensure!(
+            response["connected"] == true,
+            "invalid native TCP acknowledgement"
+        );
+        self.stream.deadline(None);
+        Ok(self.stream)
+    }
+
     fn state(&mut self, kind: Kind, handle: &Handle) -> anyhow::Result<Value> {
         let state = self.exchange(
             kind,

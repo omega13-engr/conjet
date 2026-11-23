@@ -1048,16 +1048,23 @@ Acceptance Criteria:
 - Test bind conflict, refused destination, client disconnect, half-close and container restart/removal; bound connections and buffered bytes.
 - After removal, verify listener closure and immediate port reuse. Do not use wildcard binds or change production port mappings.
 
-Problem and Evidence: Compose readiness and host-facing application performance require a real native published-port path.
+Problem and Evidence: SPEED-036A provided the guest TCP transport.
+Docker still needed a scoped host listener, port metadata and restart
+ownership.
 
-Approach:
+Approach: Bind one requested or ephemeral IPv4 loopback port to the
+container record. Forward to the authenticated guest's current workload
+handle after exec confirmation. Revoke that target at exit and wait
+for host relay teardown before acknowledging removal.
 
-1. Implement the task-owned loopback TCP mapping and teardown fixture.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
+Evidence: DONE. Built release Jetstream on `74f73cd` plus the host mapping.
+`run-conjet-speedup.py --diagnostics published-port` verified the
+unmodified CLI, exact HTTP from pinned Alpine after half-close, bind
+conflict, wildcard rejection, guest refusal, disconnect, the same
+host port across restart, removal during an open stream, closure and
+immediate port reuse by a new workload. Docker inspect reported the
+effective loopback binding. The separate `docker-network` regression
+passed. Commands, revisions, hashes and raw evidence are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-036`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
@@ -1066,10 +1073,15 @@ Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [detailed result format](docker-benchmark-results.md),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local diff, format, guest and Jetstream tests, focused Jetstream
+Clippy, and isolated checks passed. The published path allows one
+127.0.0.1 TCP mapping with up to two concurrent streams. The
+Node/Redis Compose fixture remains in SPEED-039. Both boots verified
+unchanged production, no remaining guest workloads and owned session
+and socket removal. Independent PR review remains required.
 
-Next Action: Implement the task-owned loopback TCP mapping and teardown fixture.
+Next Action: Add the private ExternalSSD block backing required by the
+named-volume fixture in SPEED-037A.
 
 ### SPEED-037
 
@@ -1077,7 +1089,7 @@ Title: Mount a named volume and an allowlisted ExternalSSD bind
 
 Description: Implement the two storage modes required by the existing storage and Compose fixtures.
 
-Is blocked by task: SPEED-036.
+Is blocked by task: SPEED-036 (DONE).
 
 Acceptance Criteria:
 
