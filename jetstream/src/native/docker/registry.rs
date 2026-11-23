@@ -360,18 +360,14 @@ impl Store {
         peer: &mut client::Connection,
         image: &Image,
     ) -> anyhow::Result<()> {
+        if self.installed(image)? {
+            return Ok(());
+        }
         let digest = &image.metadata.config_digest;
         let hash = image.receipt["package_sha256"]
             .as_str()
             .context("missing staged OCI package digest")?;
         let expected = unhex::<32>(hash)?;
-        if let Some(installed) = self.installed.get(digest) {
-            ensure!(
-                installed == hash,
-                "guest config already refers to different staged content"
-            );
-            return Ok(());
-        }
         let package = oci_stage::read_bounded(
             &self.root,
             &self.path(&image.manifest)?.join("package.json"),
@@ -384,6 +380,17 @@ impl Store {
         image::install_with_peer(peer, digest, hash, &package)?;
         self.installed.insert(digest.to_owned(), hash.to_owned());
         Ok(())
+    }
+
+    pub(super) fn installed(&self, image: &Image) -> anyhow::Result<bool> {
+        let Some(hash) = self.installed.get(&image.metadata.config_digest) else {
+            return Ok(false);
+        };
+        ensure!(
+            image.receipt["package_sha256"] == *hash,
+            "guest config has different staged content"
+        );
+        Ok(true)
     }
 
     pub(super) fn remove(

@@ -6,7 +6,7 @@ use sha2::Sha256;
 
 use crate::wire::{Frame, Kind, MAX_PAYLOAD, RequestId, VERSION, WireError, write_error};
 
-pub const MAX_CONNECTIONS: usize = 4;
+pub const MAX_CONNECTIONS: usize = 10;
 pub const MAX_QUEUED_CONTROL: usize = 8;
 pub type Key = [u8; 32];
 pub type BootId = [u8; 16];

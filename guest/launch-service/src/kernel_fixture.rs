@@ -678,7 +678,7 @@ fn poll_controlled_child(
             let mut cancellation = 0u8;
             // Read the single supervisor cancellation byte before closing.
             // A hung-up control channel also cancels the owned workload.
-            unsafe {
+            let received = unsafe {
                 libc::recv(
                     0,
                     (&mut cancellation as *mut u8).cast(),
@@ -686,6 +686,21 @@ fn poll_controlled_child(
                     libc::MSG_DONTWAIT,
                 )
             };
+            if received == 1 && cancellation == crate::prepared::TERMINATE {
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        pidfd,
+                        libc::SIGTERM,
+                        std::ptr::null::<libc::siginfo_t>(),
+                        0,
+                    )
+                };
+                if result < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                    return Err(io::Error::last_os_error());
+                }
+                continue;
+            }
             return cgroup.kill();
         }
         if let Some(bridge) = bridge {

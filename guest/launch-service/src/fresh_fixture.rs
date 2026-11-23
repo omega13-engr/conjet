@@ -20,7 +20,7 @@ use crate::handshake::{hex, random};
 use crate::image_store::{self, ConnectionId};
 use crate::intent::{DIRECTORY, Intent};
 use crate::output::{Capture, capture};
-use crate::prepared::{CANCEL, ClaimError, RELEASE, SLOT_MEMORY_LIMIT, SLOT_TTL, Slot};
+use crate::prepared::{CANCEL, ClaimError, RELEASE, SLOT_MEMORY_LIMIT, SLOT_TTL, Slot, TERMINATE};
 use crate::socket::Stream;
 use crate::spec::{LaunchRequest, LaunchSpec, ValidatedLaunch};
 use crate::wire::{Frame, Kind, WireError, write_error};
@@ -52,6 +52,7 @@ struct Handle {
 struct Control {
     handle: Handle,
     budget_ms: u64,
+    signal: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -156,6 +157,7 @@ struct Record {
     slot_expired: bool,
     memory_limit_bytes: u64,
     cancelled: bool,
+    terminate_requested: bool,
     control: Option<UnixStream>,
     stdout: Capture,
     stderr: Capture,
@@ -224,6 +226,17 @@ impl Record {
         ) {
             self.change(Phase::Exiting);
         }
+    }
+
+    fn terminate(&mut self) -> io::Result<()> {
+        if self.cancelled || self.terminate_requested || self.phase.terminal() {
+            return Ok(());
+        }
+        if let Some(control) = &mut self.control {
+            control.write_all(&[TERMINATE])?;
+        }
+        self.terminate_requested = true;
+        Ok(())
     }
 }
 
@@ -687,6 +700,7 @@ impl FreshFixture {
             slot_expired: false,
             memory_limit_bytes: spec.limits.memory_bytes,
             cancelled: false,
+            terminate_requested: false,
             control: None,
             stdout: Capture::default(),
             stderr: Capture::default(),
@@ -865,6 +879,8 @@ impl FreshFixture {
             record.control = Some(owner);
             if record.cancelled {
                 let _ = record.control.as_mut().unwrap().write_all(&[CANCEL]);
+            } else if record.terminate_requested {
+                let _ = record.control.as_mut().unwrap().write_all(&[TERMINATE]);
             }
         });
         let mut removed = false;
@@ -1134,9 +1150,18 @@ impl FreshFixture {
                 let record = guard
                     .record_mut(&request.handle.workload_id)
                     .expect("checked record");
-                if frame.kind == Kind::Cancel {
-                    record.cancel();
-                    self.changed.notify_all();
+                match (frame.kind, request.signal) {
+                    (Kind::Cancel, None | Some(9)) => {
+                        record.cancel();
+                        self.changed.notify_all();
+                    }
+                    (Kind::Cancel, Some(15)) if self.oci => {
+                        record
+                            .terminate()
+                            .map_err(|_| ("control_failed", "native termination channel failed"))?;
+                    }
+                    (Kind::Status, None) => {}
+                    _ => return Err(("unsupported_option", "unsupported native control signal")),
                 }
                 Ok((Kind::State, record.state()))
             }

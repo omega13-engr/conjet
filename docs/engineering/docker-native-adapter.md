@@ -4,9 +4,9 @@ The isolated `conjet-speedup` launcher defaults to a private Docker adapter
 connected to one authenticated Jetstream OCI session. The launcher selects
 that socket through private Docker configuration. Installed Conjet, its
 Docker socket and its selected context stay under production ownership.
-The candidate subset is one pinned Linux ARM64 OCI image, no network and one
-active container. Image content must be admitted before the adapter advertises
-readiness.
+The candidate runs pinned Linux ARM64 OCI images without networking.
+The Rust Docker owner admits up to eight independent containers. The
+configured boot image must be admitted before the owner advertises readiness.
 
 ## Runtime architecture
 
@@ -95,11 +95,12 @@ The registry fixture covers immutable digest pulls. Tag resolution,
 manifest lists, remote registries and credentials remain outside the
 verified scope.
 
-The candidate is managed from source and general promotion requires broader
-compatibility. Live streaming, interactive input, Compose, networking, build,
-persistent exec, full event streaming, guest root credentials and prepared
-OCI are outside the tested route. Native seccomp rejected shell command
-substitution that attempted to create a pipe during the release canary.
+The Docker control fixture verifies retained-container restart, graceful
+SIGTERM stop, escalation after the requested grace, SIGKILL, and removal
+after verified cleanup. The candidate is managed from source and general
+promotion requires broader compatibility. Live streaming, interactive input,
+Compose, networking, build, persistent exec, full event streaming, guest
+root credentials and prepared OCI remain outside the verified subset.
 
 The retained live test command is:
 

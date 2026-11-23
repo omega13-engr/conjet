@@ -96,7 +96,12 @@ def collect_contract_checks(connection, directory):
     if inspect['Id'] != item['Id'] or inspect['State']['Status'] != 'created':
         raise RuntimeError('inspect did not reflect the created container')
     checks['inspect_created'] = inspect['State']
+    capacity = api(connection, 'GET', '/version', (200,)).get('ConjetContainerCapacity', 1)
+    for index in range(capacity - 1):
+        api(connection, 'POST', create + f'-extra-{index}', (201,), config)
     checks['capacity'] = api(connection, 'POST', create + '-other', (409,), config)
+    for index in range(capacity - 1):
+        api(connection, 'DELETE', path + f'-extra-{index}', (204,))
     api(connection, 'POST', path + '/start', (204,))
     checks['duplicate_start'] = api(connection, 'POST', path + '/start', (409,))
     checks['running_removal_without_force'] = api(connection, 'DELETE', path, (409,))

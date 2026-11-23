@@ -619,8 +619,21 @@ Approach:
 2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
 3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
 
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
+Evidence: DONE. Rebuilt the optimized VMM and ARM64 guest on `67889de`.
+Ran `python3 build-support/run-conjet-speedup.py --diagnostics concurrency`.
+The final run observed 1/2/4/8 simultaneous populated guest workloads,
+15 unique launch witnesses, byte-exact CLI output, complete cleanup and
+a ninth-create rejection. The earlier seven-workload result exposed the
+VMM bridge limit of eight streams including the diagnostic connection.
+The control fixture verified create without execution, name and start
+replay rejection, SIGTERM exit 42, timeout escalation and SIGKILL exit 137,
+restart with the same Docker ID and new native handle, and the prior wait
+subscription receiving its original exit status. The separate
+`--diagnostics concurrency-loss` run killed only the owned QA VM after
+confirmed exec. It verified unresolved wait status 125 and rejected both
+replay and new admission. The failed cleanup boundary remains in the
+launcher report, with independent exact host-artifact reclamation after
+the process stopped. Commands, hashes and raw outcomes are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-033`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
@@ -629,10 +642,16 @@ Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [detailed result format](docker-benchmark-results.md),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local code and runtime review passed. Admission stays serialized
+for monotonic request identities. Eight boot-verified leases bound the
+workers and reuse idle connections. The Docker owner's retained execution
+generations keep wait subscriptions bound through restart. Production
+snapshots matched. Abrupt VM loss left guest cleanup unobservable.
+Ordinary cancellation and removal checks verified exact cleanup.
+Independent PR review is separate.
 
-Next Action: Implement the bounded record table and per-record lifecycle transition tests.
+Next Action: Implement persistent native exec and live attach/log streaming
+in SPEED-034.
 
 ### SPEED-034
 

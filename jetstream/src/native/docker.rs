@@ -6,7 +6,7 @@ mod request;
 
 pub(super) use image::{install, InstallOptions};
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{self, Read};
 use std::net::SocketAddr;
@@ -14,7 +14,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{ensure, Context};
 use base64::Engine;
 use clap::Args;
-use conjet_launch_service::handshake::{hex, random};
+use conjet_launch_service::handshake::{hex, random, Key};
 use conjet_launch_service::wire::{Kind, WireError};
 use serde_json::{json, Value};
 
@@ -31,7 +31,10 @@ use super::{client, session};
 const SCRATCH: &str = "/Volumes/ExternalSSD/dev_workspace/tmp";
 const BACKEND: &str = "jetstream-native-oci";
 const PLATFORM: &str = "Conjet Native OCI";
-const CONNECTIONS: usize = 8;
+const CONNECTIONS: usize = 32;
+const CONTAINERS: usize = 8;
+const KILL: u8 = 9;
+const TERM: u8 = 15;
 const CHUNK: usize = 8192;
 const STREAM_LIMIT: usize = 65536;
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -158,7 +161,23 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         .zip(options.registry)
         .map(|(root, address)| registry::Store::open(root, address, &status))
         .transpose()?;
-    serve_endpoint(options.socket, metadata, peer, status, store)
+    let sequence = status["last_sequence"]
+        .as_u64()
+        .context("missing sequence")?;
+    let native = Native {
+        pool: vec![peer],
+        peer_directory: options.native_session,
+        identity,
+        key,
+        boot: status["boot_id"]
+            .as_str()
+            .context("missing boot ID")?
+            .to_owned(),
+        sequence,
+        pending: BTreeMap::new(),
+        broken: false,
+    };
+    serve_endpoint(options.socket, metadata, native, store)
 }
 
 fn admission_lock(directory: &Path) -> anyhow::Result<fs::File> {
@@ -172,20 +191,10 @@ fn admission_lock(directory: &Path) -> anyhow::Result<fs::File> {
 fn serve_endpoint(
     socket: PathBuf,
     metadata: request::Image,
-    peer: client::Connection,
-    status: Value,
+    native: Native,
     store: Option<registry::Store>,
 ) -> anyhow::Result<()> {
-    let boot = peer.boot.clone();
-    let sequence = status["last_sequence"]
-        .as_u64()
-        .context("missing sequence")?;
-    let native = Native {
-        peer: Some(peer),
-        sequence,
-        pending: None,
-    };
-
+    let boot = &native.boot;
     signal_handlers()?;
     let listener = UnixListener::bind(&socket)?;
     let _socket = OwnedSocket(socket);
@@ -239,9 +248,22 @@ fn serve_endpoint(
 }
 
 struct Native {
-    peer: Option<client::Connection>,
+    pool: Vec<client::Connection>,
+    peer_directory: PathBuf,
+    identity: session::Identity,
+    key: Key,
+    boot: String,
     sequence: u64,
-    pending: Option<Value>,
+    pending: BTreeMap<u64, Value>,
+    broken: bool,
+}
+
+struct Admission {
+    peer: client::Connection,
+    state: Value,
+    sequence: u64,
+    began: Instant,
+    admitted: Instant,
 }
 
 struct Terminal {
@@ -305,73 +327,86 @@ fn read_stream(
 }
 
 impl Native {
-    fn run(&mut self, spec: &Value, cancellation: &AtomicBool) -> anyhow::Result<Terminal> {
-        let mut peer = self
-            .peer
-            .take()
-            .context("authenticated native channel is closed")?;
-        if cancellation.load(Ordering::Acquire) {
-            self.peer = Some(peer);
-            return Ok(Terminal {
-                code: 137,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                delivery_error: None,
-                witness: json!({"cleanup":"not_admitted"}),
-            });
-        }
-
+    fn begin(&mut self, spec: &Value) -> anyhow::Result<Admission> {
+        ensure!(
+            !self.broken && self.pending.len() < CONTAINERS,
+            "native admission is exhausted or unresolved"
+        );
+        let began = Instant::now();
+        let mut peer = match self.pool.pop() {
+            Some(peer) => peer,
+            None => client::Connection::open(&self.peer_directory, &self.identity, &self.key)?,
+        };
+        ensure!(
+            peer.boot == self.boot && peer.oci,
+            "native guest generation changed"
+        );
         let operation = hex(&random::<16>()?);
         self.sequence = self
             .sequence
             .checked_add(1)
             .context("native sequence exhausted")?;
-        self.pending =
-            Some(json!({"boot_id":peer.boot,"sequence":self.sequence,"operation_id":operation}));
-        let result = execute(&mut peer, self.sequence, &operation, spec, cancellation);
-        match result {
-            Ok(terminal) => {
-                self.pending = None;
-                self.peer = Some(peer);
-                Ok(terminal)
+        let sequence = self.sequence;
+        let identity = json!({"boot_id":peer.boot,"sequence":sequence,"operation_id":operation});
+        self.pending.insert(sequence, identity);
+        let result = peer.exchange(
+            Kind::Launch, Kind::State,
+            &json!({"boot_id":peer.boot,"sequence":sequence,"operation_id":operation,"budget_ms":1000,"spec":spec}),
+            Duration::from_secs(2),
+        ).context("native launch outcome is unresolved");
+        let state = match result {
+            Ok(state)
+                if state["handle"]["boot_id"] == peer.boot
+                    && state["handle"]["workload_id"].is_string() =>
+            {
+                state
             }
-            Err(error) => Err(error.context(format!("native operation {operation} unresolved"))),
+            other => {
+                self.broken = true;
+                return other.and_then(|_| anyhow::bail!("unexpected native launch identity"));
+            }
+        };
+        self.pending.get_mut(&sequence).expect("pending launch")["handle"] =
+            state["handle"].clone();
+        Ok(Admission {
+            peer,
+            state,
+            sequence,
+            began,
+            admitted: Instant::now(),
+        })
+    }
+
+    fn finish(&mut self, admission: Admission, verified: bool) {
+        if verified {
+            self.pending.remove(&admission.sequence);
+            self.pool.push(admission.peer);
+        } else {
+            self.broken = true;
         }
     }
 }
 
-fn execute(
-    peer: &mut client::Connection,
-    sequence: u64,
-    operation: &str,
-    spec: &Value,
-    cancellation: &AtomicBool,
-) -> anyhow::Result<Terminal> {
-    let began = Instant::now();
-    let mut state = peer.exchange(
-        Kind::Launch, Kind::State,
-        &json!({"boot_id":peer.boot,"sequence":sequence,"operation_id":operation,"budget_ms":1000,"spec":spec}),
-        Duration::from_secs(2),
-    )?;
-    let admitted = Instant::now();
+fn wait_for_native(admission: &mut Admission, cancellation: &AtomicU8) -> anyhow::Result<Terminal> {
+    let mut state = std::mem::take(&mut admission.state);
+    let peer = &mut admission.peer;
+    let began = admission.began;
+    let admitted = admission.admitted;
     let handle = state["handle"].clone();
-    ensure!(
-        handle["boot_id"] == peer.boot && handle["workload_id"].as_str().is_some(),
-        "unexpected native launch identity"
-    );
-    let mut cancelled = false;
+    let mut sent_signal = 0;
     let mut waits = 0;
     while state["cleanup"] != "complete" {
         ensure!(
             state["cleanup"] != "failed" && admitted.elapsed() < Duration::from_secs(32),
             "native guest cleanup remains unresolved"
         );
-        let result = if cancellation.load(Ordering::Acquire) && !cancelled {
-            cancelled = true;
+        let requested = cancellation.load(Ordering::Acquire);
+        let result = if requested != 0 && requested != sent_signal {
+            sent_signal = requested;
             peer.exchange(
                 Kind::Cancel,
                 Kind::State,
-                &json!({"handle":handle,"budget_ms":1000}),
+                &json!({"handle":handle,"budget_ms":1000,"signal":requested}),
                 Duration::from_secs(2),
             )
         } else {
@@ -392,8 +427,8 @@ fn execute(
         );
     }
     let terminal = Instant::now();
-    let code = if cancelled && state["exit"].is_null() && state["helper_failed"] == false {
-        137
+    let code = if sent_signal != 0 && state["exit"].is_null() && state["helper_failed"] == false {
+        128 + i64::from(sent_signal)
     } else {
         ensure!(
             state["exec"] == "confirmed" && state["helper_failed"] == false,
@@ -477,7 +512,7 @@ struct Container {
     config: Value,
     spec: Value,
     auto_remove: bool,
-    cancel: AtomicBool,
+    cancel: AtomicU8,
 }
 
 #[derive(Default)]
@@ -486,11 +521,27 @@ struct Lifecycle {
     terminal: Option<Arc<Terminal>>,
     error: Option<String>,
     removed: bool,
+    generation: u64,
+    previous: VecDeque<(u64, Arc<Terminal>)>,
+}
+
+impl Lifecycle {
+    fn terminal_for(&self, generation: u64) -> Option<&Arc<Terminal>> {
+        if self.generation == generation {
+            self.terminal.as_ref()
+        } else {
+            self.previous
+                .iter()
+                .find(|(id, _)| *id == generation)
+                .map(|(_, terminal)| terminal)
+        }
+    }
 }
 
 struct Item {
     container: Container,
     state: Mutex<Lifecycle>,
+    control: Mutex<()>,
     changed: Condvar,
 }
 
@@ -520,10 +571,10 @@ impl Item {
 
 #[derive(Default)]
 struct Ledger {
-    active: Option<Arc<Item>>,
+    active: Vec<Arc<Item>>,
     history: VecDeque<Arc<Item>>,
     events: VecDeque<Value>,
-    worker: Option<JoinHandle<()>>,
+    workers: Vec<JoinHandle<()>>,
     poisoned: bool,
     closing: bool,
 }
@@ -561,17 +612,23 @@ impl Owner {
         call: impl FnOnce(&mut client::Connection) -> anyhow::Result<T>,
     ) -> Result<T, Rejected> {
         let mut native = self.native.lock().unwrap();
+        if native.broken {
+            return Err(Rejected::internal(
+                "authenticated native channel is unresolved",
+            ));
+        }
         let peer = native
-            .peer
-            .as_mut()
-            .ok_or_else(|| Rejected::internal("authenticated native channel is closed"))?;
+            .pool
+            .last_mut()
+            .ok_or_else(|| Rejected::internal("native channel is occupied"))?;
         let result = call(peer);
         if let Err(error) = &result {
             if error
                 .downcast_ref::<WireError>()
                 .is_some_and(|err| !matches!(err, WireError::PeerError(_)))
             {
-                native.peer = None;
+                native.broken = true;
+                native.pool.clear();
             }
         }
         result.map_err(|error| Rejected::internal(format!("{error:#}")))
@@ -590,7 +647,12 @@ impl Owner {
             .map_err(|error| Rejected::bad(error.to_string()))?
             .ok_or_else(|| Rejected(404, "image is not staged".into()))?;
         let spec = image.metadata.process(config)?;
-        self.with_guest(|peer| store.ensure_guest(peer, &image))?;
+        if !store
+            .installed(&image)
+            .map_err(|error| Rejected::internal(error.to_string()))?
+        {
+            self.with_guest(|peer| store.ensure_guest(peer, &image))?;
+        }
         Ok(spec)
     }
 
@@ -616,7 +678,7 @@ impl Owner {
 
     fn pull_image(&self, reference: &str) -> Result<Value, Rejected> {
         let ledger = self.ledger.lock().unwrap();
-        if ledger.active.is_some() || ledger.poisoned || ledger.closing {
+        if !ledger.active.is_empty() || ledger.poisoned || ledger.closing {
             return Err(Rejected(
                 409,
                 "native guest must be idle to pull an image".into(),
@@ -638,7 +700,7 @@ impl Owner {
 
     fn remove_image(&self, reference: &str) -> Result<Value, Rejected> {
         let ledger = self.ledger.lock().unwrap();
-        if ledger.active.is_some()
+        if !ledger.active.is_empty()
             || ledger.poisoned
             || ledger.closing
             || self.boot_reference(reference)
@@ -684,7 +746,7 @@ impl Owner {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
-        if ledger.events.len() == 16 {
+        if ledger.events.len() == 64 {
             ledger.events.pop_front();
         }
         ledger
@@ -699,11 +761,19 @@ impl Owner {
             return Err(Rejected::bad("invalid container name"));
         }
         let mut ledger = self.ledger.lock().unwrap();
-        if ledger.active.is_some() || ledger.poisoned || ledger.closing {
+        if ledger.active.len() >= CONTAINERS || ledger.poisoned || ledger.closing {
             return Err(Rejected(
                 409,
                 "native OCI capacity is occupied or unresolved".into(),
             ));
+        }
+        if let Some(name) = name {
+            if ledger.active.iter().any(|item| item.container.name == name) {
+                return Err(Rejected(
+                    409,
+                    "native container name is already owned".into(),
+                ));
+            }
         }
         let spec = self.process(&config)?;
         let id = hex(&random::<32>()
@@ -717,12 +787,13 @@ impl Owner {
                 config,
                 spec,
                 auto_remove,
-                cancel: AtomicBool::new(false),
+                cancel: AtomicU8::new(0),
             },
             state: Mutex::new(Lifecycle::default()),
+            control: Mutex::new(()),
             changed: Condvar::new(),
         });
-        ledger.active = Some(item.clone());
+        ledger.active.push(item.clone());
         self.event(&mut ledger, "create", &item, None);
         Ok(item)
     }
@@ -742,13 +813,16 @@ impl Owner {
     }
 
     fn start(self: &Arc<Self>, item: &Arc<Item>) -> Result<(), Rejected> {
+        let _control = item.control.lock().unwrap();
+        self.submit(item, false)
+    }
+
+    fn submit(self: &Arc<Self>, item: &Arc<Item>, restart: bool) -> Result<(), Rejected> {
         let mut ledger = self.ledger.lock().unwrap();
         let mut state = item.state();
-        if !ledger
-            .active
-            .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(active, item))
-            || state.started
+        if !ledger.active.iter().any(|active| Arc::ptr_eq(active, item))
+            || (state.started && (!restart || state.terminal.is_none()))
+            || ledger.poisoned
             || ledger.closing
         {
             return Err(Rejected(
@@ -756,28 +830,64 @@ impl Owner {
                 "container has already been submitted or removed".into(),
             ));
         }
-        // The previous worker released the ledger before this record could be
-        // created. Joining it here bounds the number of launch workers.
-        if let Some(worker) = ledger.worker.take() {
-            let _ = worker.join();
+        for index in (0..ledger.workers.len()).rev() {
+            if ledger.workers[index].is_finished() {
+                let _ = ledger.workers.swap_remove(index).join();
+            }
         }
+        if ledger.workers.len() >= CONTAINERS {
+            return Err(Rejected(409, "native launch workers are occupied".into()));
+        }
+        let generation = if restart && state.started {
+            state
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| Rejected::internal("container generation exhausted"))?
+        } else {
+            state.generation
+        };
+        item.container.cancel.store(0, Ordering::Release);
         let owner = self.clone();
         let work = item.clone();
         let worker = thread::Builder::new()
             .spawn(move || owner.run(work))
             .map_err(|_| Rejected::internal("native worker allocation failed"))?;
-        ledger.worker = Some(worker);
+        ledger.workers.push(worker);
+        if let Some(terminal) = state.terminal.take() {
+            let previous = state.generation;
+            if state.previous.len() == 4 {
+                state.previous.pop_front();
+            }
+            state.previous.push_back((previous, terminal));
+        }
+        state.generation = generation;
         state.started = true;
+        if restart {
+            self.event(&mut ledger, "restart", item, None);
+        }
         self.event(&mut ledger, "start", item, None);
+        item.changed.notify_all();
         Ok(())
     }
 
     fn run(&self, item: Arc<Item>) {
-        let terminal = self
-            .native
-            .lock()
-            .unwrap()
-            .run(&item.container.spec, &item.container.cancel);
+        let signal = item.container.cancel.load(Ordering::Acquire);
+        let terminal = if signal != 0 {
+            Ok(Terminal {
+                code: 128 + i64::from(signal),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                delivery_error: None,
+                witness: json!({"cleanup":"not_admitted"}),
+            })
+        } else {
+            let admitted = self.native.lock().unwrap().begin(&item.container.spec);
+            admitted.and_then(|mut admitted| {
+                let result = wait_for_native(&mut admitted, &item.container.cancel);
+                self.native.lock().unwrap().finish(admitted, result.is_ok());
+                result
+            })
+        };
         let mut ledger = self.ledger.lock().unwrap();
         let mut state = item.state();
         match terminal {
@@ -798,8 +908,10 @@ impl Owner {
 
     fn retire(&self, ledger: &mut Ledger, item: &Arc<Item>, state: &mut Lifecycle) {
         state.removed = true;
-        ledger.active = None;
-        if ledger.history.len() == 4 {
+        ledger
+            .active
+            .retain(|candidate| !Arc::ptr_eq(candidate, item));
+        if ledger.history.len() == 16 {
             ledger.history.pop_back();
         }
         ledger.history.push_front(item.clone());
@@ -807,7 +919,60 @@ impl Owner {
         item.changed.notify_all();
     }
 
+    fn stop(&self, item: &Arc<Item>, signal: u8, grace: u64) -> Result<bool, Rejected> {
+        let _control = item.control.lock().unwrap();
+        self.stop_generation(item, signal, grace)
+    }
+
+    fn stop_generation(&self, item: &Item, signal: u8, grace: u64) -> Result<bool, Rejected> {
+        {
+            let state = item.state();
+            if state.removed {
+                return Err(Rejected(404, "container was removed".into()));
+            }
+            if let Some(error) = &state.error {
+                return Err(Rejected::internal(error));
+            }
+            if !state.started || state.terminal.is_some() {
+                return Ok(false);
+            }
+        }
+        let finished = |state: &Lifecycle| state.terminal.is_some() || state.error.is_some();
+        let termination = if signal == TERM && grace > 0 {
+            let _ = item.container.cancel.compare_exchange(
+                0,
+                TERM,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            item.wait_for(finished, grace).ok()
+        } else {
+            None
+        };
+        let state = match termination {
+            Some(state) => state,
+            None => {
+                item.container.cancel.store(KILL, Ordering::Release);
+                item.wait_for(finished, 5)?
+            }
+        };
+        if let Some(error) = &state.error {
+            return Err(Rejected::internal(error));
+        }
+        Ok(true)
+    }
+
+    fn restart(self: &Arc<Self>, item: &Arc<Item>, grace: u64) -> Result<(), Rejected> {
+        let _control = item.control.lock().unwrap();
+        if item.container.auto_remove {
+            return Err(Rejected::bad("restart requires a retained container"));
+        }
+        self.stop_generation(item, TERM, grace)?;
+        self.submit(item, true)
+    }
+
     fn remove(&self, item: &Arc<Item>, force: bool) -> Result<(), Rejected> {
+        let _control = item.control.lock().unwrap();
         let mut cancelled = false;
         loop {
             let mut ledger = self.ledger.lock().unwrap();
@@ -828,7 +993,7 @@ impl Owner {
             if !force {
                 return Err(Rejected(409, "container is running".into()));
             }
-            item.container.cancel.store(true, Ordering::Release);
+            item.container.cancel.store(KILL, Ordering::Release);
             cancelled = true;
             drop(state);
             drop(ledger);
@@ -843,8 +1008,8 @@ impl Owner {
         let worker = {
             let mut ledger = self.ledger.lock().unwrap();
             ledger.closing = true;
-            if let Some(item) = &ledger.active {
-                item.container.cancel.store(true, Ordering::Release);
+            for item in &ledger.active {
+                item.container.cancel.store(KILL, Ordering::Release);
                 // Unstarted admissions own no guest resources.
                 let mut state = item.state();
                 if !state.started {
@@ -852,9 +1017,9 @@ impl Owner {
                 }
                 item.changed.notify_all();
             }
-            ledger.worker.take()
+            std::mem::take(&mut ledger.workers)
         };
-        if let Some(worker) = worker {
+        for worker in worker {
             let _ = worker.join();
         }
     }

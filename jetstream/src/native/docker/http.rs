@@ -198,6 +198,7 @@ fn header(writer: &mut UnixStream, status: u16, lines: &str) -> io::Result<()> {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
+        304 => "Not Modified",
         400 => "Bad Request",
         404 => "Not Found",
         408 => "Request Timeout",
@@ -259,8 +260,18 @@ impl Reply {
 
 enum Action {
     Reply(Reply),
-    Wait(Arc<Item>, String),
-    Attach(Arc<Item>, [bool; 2]),
+    Wait(Arc<Item>, String, u64),
+    Attach(Arc<Item>, [bool; 2], u64),
+}
+
+fn stop_grace(query: &BTreeMap<String, String>) -> Result<u64> {
+    query.get("t").map_or(Ok(10), |value| {
+        value
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds <= 30)
+            .ok_or_else(|| Rejected::bad("stop timeout must be between 0 and 30 seconds"))
+    })
 }
 
 fn disabled(value: Option<&String>) -> bool {
@@ -298,6 +309,7 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             json!({
                 "Version":"0.1.0","ApiVersion":"1.44","MinAPIVersion":"1.44",
                 "Os":"linux","Arch":"arm64","Platform":{"Name":PLATFORM},
+                "ConjetContainerCapacity":super::CONTAINERS,
             }),
         ),
         ("POST", "/containers/create") => {
@@ -390,6 +402,8 @@ fn container(
     let allowed_query: &[&str] = match (method, action) {
         ("POST", "attach") => &["stdin", "stdout", "stderr", "logs", "stream"],
         ("POST", "wait") => &["condition"],
+        ("POST", "stop" | "restart") => &["t", "signal"],
+        ("POST", "kill") => &["signal"],
         ("DELETE", "") => &["force", "v", "link"],
         _ => &[],
     };
@@ -406,12 +420,44 @@ fn container(
             reply.attributed = true;
             reply
         }
+        ("POST", "stop" | "restart") => {
+            if query
+                .get("signal")
+                .is_some_and(|value| !matches!(value.as_str(), "SIGTERM" | "TERM" | "15"))
+            {
+                return Err(Rejected::bad("stop and restart support SIGTERM"));
+            }
+            let grace = stop_grace(query)?;
+            if action == "restart" {
+                owner.restart(&item, grace)?;
+                Reply::empty(204)
+            } else {
+                Reply::empty(if owner.stop(&item, super::TERM, grace)? {
+                    204
+                } else {
+                    304
+                })
+            }
+        }
+        ("POST", "kill") => {
+            if query
+                .get("signal")
+                .is_some_and(|value| !matches!(value.as_str(), "SIGKILL" | "KILL" | "9"))
+            {
+                return Err(Rejected::bad("kill supports SIGKILL"));
+            }
+            if !owner.stop(&item, super::KILL, 0)? {
+                return Err(Rejected(409, "container is not running".into()));
+            }
+            Reply::empty(204)
+        }
         ("POST", "wait") => {
             let condition = query.get("condition").map_or("not-running", String::as_str);
             if !matches!(condition, "next-exit" | "not-running" | "removed") {
                 return Err(Rejected::bad("unsupported wait condition"));
             }
-            return Ok(Action::Wait(item, condition.to_owned()));
+            let generation = item.state().generation;
+            return Ok(Action::Wait(item, condition.to_owned(), generation));
         }
         ("POST", "attach") => {
             if !disabled(query.get("stdin")) || !disabled(query.get("logs")) {
@@ -419,7 +465,8 @@ fn container(
             }
             let streams = ["stdout", "stderr"]
                 .map(|name| query.get(name).is_none() || !disabled(query.get(name)));
-            return Ok(Action::Attach(item, streams));
+            let generation = item.state().generation;
+            return Ok(Action::Attach(item, streams, generation));
         }
         ("GET", "json") => {
             let state = item.state();
@@ -446,6 +493,7 @@ fn container(
                 json!({
                     "Id":container.id,"Name":format!("/{}",container.name),"Image":container.spec["image_digest"],
                     "Driver":BACKEND,"Platform":"linux","Path":specs[0],"Args":specs[1..],
+                    "RestartCount":state.generation,
                     "State":{"Status":status,"Running":status=="running","ExitCode":code,
                              "Error":state.error.as_deref().unwrap_or("")},
                     "Config":config,"HostConfig":container.config["HostConfig"],"NetworkSettings":{"Networks":{}},
@@ -474,7 +522,7 @@ fn container(
     Ok(Action::Reply(reply))
 }
 
-fn wait(item: &Item, condition: &str, writer: &mut UnixStream) -> io::Result<()> {
+fn wait(item: &Item, condition: &str, generation: u64, writer: &mut UnixStream) -> io::Result<()> {
     header(
         writer,
         200,
@@ -487,20 +535,32 @@ fn wait(item: &Item, condition: &str, writer: &mut UnixStream) -> io::Result<()>
                     || match condition {
                         "removed" => state.removed,
                         "not-running" if !state.started => true,
-                        _ => state.terminal.is_some(),
+                        _ => state.generation != generation || state.terminal.is_some(),
                     }
             },
             35,
         )
         .and_then(|state| {
-            if let Some(error) = &state.error {
+            let selected = if condition == "removed" {
+                state.generation
+            } else {
+                generation
+            };
+            if let Some(error) = state
+                .error
+                .as_ref()
+                .filter(|_| selected == state.generation)
+            {
                 return Err(Rejected::internal(error));
             }
-            match state.terminal.as_ref() {
+            match state.terminal_for(selected) {
                 Some(terminal) if terminal.delivery_error.is_some() => Err(Rejected::internal(
                     terminal.delivery_error.as_ref().unwrap(),
                 )),
                 Some(terminal) => Ok(terminal.code),
+                None if selected != state.generation => {
+                    Err(Rejected::internal("container execution history expired"))
+                }
                 None => Ok(0),
             }
         });
@@ -511,15 +571,25 @@ fn wait(item: &Item, condition: &str, writer: &mut UnixStream) -> io::Result<()>
     writer.write_all(reply.to_string().as_bytes())
 }
 
-fn attach(item: &Item, enabled: [bool; 2], writer: &mut UnixStream) -> io::Result<()> {
+fn attach(
+    item: &Item,
+    enabled: [bool; 2],
+    generation: u64,
+    writer: &mut UnixStream,
+) -> io::Result<()> {
     header(writer, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
     let terminal = item
         .wait_for(
-            |state| state.terminal.is_some() || state.removed || state.error.is_some(),
+            |state| {
+                state.generation != generation
+                    || state.terminal.is_some()
+                    || state.removed
+                    || state.error.is_some()
+            },
             35,
         )
         .ok()
-        .and_then(|state| state.terminal.clone());
+        .and_then(|state| state.terminal_for(generation).cloned());
     let Some(terminal) = terminal else {
         return Ok(());
     };
@@ -584,12 +654,12 @@ pub(super) fn serve(mut stream: UnixStream, owner: &Arc<Owner>) -> io::Result<()
             Ok(Action::Reply(reply)) => reply.send(&mut stream, request.method == "HEAD", close)?,
             Err(Rejected(status, message)) => Reply::json(status, json!({"message":message}))
                 .send(&mut stream, request.method == "HEAD", close)?,
-            Ok(Action::Wait(item, condition)) => {
-                wait(&item, &condition, &mut stream)?;
+            Ok(Action::Wait(item, condition, generation)) => {
+                wait(&item, &condition, generation, &mut stream)?;
                 break;
             }
-            Ok(Action::Attach(item, streams)) => {
-                attach(&item, streams, &mut stream)?;
+            Ok(Action::Attach(item, streams, generation)) => {
+                attach(&item, streams, generation, &mut stream)?;
                 break;
             }
         }

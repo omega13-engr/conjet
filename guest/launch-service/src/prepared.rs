@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 pub(crate) const SLOT_TTL: Duration = Duration::from_secs(5);
 pub(crate) const SLOT_MEMORY_LIMIT: u64 = 32 * 1024 * 1024;
 pub(crate) const CANCEL: u8 = 1;
+pub(crate) const TERMINATE: u8 = 3;
 pub(crate) const RELEASE: u8 = 2;
 
 #[derive(PartialEq, Eq)]
