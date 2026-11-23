@@ -757,16 +757,26 @@ Acceptance Criteria:
 - Verify container survival after exec failure, multiple bounded exec requests, and cleanup of exec children on container removal.
 - Implement only the noninteractive stdin/TTY behavior declared in the fixture contract; reject unsupported options rather than returning synthetic success.
 
-Problem and Evidence: Persistent exec and live output are absent from the native Docker subset and are part of everyday Docker use.
+Problem and Evidence: SPEED-034B delivered live attach and logs. Exec
+needed a process inside the existing workload namespaces and cgroup.
+Removing a workload during exec exposed a zombie in the exec process group.
 
-Approach:
+Approach: Tie Docker exec records to a single container run generation.
+The guest uses the live workload's pidfd to join its namespaces and
+cgroup. The wrapper applies the inherited execution context and reaps
+children in its own process group on forced teardown.
 
-1. Add a long-lived native fixture and exec protocol tests before wiring Docker exec endpoints.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
+Evidence: DONE for the declared noninteractive exec fixture. Built release
+guest and Jetstream from the working tree on `c686267` and ran
+`python3 build-support/run-conjet-speedup.py --diagnostics exec`.
+The unmodified CLI verified the existing `sh -c` stream and exit-23
+command, inherited env and cwd, UID 65532, reads from the live overlay,
+and actual exit 127 for a missing binary. A duplicate exec start caused
+one side effect. The fixture verified timeout, explicit overflow at an
+8 KiB combined bound, container survival, and verified removal during
+exec. Live attach, logs, backpressure and disconnect evidence is in
+SPEED-034B. Raw results, failed pilots, launcher arguments, and hashes
+are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-034`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
@@ -775,10 +785,15 @@ Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [detailed result format](docker-benchmark-results.md),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local diff and isolated checks passed. One guest exec slot,
+bounded host records, and run-identity checks prevent exec replay or
+retargeting. The final exec pilot recorded unchanged production, removed
+the owned session and socket, and reported no cleanup errors. The
+larger control matrix is measured separately in SPEED-042. Independent
+PR review remains required.
 
-Next Action: Add a long-lived native fixture and exec protocol tests before wiring Docker exec endpoints.
+Next Action: Connect two independently owned OCI workloads to a private
+bridge in SPEED-035.
 
 ### SPEED-035
 

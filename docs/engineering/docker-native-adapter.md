@@ -101,9 +101,15 @@ after verified cleanup. The candidate is managed from source and general
 promotion requires broader compatibility. The Rust owner streams bounded
 stdout and stderr through noninteractive attach and `docker logs`, including
 follow mode, after the guest captures each chunk. Log filters and timestamps
-are outside the verified subset. Interactive input, Compose, networking,
-build, persistent exec, full event streaming, guest
-root credentials and prepared OCI remain outside the verified subset.
+are outside the verified subset. Noninteractive `docker exec` uses the
+running workload's namespaces, cgroup, working directory, environment and
+UID/GID 65532. It accepts absolute paths or resolves bare executable names
+using the workload's PATH. The candidate admits one active guest exec
+with a two-second deadline and 8 KiB combined output. Exec reports the
+actual process status and surfaces output overflow explicitly. Interactive
+input, TTY, exec context overrides, Compose, networking, build, full event
+streaming, guest root credentials and prepared OCI remain outside the
+verified subset.
 
 The retained live test command is:
 

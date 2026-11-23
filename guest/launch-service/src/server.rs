@@ -150,6 +150,7 @@ impl Server {
                         | Kind::Memory
                         | Kind::Inspect
                         | Kind::Image
+                        | Kind::Exec
                 )
             {
                 fresh.dispatch(

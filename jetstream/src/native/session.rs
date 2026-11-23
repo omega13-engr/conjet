@@ -383,13 +383,13 @@ fn build_archive(
         .open(path)?;
     let mut inode = 0u32;
     let mut append_entry = |name: &str,
-                      mode: u32,
-                      data: &[u8],
-                      major: u32,
-                      minor: u32,
-                      uid: u32,
-                      gid: u32,
-                      link: Option<(u32, u32)>|
+                            mode: u32,
+                            data: &[u8],
+                            major: u32,
+                            minor: u32,
+                            uid: u32,
+                            gid: u32,
+                            link: Option<(u32, u32)>|
      -> std::io::Result<()> {
         inode += 1;
         let (ino, nlink) = link.unwrap_or((inode, 1));
@@ -433,7 +433,10 @@ fn build_archive(
         let groups = root.link_groups();
         if !groups.is_empty() {
             let groups = serde_json::to_vec(&groups)?;
-            ensure!(groups.len() <= 5 * 1024 * 1024, "OCI hard-link manifest exceeds its bound");
+            ensure!(
+                groups.len() <= 5 * 1024 * 1024,
+                "OCI hard-link manifest exceeds its bound"
+            );
             append(
                 "etc/conjet/native-oci-hardlinks.json",
                 0o100400,
@@ -444,7 +447,9 @@ fn build_archive(
                 0,
             )?;
         }
-        super::oci::append(root, |name, mode, uid, gid, data, link| append_entry(name, mode, data, 0, 0, uid, gid, link))?;
+        super::oci::append(root, |name, mode, uid, gid, data, link| {
+            append_entry(name, mode, data, 0, 0, uid, gid, link)
+        })?;
         append_entry("TRAILER!!!", 0, &[], 0, 0, 0, 0, None)?;
         return Ok(());
     } else {

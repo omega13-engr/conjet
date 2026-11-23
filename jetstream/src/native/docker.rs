@@ -1,4 +1,5 @@
 //! Bounded Docker compatibility endpoint for the isolated OCI candidate.
+mod exec;
 mod http;
 mod image;
 mod registry;
@@ -534,6 +535,7 @@ struct Lifecycle {
     generation: u64,
     previous: VecDeque<(u64, Arc<Terminal>)>,
     live: [Vec<u8>; 2],
+    native_handle: Option<Value>,
 }
 
 impl Lifecycle {
@@ -615,6 +617,7 @@ struct Ledger {
     history: VecDeque<Arc<Item>>,
     events: VecDeque<Value>,
     workers: Vec<JoinHandle<()>>,
+    execs: VecDeque<Arc<exec::Entry>>,
     poisoned: bool,
     closing: bool,
 }
@@ -624,6 +627,7 @@ struct Owner {
     native: Mutex<Native>,
     ledger: Mutex<Ledger>,
     store: Option<Mutex<registry::Store>>,
+    exec_peer: Mutex<Option<client::Connection>>,
 }
 
 impl Owner {
@@ -633,6 +637,7 @@ impl Owner {
             native: Mutex::new(native),
             ledger: Mutex::new(Ledger::default()),
             store: store.map(Mutex::new),
+            exec_peer: Mutex::new(None),
         }
     }
 
@@ -902,6 +907,7 @@ impl Owner {
         }
         state.generation = generation;
         state.live = Default::default();
+        state.native_handle = None;
         state.started = true;
         if restart {
             self.event(&mut ledger, "restart", item, None);
@@ -924,6 +930,7 @@ impl Owner {
         } else {
             let admitted = self.native.lock().unwrap().begin(&item.container.spec);
             admitted.and_then(|mut admitted| {
+                item.state().native_handle = Some(admitted.state["handle"].clone());
                 let result = wait_for_native(&mut admitted, &item, generation);
                 self.native.lock().unwrap().finish(admitted, result.is_ok());
                 result
@@ -931,6 +938,7 @@ impl Owner {
         };
         let mut ledger = self.ledger.lock().unwrap();
         let mut state = item.state();
+        state.native_handle = None;
         match terminal {
             Ok(terminal) => {
                 self.event(&mut ledger, "die", &item, Some(&terminal));

@@ -470,7 +470,12 @@ fn clone_and_reap(
         match confirm_exec(pid, prepared) {
             Ok(ExecObservation::Confirmed) => {
                 if controlled {
-                    if let Err(error) = notify_control(b'E', &[]) {
+                    let event = if process.is_some() {
+                        crate::exec_fixture::send_pidfd(0, pidfd.as_raw_fd())
+                    } else {
+                        notify_control(b'E', &[])
+                    };
+                    if let Err(error) = event {
                         unsafe { libc::kill(pid, libc::SIGKILL) };
                         reap(pid)?;
                         return Err(error);
@@ -786,7 +791,7 @@ fn resume_trace(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     security::checked(result as libc::c_int)
 }
 
-fn reap(pid: libc::pid_t) -> io::Result<i32> {
+pub(crate) fn reap(pid: libc::pid_t) -> io::Result<i32> {
     loop {
         let mut status = 0;
         if unsafe { libc::waitpid(pid, &mut status, 0) } == pid {

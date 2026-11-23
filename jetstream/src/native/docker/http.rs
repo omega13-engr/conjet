@@ -263,6 +263,7 @@ enum Action {
     Wait(Arc<Item>, String, u64),
     Attach(Arc<Item>, [bool; 2], u64),
     Logs(Arc<Item>, [bool; 2], u64, bool),
+    Exec(Arc<super::exec::Entry>, Value),
 }
 
 fn stop_grace(query: &BTreeMap<String, String>) -> Result<u64> {
@@ -381,7 +382,24 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 owner.remove_image(&decode(&path["/images/".len()..])?)?,
             )
         }
-        _ => return container(owner, method, path, query),
+        (_, _) if path.starts_with("/exec/") => {
+            let (id, operation) = path["/exec/".len()..]
+                .split_once('/')
+                .ok_or_else(|| Rejected::bad("invalid native exec route"))?;
+            if !super::request::name(id) || !query.is_empty() {
+                return Err(Rejected::bad("invalid native exec identifier or query"));
+            }
+            let entry = owner.lookup_exec(id)?;
+            match (method, operation) {
+                ("POST", "start") => {
+                    let handle = entry.reserve(&request.body)?;
+                    return Ok(Action::Exec(entry, handle));
+                }
+                ("GET", "json") => Reply::json(200, entry.inspect()),
+                _ => return Err(Rejected(501, "unsupported native exec operation".into())),
+            }
+        }
+        _ => return container(owner, method, path, query, &request.body),
     };
     Ok(Action::Reply(reply))
 }
@@ -391,6 +409,7 @@ fn container(
     method: &str,
     path: &str,
     query: &BTreeMap<String, String>,
+    body: &[u8],
 ) -> Result<Action> {
     let route = path
         .strip_prefix("/containers/")
@@ -425,6 +444,11 @@ fn container(
         return Err(Rejected::bad("unsupported Docker container query"));
     }
     let mut reply = match (method, action) {
+        ("POST", "exec") => {
+            let data = serde_json::from_slice(body)
+                .map_err(|_| Rejected::bad("invalid Docker exec body"))?;
+            Reply::json(201, owner.create_exec(item, data)?)
+        }
         ("POST", "start") => {
             owner.start(&item)?;
             let mut reply = Reply::empty(204);
@@ -743,6 +767,19 @@ pub(super) fn serve(mut stream: UnixStream, owner: &Arc<Owner>) -> io::Result<()
             Ok(Action::Logs(item, streams, generation, follow)) => {
                 header(&mut stream, 200, "Connection: close\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
                 send_output(&item, streams, generation, follow, &mut stream)?;
+                break;
+            }
+            Ok(Action::Exec(entry, handle)) => {
+                let result = entry.run(owner, handle);
+                header(&mut stream, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
+                for (index, data) in result.output.into_iter().enumerate() {
+                    if !data.is_empty() {
+                        send_frame(&mut stream, index as u8 + 1, &data)?;
+                    }
+                }
+                if let Some(error) = result.error {
+                    send_frame(&mut stream, 3, error.as_bytes())?;
+                }
                 break;
             }
         }

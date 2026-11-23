@@ -1,0 +1,444 @@
+use std::ffi::CString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+
+use crate::handshake::{hex, unhex};
+use crate::output::{Capture, drain};
+use crate::security::{self, checked};
+use crate::spec::{LaunchSpec, NATIVE_LIMITS, WORKLOAD_GID, WORKLOAD_UID};
+
+const TARGET_PIDFD: libc::c_int = 3;
+const TARGET_ROOT: libc::c_int = 4;
+const RESULT_PIPE: libc::c_int = 5;
+const INLINE_OUTPUT_CAP: usize = 8192;
+
+pub(crate) fn send_pidfd(socket: i32, pidfd: i32) -> io::Result<()> {
+    let mut event = b'E';
+    let mut vector = libc::iovec {
+        iov_base: (&mut event as *mut u8).cast(),
+        iov_len: 1,
+    };
+    let mut control = [0usize; 8];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut vector;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<i32>() as u32) } as _;
+    // Transfer the kernel reference itself, so the supervisor never has
+    // to look up a reusable numeric PID to identify the target.
+    unsafe {
+        let header = libc::CMSG_FIRSTHDR(&msg);
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(size_of::<i32>() as u32) as _;
+        libc::CMSG_DATA(header).cast::<i32>().write_unaligned(pidfd);
+        if libc::sendmsg(socket, &msg, libc::MSG_NOSIGNAL) != 1 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn receive_event(socket: i32) -> io::Result<Option<(u8, Option<OwnedFd>)>> {
+    let mut event = 0u8;
+    let mut vector = libc::iovec {
+        iov_base: (&mut event as *mut u8).cast(),
+        iov_len: 1,
+    };
+    let mut control = [0usize; 8];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut vector;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = size_of_val(&control) as _;
+    let result = unsafe { libc::recvmsg(socket, &mut msg, libc::MSG_CMSG_CLOEXEC) };
+    match result {
+        0 => return Ok(None),
+        1 => {}
+        _ => return Err(io::Error::last_os_error()),
+    }
+    let mut received = Vec::new();
+    unsafe {
+        let mut header = libc::CMSG_FIRSTHDR(&msg);
+        while !header.is_null() {
+            let base = libc::CMSG_LEN(0) as usize;
+            let len = (*header).cmsg_len as usize;
+            if (*header).cmsg_level != libc::SOL_SOCKET
+                || (*header).cmsg_type != libc::SCM_RIGHTS
+                || len < base
+                || len > msg.msg_controllen as usize
+            {
+                return Err(io::Error::other("invalid helper event descriptor"));
+            }
+            // The kernel supplied this ancillary data and a CLOEXEC
+            // descriptor for each complete element that fitted the buffer.
+            let data = libc::CMSG_DATA(header).cast::<i32>();
+            for offset in 0..(len - base) / size_of::<i32>() {
+                received.push(OwnedFd::from_raw_fd(data.add(offset).read_unaligned()));
+            }
+            header = libc::CMSG_NXTHDR(&msg, header);
+        }
+    }
+    if msg.msg_flags & libc::MSG_CTRUNC != 0
+        || received.len() > 1
+        || (!received.is_empty() && event != b'E')
+    {
+        return Err(io::Error::other("unexpected helper event descriptors"));
+    }
+    Ok(Some((event, received.pop())))
+}
+
+fn target_root(pidfd: &OwnedFd) -> io::Result<File> {
+    let live = || {
+        checked(unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                pidfd.as_raw_fd(),
+                0,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            ) as libc::c_int
+        })
+    };
+    live()?;
+    let info = fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd()))?;
+    let pid = info
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Pid:")
+                .and_then(|value| value.trim().parse::<i32>().ok())
+        })
+        .filter(|pid| *pid > 1)
+        .ok_or_else(|| io::Error::other("target pidfd has no live PID"))?;
+    let root = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+        .open(format!("/proc/{pid}/root"))?;
+    // A numeric PID can't be reused while its original process is live.
+    // Recheck the pinned process before using the directory just opened.
+    live()?;
+    Ok(root)
+}
+
+fn dup_high(fd: i32) -> io::Result<OwnedFd> {
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 64) };
+    if copy < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+    }
+}
+
+fn capture(reader: impl Read) -> io::Result<Capture> {
+    let mut buffer = Capture::default();
+    drain(reader, |bytes| buffer.append(bytes))?;
+    Ok(buffer)
+}
+
+pub(crate) fn execute(
+    pidfd: OwnedFd,
+    id: [u8; 16],
+    spec: LaunchSpec,
+    deadline: Instant,
+) -> io::Result<Value> {
+    let root = target_root(&pidfd)?;
+    let pidfd = dup_high(pidfd.as_raw_fd())?;
+    let root = dup_high(root.as_raw_fd())?;
+    let owner = std::process::id() as libc::pid_t;
+    let mut result_fds = [-1; 2];
+    checked(unsafe { libc::pipe2(result_fds.as_mut_ptr(), libc::O_CLOEXEC) })?;
+    let mut result_reader = unsafe { File::from_raw_fd(result_fds[0]) };
+    let pipe_writer = unsafe { OwnedFd::from_raw_fd(result_fds[1]) };
+    let writer = dup_high(pipe_writer.as_raw_fd())?;
+    drop(pipe_writer);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
+    let mut command = Command::new("/init");
+    command.process_group(0);
+    command
+        .args([
+            "--run-oci-exec",
+            &owner.to_string(),
+            &hex(&id),
+            &remaining.as_millis().to_string(),
+            &serde_json::to_string(&spec)?,
+        ])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    unsafe {
+        command.pre_exec(move || {
+            checked(libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0))?;
+            if libc::getppid() != owner {
+                return Err(io::Error::from_raw_os_error(libc::ECHILD));
+            }
+            if libc::dup2(pidfd.as_raw_fd(), TARGET_PIDFD) < 0
+                || libc::dup2(root.as_raw_fd(), TARGET_ROOT) < 0
+                || libc::dup2(writer.as_raw_fd(), RESULT_PIPE) < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    let process_group = -(child.id() as libc::pid_t);
+    drop(command);
+    let out = child.stdout.take().expect("piped output");
+    let err = child.stderr.take().expect("piped error");
+    let stdout = thread::spawn(move || capture(out));
+    let stderr = thread::spawn(move || capture(err));
+    let mut forced = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                crate::recovery_fixture::reap_owned_children(process_group)?;
+                return Err(error);
+            }
+        }
+        if Instant::now() >= deadline + Duration::from_millis(500) {
+            child.kill()?;
+            forced = true;
+            break child.wait()?;
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    if forced || status.signal().is_some() {
+        // Container removal can kill the exec wrapper and its child
+        // together. Reap only this wrapper's adopted descendants so the
+        // owning workload can finish cgroup cleanup.
+        crate::recovery_fixture::reap_owned_children(process_group)?;
+    }
+    let output = stdout
+        .join()
+        .map_err(|_| io::Error::other("exec output reader panicked"))??;
+    let error = stderr
+        .join()
+        .map_err(|_| io::Error::other("exec error reader panicked"))??;
+    let mut result = [0];
+    let count = result_reader.read(&mut result)?;
+    if result == [1] || (Instant::now() >= deadline && status.signal() == Some(libc::SIGKILL)) {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "exec fixture timed out",
+        ));
+    }
+    if count != 1 {
+        return Err(io::Error::other(
+            "native exec helper lost its result channel",
+        ));
+    }
+    use base64::Engine;
+    let cap = INLINE_OUTPUT_CAP.min(output.bytes.len());
+    let err_cap = (INLINE_OUTPUT_CAP - cap).min(error.bytes.len());
+    let encode = |stream: Capture, cap: usize| {
+        json!({
+            "data":base64::engine::general_purpose::STANDARD.encode(&stream.bytes[..cap]),
+            "dropped_bytes":stream.dropped + (stream.bytes.len() - cap) as u64,
+        })
+    };
+    Ok(json!({
+       "exit_code":status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
+       "stdout":encode(output,cap), "stderr":encode(error,err_cap),
+    }))
+}
+
+pub fn run_helper(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let owner: i32 = args
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or("missing exec owner")?
+        .parse()?;
+    let workload = args
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or("missing exec workload")?;
+    let id = unhex::<16>(&workload)?;
+    let budget: u64 = args
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or("missing exec budget")?
+        .parse()?;
+    if !(1..=30_000).contains(&budget) {
+        return Err("invalid exec budget".into());
+    }
+    let deadline = Instant::now() + Duration::from_millis(budget);
+    let specification = args
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or("missing exec specification")?;
+    if owner <= 1 || unsafe { libc::getppid() } != owner || args.next().is_some() {
+        return Err("exec helper requires its guest supervisor".into());
+    }
+    let intent =
+        crate::intent::Intent::open(std::path::Path::new(crate::intent::DIRECTORY)).scoped(id);
+    if intent.read()? != Some(id) {
+        return Err("exec helper lacks owned OCI intent".into());
+    }
+    let spec: LaunchSpec = serde_json::from_str(&specification)?;
+    spec.validate_exec()?;
+    if spec.uid != WORKLOAD_UID
+        || spec.gid != WORKLOAD_GID
+        || spec.network != "none"
+        || spec.limits != NATIVE_LIMITS
+    {
+        return Err("unsupported exec credentials or resources".into());
+    }
+
+    let args: Vec<_> = spec
+        .argv
+        .iter()
+        .map(|value| CString::new(value.as_bytes()))
+        .collect::<Result<_, _>>()?;
+    let env: Vec<_> = spec
+        .env
+        .iter()
+        .map(|value| CString::new(value.as_bytes()))
+        .collect::<Result<_, _>>()?;
+    let argv: Vec<_> = args
+        .iter()
+        .map(|value| value.as_ptr())
+        .chain([std::ptr::null()])
+        .collect();
+    let envp: Vec<_> = env
+        .iter()
+        .map(|value| value.as_ptr())
+        .chain([std::ptr::null()])
+        .collect();
+    let cwd = CString::new(spec.cwd.as_bytes())?;
+    let program = &spec.argv[0];
+    let executables = if program.starts_with('/') {
+        vec![CString::new(program.as_bytes())?]
+    } else {
+        spec.env
+            .iter()
+            .find_map(|entry| entry.strip_prefix("PATH="))
+            .unwrap_or("/bin:/usr/bin")
+            .split(':')
+            .take(32)
+            .filter(|directory| {
+                directory.starts_with('/')
+                    && directory.split('/').all(|part| !matches!(part, "." | ".."))
+            })
+            .map(|directory| CString::new(format!("{}/{program}", directory.trim_end_matches('/'))))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let (mount, scope) = crate::kernel_fixture::cgroup_paths(&workload, true);
+    let cgroup = mount.join(scope).join("workloads/active").join(&workload);
+    crate::cgroups::write_control(&cgroup, "cgroup.procs", "0")?;
+    security::clear_supplementary_groups()?;
+    let flags = libc::CLONE_NEWUSER
+        | libc::CLONE_NEWNS
+        | libc::CLONE_NEWPID
+        | libc::CLONE_NEWNET
+        | libc::CLONE_NEWIPC
+        | libc::CLONE_NEWUTS;
+    checked(unsafe { libc::setns(TARGET_PIDFD, flags) })?;
+    checked(unsafe { libc::setresgid(0, 0, 0) })?;
+    checked(unsafe { libc::setresuid(0, 0, 0) })?;
+    checked(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;
+    if unsafe { libc::getppid() } != owner {
+        return Err("exec supervisor lost after namespace entry".into());
+    }
+    checked(unsafe { libc::fchdir(TARGET_ROOT) })?;
+    checked(unsafe { libc::chroot(c".".as_ptr()) })?;
+    checked(unsafe { libc::chdir(cwd.as_ptr()) })?;
+    let filter = security::WorkloadFilter::new(false);
+    let mut lifeline = [-1; 2];
+    checked(unsafe { libc::pipe2(lifeline.as_mut_ptr(), libc::O_CLOEXEC) })?;
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    if child == 0 {
+        unsafe {
+            libc::close(lifeline[1]);
+        }
+        let setup = (|| -> io::Result<()> {
+            security::set_process_limits()?;
+            security::drop_workload_identity()?;
+            checked(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;
+            let mut poll = libc::pollfd {
+                fd: lifeline[0],
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // The parent holds an empty lifeline pipe. A hangup means it
+            // died before the child's parent-death signal was installed.
+            if unsafe { libc::poll(&mut poll, 1, 0) } != 0 {
+                return Err(io::Error::other("exec helper is no longer live"));
+            }
+            checked(unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) as i32 })?;
+            filter.install()
+        })();
+        if setup.is_err() {
+            unsafe { libc::_exit(126) };
+        }
+        unsafe {
+            for executable in &executables {
+                libc::execve(executable.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            }
+            libc::_exit(127);
+        }
+    }
+    unsafe {
+        libc::close(lifeline[0]);
+    }
+    let mut timed_out = false;
+    let status = loop {
+        let mut status = 0;
+        let wait = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
+        if wait == child {
+            break status;
+        }
+        if wait < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.into());
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            // This is our unreaped child, so its numeric PID is stable.
+            if unsafe { libc::kill(child, libc::SIGKILL) } != 0
+                && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+            break crate::kernel_fixture::reap(child)?;
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    unsafe {
+        libc::close(lifeline[1]);
+    }
+    let byte = u8::from(timed_out);
+    if unsafe { libc::write(RESULT_PIPE, (&byte as *const u8).cast(), 1) } != 1 {
+        return Err(io::Error::last_os_error().into());
+    }
+    if libc::WIFEXITED(status) {
+        std::process::exit(libc::WEXITSTATUS(status));
+    }
+    if libc::WIFSIGNALED(status) {
+        std::process::exit(128 + libc::WTERMSIG(status));
+    }
+    Err("exec child did not report its exit".into())
+}

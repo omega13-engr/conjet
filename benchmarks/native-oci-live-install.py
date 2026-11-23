@@ -261,3 +261,48 @@ def verify_live_output(session, pid, digest, expected_boot, output):
             cases['unread_overflow'] = finished
     finally:
         (output / 'guest-live-output.json').write_text(json.dumps(cases, indent=2) + '\n')
+
+
+def verify_guest_exec(session, pid, digest, expected_boot, output):
+    cases = {}
+    try:
+        with channel(session, pid) as (stream, boot):
+            if boot != expected_boot:
+                raise RuntimeError('native exec used the wrong boot')
+            workload = launch(stream, inspect(stream), digest, ['/bin/sh', '-c',
+                'printf exec-shared >/fixture/cj-exec-proof; exec /bin/busybox sleep 20'])
+            handle = workload['handle']
+            deadline = time.monotonic() + 3
+            while True:
+                running = exchange(stream, 9, {'handle': handle, 'budget_ms': 1000}, 13)
+                if running['phase'] == 'running':
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f'guest exec target did not reach running: {running}')
+                time.sleep(0.02)
+            time.sleep(0.15)
+
+            def run(label, argv, code=0, stdout=b'', stderr=b'', *, budget=2000, error=None):
+                result = exchange(stream, 22, {'handle': handle, 'budget_ms': budget, 'argv': argv},
+                                  15 if error else 22, error)
+                cases[label] = result
+                if error is None:
+                    observed = (result['exit_code'], base64.b64decode(result['stdout']['data']),
+                                base64.b64decode(result['stderr']['data']))
+                    if observed != (code, stdout, stderr):
+                        raise RuntimeError(f'native exec {label} returned {observed!r}')
+
+            run('shared_root', ['/bin/busybox', 'cat', '/fixture/cj-exec-proof'], stdout=b'exec-shared')
+            run('identity', ['/bin/busybox', 'id', '-u'], stdout=b'65532\n')
+            run('streams_and_exit', ['/bin/sh', '-c', 'printf a; printf b >&2; exit 23'],
+                23, b'a', b'b')
+            run('missing_target', ['/bin/cj-missing-exec'], 127)
+            run('invalid_target', ['../relative'], error='invalid_spec')
+            run('exec_timeout', ['/bin/busybox', 'sleep', '8'], budget=150, error='deadline_exceeded')
+            run('after_failure', ['/bin/busybox', 'cat', '/fixture/cj-exec-proof'], stdout=b'exec-shared')
+            exchange(stream, 11, {'handle': handle, 'budget_ms': 1000}, 13)
+            if terminal(stream, handle)['cleanup'] != 'complete':
+                raise RuntimeError('native exec target did not reclaim its resources')
+            run('removed_target', ['/bin/true'], error='not_running')
+    finally:
+        (output / 'guest-exec.json').write_text(json.dumps(cases, indent=2) + '\n')

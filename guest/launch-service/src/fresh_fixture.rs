@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -101,6 +101,14 @@ struct Output {
     follow: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Exec {
+    handle: Handle,
+    budget_ms: u64,
+    argv: Vec<String>,
+}
+
 const OUTPUT_CHUNK_LIMIT: usize = 8192;
 const OCI_CONCURRENCY: usize = 8;
 const OCI_RECORDS: usize = 24;
@@ -163,6 +171,7 @@ struct Record {
     sequence: u64,
     body: [u8; 32],
     image_digest: String,
+    exec_context: Option<(LaunchSpec, OwnedFd)>,
     phase: Phase,
     revision: u64,
     exec: &'static str,
@@ -267,6 +276,7 @@ struct Ledger {
     records: VecDeque<Record>,
     pressure: bool,
     evictions: u64,
+    exec_active: bool,
 }
 
 impl Ledger {
@@ -703,6 +713,7 @@ impl FreshFixture {
             sequence: request.sequence,
             body,
             image_digest: spec.image_digest.clone(),
+            exec_context: None,
             phase: Phase::Accepted,
             revision: 1,
             exec: "pending",
@@ -804,6 +815,7 @@ impl FreshFixture {
         }
         self.update(&workload, |record| {
             record.control = None;
+            record.exec_context = None;
             if let Some(slot) = &mut record.slot {
                 slot.discard();
             }
@@ -915,9 +927,9 @@ impl FreshFixture {
         let mut exit_received = false;
         let mut network_removed = !bridge;
         let result = (|| -> io::Result<()> {
-            let mut code = [0];
-            while peer.read(&mut code)? == 1 {
-                match code[0] {
+            while let Some((event, target)) = crate::exec_fixture::receive_event(peer.as_raw_fd())?
+            {
+                match event {
                     b'P' => self.update(&workload, |record| {
                         if !record.cancelled {
                             record.change(Phase::Preparing);
@@ -966,6 +978,11 @@ impl FreshFixture {
                             });
                         }
                         self.update(&workload, |record| {
+                            if let (Some(spec), Some(target)) = (oci_process, target)
+                                && let Ok(spec) = serde_json::from_str(spec)
+                            {
+                                record.exec_context = Some((spec, target));
+                            }
                             record.exec = "confirmed";
                             record.mark("exec_confirmed");
                             if !record.cancelled {
@@ -1128,6 +1145,7 @@ impl FreshFixture {
                         "last_sequence": guard.highest_sequence,
                         "workload": guard.records.back().map(Record::state),
                         "installed_images": guard.images.snapshot(),
+                        "exec_active": guard.exec_active,
                         "active_workloads": guard.active().map(Record::state).collect::<Vec<_>>(),
                     }),
                 ))
@@ -1168,6 +1186,50 @@ impl FreshFixture {
                     self.changed.notify_all();
                 }
                 Ok((Kind::Memory, guard.memory_snapshot(self.oci)))
+            }
+            Kind::Exec if self.oci => {
+                let request: Exec = parse(frame)?;
+                let expires = deadline(request.budget_ms)?;
+                check(&guard, &request.handle)?;
+                if guard.closing || guard.exec_active {
+                    return Err(("busy", "the native exec slot is already owned"));
+                }
+                let record = guard
+                    .record(&request.handle.workload_id)
+                    .expect("checked record");
+                let (spec, target) = record
+                    .exec_context
+                    .as_ref()
+                    .filter(|_| record.phase == Phase::Running)
+                    .ok_or(("not_running", "native exec requires a live OCI process"))?;
+                let mut spec = spec.clone();
+                spec.argv = request.argv;
+                spec.validate_exec()
+                    .map_err(|_| ("invalid_spec", "invalid native exec argv"))?;
+                let target = target
+                    .try_clone()
+                    .map_err(|_| ("busy", "cannot retain native exec target"))?;
+                let id = crate::handshake::unhex(&request.handle.workload_id)
+                    .map_err(|_| ("malformed", "invalid native workload ID"))?;
+                guard.exec_active = true;
+                drop(guard);
+                let result = crate::exec_fixture::execute(target, id, spec, expires);
+                let mut guard = self.ledger.lock().expect("fresh ledger");
+                guard.exec_active = false;
+                self.changed.notify_all();
+                match result {
+                    Ok(reply) => Ok((Kind::Exec, reply)),
+                    Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                        Err(("deadline_exceeded", "native exec exceeded its deadline"))
+                    }
+                    Err(error) => {
+                        eprintln!("native exec failed: {error}");
+                        Err((
+                            "exec_failed",
+                            "native exec could not enter its owned workload",
+                        ))
+                    }
+                }
             }
             Kind::Status | Kind::Cancel => {
                 let request: Control = parse(frame)?;
@@ -1322,7 +1384,7 @@ impl FreshFixture {
         let mut ledger = self.ledger.lock().expect("fresh ledger");
         ledger.closing = true;
         loop {
-            if ledger.records.iter().all(|record| record.phase.terminal()) {
+            if !ledger.exec_active && ledger.records.iter().all(|record| record.phase.terminal()) {
                 return !ledger
                     .active()
                     .any(|record| record.phase == Phase::CleanupFailed);

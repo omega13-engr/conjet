@@ -35,7 +35,7 @@ pub struct LaunchRequest {
     pub spec: LaunchSpec,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchSpec {
     pub image_digest: String,
@@ -134,6 +134,14 @@ impl LaunchRequest {
 
 impl LaunchSpec {
     pub fn validate(&self) -> Result<[u8; 32], SpecError> {
+        self.validate_process(false)
+    }
+
+    pub fn validate_exec(&self) -> Result<[u8; 32], SpecError> {
+        self.validate_process(true)
+    }
+
+    fn validate_process(&self, search_path: bool) -> Result<[u8; 32], SpecError> {
         let spec = self;
         let digest = spec
             .image_digest
@@ -153,7 +161,14 @@ impl LaunchSpec {
         if strings > MAX_ARG_ENV_BYTES {
             return Err(SpecError::Strings);
         }
-        if !canonical_absolute(&spec.argv[0], false) || !canonical_absolute(&spec.cwd, true) {
+        let executable = &spec.argv[0];
+        let bare = search_path
+            && !matches!(executable.as_str(), "" | "." | "..")
+            && executable
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte));
+        if !(bare || canonical_absolute(executable, false)) || !canonical_absolute(&spec.cwd, true)
+        {
             return Err(SpecError::Path);
         }
         let mut names = HashSet::with_capacity(spec.env.len());
