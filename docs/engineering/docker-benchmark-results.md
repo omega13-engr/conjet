@@ -429,11 +429,22 @@ and a different cleanup boundary from existing Docker and Kiri.
 
 ## Coverage and retained evidence
 
-The full suite remains underway. Image, builds, Compose, control, storage
-and concurrency are separate modes. Their results require scenario-level
-validation. The native Docker route supports the documented no-network
-fresh OCI subset. Docker build, Compose, persistent exec and service
-networking use the existing engine where supported.
+| Workload | Executing backend | Coverage and verdict |
+| --- | --- | --- |
+| Docker API and CLI launch | Existing Conjet Docker/containerd and official Kiri | Full no-network API pair and pilot rows. Complete CLI series and remaining API/bridge pairs pending |
+| Static fresh and prepared CLI/API | Conjet Rust native guest | Full-budget product session and live correctness. Kiri has no corresponding prepared API |
+| No-network Docker OCI | Conjet opt-in source adapter and native guest | Full-budget CLI/API session with per-operation cleanup. Prepared OCI and general Docker options outside the subset |
+| Controlled registry | Both existing Docker engines | Five complete pairs. Kiri faster for the declared pull boundaries |
+| Image save/load/inspect | Both existing Docker engines | Five complete suites with pinned image identities and executable canaries |
+| Rust, Go and Node Buildx | Pinned BuildKit worker on each existing engine | Two validated pairs with differing harness versions. Worker resource and comparable repetition evidence pending |
+| Node/Redis Compose | Both existing Docker engines | Two measured pairs. One verifies effective quotas. Comparative intervals pending |
+| Persistent exec and control | Both existing Docker engines | One complete pair after the event-observation correction |
+| Storage and sustained service | Both existing Docker engines | One measured pair. Conjet ExternalSSD bind unsupported in the tested configuration |
+| Concurrency and pressure | Both existing Docker engines and separate native product | Two Docker sweeps. Conjet OOM and native-pressure recovery verified. Kiri OOM attribution requires rerun |
+
+Buildx, Compose, persistent exec and service networking keep the existing
+Docker backend where supported. The source adapter uses the declared
+no-network OCI operations. Its scope does not provide those measurements.
 
 Evidence root is
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence`.
