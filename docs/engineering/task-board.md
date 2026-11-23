@@ -425,8 +425,11 @@ cleanup on every operation and uses UID/GID 65532. The baseline uses the
 image-default user, so their measurements remain distinct.
 The full-sample runner handles cancellation through its Docker adapter and
 VM ownership cleanup and retains partial rows.
-The full no-network Alpine `true` CLI series is running serially on harness
-`eb31229` under `SPEED-019/alpine-true-none-cli-series`.
+The no-network Alpine `true` CLI series at `eb31229` completed pair 1 with
+2,000 samples per engine and no failures. It retained a canceled next boot
+with verified cleanup to allow local validation of the hosted CI fix without
+overlapping compilation and timing. Resume the remaining pairs with the same
+frozen harness and fresh output paths.
 
 
 ### SPEED-008

@@ -53,6 +53,21 @@ observation. The existing Conjet path was slower in this pair. The
 comparative verdict remains inconclusive pending the other boot pairs,
 matched observability and the predeclared uncertainty analysis.
 
+The no-network Alpine true CLI series used harness `eb31229`. Both
+engines completed all 2,000 measured samples in pair 1 with zero failures.
+The pinned Docker client ran `docker run --rm` for every sample. The
+measurement starts at client spawn and ends at client exit. The verified
+guest teardown boundary remains unknown for these ordinary Docker routes.
+
+| Engine | p50 / p95 / p99 (ms) | Successes/s |
+| --- | ---: | ---: |
+| Conjet | 671.800/960.825/1044.558 | 1.446 |
+| Kiri | 22.443/28.624/43.052 | 42.410 |
+
+The worker canceled the next private Kiri boot before counting it to run
+local validation of the hosted CI fix outside a measurement window. The
+complete first pair and the canceled boot's cleanup evidence are retained.
+
 ## Earlier Docker pilot
 
 The pilot ran 20 operations per workload, network and timing boundary on
@@ -458,6 +473,7 @@ failed attempts and shutdown checks.
 | Native and Docker pilots and capability checks | `SPEED-017` |
 | Rootfs receipts, backend audit and Docker-to-native pilot | `SPEED-018` |
 | Full paired no-network API row | `SPEED-019/alpine-true-none-api-pair-2` |
+| First full CLI pair and canceled next-boothalf evidence | `SPEED-019/alpine-true-none-cli-series` |
 | Full-budget Docker-to-native OCI run with per-operation cleanup witnesses | `SPEED-019/native-oci-full-1` |
 | First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
 | Pinned image and loopback registry results with asymmetric transfer proof | `SPEED-020/pair-2` |
