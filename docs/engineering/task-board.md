@@ -83,6 +83,89 @@ retain their old acceptance criteria for research provenance.
 
 ## BACKLOG
 
+### SPEED-051
+
+Title: Diagnose and correct the retained Docker four-PID CLI failure
+
+Description: Isolate the intermittent CLI exit 127 on the pinned
+no-network Alpine true fixture with four PIDs.
+
+Is blocked by task: None. SPEED-049 records the failed operation.
+
+Acceptance Criteria:
+
+- Attribute the thread-creation failure to a guest process or runtime
+  stage using the fixed fixture and a bounded diagnostic boot. Preserve
+  the four-PID workload, operation output and error on failure.
+- Validate a narrow correction at the same effective cgroup limits
+  and check cleanup after failure and success.
+- Keep this diagnostic separate from the five-pair CLI requalification.
+
+Problem and Evidence: The fifth SPEED-049 Conjet CLI boot recorded
+one failure. SPEED-019's retained-engine pair 2 had two failures with
+the same signature. The event wake change came after those failures.
+
+Approach: Capture guest engine and OCI runtime diagnostics around
+the failed operation before recovery. Record the workload cgroup's
+PID events and identify the emitting binary before changing it.
+
+Evidence: SPEED-049 `cli/pair-5/conjet/session.json`, measured sample
+index 139. Historical comparison is under SPEED-019
+`alpine-true-none-cli-series/remaining/pair-2/conjet/session.json`.
+The isolated `run-pid-hypothesis.py` probe and raw output are in
+SPEED-049 `pid-hypothesis`. Production and teardown checks passed.
+
+Source: [SPEED-049](#speed-049).
+
+Review: In the bounded `runc --version` diagnostic, 12/12 runs at
+four PIDs returned a Go thread error. All 13 runs at eight PIDs
+passed, including setup. The qualified CLI failure still needs a
+direct process and cgroup witness.
+
+Next Action: Add a bounded guest failure capture with the pinned
+four-PID CLI fixture. Use a verified result to select the correction.
+
+### SPEED-050
+
+Title: Isolate the retained Docker start and wait scheduling delay
+
+Description: Attribute the remaining start and wait latency on the
+pinned no-network Alpine API fixture with event wake enabled.
+
+Is blocked by task: None. Uses the completed API evidence in SPEED-049.
+
+Acceptance Criteria:
+
+- Measure the same 12 timed operations and four warmups in two
+  untraced and two bounded diagnostic boots with the 25 ms tick in
+  place. Report the observer effect.
+- Record guest monotonic receipt and response spans for start and
+  wait and host monotonic guest-ring publication and response
+  spans. Pair operations by ID and preserve their separate clocks.
+- Identify whether the residual lies inside or outside the guest
+  Docker request handler. Retain inconclusive runs and record host
+  and guest cleanup evidence. Require attribution before selecting
+  an implementation.
+
+Problem and Evidence: The ingress wake reduced host queue-to-ring
+delay. SPEED-049 still measured Conjet API start at 190–214 ms and
+wait at 217–229 ms by boot median. The guest containerd task runtime
+observed in SPEED-047 was about 2 ms under diagnostic conditions.
+
+Approach: Instrument the released conjet-netd-c guest relay at
+request delivery to the dockerd Unix socket and first response read.
+Compare these spans with the existing host spans. Keep resource
+settings and runtime ownership fixed.
+
+Evidence: [Retained Docker qualification results](docker-benchmark-results.md#speed-049-retained-docker-release-lifecycle-against-kiri).
+
+Source: [SPEED-047](#speed-047), [SPEED-048](#speed-048), [SPEED-049](#speed-049).
+
+Review: Pending live attribution.
+
+Next Action: Add tagged start and wait spans at the relay socket
+boundary and run the four isolated boots.
+
 ### SPEED-014
 
 Title: Validate and release the next Conjet version
@@ -141,43 +224,6 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: Set matching version metadata and release notes for the reviewed package scope before tagging an independently approved, qualified revision. Confirm Developer ID and notarization credential availability through the release environment.
 
 ## INPROGRESS
-
-### SPEED-049
-
-Title: Compare retained Docker event wake with official Kiri
-
-Description: Measure the frozen no-network Alpine true API and CLI
-groups with the scoped ingress candidate and official Kiri 0.2.2.
-
-Is blocked by task: SPEED-048 (DONE).
-
-Acceptance Criteria:
-
-- Run five independent alternating pairs per lane, with 2,000 timed
-  operations and ten warmups per engine and boot.
-- Keep Docker API and CLI results separate. Record matching workloads,
-  resource settings, backend identities and cleanup witnesses.
-- Retain failures and partial runs. Use the existing report's paired
-  95% method and 1.05 CLI parity threshold for eligible pairs.
-
-Problem and Evidence: The isolated Conjet A/B pilot verified lower
-ingress and lifecycle medians on the same release binary. It has no
-matched Kiri result.
-
-Approach: Use the frozen lifecycle harness and signed pinned Kiri
-release. Enable event wake only in the candidate. Keep trace
-instrumentation disabled during timing.
-
-Evidence: Pending matched release runs under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-049`.
-
-Source: [Benchmark contract](docker-benchmark-plan.md),
-[result format](docker-benchmark-results.md).
-
-Review: Pending independent paired evidence and cleanup.
-
-Next Action: Verify release identities, freeze the manifest and run
-the API group followed by the CLI group.
 
 ### SPEED-025
 
@@ -644,6 +690,59 @@ then rerun the original matrix. Experimental release proceeds under local
 acceptance without changing the SPEED-008 verdict.
 
 ## UNDERREVIEW
+
+### SPEED-049
+
+Title: Compare retained Docker event wake with official Kiri
+
+Description: Measure the frozen no-network Alpine true API and CLI
+groups with the scoped ingress candidate and official Kiri 0.2.2.
+
+Is blocked by task: SPEED-051 for CLI requalification. SPEED-048 is complete.
+
+Acceptance Criteria:
+
+- Run five independent alternating pairs per lane with 2,000 timed
+  operations and ten warmups per engine and boot.
+- Record matched workloads, backend identities, effective limits and
+  cleanup. Preserve failures and partial runs.
+- Compute the frozen paired 95% intervals from five eligible pairs.
+  Evaluate the API separately from the 1.05 CLI parity requirement.
+
+Problem and Evidence: SPEED-048 reduced host ingress publication
+delay. The retained Docker API lane remained slower than Kiri.
+One Conjet CLI operation exited 127 with a `pthread_create` resource
+error. The same signature appears in earlier retained Docker evidence
+before the ingress watcher. In a later diagnostic the packaged
+runc binary reproduced thread creation failure under four PIDs.
+
+Approach: Run the frozen lifecycle harness with Core 1.3.1 and
+release revision `84e29ab446329a2ea379564253f126a86b3cbeff`.
+Enable the isolated event wake and keep tracing disabled. Run
+the resource and exit canaries outside qualification timing.
+
+Evidence: Ran `benchmarks/docker-comparison.py --mode lifecycle --group
+alpine-true/none/{api,cli} --all-pairs --timeout 1800 --retained-event-wake`
+with private endpoints and the frozen release paths in each launcher
+record. API pair 4 was rerun and pair 5 ran separately after the
+preserved guard event. Across 40,000 timed operations and 200 warmups, one CLI operation
+failed. The five API pairs produced p50 ratio 102.9228
+(95% interval 92.1571–115.4850) and p99 ratio 80.0233
+(51.7371–107.6650). Four CLI pairs are eligible. Both canaries and
+all final production and host teardown checks passed.
+Raw evidence is under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-049`.
+
+Source: [Benchmark contract](docker-benchmark-plan.md),
+[qualification report](docker-benchmark-results.md#speed-049-retained-docker-release-lifecycle-against-kiri).
+
+Review: Audited artifacts, timings, fixture identity, limits and boot
+cleanup. API measurement is complete with a failed speed target.
+CLI qualification remains incomplete on correctness. Independent PR
+review is pending.
+
+Next Action: Isolate the four-PID CLI failure in SPEED-051. Preserve
+the current measurements and requalify CLI only after a verified fix.
 
 ### SPEED-020
 

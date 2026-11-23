@@ -81,8 +81,7 @@ leaves runtime implementation for the resulting scoped task.
 
 ## Qualification and isolation
 
-The current diagnostic has no matched parity verdict. If a selected
-integration reaches qualification, freeze the release artifacts,
+For qualification of an integration, freeze the release artifacts,
 workload manifest and paired analysis before timing. Use official
 pinned Kiri, identical unmodified clients and workloads, five
 alternating boot pairs, and the existing 2,000 measured lifecycle
@@ -96,8 +95,10 @@ SPEED-048 tested an opt-in Jetstream ingress wake through the retained
 Docker endpoint. Use `--retained-event-wake` on the isolated launcher
 or paired comparison command to select it. Omit the flag to select
 the original polling path. Both modes keep the 25 ms fallback tick.
-SPEED-049 qualifies the pinned no-network `alpine-true` API and CLI
-groups against the signed Kiri 0.2.2 release.
+SPEED-049 measured the pinned no-network `alpine-true` API and CLI
+groups against signed Kiri 0.2.2. The API missed parity. One CLI
+operation failed, leaving four eligible pairs and no CLI interval.
+[Retained Docker results](docker-benchmark-results.md#speed-049-retained-docker-release-lifecycle-against-kiri)
 
 Use explicit private contexts, session-owned foreground services and
 ExternalSSD scratch for artifacts and evidence. Keep builds and

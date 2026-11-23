@@ -2,12 +2,170 @@
 
 This report covers the M1 Pro experiments completed to date. It separates
 the existing Docker engines, static native API/CLI and the isolated Docker
-candidate backed by native OCI. The program's frozen comparison contract
-requires five independent pairs. The retained local data support
-descriptive results at the stated boundaries. SPEED-008 remains unresolved.
+candidate backed by native OCI. The frozen comparison contract requires five independent pairs
+per lane. Each section reports its coverage and verdict at the stated
+boundary. SPEED-008 remains unresolved.
 
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Native OCI research scope](docker-native-adapter.md)
+
+## SPEED-049 retained Docker release lifecycle against Kiri
+
+This series compares the isolated Conjet event-wake candidate at
+`84e29ab446329a2ea379564253f126a86b3cbeff` with official signed Kiri
+0.2.2. The measured Conjet backend was Core 1.3.1 with dockerd 29.1.3,
+containerd 2.2.1, and runc 1.3.4. Kiri identified its own runtime.
+The existing 25 ms VMM tick remained active and trace capture was
+disabled. The Swift CLI and daemon, Rust VMM and network helper were
+release builds. The pinned guest was the shipped Core release. These
+results are separate from the native OCI research and historical
+existing-engine results.
+
+| Observed environment | Value |
+| --- | --- |
+| Host | Apple M1 Pro, 16 GiB RAM, macOS 27.2.1 (26B131) |
+| Storage | APFS ExternalSSD, verified VM disk holders in each private boot |
+| VM resources | Two vCPUs and 2 GiB configured on both sides |
+| Guest | Conjet Linux 6.12.86-conjet, 2,094,825,472 bytes reported. Kiri Linux 6.18-kiri, 2,088,570,880 bytes reported |
+| Clients | Docker 29.10.0, Buildx 0.39.1 and Compose 5.8.0 pinned. Only Docker was exercised |
+| API and fixture | Docker API 1.44, warm pinned Alpine 3.22 ARM64 config `062964a69725bb96611dae2ac911a5a1ab3f8d32fe6f096f267d77f09e55a99c` |
+| Container | `/bin/true`, no network, 16 MiB, four PIDs, 500 millicores, all capabilities dropped and no-new-privileges requested |
+
+| Frozen artifact | SHA-256 |
+| --- | --- |
+| Conjet CLI | `6a90e3096e1da7ff35a314ae817111a37d0282082703f3995fb7a1be6030ed93` |
+| Conjet daemon | `9e6a8f96b8cb3d762a51a5ae442eb7a522dbf3883b0d959a1fa45eaeb63f586f` |
+| Jetstream VMM | `518c6f84ce30124e7d79cc69fe191df20c82be070ee568191c4e026e52d9642a` |
+| Conjet network helper | `cd23449a68008b4a5d12ab52768ac82a32c5b12dcbc71e82e585b228bb128fb5` |
+| Kiri daemon | `c5cd8edefc69d3e4de4cf38a8149d07d6c4c4f1d522167c890541c17f2630884` |
+| Docker client | `cd9e0b149e447af504421ac7117044d8e17d695d66846a5c4df1312c417c22a3` |
+| Docker comparison manifest v1 | `572fa7ec2ff060d488daa8adaccc0bb5ffeb9ed0adcd6d009873f86f36826d19` |
+
+The frozen v1 workload, client versions, repetition counts and analysis
+rules also govern this retained Docker comparison. Each lane has
+five alternating independent boot pairs, with ten warmups and 2,000
+measured operations per engine and boot. The host monotonic clock
+measures API create through removal acknowledgement and unmodified
+Docker CLI `run --rm` invocation through process exit. Throughput
+uses the full measured serial window. VM boot, pulls and fixture
+admission happen outside that window. Per-operation guest teardown
+is unobserved on both engines. Separate launcher checks verify owned
+host processes, sockets and backing-file handles after each boot.
+
+Both engines reported the same pinned Alpine image config and ARM64
+architecture. Untimed canaries on the frozen artifacts confirmed
+`memory.max=16777216`, `pids.max=4`, `cpu.max=50000 100000`, zero
+effective capabilities and `NoNewPrivs=1`. The canaries delivered both
+streams and deliberate exit 23. Each engine passed its shutdown checks.
+
+| Pair | Engine order | Engine | API p50 / p95 / p99 (ms) | API ops/s | CLI p50 / p95 / p99 (ms) | CLI ops/s |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Conjet → Kiri | Conjet | 429.016 / 657.532 / 690.065 | 2.260 | 458.016 / 658.736 / 697.809 | 2.160 |
+| 1 | Conjet → Kiri | Kiri | 4.127 / 4.830 / 5.771 | 236.918 | 20.339 / 21.817 / 23.432 | 48.701 |
+| 2 | Kiri → Conjet | Kiri | 4.179 / 4.874 / 6.656 | 231.677 | 20.255 / 21.553 / 22.396 | 48.948 |
+| 2 | Kiri → Conjet | Conjet | 419.257 / 623.839 / 661.316 | 2.329 | 455.078 / 665.006 / 693.297 | 2.168 |
+| 3 | Conjet → Kiri | Conjet | 429.005 / 650.291 / 1154.469 | 2.213 | 458.790 / 663.470 / 698.849 | 2.157 |
+| 3 | Conjet → Kiri | Kiri | 5.036 / 18.913 / 34.303 | 132.675 | 20.130 / 21.010 / 22.025 | 49.416 |
+| 4 | Kiri → Conjet | Kiri | 4.206 / 5.138 / 8.408 | 229.417 | 20.164 / 21.114 / 22.231 | 49.315 |
+| 4 | Kiri → Conjet | Conjet | 436.181 / 651.971 / 683.821 | 2.201 | 460.878 / 669.166 / 700.198 | 2.150 |
+| 5 | Conjet → Kiri | Conjet | 468.607 / 651.826 / 688.853 | 2.167 | 460.429 / 661.119 / 694.062 | 2.160 |
+| 5 | Conjet → Kiri | Kiri | 3.739 / 4.502 / 6.826 | 256.751 | 20.073 / 20.975 / 21.957 | 49.563 |
+
+Paired ratios are geometric means with 95% intervals from 10,000
+independent boot-pair bootstrap resamples, seeded with 615026. The
+CLI requires both upper endpoints to be at most 1.05. The API median
+advantage is evaluated separately.
+
+| Lane | Metric | Conjet / Kiri | 95% interval |
+| --- | --- | ---: | ---: |
+| API | p50 | 102.9228 | 92.1571–115.4850 |
+| API | p99 | 80.0233 | 51.7371–107.6650 |
+| API | Throughput | 0.0105 | 0.0090–0.0134 |
+| CLI | p50 | — | — |
+| CLI | p99 | — | — |
+| CLI | Throughput | — | — |
+
+The API lane was slower at both percentiles and missed parity. The CLI
+was slower in every observed pair, with Conjet p50 of 455–461 ms and
+Kiri p50 of 20.07–20.34 ms. Its formal parity result remains
+inconclusive because only four pairs qualify for inference. The
+fifth Conjet boot had one exit 127 with a Go `pthread_create` resource
+error. The per-operation recovery request completed. An earlier retained
+Docker binary recorded the same error twice with the same workload
+before event wake existed.
+
+A separate diagnostic ran the pinned guest `runc --version` as a
+workload under directly read-back PID caps. All 12 runs at four PIDs
+failed during Go startup with the same resource error. All 13 runs at
+eight PIDs succeeded, including the setup check. This establishes
+sensitivity of the packaged binary to the cap in the diagnostic.
+The failing qualification operation still lacks a direct guest
+process and cgroup witness.
+
+The range below is across the boot medians for each operation. CLI
+timing has a single host exit boundary.
+
+| Lane | Engine | Create (ms) | Start (ms) | Wait (ms) | Remove (ms) | CLI exit (ms) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| API | conjet | 8.236–10.288 | 189.529–214.157 | 217.272–228.704 | 4.397–4.831 | — |
+| API | kiri | 1.815–2.121 | 1.274–1.945 | 0.090–0.170 | 0.502–0.696 | — |
+| CLI | conjet | — | — | — | — | 455.078–460.878 |
+| CLI | kiri | — | — | — | — | 20.073–20.339 |
+
+| Lane | Engine | Boots | Timed | Failed | Warmups | Failed warmups | Clean | Recovered |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| API | conjet | 5 | 10000 | 0 | 50 | 0 | 5 | 0 |
+| API | kiri | 5 | 10000 | 0 | 50 | 0 | 5 | 0 |
+| CLI | conjet | 5 | 10000 | 1 | 50 | 0 | 5 | 0 |
+| CLI | kiri | 5 | 10000 | 0 | 50 | 0 | 5 | 0 |
+
+Clean denotes verified host teardown and unchanged production
+snapshots. Recovered counts residual labeled containers found by
+the final sweep. The CLI failure was recovered by the per-operation
+removal path before the sweep. Total measured operations were 40,000,
+with one failure and 200 successful warmups.
+
+| Lane | Engine | CPU time delta (s) | Higher RSS snapshot (MiB) | Footprint snapshots (MiB) | Allocated disk delta (MiB) | One-minute load |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| API | conjet | 644.46–696.06 | 891.12–1170.39 | 288.69–471.00 | 1568.73–1684.03 | 2.08–20.73 |
+| API | kiri | 9.60–15.08 | 360.89–581.11 | 134.80–396.42 | 0.00–0.00 | 2.30–19.87 |
+| CLI | conjet | 668.70–670.71 | 1224.36–1299.08 | 287.61–493.47 | 1580.41–1706.73 | 2.12–4.47 |
+| CLI | kiri | 10.74–10.88 | 424.56–450.62 | 241.35–293.71 | 0.00–0.00 | 2.43–5.75 |
+
+Host CPU reflects attributable runtime processes between snapshots.
+RSS and physical footprint are point observations. Continuous peak
+memory and bytes read or written were unavailable. Allocated backing
+file growth describes storage occupancy. Conjet used a disposable
+16 GiB guest root and 100 GiB sparse data disk. Kiri reused its
+isolated 64 GiB sparse VM data image across boots. Images were warm
+in all measured windows.
+
+| Coverage | Result | Evidence under SPEED-049 |
+| --- | --- | --- |
+| Retained Docker API | Five eligible pairs, zero workload failures | `api/pair-{1..5}` |
+| Retained Docker CLI | Five measured pairs, four eligible, one workload failure | `cli/pair-{1..5}` |
+| Effective cgroup, privileges, output and exit | Matched guest witnesses | `effective-limits` |
+| CLI failure diagnostic | Packaged runc reproduced the thread error under a four-PID cap | `pid-hypothesis` and `pid-hypothesis-missing-library` |
+| Production and host cleanup | Both launchers verified all 20 final boot legs and the two canaries | `*-launcher.json` in each pair and canary |
+| Adverse preservation check | Earlier API pair 4 and a canceled CLI start retained | `api-adverse-pair-4`, `cli-canceled`, `production-drift.json` |
+| Frozen versions, checksums and paired analysis | Host and Kiri executable hashes, Core release SHA-512, raw summary and rendering tools | `sha256.txt`, `core-sha512.txt`, `revision.txt`, `final-summary.json` |
+| Build, Compose, image acquisition, control, storage, networking and concurrency | Historical series only | Existing sections below |
+
+An earlier API pair 4 was excluded after the production guard observed
+a changed global Buildx selector fingerprint. The production app,
+daemon, VM, socket identity and selected Docker context matched.
+The selector writer was unobserved. The partial CLI invocation was
+canceled and its owned runtime was reclaimed. After checking the
+private configuration and stable production observations, API pair 4
+was rerun at the same revision and counts. All final boot legs passed
+the guard. The excluded and canceled logs are retained.
+
+Raw evidence is under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-049`.
+Resolve the four-PID CLI runtime failure before freezing another CLI
+series. The API results support a separate start and wait timing
+follow-up at the guest relay boundary. Second-host, privileged energy,
+equivalent Kiri guest teardown and sub-1 ms research remain deferred.
 
 ## SPEED-048 retained Docker ingress wake pilot
 
