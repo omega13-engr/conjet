@@ -387,7 +387,9 @@ Acceptance Criteria:
 Problem and Evidence: [Interim outcome and coverage audit](docker-benchmark-results.md).
 The report separates the first complete lifecycle pair, existing-engine
 pilots and native OCI/static timing. The summary tool verifies per-session
-counts and refuses a lifecycle paired interval before five complete pairs.
+counts and refuses a lifecycle paired interval before five complete pairs
+or across mixed executable, harness or manifest revisions. It retains setup,
+warmup and artifact-verification failures alongside measured rows.
 The remaining modes and claim review are still in progress.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),

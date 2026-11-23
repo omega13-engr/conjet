@@ -42,7 +42,8 @@ def summarize(path):
     data = json.loads(path.read_text())
     result = {key: data.get(key) for key in ('engine', 'backend', 'mode', 'passed', 'error',
                                             'selected_group', 'harness_revision', 'guest',
-                                            'host_before', 'host_after', 'engine_sha256')}
+                                            'host_before', 'host_after', 'engine_sha256',
+                                            'manifest_sha256', 'vm_backing', 'clients')}
     result['source'] = str(path)
     groups = {}
     for group in data.get('groups', []):
@@ -51,11 +52,17 @@ def summarize(path):
         groups[label]['warmup_failures'] = sum(row.get('error') is not None for row in group['warmups'])
     rows = defaultdict(list)
     for row in data.get('operations', []):
-        if row.get('phase') == 'sample':
-            rows[row['scenario']].append(row)
-    for name, samples in rows.items():
-        groups[name] = summarized_samples(samples, data.get('windows_ns', {}).get(name))
+        rows[row['scenario']].append(row)
+    for name, operations in rows.items():
+        samples = [row for row in operations if row.get('phase') == 'sample']
+        if samples:
+            groups[name] = summarized_samples(samples, data.get('windows_ns', {}).get(name))
+            groups[name]['warmup_failures'] = sum(row.get('phase') == 'warmup' and
+                                                   row.get('error') is not None for row in operations)
     result['groups'] = groups
+    result['operation_failures'] = [
+        {'scenario': row['scenario'], 'phase': row.get('phase'), 'error': row['error']}
+        for row in data.get('operations', []) if row.get('error') is not None]
     return result
 
 
@@ -78,15 +85,29 @@ def lifecycle_intervals(paths):
             key = (pair, result['engine'])
             if key in case[label]:
                 raise ValueError('duplicate qualifying engine and pair index')
-            case[label][key] = details
+            case[label][key] = (parent.resolve(), result, details)
     output = {}
     for label, accepted in case.items():
-        values = [pair for pair in range(1, 6) if (pair, 'conjet') in accepted and (pair, 'kiri') in accepted]
+        values = []
+        identities = {'conjet': set(), 'kiri': set()}
+        for pair in range(1, 6):
+            left = accepted.get((pair, 'conjet'))
+            right = accepted.get((pair, 'kiri'))
+            if left is None or right is None:
+                continue
+            if left[0] != right[0] or left[1]['manifest_sha256'] != right[1]['manifest_sha256']:
+                raise ValueError('qualifying engines must share their pair root and manifest')
+            for engine, run in (('conjet', left[1]), ('kiri', right[1])):
+                identities[engine].add((run['manifest_sha256'], run['engine_sha256'], run['harness_revision']))
+            values.append(pair)
         output[label] = {'complete_pairs': values}
+        if any(len(identity) > 1 for identity in identities.values()):
+            output[label]['excluded_from_interval'] = 'mixed revision, executable or manifest'
         for percentile in ('p50_ns', 'p99_ns'):
-            pairs = [(accepted[(pair, 'conjet')][percentile], accepted[(pair, 'kiri')][percentile])
+            pairs = [(accepted[(pair, 'conjet')][2][percentile], accepted[(pair, 'kiri')][2][percentile])
                      for pair in values]
-            output[label][percentile] = paired_interval(pairs)
+            output[label][percentile] = (None if 'excluded_from_interval' in output[label]
+                                         else paired_interval(pairs))
     return output
 
 

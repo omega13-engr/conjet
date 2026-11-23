@@ -1,5 +1,7 @@
+import json
 from pathlib import Path
 import runpy
+import tempfile
 import unittest
 
 SUMMARY = runpy.run_path(str(Path(__file__).with_name('docker-comparison-summary.py')))
@@ -18,6 +20,18 @@ class StatisticsTests(unittest.TestCase):
         self.assertIsNone(metric([(2, 1)] * 4))
         self.assertEqual(metric([(2, 1)] * 5, resamples=100),
                          {'paired_sessions': 5, 'ratio': 2.0, 'ci95': [2.0, 2.0]})
+
+    def test_setup_failure_survives_summary_without_timed_samples(self):
+        with tempfile.TemporaryDirectory(dir='/Volumes/ExternalSSD/dev_workspace/tmp') as work:
+            path = Path(work) / 'session.json'
+            path.write_text(json.dumps({'operations': [
+                {'scenario': 'builder-bootstrap', 'phase': 'setup', 'error': 'timed out'},
+                {'scenario': 'build', 'phase': 'warmup', 'error': 'canary mismatch'},
+                {'scenario': 'build', 'phase': 'sample', 'error': None, 'elapsed_ns': 30},
+            ]}))
+            summary = SUMMARY['summarize'](path)
+        self.assertEqual(summary['groups']['build']['warmup_failures'], 1)
+        self.assertEqual(summary['operation_failures'][0]['scenario'], 'builder-bootstrap')
 
 
 if __name__ == '__main__':

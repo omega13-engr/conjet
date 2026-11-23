@@ -15,18 +15,22 @@ and record hashes of the actual executables in every report.
 Docker CLI or HTTP -> kiri-speedup Unix socket -> official Kiri -> Kiri guest
 Docker CLI or HTTP -> conjet-speedup Unix socket -> Jetstream bridge -> guest Docker/containerd
 Native CLI or authenticated API -> private native socket -> Jetstream -> Rust launch service
-Docker CLI or HTTP -> proposed dedicated socket -> one native Docker owner -> qualified OCI sandbox
+Docker CLI or HTTP -> dedicated source-adapter socket -> one native Docker owner -> qualified OCI sandbox
 ```
 
-| Surface | Official Kiri | Existing Conjet Docker | Conjet native | Proposed Docker-to-native |
+| Surface | Official Kiri | Existing Conjet Docker | Conjet native | Docker-to-native source adapter |
 | --- | --- | --- | --- | --- |
-| Docker API and CLI run, inspect, stop, remove | Probe API behavior and flags | Guest Docker/containerd | No Docker endpoint | Unavailable until admitted OCI image and full declared lifecycle are verified |
-| OCI image pull/load/save and ready-to-run | Probe digest and load behavior | Guest Docker image store | One pinned executable per boot | Image admission is a prerequisite |
+| Docker API and CLI run, inspect, stop, remove | Probe API behavior and flags | Guest Docker/containerd | No Docker endpoint | Verified run, inspect, wait and removal for the declared no-network subset. Standalone stop and restart are outside that subset |
+| OCI image pull/load/save and ready-to-run | Probe digest and load behavior | Guest Docker image store | One pinned executable per boot | Pre-export and admit one pinned OCI package before server start |
 | Build and Buildx | Probe builder and cache placement | Guest Docker builder or BuildKit | Unsupported | Out of minimum route |
 | Compose, service discovery, volumes and ports | Probe actual plugin calls and data integrity | Guest Docker; bind mounts and ports require individual probes | Unsupported | Out of minimum route |
-| Persistent exec, attach, logs, events and cp | Probe each operation | Guest Docker/containerd | Bounded per-launch streams and native control | Attach, wait and inspect only after explicit verification |
-| Fresh and one-use prepared native launch | Unsupported | Separate endpoint | Supported for static ARM64, no network | Only operations proven to dispatch to the same owner |
-| Verified guest cleanup | Unknown at Docker acknowledgement | Unknown unless independently verified | Explicit terminal cleanup | Must be independently verified |
+| Persistent exec, attach, logs, events and cp | Probe each operation | Guest Docker/containerd | Bounded per-launch streams and native control | Noninteractive attach and bounded lifecycle event snapshots. Persistent exec, log streaming and copy are outside that subset |
+| Fresh and one-use prepared native launch | Unsupported | Separate endpoint | Supported for static ARM64, no network | Verified fresh OCI execution. Prepared OCI is outside the subset |
+| Verified guest cleanup | Unknown at Docker acknowledgement | Unknown unless independently verified | Explicit terminal cleanup | Explicit terminal cleanup, recorded with the native workload ID |
+
+The source adapter column reflects the subsequent SPEED-018 verification.
+The separate adapter procedure defines the documented limits and required
+operation flags. [Native Docker adapter](docker-native-adapter.md)
 
 Probe means the comparison will test semantics rather than assuming that a
 Docker-compatible version string guarantees support. Record requested and
