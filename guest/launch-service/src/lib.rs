@@ -8,7 +8,10 @@ pub mod fresh_fixture;
 pub mod guest;
 pub mod handshake;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod image_store;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub mod kernel_fixture;
+pub mod oci;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub mod recovery_fixture;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]

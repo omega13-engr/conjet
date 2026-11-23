@@ -159,6 +159,16 @@ incomplete stream at its next offset using Output. The capture limit remains
 64 KiB per stream. Output delivery and overflow reporting do not move the
 guest cleanup boundary.
 
+The native OCI image control operation uses an authenticated, boot-bound
+transfer. One connection owns the upload with a unique transfer ID and
+strict successive offsets. The guest admits at most three extra images
+with a combined 64 MiB package budget. Chunks contain at most 8 KiB of
+decoded data. The guest verifies complete size, package SHA-256 and config
+digest before publishing an immutable root. Disconnect discards an
+uncommitted transfer. If a commit response is lost, Inspect reports
+installed image identity. The guest refuses removal of its boot image or
+an image referenced by an admitted workload with unresolved cleanup.
+
 | Phase | Transition owner and rule |
 |---|---|
 | accepted | Supervisor reserves a bounded record and writes an intent before making resources. |

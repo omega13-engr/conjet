@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::handshake::{hex, random};
+use crate::image_store::{self, ConnectionId};
 use crate::intent::{DIRECTORY, Intent};
 use crate::output::{Capture, capture};
 use crate::prepared::{CANCEL, ClaimError, RELEASE, SLOT_MEMORY_LIMIT, SLOT_TTL, Slot};
@@ -139,6 +140,7 @@ struct Record {
     handle: Handle,
     sequence: u64,
     body: [u8; 32],
+    image_digest: String,
     phase: Phase,
     revision: u64,
     exec: &'static str,
@@ -224,6 +226,7 @@ impl Record {
 
 #[derive(Default)]
 struct Ledger {
+    images: image_store::Store,
     highest_sequence: u64,
     closing: bool,
     waiting: usize,
@@ -291,6 +294,22 @@ pub(crate) struct FreshFixture {
     intent: Intent,
     ledger: Mutex<Ledger>,
     changed: Condvar,
+}
+
+pub(crate) struct ConnectionLease<'a> {
+    pub(crate) fresh: &'a FreshFixture,
+    pub(crate) id: ConnectionId,
+}
+
+impl Drop for ConnectionLease<'_> {
+    fn drop(&mut self) {
+        self.fresh
+            .ledger
+            .lock()
+            .expect("fresh ledger")
+            .images
+            .disconnect(self.id);
+    }
 }
 
 type Failure = (&'static str, &'static str);
@@ -518,9 +537,7 @@ impl FreshFixture {
                 ));
             }
         };
-        if (mode != "benchmark" && spec.image_digest != self.image_digest)
-            || (!self.oci && (spec.cwd != "/work" || !spec.env.is_empty()))
-        {
+        if !self.oci && (spec.cwd != "/work" || !spec.env.is_empty()) {
             return Err((
                 "unsupported_option",
                 "request does not match the pinned ARM64 executable profile",
@@ -563,6 +580,12 @@ impl FreshFixture {
         hash.update(serde_json::to_vec(request).expect("typed request"));
         let body: [u8; 32] = hash.finalize().into();
         let mut ledger = self.ledger.lock().expect("fresh ledger");
+        if mode != "benchmark"
+            && spec.image_digest != self.image_digest
+            && !(self.oci && ledger.images.contains(&spec.image_digest))
+        {
+            return Err(("unsupported_option", "requested OCI image is not installed"));
+        }
         if let Some(record) = &ledger.record {
             if record.sequence == request.sequence {
                 if record.body != body {
@@ -609,6 +632,7 @@ impl FreshFixture {
             },
             sequence: request.sequence,
             body,
+            image_digest: spec.image_digest.clone(),
             phase: Phase::Accepted,
             revision: 1,
             exec: "pending",
@@ -882,7 +906,7 @@ impl FreshFixture {
         Ok((stdout, stderr, recovered))
     }
 
-    fn operation(self: &Arc<Self>, frame: &Frame, boot: &str) -> Reply {
+    fn operation(self: &Arc<Self>, frame: &Frame, boot: &str, connection: ConnectionId) -> Reply {
         fn parse<T: serde::de::DeserializeOwned>(frame: &Frame) -> Result<T, Failure> {
             frame
                 .decode()
@@ -971,8 +995,32 @@ impl FreshFixture {
                         "image_digest": self.image_digest,
                         "last_sequence": guard.highest_sequence,
                         "workload": guard.record.as_ref().map(Record::state),
+                        "installed_images": guard.images.snapshot(),
                     }),
                 ))
+            }
+            Kind::Image if self.oci => {
+                let request: image_store::Request = parse(frame)?;
+                if request.boot_id != boot {
+                    return Err(("stale_generation", "unexpected boot ID"));
+                }
+                let expires = deadline(request.budget_ms)?;
+                if guard.closing {
+                    return Err(("busy", "fresh fixture is draining"));
+                }
+                let live_image = guard
+                    .record
+                    .as_ref()
+                    .filter(|record| record.phase != Phase::Removed)
+                    .map(|record| record.image_digest.clone());
+                let response = guard.images.handle(
+                    request,
+                    connection,
+                    &self.image_digest,
+                    live_image.as_deref(),
+                    expires,
+                )?;
+                Ok((Kind::Image, response))
             }
             Kind::Memory => {
                 let request: MemoryRequest = parse(frame)?;
@@ -1076,8 +1124,9 @@ impl FreshFixture {
         frame: Frame,
         stream: &mut Stream,
         boot: &str,
+        connection: ConnectionId,
     ) -> Result<(), WireError> {
-        let reply = self.operation(&frame, boot);
+        let reply = self.operation(&frame, boot, connection);
         stream.deadline(Some(Instant::now() + Duration::from_secs(2)));
         match reply {
             Ok((kind, reply)) => Frame::write(stream, kind, frame.id, &reply),

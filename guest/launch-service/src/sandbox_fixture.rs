@@ -8,11 +8,13 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use crate::security::{self, WorkloadFilter};
-use crate::spec::{GID_BASE, ID_MAP_WIDTH, UID_BASE, WORKLOAD_GID, WORKLOAD_UID};
+use crate::spec::{GID_BASE, ID_MAP_WIDTH, LaunchSpec, UID_BASE, WORKLOAD_GID, WORKLOAD_UID};
 
 const BASE: &str = "/run/conjet/workload-probe";
 pub(crate) const BENCHMARK_EXECUTABLE: &str = "/etc/conjet/benchmark-executable";
 pub(crate) const OCI_ROOT: &str = "/etc/conjet/oci-root";
+pub(crate) const OCI_MARKER: &str = "/etc/conjet/native-oci-image";
+const OCI_LINKS: &str = "/etc/conjet/native-oci-hardlinks.json";
 pub(crate) const NATIVE_EXECUTABLE: &str = "/etc/conjet/native-executable";
 
 pub(crate) struct Sandbox {
@@ -27,7 +29,7 @@ impl Sandbox {
     pub(crate) fn prepare(
         bridge: bool,
         executable: &str,
-        oci_cwd: Option<&str>,
+        oci: Option<&LaunchSpec>,
     ) -> io::Result<Self> {
         let base = Path::new(BASE);
         std::fs::create_dir(base)?;
@@ -35,15 +37,31 @@ impl Sandbox {
             for entry in ["lower", "lower/bin", "lower/work", "upper", "work", "root"] {
                 std::fs::create_dir(base.join(entry))?;
             }
-            if oci_cwd.is_none() {
+            let lower = if let Some(spec) = oci {
+                let (lower, links) = if fs::read_to_string(OCI_MARKER)? == spec.image_digest {
+                    (
+                        Path::new(OCI_ROOT).to_path_buf(),
+                        Path::new(OCI_LINKS).to_path_buf(),
+                    )
+                } else {
+                    let imported = crate::image_store::imported_root(&spec.image_digest)
+                        .ok_or_else(|| io::Error::other("invalid OCI image digest"))?;
+                    let lower = imported.join("root");
+                    if !lower.symlink_metadata()?.is_dir() {
+                        return Err(io::Error::other("OCI lower root is unavailable"));
+                    }
+                    (lower, imported.join("hardlinks.json"))
+                };
+                prepare_oci_hardlinks(&lower, &links, &base.join("upper"))?;
+                lower
+            } else {
                 std::fs::copy(executable, base.join("lower/bin/probe"))?;
                 std::fs::set_permissions(
                     base.join("lower/bin/probe"),
                     std::fs::Permissions::from_mode(0o555),
                 )?;
-            } else {
-                prepare_oci_hardlinks(&base.join("upper"))?;
-            }
+                base.join("lower")
+            };
             std::fs::write(base.join("lower/work/immutable"), b"verified fixture\n")?;
             if bridge {
                 std::fs::create_dir(base.join("lower/etc"))?;
@@ -76,16 +94,12 @@ impl Sandbox {
                 base.join("outside-canary"),
                 b"must stay outside workload root\n",
             )?;
-            let lower = if oci_cwd.is_some() {
-                OCI_ROOT
-            } else {
-                concat!("/run/conjet/workload-probe", "/lower")
-            };
             Ok(Self {
-                cwd: CString::new(oci_cwd.unwrap_or("/work"))?,
+                cwd: CString::new(oci.map_or("/work", |spec| spec.cwd.as_str()))?,
                 new_root: CString::new(base.join("root").as_os_str().as_bytes())?,
                 overlay: CString::new(format!(
-                    "lowerdir={lower},upperdir={BASE}/upper,workdir={BASE}/work,userxattr"
+                    "lowerdir={},upperdir={BASE}/upper,workdir={BASE}/work,userxattr",
+                    lower.display()
                 ))?,
                 filter: WorkloadFilter::new(bridge),
                 stdin: File::open("/dev/null")?,
@@ -257,13 +271,12 @@ pub fn verify_after_exec() -> io::Result<()> {
 // On the tested overlay filesystem, copying up one lower hard link breaks
 // its aliases even with index=on. Seed complete groups in the private upper
 // before mounting it so both link identity and lower immutability survive.
-fn prepare_oci_hardlinks(upper: &Path) -> io::Result<()> {
-    const MANIFEST: &str = "/etc/conjet/native-oci-hardlinks.json";
+fn prepare_oci_hardlinks(lower: &Path, manifest: &Path, upper: &Path) -> io::Result<()> {
     const MAX_LINKS: usize = 4096;
     const MAX_METADATA: u64 = 5 * 1024 * 1024;
     const MAX_CONTENT: u64 = 40 * 1024 * 1024;
 
-    let file = match File::open(MANIFEST) {
+    let file = match File::open(manifest) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
@@ -277,7 +290,6 @@ fn prepare_oci_hardlinks(upper: &Path) -> io::Result<()> {
         return Err(io::Error::other("invalid native OCI hard-link manifest"));
     }
     let groups: BTreeMap<String, Vec<String>> = serde_json::from_reader(file.take(MAX_METADATA))?;
-    let lower = Path::new(OCI_ROOT);
     let mut seen = HashSet::new();
     let mut copied = 0;
     for (source, aliases) in &groups {

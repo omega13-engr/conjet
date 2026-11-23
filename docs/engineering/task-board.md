@@ -375,17 +375,34 @@ Docker pull needs a runnable image in an already authenticated guest.
 Approach: Add a single bounded transfer lease, verify before publication,
 and bind the resulting lower root to the launch image digest.
 
-Evidence: Live installation checks pending. Retain raw evidence under
+Evidence: DONE. Rebuilt the release guest and VMM from the working tree on
+`0096f36` and reused the source-identical Swift CLI. Ran the private
+launcher with `--diagnostics oci-import` and the pinned SPEED-031 fixture.
+The Rust installer transferred, verified, and published the package into
+the same authenticated boot. The negative cases checked stale generation,
+capacity, wrong offset, bad hash, a foreign connection, and disconnect
+before commit. Live checks verified referenced-root rejection, removal
+after cleanup, rejection of requests for the removed digest without
+admission, and original boot-image execution after removal. The imported
+fixture's hard-link and writable-overlay canaries passed through Docker.
+Formatting, guest and Jetstream tests, guest Clippy, and the Python adapter
+tests passed. Jetstream Clippy retains its baseline PSCI and FFI errors.
+Exact commands, hashes and launcher evidence are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-032A`.
 
 Source: [Launch service contract](launch-service-contract.md),
 [`fresh_fixture.rs`](../../guest/launch-service/src/fresh_fixture.rs),
 [`sandbox_fixture.rs`](../../guest/launch-service/src/sandbox_fixture.rs).
 
-Review: Pending implementation and isolated runtime verification.
+Review: Local runtime and diff checks passed. Transfer ownership follows
+the authenticated connection and boot generation. Bounds cover image
+count, staged bytes, frame size and time. Publication requires a complete
+verified package. A lost commit reply requires Inspect rather than replay.
+The launchers verified unchanged production and removed their sessions
+and sockets. Independent PR review is separate.
 
-Next Action: Implement bounded, authenticated installation and prove a
-same-boot launch of the pinned two-layer fixture.
+Next Action: Integrate this guest protocol with Docker pull and the
+ExternalSSD content store in SPEED-032.
 
 ### SPEED-032
 

@@ -26,6 +26,8 @@ enum Action {
     DockerServe(docker::Options),
     /// Verify and stage an OCI manifest from a private content layout.
     DockerStage(oci_stage::Options),
+    /// Install a verified OCI package into an idle candidate guest.
+    DockerInstall(docker::InstallOptions),
     /// Drain the isolated native OCI guest.
     DockerStop {
         #[arg(long)]
@@ -71,6 +73,7 @@ pub fn run(args: Arguments) -> anyhow::Result<()> {
         Action::DockerBoot(_)
             | Action::DockerServe(_)
             | Action::DockerStage(_)
+            | Action::DockerInstall(_)
             | Action::DockerStop { .. }
     );
     ensure!(
@@ -81,6 +84,7 @@ pub fn run(args: Arguments) -> anyhow::Result<()> {
         Action::DockerBoot(options) => docker::boot(options),
         Action::DockerServe(options) => docker::serve(options),
         Action::DockerStage(options) => oci_stage::stage(options),
+        Action::DockerInstall(options) => docker::install(options),
         Action::DockerStop { session } => docker::stop(&session),
         Action::Serve(options) => session::serve(options),
         Action::Run(target) => client::invoke(target, client::Operation::Run),

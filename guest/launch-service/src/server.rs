@@ -89,6 +89,14 @@ impl Server {
         stream.deadline(Some(Instant::now() + FRAME_TIMEOUT));
         handshake::guest(&mut stream, &self.key, self.boot_id, self.capabilities())?;
         let boot_id = hex(&self.boot_id);
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        let lease = self
+            .fresh
+            .as_ref()
+            .map(|fresh| {
+                handshake::random().map(|id| crate::fresh_fixture::ConnectionLease { fresh, id })
+            })
+            .transpose()?;
         let mut pending: Option<Pending<'_>> = None;
         loop {
             let wait_deadline = pending.as_ref().map(|request| request.due);
@@ -141,9 +149,15 @@ impl Server {
                         | Kind::Claim
                         | Kind::Memory
                         | Kind::Inspect
+                        | Kind::Image
                 )
             {
-                fresh.dispatch(frame, &mut stream, &boot_id)?;
+                fresh.dispatch(
+                    frame,
+                    &mut stream,
+                    &boot_id,
+                    lease.as_ref().expect("fixture lease").id,
+                )?;
                 continue;
             }
             match frame.kind {

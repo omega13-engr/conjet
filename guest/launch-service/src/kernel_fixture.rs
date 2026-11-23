@@ -205,7 +205,7 @@ fn run(
         _ => "/init",
     };
     let sandbox = with_sandbox
-        .then(|| Sandbox::prepare(network, executable, process.map(|spec| spec.cwd.as_str())))
+        .then(|| Sandbox::prepare(network, executable, process))
         .transpose()?;
     inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)

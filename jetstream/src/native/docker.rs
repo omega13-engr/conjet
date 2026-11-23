@@ -1,6 +1,9 @@
 //! Bounded Docker compatibility endpoint for the isolated OCI candidate.
 mod http;
+mod image;
 mod request;
+
+pub(super) use image::{install, InstallOptions};
 
 use std::collections::VecDeque;
 use std::fs;
@@ -125,23 +128,39 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     ensure!(bytes.len() <= 65536, "OCI receipt exceeds its bound");
     let metadata = request::Image::new(options.image, serde_json::from_slice(&bytes)?)?;
 
-    let lock = client::open_private(&options.native_session.join(session::LOCK))?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(io::Error::last_os_error()).context("native admission already owned");
-    }
-    // The lock outlives the authenticated connection and all Docker handlers.
+    let _lock = admission_lock(&options.native_session)?;
     let (identity, key) = client::load(&options.native_session)?;
-    ensure!(
-        identity.image_digest == metadata.config_digest,
-        "native image mismatch"
-    );
     let mut peer = client::Connection::open(&options.native_session, &identity, &key)?;
     ensure!(peer.oci, "native Docker requires OCI capability");
     let status = peer.inspect()?;
     ensure!(
-        status["image_digest"] == metadata.config_digest && status["workload"].is_null(),
-        "native guest must start dedicated and idle"
+        status["image_digest"] == identity.image_digest
+            && (status["image_digest"] == metadata.config_digest
+                || status["installed_images"].as_array().is_some_and(|images| {
+                    images
+                        .iter()
+                        .any(|image| image["config_digest"] == metadata.config_digest)
+                }))
+            && (status["workload"].is_null() || status["workload"]["cleanup"] == "complete"),
+        "native guest must be dedicated, idle and own the requested image"
     );
+    serve_endpoint(options.socket, metadata, peer, status)
+}
+
+fn admission_lock(directory: &Path) -> anyhow::Result<fs::File> {
+    let lock = client::open_private(&directory.join(session::LOCK))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error()).context("native admission already owned");
+    }
+    Ok(lock)
+}
+
+fn serve_endpoint(
+    socket: PathBuf,
+    metadata: request::Image,
+    peer: client::Connection,
+    status: Value,
+) -> anyhow::Result<()> {
     let boot = peer.boot.clone();
     let sequence = status["last_sequence"]
         .as_u64()
@@ -153,8 +172,8 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     };
 
     signal_handlers()?;
-    let listener = UnixListener::bind(&options.socket)?;
-    let _socket = OwnedSocket(options.socket);
+    let listener = UnixListener::bind(&socket)?;
+    let _socket = OwnedSocket(socket);
     fs::set_permissions(&_socket.0, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
     println!(

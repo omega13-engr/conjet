@@ -444,7 +444,7 @@ fn build_archive(
                 0,
             )?;
         }
-        root.append(|name, mode, uid, gid, data, link| append_entry(name, mode, data, 0, 0, uid, gid, link))?;
+        super::oci::append(root, |name, mode, uid, gid, data, link| append_entry(name, mode, data, 0, 0, uid, gid, link))?;
         append_entry("TRAILER!!!", 0, &[], 0, 0, 0, 0, None)?;
         return Ok(());
     } else {

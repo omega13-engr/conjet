@@ -396,12 +396,24 @@ def native_session(args, root):
         directory = candidate
         report['vmm_pid'] = vm.pid
         report['native_session'] = str(directory)
+        if args.diagnostics == 'oci-import':
+            diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-live-install.py'))
+            config_digest = json.loads(args.import_receipt.read_text())['config_digest']
+            boot = diagnostic['preflight'](directory, vm.pid, config_digest, output)
+            package_hash = fingerprint(args.import_package)['sha256']
+            install = [args.core, 'native', 'docker-install', '--session', directory,
+                       '--package', args.import_package, '--sha256', package_hash]
+            report['install_command'] = list(map(str, install))
+            report['install'] = json.loads(run(install, env=env, timeout=60))
+            if report['install']['boot_id'] != boot:
+                raise RuntimeError('image was installed into a different boot')
+            diagnostic['postflight'](directory, vm.pid, config_digest, boot, output)
         run(docker + ['context', 'create', CONTEXT, '--docker', f'host={host}'], env=env)
         if run(docker + ['context', 'inspect', CONTEXT, '--format', '{{.Endpoints.docker.Host}}'], env=env) != host:
             raise RuntimeError('private native Docker context endpoint mismatch')
         docker += ['--context', CONTEXT]
         bridge_command = [sys.executable, adapter] if python_owner else [args.core, 'native', 'docker-serve']
-        bridge_command += ['--native-session', directory, '--receipt', args.native_receipt,
+        bridge_command += ['--native-session', directory, '--receipt', args.import_receipt or args.native_receipt,
                            '--image', args.image, '--socket', endpoint]
         if args.diagnostics == 'trace':
             bridge_command += ['--trace', output / 'adapter-trace.json']
@@ -426,9 +438,13 @@ def native_session(args, root):
         report['backend'] = version['Platform']['Name']
         print(f'Native Docker ready: {host}', flush=True)
         if args.diagnostics:
-            if args.diagnostics == 'oci':
-                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
-                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.image)
+            if args.diagnostics in ('oci', 'oci-import'):
+                oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
+                oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
+                if args.diagnostics == 'oci-import':
+                    if stop_child(bridge, 45) != 0:
+                        raise RuntimeError('Rust Docker owner did not stop before image removal check')
+                    diagnostic['verify_removal'](directory, vm.pid, config_digest, boot, output)
             else:
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-diagnostic.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
@@ -500,10 +516,12 @@ def main():
     parser.add_argument('--core', required=True, type=Path)
     parser.add_argument('--legacy-baseline', action='store_true', help='explicit historical Docker/containerd lane')
     parser.add_argument('--network-helper', type=Path)
-    for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output'):
+    for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output',
+                 'import-package', 'import-receipt'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
-    parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci'), help='run native-only diagnostic canaries')
+    parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import'),
+                        help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--image', default='alpine:3.22')
@@ -524,6 +542,12 @@ def main():
     if args.docker_args[:1] == ['--']:
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
+    if args.diagnostics == 'oci-import':
+        if not (args.import_package and args.import_receipt and args.docker_owner == 'rust'):
+            parser.error('OCI import diagnostics require the Rust owner and a staged package and receipt')
+        native_assets += ('import_package', 'import_receipt')
+    elif args.import_package or args.import_receipt:
+        parser.error('import package and receipt require OCI import diagnostics')
     if (bool(args.benchmark_scenario) != bool(args.benchmark_archive)
             or (args.benchmark_scenario and not args.benchmark_output)):
         parser.error('a staged scenario requires benchmark output and an image archive')
