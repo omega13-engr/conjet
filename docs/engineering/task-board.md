@@ -83,41 +83,43 @@ retain their old acceptance criteria for research provenance.
 
 ## BACKLOG
 
-### SPEED-047
+### SPEED-048
 
-Title: Trace retained Docker start and wait across Jetstream and the guest
+Title: Evaluate event-driven ingress on the retained Docker VSOCK bridge
 
-Description: Attribute a single pinned no-network API workload to
-host transport and guest lifecycle spans before choosing a native
-integration boundary.
+Description: Wake the existing Jetstream queue owner on private Docker
+socket readiness. Retain the current engine and 25 ms fallback tick.
 
-Is blocked by task: SPEED-046 (DONE).
+Is blocked by task: SPEED-047 (DONE).
 
 Acceptance Criteria:
 
-- Capture bounded native Jetstream request/response wakeup spans on
-  the host and guest-local dockerd/containerd start and exit events.
-- Correlate by owned container identity and keep monotonic clock
-  domains separate. Record trace overhead in separate control runs.
-- Recommend one controllable optimization only if the trace
-  demonstrates a bottleneck and preserves lifecycle ownership.
+- Reuse the existing owned readiness watcher, with an isolated opt-in
+  and a rollback to the polling path.
+- Preserve ordinary Docker lifecycle results, stream framing, EOF and
+  cleanup. Test the listener wake and socket ownership directly.
+- Compare release builds with ingress wake off and on in separate
+  boots. Measure transport publication and complete workload latency.
+  Keep the experiment opt-in if the workload result remains uncertain.
 
-Problem and Evidence: Start and wait consume most observed API
-elapsed time. SPEED-046 establishes the outer boundaries only.
+Problem and Evidence: SPEED-047 observed 4.44–8.58 ms of median
+start-request delay between host queueing and guest-ring publication
+in the host-only traces. The Docker accept loop polls every
+10 ms and the initialized guest can wait for the VMM tick.
 
-Approach: Reuse host VSOCK observations and guest-local lifecycle
-events. Keep the existing engine and the 25 ms VMM tick while
-collecting this diagnostic.
+Approach: Apply the scoped readiness notification used by the
+native-launch transport to Docker ingress. Keep the host queue,
+credit, Docker engine and guest lifecycle owners intact.
 
-Evidence: Pending. No implementation or qualification results.
+Evidence: Pending release A/B runs and correctness checks.
 
-Source: [SPEED-046 results](docker-benchmark-results.md),
-[retained Docker plan](native-docker-speed-plan.md).
+Source: [SPEED-047](#speed-047),
+[`vsock.rs`](../../jetstream/src/devices/vsock.rs).
 
-Review: Pending evidence for the selected integration boundary.
+Review: Pending isolated transport and workload evidence.
 
-Next Action: Prepare a separate scoped instrumentation change for
-the retained engine.
+Next Action: Implement the reversible readiness path after SPEED-047
+finishes. Freeze the matched Kiri comparison separately.
 
 ### SPEED-014
 
@@ -1163,6 +1165,56 @@ Next Action: Preserve the source and diagnostics. The retained Docker
 path has no dependency on this experiment.
 
 ## DONE
+
+### SPEED-047
+
+Title: Trace retained Docker start and wait across Jetstream and the guest
+
+Description: Attribute a single pinned no-network API workload to
+host transport and guest lifecycle spans before choosing a native
+integration boundary.
+
+Is blocked by task: SPEED-046 (DONE).
+
+Acceptance Criteria:
+
+- Capture bounded native Jetstream request/response wakeup spans on
+  the host and guest-local dockerd/containerd start and exit events.
+- Correlate by owned container identity and keep monotonic clock
+  domains separate. Record trace overhead in separate control runs.
+- Recommend one controllable optimization only if the trace
+  demonstrates a bottleneck and preserves lifecycle ownership.
+
+Problem and Evidence: Start and wait consume most observed API
+elapsed time. SPEED-046 establishes the outer boundaries only.
+
+Approach: Reuse host VSOCK observations and guest-local lifecycle
+events. Keep the existing engine and the 25 ms VMM tick while
+collecting this diagnostic.
+
+Evidence: DONE. At `faf374d` plus this change, built the release host
+tools and ran two untraced, two host-only and two combined traced boots.
+Each had four warmups and 12 measurements. Every tagged start and wait
+had the five host phases. Each combined trace recorded dockerd and
+containerd lifecycle events for all 16 workloads by container ID.
+Host-only start queue-to-ring medians were 4.44 and 8.58 ms. Combined
+tracing changed workload timing materially. Raw logs, controls and
+adverse pilots are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-047`.
+
+Source: [SPEED-046 results](docker-benchmark-results.md),
+[retained Docker plan](native-docker-speed-plan.md).
+
+Review: All six final boots confirmed unchanged production, closed
+handles and exact scratch removal. Rust tests passed. The diagnostic
+keeps the VMM monotonic and guest engine wall clock domains separate.
+The guest observer runs only in the disposable Core VM, with no
+network, no capabilities and an immutable filesystem. The host-only
+trace is the basis for the isolated ingress experiment. The combined
+trace is causal event evidence and does not qualify a speed claim.
+
+Next Action: Implement and test the optional Docker ingress wake
+in SPEED-048.
 
 ### SPEED-046
 

@@ -9,6 +9,38 @@ descriptive results at the stated boundaries. SPEED-008 remains unresolved.
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Native OCI research scope](docker-native-adapter.md)
 
+## SPEED-047 retained Docker start and wait trace
+
+The release host tools, Core 1.3.1 and the same pinned ARM64 fixture
+ran six private boots. Each boot completed four warmups and 12
+measured no-network API lifecycles. The harness opened a fresh
+HTTP connection for each request in all modes.
+
+| Trace mode | Lifecycle median, boot 1 / 2 (ms) | Start host queue to guest ring (ms) | Wait host queue to guest ring (ms) |
+| --- | ---: | ---: | ---: |
+| Disabled | 302.162 / 300.923 | — | — |
+| Host only | 335.578 / 309.482 | 8.582 / 4.443 | 2.691 / 3.812 |
+| Host plus guest observers | 211.647 / 165.910 | 6.956 / 7.625 | 2.972 / 5.100 |
+
+The tagged traces measured VMM-local socket acceptance, queueing,
+guest-ring publication, guest response arrival and host flush attempts.
+The probe captured Docker create, start, die and destroy plus
+containerd task start and exit by container ID. Containerd task
+start-to-exit medians were 1.886 and 2.305 ms within its guest event
+clock. The guest event API returned inconsistent wall-clock bounds in
+an adverse pilot. The successful runs used live subscriptions. No
+elapsed interval subtracts a guest timestamp from a host timestamp.
+
+The observers altered request timing enough to exclude these runs
+from qualification. Host-only evidence isolates a reversible
+publication delay worth testing in SPEED-048. The interval from
+guest-ring publication to the VMM's receipt includes guest dispatch,
+daemon work and response scheduling. The trace does not assign that
+entire interval to a single component. Production matched before and
+after all runs, with observer and launcher cleanup verified. Raw
+commands, build logs, stage timestamps and adverse trials are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-047`.
+
 ## SPEED-046 retained Docker path diagnostic
 
 One isolated release boot at `de8773b` used Docker Engine 29.1.3,

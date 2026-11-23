@@ -7,6 +7,8 @@ use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -51,6 +53,56 @@ const CONJET_BINARY_FRAME_HEADER_LEN: usize = 20;
 const CONJET_BINARY_FRAME_TCP_DATA: u8 = 15;
 const MAX_CONJET_BINARY_FRAME_PAYLOAD: usize = 1024 * 1024;
 const MAX_DOCKER_WORKLOAD_REQUEST_PREFIX_BYTES: usize = 16 * 1024;
+
+fn docker_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var_os("CONJET_DOCKER_TRANSPORT_TRACE").is_some_and(|v| v == "1"))
+}
+
+fn docker_trace_tag(payload: &[u8]) -> Option<[u8; 32]> {
+    let header_end = payload
+        .get(..payload.len().min(8192))?
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")?;
+    let header = payload.get(..header_end)?;
+    let mut lines = header.split(|b| *b == b'\n');
+    let request = lines.next()?;
+    if !request.starts_with(b"POST ") {
+        return None;
+    }
+    lines.find_map(|line| {
+        let tag: [u8; 32] = line
+            .strip_suffix(b"\r")
+            .unwrap_or(line)
+            .strip_prefix(b"X-Conjet-Benchmark-Trace: ")?
+            .try_into()
+            .ok()?;
+        tag.iter()
+            .all(|&b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            .then_some(tag)
+    })
+}
+
+fn docker_trace(tag: &[u8; 32], phase: &str, at: Instant) {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    static EVENTS: AtomicUsize = AtomicUsize::new(0);
+    // Clamp to the diagnostic budget without writing request paths or bytes.
+    if EVENTS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            (n < 512).then_some(n + 1)
+        })
+        .is_ok()
+    {
+        let epoch = *EPOCH.get_or_init(|| at);
+        eprintln!(
+            "conjet-docker-trace {} {} {}",
+            std::str::from_utf8(tag).expect("validated hex"),
+            phase,
+            at.saturating_duration_since(epoch).as_nanos()
+        );
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum VsockError {
@@ -379,6 +431,7 @@ impl VsockQueueHandler {
             return Ok(Vec::new());
         }
         let mut prepared = Vec::new();
+        let mut trace_deliveries = Vec::new();
         for chain in chains {
             let Some(packet) = self.pending_host_packets.pop_front() else {
                 break;
@@ -390,6 +443,14 @@ impl VsockQueueHandler {
             if capacity < HEADER_LEN {
                 self.pending_host_packets.push_front(packet);
                 break;
+            }
+            if packet.dst_port == DOCKER_BRIDGE_PORT && packet.op == OP_RW && docker_trace_enabled()
+            {
+                if let Some(tag) = docker_trace_tag(
+                    &packet.payload[..packet.payload.len().min(capacity - HEADER_LEN)],
+                ) {
+                    trace_deliveries.push(tag);
+                }
             }
             let encoded = packet.encode();
             if encoded.len() > capacity {
@@ -432,6 +493,9 @@ impl VsockQueueHandler {
         }
         self.receive_executor
             .publish_used(queue, transport, memory, guest_base, &used)?;
+        for tag in trace_deliveries {
+            docker_trace(&tag, "guest_rx_published", Instant::now());
+        }
         if !used.is_empty() && transport.interrupt_status == 0 {
             transport.mark_queue_used();
         }
@@ -1009,6 +1073,18 @@ impl HostUnixVsockBridgeState {
                     let Some((buf, request_complete)) = host_payload.into_forwarded() else {
                         continue;
                     };
+                    if self.guest_port == DOCKER_BRIDGE_PORT && docker_trace_enabled() {
+                        if let Some(tag) = docker_trace_tag(&buf) {
+                            let now = Instant::now();
+                            docker_trace(
+                                &tag,
+                                "socket_accepted",
+                                stream.accepted_at.unwrap_or(now),
+                            );
+                            docker_trace(&tag, "request_queued", now);
+                            stream.trace_tag = Some(tag);
+                        }
+                    }
                     stream.bytes_sent_to_guest =
                         stream.bytes_sent_to_guest.wrapping_add(buf.len() as u64);
                     let fwd_cnt = stream.forward_count();
@@ -1078,6 +1154,10 @@ impl HostUnixVsockBridgeState {
             }
             OP_RW => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
+                    let trace_tag = stream.trace_tag.take();
+                    if let Some(tag) = &trace_tag {
+                        docker_trace(tag, "guest_response_rx", Instant::now());
+                    }
                     stream.update_guest_credit(&packet);
                     let workload_was_detected = stream.is_docker_workload();
                     if !stream.binary_frame_stream {
@@ -1110,6 +1190,9 @@ impl HostUnixVsockBridgeState {
                             stream.forward_count(),
                         ));
                         return true;
+                    }
+                    if let Some(tag) = &trace_tag {
+                        docker_trace(tag, "client_flush_attempt", Instant::now());
                     }
                     self.poll_host_stream(host_port);
                     true
@@ -1193,6 +1276,8 @@ impl HostUnixVsockBridgeState {
 #[derive(Debug)]
 struct HostUnixVsockStream {
     socket: UnixStream,
+    accepted_at: Option<Instant>,
+    trace_tag: Option<[u8; 32]>,
     bytes_received_from_guest: u64,
     bytes_forwarded_to_host: u64,
     last_advertised_guest_forward_count: u32,
@@ -1227,6 +1312,8 @@ impl HostUnixVsockStream {
     fn new(socket: UnixStream) -> Self {
         Self {
             socket,
+            accepted_at: docker_trace_enabled().then(Instant::now),
+            trace_tag: None,
             bytes_received_from_guest: 0,
             bytes_forwarded_to_host: 0,
             last_advertised_guest_forward_count: 0,
@@ -3236,4 +3323,27 @@ mod tests {
         assert_eq!(bridge.docker_phase_response_events(), 1);
         assert_eq!(bridge.docker_response_bytes(), payload.len() as u64);
     }
+}
+#[test]
+fn diagnostic_tag_requires_a_bounded_http_header_and_valid_hex() {
+    let tag = b"0123456789abcdef0123456789abcdef";
+    let request = [
+        b"POST /start HTTP/1.1\r\nX-Conjet-Benchmark-Trace: ".as_slice(),
+        tag,
+        b"\r\n\r\n",
+    ]
+    .concat();
+    assert_eq!(docker_trace_tag(&request), Some(*tag));
+    let in_body = [
+        b"POST /start HTTP/1.1\r\n\r\nX-Conjet-Benchmark-Trace: ".as_slice(),
+        tag,
+        b"\r\n\r\n",
+    ]
+    .concat();
+    assert_eq!(docker_trace_tag(&in_body), None);
+    assert_eq!(docker_trace_tag(&request[..request.len() - 1]), None);
+    let mut invalid = request;
+    let digit = invalid.len() - 5;
+    invalid[digit] = b'g';
+    assert_eq!(docker_trace_tag(&invalid), None);
 }

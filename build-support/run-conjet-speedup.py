@@ -213,6 +213,8 @@ def session(args, root):
         'CONJET_NETWORK_HELPER_PATH': str(network), 'CONJET_DISABLE_MENU_BAR_APP': '1',
         'CONJET_DISABLE_BACKGROUND_SERVICE_REGISTRATION': '1',
     }
+    if args.retained_trace:
+        env['CONJET_DOCKER_TRANSPORT_TRACE'] = '1'
     before = production()
     if before['endpoint'] == f'unix://{docker_socket}':
         raise RuntimeError('candidate overlaps production Docker')
@@ -289,6 +291,12 @@ def session(args, root):
         if evidence['smoke'] != 'conjet-speedup-ok':
             raise RuntimeError('unexpected fixture output')
         print(evidence['smoke'], flush=True)
+        if args.retained_trace_output:
+            profile = runpy.run_path(str(REPO / 'benchmarks/retained-docker-trace.py'))
+            profile['collect'](docker_socket, docker_config, docker_peer, DOCKER,
+                               args.retained_trace_output, args.benchmark_scenario,
+                               args.benchmark_archive, args.retained_trace,
+                               args.retained_trace and not args.retained_host_only, args.benchmark_samples)
         if args.comparison_output:
             comparison = runpy.run_path(str(REPO / 'benchmarks/docker-comparison.py'))
             comparison['run_suite']('conjet', docker_socket, docker_config, docker_peer,
@@ -581,6 +589,9 @@ def main():
     parser.add_argument('--comparison-mode', choices=('preflight', 'pilot', 'probes', 'lifecycle', 'images', 'builds', 'compose', 'control',
                                                          'storage_network', 'stress'), default='preflight')
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
+    parser.add_argument('--retained-trace-output', type=Path)
+    parser.add_argument('--retained-trace', action='store_true')
+    parser.add_argument('--retained-host-only', action='store_true')
     parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
     parser.add_argument('--benchmark-scenario', type=Path, help='use a staged lifecycle scenario')
     parser.add_argument('--benchmark-archive', type=Path, help='load the scenario image into the private runtime')
@@ -605,8 +616,20 @@ def main():
     elif args.registry_fixtures:
         parser.error('registry fixtures require registry diagnostics')
     if (bool(args.benchmark_scenario) != bool(args.benchmark_archive)
-            or (args.benchmark_scenario and not args.benchmark_output)):
+            or (args.benchmark_scenario and not (args.benchmark_output or args.retained_trace_output))):
         parser.error('a staged scenario requires benchmark output and an image archive')
+    if args.retained_host_only and not args.retained_trace:
+        parser.error('host-only mode requires retained transport tracing')
+    if args.retained_trace_output or args.retained_trace:
+        if (not args.legacy_baseline or not args.retained_trace_output or args.benchmark_output
+                or args.comparison_output or not args.benchmark_scenario
+                or not 1 <= args.benchmark_samples <= 24):
+            parser.error('retained trace requires its own baseline boot, pinned archive and 1–24 samples')
+        destination = args.retained_trace_output
+        resolved = destination.parent.resolve(strict=True) / destination.name
+        if not resolved.is_relative_to(SCRATCH) or os.path.lexists(resolved):
+            parser.error('retained trace output must be a new ExternalSSD directory')
+        args.retained_trace_output = resolved
     if not args.image or args.image.startswith('-'):
         parser.error('image must be a Docker image reference')
     if not SSD.is_mount() or SCRATCH.resolve() != SCRATCH:
