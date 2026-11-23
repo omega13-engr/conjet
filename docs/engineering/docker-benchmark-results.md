@@ -134,6 +134,28 @@ five timed samples per engine with no failures.
 | Multilayer first pull | 171.621/197.132/197.132 | 73.838/76.742/76.742 |
 | Multilayer cached pull | 100.036/114.363/114.363 | 32.208/50.546/50.546 |
 
+The later five-pair series froze harness `20e3a2b`. It produced 25 valid
+samples per engine for each small and multilayer first-pull and cached-pull
+row. All first pulls confirmed transfer of every expected config and layer
+byte. Each launcher verified production preservation and removal of all
+12 owned registry images, including warmups. These complete pairs pass the
+frozen effect threshold for **Kiri faster** at the loopback Docker CLI pull
+boundary. This verdict applies to the two controlled fixtures on the M1 Pro.
+
+| Loopback operation | Conjet/Kiri p50 ratio with 95% CI | Conjet/Kiri p99 ratio with 95% CI |
+| --- | ---: | ---: |
+| Small first pull | 2.129 [1.947, 2.329] | 2.177 [1.910, 2.516] |
+| Small cached pull | 2.756 [2.440, 3.055] | 2.512 [2.202, 2.921] |
+| Multilayer first pull | 2.471 [2.238, 2.730] | 2.649 [2.329, 3.188] |
+| Multilayer cached pull | 2.599 [2.273, 2.985] | 2.849 [2.574, 3.154] |
+
+The p99s are session tail observations from five samples per session. The
+intervals resample the five independent paired boots. Median session archive
+rates in MiB/s were 14.68 save and 53.42 warm load for Alpine on Conjet,
+and 111.16 save and 61.80 warm load on Kiri. For Node they were 16.24 and
+91.70 on Conjet, and 497.70 and 267.30 on Kiri. Size derives from the
+actual saved archive. Save and load are distinct from registry transfer.
+
 ## Buildx first session
 
 The first Buildx pair used the pinned BuildKit v0.23.2 `docker-container`
@@ -408,6 +430,7 @@ failed attempts and shutdown checks.
 | First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
 | Pinned image and loopback registry results with asymmetric transfer proof | `SPEED-020/pair-2` |
 | Complete paired registry transfer and labeled-store cleanup | `SPEED-020/pair-3` |
+| Five matched image pairs, distribution summary and verified digest cleanup | `SPEED-020/cleanup-qualified`, `SPEED-020/cleanup-qualified/summary.json` |
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
 | Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |

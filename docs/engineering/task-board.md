@@ -366,6 +366,12 @@ images omitted by the earlier repository-filtered listing. Removed their
 exact config IDs and verified absence without pruning. The harness now
 validates those IDs against the full private image inventory and verifies
 their removal. See `SPEED-026/final-local/kiri-image-inventory*.log`.
+`SPEED-020/cleanup-qualified` then completed five independent matched pairs
+at `20e3a2b` with zero recorded operation failures. It verified 12 digest-only
+removals per engine per boot and complete transfers for the first pulls.
+`summary.json` records per-session distributions and the paired CIs. Kiri
+met the frozen faster threshold for the four controlled pull rows. Pending
+work includes reviewing the supplemental disk expansion evidence.
 
 ### SPEED-026
 
