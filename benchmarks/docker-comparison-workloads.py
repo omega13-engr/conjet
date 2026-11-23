@@ -232,7 +232,7 @@ def pilot_probes(manifest, report, output, docker, env, image, token):
         probe('compose-down', prefix + ['down', '--volumes'])
 
 
-def run_workloads(mode, manifest, report, output, connection, docker, env):
+def run_workloads(mode, manifest, report, output, connection, docker, env, selected_group=None):
     token = uuid.uuid4().hex[:10]
     image = manifest['images']['alpine']['ref']
     require(cli(docker, env, ['pull', '--platform', manifest['platform'], image], 180))
@@ -270,6 +270,8 @@ def run_workloads(mode, manifest, report, output, connection, docker, env):
         for workload, spec in workloads:
             for network in ('none', 'bridge'):
                 for lane in ('api', 'cli'):
+                    if selected_group and selected_group != f'{workload}/{network}/{lane}':
+                        continue
                     series = {'workload': workload, 'network': network, 'lane': lane,
                               'warmups': [], 'samples': []}
                     groups.append(series)
@@ -291,6 +293,12 @@ def run_workloads(mode, manifest, report, output, connection, docker, env):
                     series['summary'] = TOOLS['summarize'](series['samples'])
                     if window is not None:
                         series['measured_wall_ns'] = time.monotonic_ns() - window
+                        series['window_successes_per_second'] = (
+                            (series['summary']['operations'] - series['summary']['failures'])
+                            * 1_000_000_000 / series['measured_wall_ns'])
+                    print(f"{report['engine']} {workload}/{network}/{lane}: {series['summary']}", flush=True)
+        if not groups:
+            raise ValueError('requested lifecycle group did not match the manifest')
         if mode == 'pilot':
             pilot_probes(manifest, report, output, docker, env, image, token)
     finally:

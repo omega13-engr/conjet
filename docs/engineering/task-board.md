@@ -71,45 +71,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 
 ## BACKLOG
 
-### SPEED-019
-
-Title: Benchmark Docker run and container lifecycle
-
-Description: Measure fresh Docker API and docker run end-to-end against Kiri, retaining native API measurements as a distinct comparison.
-
-Is blocked by task: SPEED-018.
-
-Acceptance Criteria:
-
-- Measure create/start/wait/removal through HTTP and docker run --rm through the same pinned CLI separately. Validate nonzero exits and output; include true and a small observable application.
-- Cover warm-image no-network and supported bridge cases; separate first-use/image acquisition from cached runs. Keep VM cold boot outside warm lifecycle timing.
-- Report p50/p95/p99, raw failures, wall time, throughput and per-session distributions. Record API removal and verified guest cleanup separately; do not infer one from the other.
-- Compare native fresh/prepared only where workload semantics match; include preparation/refill, missed claims and actual dispatch backend. Do not label a native RPC measurement docker run.
-- Exercise create/start of pre-created containers, stop/kill/restart and remove; mark unsupported lifecycle operations explicitly.
-
-Problem and Evidence: The headline Kiri measurement is a Docker API lifecycle, while the existing fast Conjet measurement is native submission through cleanup.
-
-Approach:
-
-1. Extend the lifecycle scenario with actual CLI and nonzero/output canaries.
-2. Run alternating paired sessions at the frozen counts and collect bounded-concurrency data separately.
-3. Verify raw percentiles and publish API and CLI results without cross-lane ratios presented as equivalent work.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-019`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Add the real Docker CLI lifecycle and backend-attribution rows.
-
 ### SPEED-020
 
 Title: Benchmark Docker image and registry operations
@@ -435,6 +396,43 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: After the PR merges, inspect current versions and release workflows to select the release scope.
 
 ## INPROGRESS
+
+### SPEED-019
+
+Title: Benchmark Docker run and container lifecycle
+
+Description: Measure fresh Docker API and docker run end-to-end against Kiri, retaining native API measurements as a distinct comparison.
+
+Is blocked by task: SPEED-018 for the accelerated Docker route. Existing
+Docker and native lanes can proceed independently.
+
+Acceptance Criteria:
+
+- Measure create/start/wait/removal through HTTP and docker run --rm through the same pinned CLI separately. Validate nonzero exits and output; include true and a small observable application.
+- Cover warm-image no-network and supported bridge cases; separate first-use/image acquisition from cached runs. Keep VM cold boot outside warm lifecycle timing.
+- Report p50/p95/p99, raw failures, wall time, throughput and per-session distributions. Record API removal and verified guest cleanup separately; do not infer one from the other.
+- Compare native fresh/prepared only where workload semantics match; include preparation/refill, missed claims and actual dispatch backend. Do not label a native RPC measurement docker run.
+- Exercise create/start of pre-created containers, stop/kill/restart and remove; mark unsupported lifecycle operations explicitly.
+
+Problem and Evidence: The orchestrator exposes the frozen lifecycle counts and allows
+one complete network/workload/adapter group per paired session. The
+launchers keep API removal acknowledgement separate from cleanup. The
+pilot measured 121.6 s for 240 Conjet operations. At that rate the
+full frozen 12-group, five-session Conjet matrix alone requires about
+17 hours of measured windows. Start with an independently booted,
+complete group and keep partial coverage explicit.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Run the frozen serial group on the existing Docker endpoints,
+retain full raw windows and later repeat across the remaining pairs and groups.
 
 ### SPEED-018
 

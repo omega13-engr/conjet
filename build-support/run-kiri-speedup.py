@@ -45,6 +45,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--smoke', action='store_true', help='pull Alpine and run an ephemeral container')
     parser.add_argument('--comparison-output', type=Path)
+    parser.add_argument('--comparison-group')
     parser.add_argument('--comparison-mode', choices=('preflight', 'pilot', 'probes', 'lifecycle'), default='preflight')
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
     parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
@@ -152,7 +153,8 @@ def main():
             if args.comparison_output:
                 comparison = runpy.run_path(str(REPO / 'benchmarks/docker-comparison.py'))
                 comparison['run_suite']('kiri', endpoint, Path(env['DOCKER_CONFIG']), proc.pid,
-                                        args.comparison_output, args.comparison_mode)
+                                        args.comparison_output, args.comparison_mode,
+                                        group=args.comparison_group)
             if args.benchmark_output:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                     client.settimeout(3)

@@ -112,13 +112,14 @@ def observed_disks(engine, peer, disks):
     return observations
 
 
-def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None):
+def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None, group=None):
     """Called by the launcher after it has proved its own runtime identity."""
     output = private_path(output)
     output.mkdir(mode=0o700)
     manifest = contract()
     report = {'mode': mode, 'engine': engine, 'endpoint': str(endpoint), 'peer_pid': peer,
               'manifest_sha256': TOOLS['file_hash'](MANIFEST),
+              'selected_group': group,
               'harness_revision': TOOLS['run'](['/usr/bin/git', '-C', REPO, 'rev-parse', 'HEAD']),
               'passed': False}
     resources = ExitStack()
@@ -160,7 +161,7 @@ def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None):
             report['backend'] = ('official Kiri 0.2.2' if engine == 'kiri' else 'Conjet Core Docker/containerd')
             if mode != 'preflight':
                 adapter = runpy.run_path(str(REPO / 'benchmarks/docker-comparison-workloads.py'))
-                adapter['run_workloads'](mode, manifest, report, output, connection, docker, env)
+                adapter['run_workloads'](mode, manifest, report, output, connection, docker, env, group)
         finally:
             connection.close()
         report['host_after'] = TOOLS['sample_host'](peer_args, output / 'footprint-after.json')
@@ -215,6 +216,8 @@ def run_pair(args, output, order):
         launcher = REPO / f'build-support/run-{engine}-speedup.py'
         command = [sys.executable, str(launcher), '--comparison-output', str(report),
                    '--comparison-mode', args.mode]
+        if args.group:
+            command += ['--comparison-group', args.group]
         if engine == 'conjet':
             command += ['--image', contract()['images']['alpine']['ref']]
             for name in ('swift_bin', 'core', 'network_helper', 'core_assets'):
@@ -261,9 +264,16 @@ def main():
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--pair', type=int, choices=range(1, 6), default=1)
     parser.add_argument('--timeout', type=int, default=900)
+    lifecycle = contract()['suites']['lifecycle']
+    parser.add_argument('--group', choices=[f'{workload}/{network}/{lane}'
+                         for workload in lifecycle['workloads']
+                         for network in lifecycle['networks'] for lane in ('api', 'cli')],
+                        help='run one complete lifecycle group per paired session')
     for name in ('swift-bin', 'core', 'network-helper', 'core-assets'):
         parser.add_argument('--' + name, required=True, type=Path)
     args = parser.parse_args()
+    if args.group and args.mode != 'lifecycle':
+        parser.error('--group is only valid with lifecycle mode')
     for name in ('swift_bin', 'core', 'network_helper', 'core_assets'):
         path = getattr(args, name).resolve(strict=True)
         if not path.is_relative_to(SCRATCH):
