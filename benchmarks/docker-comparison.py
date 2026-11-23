@@ -231,7 +231,7 @@ def run_pair(args, output, order):
         if args.build_bases:
             command += ['--comparison-build-bases', str(args.build_bases)]
         if engine == 'conjet':
-            command += ['--image', contract()['images']['alpine']['ref']]
+            command += ['--legacy-baseline', '--image', contract()['images']['alpine']['ref']]
             for name in ('swift_bin', 'core', 'network_helper', 'core_assets'):
                 command += ['--' + name.replace('_', '-'), str(getattr(args, name))]
         before = production()

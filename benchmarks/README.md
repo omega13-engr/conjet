@@ -184,6 +184,25 @@ for the supported configuration.
 
 ## Paired Docker comparison
 
+The isolated launcher includes a matched release-build native Docker/Kiri
+lane. Use the native command in the environment runbook with
+`--matched-output "$evidence/native-pair-1" --matched-samples 2000`.
+Run Kiri separately with
+`--matched-output "$evidence/kiri-pair-1" --matched-samples 2000`.
+Alternate engine order across five independent pairs. Keep builds and other
+suites outside the measured sessions. Smaller sample counts are pilots.
+
+Both lanes use pinned ARM64 Alpine, UID/GID 65532, 16 MiB, four PIDs,
+half of one CPU, no networking, dropped capabilities and no-new-privileges.
+The probes check credentials, stdout/stderr, and nonzero exit. The timed
+workload is the image's `/bin/true`. Ten warmups per transport are retained
+separately. API time spans create, start, wait and removal acknowledgement.
+CLI time spans the Docker process and `run --rm` completion. The native
+lane checks the unique guest workload and verified cleanup after recording
+each sample. Kiri guest cleanup is unobservable in this suite. Report
+percentiles, failures and throughput per independent session before
+computing paired uncertainty.
+
 The [frozen protocol](../docs/engineering/docker-benchmark-plan.md) controls
 the Docker comparison. Use the build outputs and verified Core assets from
 the [isolated environment runbook](../docs/engineering/speedup-environment.md).

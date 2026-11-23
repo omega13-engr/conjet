@@ -1,9 +1,9 @@
 # Docker-to-native adapter contract
 
-The tested opt-in source adapter connects a private Docker socket to one
-authenticated Jetstream OCI session. A Docker context explicitly selects that
-socket. The
-normal Docker endpoint and its containerd owner continue to operate as before.
+The isolated `conjet-speedup` launcher defaults to a private Docker adapter
+connected to one authenticated Jetstream OCI session. The launcher selects
+that socket through private Docker configuration. Installed Conjet, its
+Docker socket and its selected context stay under production ownership.
 The candidate subset is one pinned Linux ARM64 OCI image, no network and one
 active container. Image content must be admitted before the adapter advertises
 readiness.
@@ -61,20 +61,22 @@ start after its response is lost. The test verifies real Jetstream workload
 handles and guest cleanup in terminal event attributes. On an unresolved
 backend disposition the session rejects new admission.
 
-## Supported source experiment
+## Supported isolated candidate
 
-Use a private context and the explicitly opted-in foreground processes.
+Use the foreground launcher in the [environment runbook](speedup-environment.md).
+The candidate requires no experimental switch and has no containerd fallback.
 The workload uses the staged immutable image reference, `--pull never`,
 `--network none`, `--user 65532:65532`, `--memory 16m`, `--pids-limit 4`,
-and `--cpus 0.5`. Commands use an absolute executable path. The verified
+and `--cpus 0.5`. It accepts the enforced constraints
+`--cap-drop ALL` and `--security-opt no-new-privileges`.
+Commands use an absolute executable path. The verified
 subset supports inherited OCI Entrypoint, Cmd and Env defaults and the tested
 explicit argv, environment and working directory. It permits regular files,
 directories and symlinks in a single rootfs layer. It declines unsupported
 permissions, multiple layers and hard links during staging.
 
-This is a source-operated experiment. The existing app release scope,
-official Docker context, default routing and existing prepare/claim API are
-unchanged. Live streaming, interactive input, Compose, networking, build,
+The candidate is managed from source and general promotion requires broader
+compatibility. Live streaming, interactive input, Compose, networking, build,
 persistent exec, full event streaming, guest root credentials and prepared
 OCI are outside the tested route.
 
@@ -96,4 +98,6 @@ backend attribution, a unique one-use execution and guest cleanup from
 the owned event snapshot after the measured operation. Throughput windows
 include those verification requests. The ordinary Docker baseline uses
 the image-default user. Report the native adapter's UID/GID 65532 lane
-separately.
+separately. The release-build matched lane uses UID/GID 65532 on both
+engines and checks memory, PID, and CPU limits. Use the timing boundaries and
+evidence procedures in the [benchmark README](../../benchmarks/README.md).

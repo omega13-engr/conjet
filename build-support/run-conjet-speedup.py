@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Boot branch-built Conjet and run a disposable fixture on its private Docker API."""
+"""Run the isolated Conjet native Docker candidate in the foreground."""
 import argparse
 import hashlib
 import json
 import os
+import re
 import runpy
+import select
 import shutil
 import signal
 import socket
@@ -330,11 +332,161 @@ def session(args, root):
         raise RuntimeError('session cleanup or production observation failed')
 
 
+def await_ready(process, timeout):
+    if select.select([process.stdout], [], [], timeout)[0]:
+        line = process.stdout.readline()
+        if line:
+            return json.loads(line)
+    raise RuntimeError('owned candidate process did not report readiness')
+
+
+def stop_child(process, timeout):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+            raise RuntimeError('candidate process required forced cleanup')
+    return process.returncode
+
+
+def native_session(args, root):
+    before = production()
+    output = args.native_evidence
+    output.mkdir(mode=0o700)
+    adapter = REPO / 'build-support/conjet-native-docker.py'
+    cli = args.swift_bin / 'conjet'
+    config = root / 'docker'
+    config.mkdir(mode=0o700)
+    endpoint = root / 'docker.sock'
+    env = {'PATH': '/usr/bin:/bin', 'HOME': str(root), 'DOCKER_CONFIG': str(config),
+           'TMPDIR': str(root), 'CONJET_CORE_VMM_PATH': str(args.core)}
+    docker = [DOCKER, '--config', config]
+    host = f'unix://{endpoint}'
+    report = {'passed': False, 'context': CONTEXT, 'endpoint': host, 'production_before': before,
+              'revision': run(['/usr/bin/git', '-C', REPO, 'rev-parse', 'HEAD']),
+              'load_before': os.getloadavg()}
+    vm = bridge = directory = None
+    try:
+        if host == before['endpoint']:
+            raise RuntimeError('candidate endpoint overlaps production')
+        assets = [cli, args.core, args.native_kernel, args.native_guest, args.native_package,
+                  args.native_receipt, adapter, DOCKER]
+        report['binary_sha256'] = {str(path): fingerprint(path.resolve(strict=True))['sha256'] for path in assets}
+        kernel_hash = args.native_kernel.with_name(args.native_kernel.name + '.sha512sum').read_text().split()[0]
+        vm_command = [cli, 'native', '--experimental', 'serve', '--scratch', SCRATCH,
+                      '--kernel', args.native_kernel, '--kernel-sha512', kernel_hash,
+                      '--guest-init', args.native_guest, '--oci-package', args.native_package,
+                      '--sha256', report['binary_sha256'][str(args.native_package)]]
+        report['vm_command'] = list(map(str, vm_command))
+        with (output / 'vmm.stderr').open('w') as log:
+            vm = subprocess.Popen(vm_command, env=env, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=log, text=True)
+        ready = await_ready(vm, 30)
+        candidate = Path(ready['session'])
+        if (ready['pid'] != vm.pid or processes().get(vm.pid) != args.core
+                or candidate.parent != SCRATCH or not candidate.name.startswith('cn-')
+                or candidate.is_symlink() or candidate.stat().st_mode & 0o077):
+            raise RuntimeError('unexpected native VM ownership')
+        directory = candidate
+        report['vmm_pid'] = vm.pid
+        report['native_session'] = str(directory)
+        run(docker + ['context', 'create', CONTEXT, '--docker', f'host={host}'], env=env)
+        if run(docker + ['context', 'inspect', CONTEXT, '--format', '{{.Endpoints.docker.Host}}'], env=env) != host:
+            raise RuntimeError('private native Docker context endpoint mismatch')
+        docker += ['--context', CONTEXT]
+        bridge_command = [sys.executable, adapter, '--native-session', directory,
+                          '--receipt', args.native_receipt, '--image', args.image, '--socket', endpoint]
+        report['adapter_command'] = list(map(str, bridge_command))
+        with (output / 'adapter.stderr').open('w') as log:
+            bridge = subprocess.Popen(bridge_command, env=env, stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=log, text=True)
+        ready = await_ready(bridge, 10)
+        with socket.socket(socket.AF_UNIX) as probe:
+            probe.settimeout(3)
+            probe.connect(str(endpoint))
+            if (probe.getsockopt(0, 2) != bridge.pid or ready['socket'] != str(endpoint)
+                    or ready['backend'] != 'jetstream-native-oci'):
+                raise RuntimeError('unexpected private Docker endpoint ownership')
+        report['adapter_pid'] = bridge.pid
+        version = json.loads(run(docker + ['version', '--format', '{{json .Server}}'], env=env))
+        if version['Platform']['Name'] != 'Conjet Native OCI':
+            raise RuntimeError('native endpoint reported the wrong backend')
+        report['backend'] = version['Platform']['Name']
+        print(f'Native Docker ready: {host}', flush=True)
+        if args.matched_output:
+            bench = runpy.run_path(str(REPO / 'benchmarks/native-docker-comparison.py'))
+            bench['measure']('native', endpoint, bridge.pid, docker, env, args.matched_output,
+                             args.matched_samples, vm.pid)
+        if args.docker_args:
+            command = docker + args.docker_args
+            child = subprocess.Popen(command, env=env)
+            try:
+                report['docker_exit'] = child.wait(timeout=120)
+            finally:
+                stop_child(child, 3)
+        elif not args.matched_output:
+            smoke = run(docker + ['run', '--rm', '--pull', 'never', '--network', 'none',
+                                  '--user', '65532:65532', '--memory', '16m', '--pids-limit', '4',
+                                  '--cpus', '0.5', args.image, '/bin/echo', 'conjet-native-ok'], env=env)
+            if smoke != 'conjet-native-ok':
+                raise RuntimeError('native smoke output mismatch')
+            print(smoke, flush=True)
+        if args.hold_seconds:
+            time.sleep(args.hold_seconds)
+        report['passed'] = True
+    except BaseException as error:
+        report['error'] = str(error) or type(error).__name__
+        raise
+    finally:
+        cleanup = []
+        for label, process in [('adapter', bridge), ('vmm', vm)]:
+            if process is None:
+                continue
+            try:
+                if label == 'vmm' and directory is not None and process.poll() is None:
+                    run([cli, 'native', '--experimental', 'stop', '--session', directory], env=env, timeout=12)
+                    process.wait(timeout=12)
+                    report['shutdown'] = json.loads(process.stdout.readline())
+                    if report['shutdown'].get('guest_cleanup') != 'complete' or report['shutdown'].get('reclaim_failures') != 0:
+                        cleanup.append('native VM did not verify guest reclamation')
+                if stop_child(process, 45 if label == 'adapter' else 15) != 0:
+                    cleanup.append(f'{label} exited {process.returncode}')
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                cleanup.append(f'{label}: {error}')
+                try:
+                    stop_child(process, 15)
+                except (OSError, RuntimeError, subprocess.SubprocessError) as failure:
+                    cleanup.append(f'{label}: {failure}')
+            finally:
+                process.stdout.close()
+        report['native_session_removed'] = directory is None or not directory.exists()
+        report['adapter_socket_removed'] = not os.path.lexists(endpoint)
+        report['cleanup_errors'] = cleanup
+        try:
+            report['production_after'] = production()
+            report['production_unchanged'] = report['production_after'] == before
+        finally:
+            report['passed'] &= (report.get('production_unchanged', False) and not cleanup
+                                 and report['native_session_removed'] and report['adapter_socket_removed'])
+            report['load_after'] = os.getloadavg()
+            (output / 'launcher.json').write_text(json.dumps(report, indent=2) + '\n')
+    if not report['passed']:
+        raise RuntimeError(f'native candidate did not verify cleanup; see {output}')
+    return report.get('docker_exit', 0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--swift-bin', required=True, type=Path)
     parser.add_argument('--core', required=True, type=Path)
-    parser.add_argument('--network-helper', required=True, type=Path)
+    parser.add_argument('--legacy-baseline', action='store_true', help='explicit historical Docker/containerd lane')
+    parser.add_argument('--network-helper', type=Path)
+    for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output'):
+        parser.add_argument('--' + name, type=Path)
+    parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
@@ -348,7 +500,11 @@ def main():
     parser.add_argument('--core-assets', type=Path, help='reuse verified ExternalSSD release downloads')
     parser.add_argument('--hold-seconds', type=int, choices=range(601), default=0,
                         metavar='0..600', help='keep the verified VM alive briefly for QA')
+    parser.add_argument('docker_args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.docker_args[:1] == ['--']:
+        args.docker_args.pop(0)
+    native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
     if (bool(args.benchmark_scenario) != bool(args.benchmark_archive)
             or (args.benchmark_scenario and not args.benchmark_output)):
         parser.error('a staged scenario requires benchmark output and an image archive')
@@ -362,6 +518,33 @@ def main():
             parser.error('cached release assets must be on designated ExternalSSD scratch')
     if any(key in os.environ for key in ('DOCKER_HOST', 'DOCKER_CONTEXT', 'BUILDX_BUILDER')):
         parser.error('unset inherited Docker endpoint and builder overrides before running')
+    if args.legacy_baseline:
+        if not args.network_helper or args.docker_args or args.matched_output or args.native_evidence or any(
+                getattr(args, name) for name in native_assets):
+            parser.error('legacy baseline requires its network helper and accepts no native options')
+    else:
+        if any((args.network_helper, args.core_assets, args.benchmark_output, args.comparison_output)):
+            parser.error('legacy settings require --legacy-baseline')
+        if not args.native_evidence or not all(getattr(args, name) for name in native_assets):
+            parser.error('native candidate requires kernel, guest, package, receipt and evidence paths')
+        if not re.fullmatch(r'[^@]+@sha256:[0-9a-f]{64}', args.image):
+            parser.error('native candidate requires a pinned image reference')
+        if args.docker_args and (args.docker_args[0].startswith('-') or args.docker_args[0] in ('context', 'buildx')):
+            parser.error('pass a Docker workload subcommand without endpoint or context overrides')
+        for name in ('swift_bin', 'core', *native_assets):
+            asset = getattr(args, name).resolve(strict=True)
+            if not asset.is_relative_to(SCRATCH):
+                parser.error(f'{name} must reside on ExternalSSD')
+            setattr(args, name, asset)
+        for name in ('native_evidence', 'matched_output'):
+            dest = getattr(args, name)
+            if dest is not None:
+                target = dest.parent.resolve(strict=True) / dest.name
+                if not target.is_relative_to(SCRATCH) or os.path.lexists(target):
+                    parser.error(f'{name} must be a new ExternalSSD directory')
+                setattr(args, name, target)
+        if args.matched_output == args.native_evidence:
+            parser.error('benchmark and launcher evidence require distinct directories')
     root = Path(tempfile.mkdtemp(prefix='cs-', dir=SCRATCH))
     print(f'Candidate artifacts: {root}', flush=True)
 
@@ -374,13 +557,19 @@ def main():
     signal.signal(signal.SIGINT, interrupt)
     signal.signal(signal.SIGTERM, interrupt)
     try:
-        session(args, root)
+        if args.legacy_baseline:
+            session(args, root)
+        else:
+            return native_session(args, root)
     except SessionInterrupted as error:
         print(f'Candidate interrupted by {error}', file=sys.stderr)
         return 128 + error.signum
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         print(f'Candidate failed: {error}', file=sys.stderr)
         return 1
+    finally:
+        if not args.legacy_baseline:
+            shutil.rmtree(root)
     return 0
 
 

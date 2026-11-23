@@ -46,6 +46,8 @@ def main():
     parser.add_argument('--smoke', action='store_true', help='pull Alpine and run an ephemeral container')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
+    parser.add_argument('--matched-output', type=Path)
+    parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--comparison-build-bases', type=Path)
     parser.add_argument('--comparison-mode', choices=('preflight', 'pilot', 'probes', 'lifecycle', 'images', 'builds', 'compose', 'control',
                                                          'storage_network', 'stress'), default='preflight')
@@ -157,6 +159,10 @@ def main():
                 comparison['run_suite']('kiri', endpoint, Path(env['DOCKER_CONFIG']), proc.pid,
                                         args.comparison_output, args.comparison_mode,
                                         group=args.comparison_group, build_bases=args.comparison_build_bases)
+            if args.matched_output:
+                bench = runpy.run_path(str(REPO / 'benchmarks/native-docker-comparison.py'))
+                bench['measure_kiri'](endpoint, proc.pid, Path(env['DOCKER_CONFIG']),
+                                      args.matched_output, args.matched_samples)
             if args.benchmark_output:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                     client.settimeout(3)

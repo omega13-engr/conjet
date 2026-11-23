@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Foreground Docker API experiment over one owned native OCI session."""
+"""Serve the isolated candidate's Docker API over one owned native OCI session."""
 
 import argparse
 import base64
@@ -73,7 +73,9 @@ class Native:
         return response
 
     def execute(self, process, cancellation):
+        began = time.monotonic_ns()
         with self.channel() as (channel, boot):
+            authenticated = time.monotonic_ns()
             if boot != self.boot:
                 raise RuntimeError('native guest incarnation changed')
             self.sequence += 1
@@ -82,6 +84,8 @@ class Native:
             if cancellation.is_set():
                 return 137, b'', b'', {'cancelled_before_admission': True}
             state = self.call(channel, 8, request, 13)
+            admitted = time.monotonic_ns()
+            slept = 0
             bound = time.monotonic() + 32
             handle = state['handle']
             sent_cancel = False
@@ -95,7 +99,10 @@ class Native:
                 # launch whose response or terminal disposition is ambiguous.
                 state = self.call(channel, 9, {'handle': handle, 'budget_ms': 1000}, 13)
                 if state['cleanup'] != 'complete':
+                    before_sleep = time.monotonic_ns()
                     time.sleep(0.02)
+                    slept += time.monotonic_ns() - before_sleep
+            terminal = time.monotonic_ns()
             output = []
             for name in ('stdout', 'stderr'):
                 data = bytearray()
@@ -111,6 +118,10 @@ class Native:
                     if not piece:
                         raise RuntimeError('native output did not advance')
                 output.append(bytes(data))
+            state['adapter_timings_ns'] = {'authenticate': authenticated - began,
+                                           'admit': admitted - authenticated,
+                                           'terminal': terminal - admitted, 'sleep': slept,
+                                           'output': time.monotonic_ns() - terminal}
             if sent_cancel and state['exit'] is None and not state.get('helper_failed'):
                 return 137, *output, state
             if state['exec'] != 'confirmed' or state.get('helper_failed'):
@@ -146,8 +157,13 @@ def make_process(data, image, metadata):
         if name not in allowed and value:
             raise Rejected(f'unsupported Docker option {name}')
     for name, value in conf.items():
-        if name not in {*expected, 'AutoRemove', 'ConsoleSize', 'RestartPolicy', 'LogConfig', 'MemorySwappiness'} and value:
+        if name not in {*expected, 'AutoRemove', 'ConsoleSize', 'RestartPolicy', 'LogConfig', 'MemorySwappiness',
+                        'CapDrop', 'SecurityOpt'} and value:
             raise Rejected(f'unsupported Docker HostConfig option {name}')
+    if conf.get('CapDrop') not in (None, [], ['ALL']):
+        raise Rejected('only dropping all capabilities is supported')
+    if conf.get('SecurityOpt') not in (None, [], ['no-new-privileges'], ['no-new-privileges=true']):
+        raise Rejected('only no-new-privileges is supported')
     if conf.get('MemorySwappiness') not in (None, -1):
         raise Rejected('explicit memory swappiness is unsupported')
     if conf.get('RestartPolicy', {}).get('Name') not in ('', 'no', None):
@@ -214,6 +230,8 @@ class Owner:
             attributes.update({'exitCode': str(item.code),
                                'conjet.guest_cleanup': item.native.get('cleanup', 'not_admitted'),
                                'conjet.native_handle': item.native.get('handle', {}).get('workload_id', '')})
+            attributes.update({f'conjet.timing.{key}': str(value) for key, value in
+                               item.native.get('adapter_timings_ns', {}).items()})
         self.events.append({'Type': 'container', 'Action': action,
                             'Actor': {'ID': item.id, 'Attributes': attributes},
                             'time': int(time.time()), 'timeNano': time.time_ns()})
@@ -499,7 +517,7 @@ class Server(socketserver.ThreadingUnixStreamServer):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--experimental', required=True, action='store_true')
+    parser.add_argument('--experimental', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--native-session', required=True, type=Path)
     parser.add_argument('--receipt', required=True, type=Path)
     parser.add_argument('--image', required=True)

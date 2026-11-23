@@ -5,8 +5,9 @@
 Official Kiri 0.2.2 is runnable for session-scoped tests. Live smoke and
 cancellation checks passed on 2026-11-22. No Kiri process is left running.
 Production Conjet remains running with its existing Docker context selected.
-The branch-built Conjet candidate has run the pinned smoke fixture through
-`conjet-speedup`. Comparative performance benchmarks have not run.
+The branch-built `conjet-speedup` candidate defaults to Jetstream native OCI.
+The existing Docker/containerd path is available only as an explicit baseline
+in this launcher. See the [benchmark report](docker-benchmark-results.md).
 
 The user accepted keeping test data on ExternalSSD while allowing the official
 app's normal settings location. This replaces the earlier requirement for full
@@ -18,40 +19,44 @@ Run from the checked-out `enhancement/speed-up` branch:
 
 ```sh
 speed_build="$(mktemp -d /Volumes/ExternalSSD/dev_workspace/tmp/cj-build.XXXXXX)"
-swift build --build-system native --scratch-path "$speed_build/swift"
-PATH="/usr/bin:/bin:$PATH" cargo build --locked --manifest-path jetstream/Cargo.toml \
+swift build --build-system native -c release --product conjet --scratch-path "$speed_build/swift"
+PATH="/usr/bin:/bin:$PATH" cargo build --locked --release --manifest-path jetstream/Cargo.toml \
   --target-dir "$speed_build/cargo"
-GOCACHE="$speed_build/go-cache" \
-  build-support/build-network-helper.sh "$speed_build/conjet-network"
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build --locked --release \
+  --manifest-path guest/launch-service/Cargo.toml --target aarch64-unknown-linux-musl \
+  --target-dir "$speed_build/cargo"
 /usr/bin/codesign --force --sign - --entitlements build-support/conjet-debug.entitlements \
-  "$speed_build/cargo/debug/jetstream"
+  "$speed_build/cargo/release/jetstream"
 python3 build-support/run-conjet-speedup.py \
-  --swift-bin "$speed_build/swift/debug" \
-  --core "$speed_build/cargo/debug/jetstream" \
-  --network-helper "$speed_build/conjet-network" \
-  --image alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+  --swift-bin "$speed_build/swift/release" --core "$speed_build/cargo/release/jetstream" \
+  --native-kernel "$kernel" \
+  --native-guest "$speed_build/cargo/aarch64-unknown-linux-musl/release/conjet-launchd" \
+  --native-package "$native_package" --native-receipt "$oci_receipt" \
+  --image "$pinned_image" --native-evidence "$evidence/native-launcher"
 ```
 
 On the current Xcode toolchain, the native SwiftPM build avoids a SwiftTerm
 Metal build failure from the default build system. Putting system tools first
 for Cargo selects Apple's archiver for the Mach-O vmnet shim.
 
-The launcher prints the fresh ExternalSSD session directory. It uses a
-private `CONJET_HOME`, the `speedup` profile, and the branch-built CLI,
-daemon, VMM, and networking helper. The VM starts with two vCPUs and
-2,048 MiB. The Docker fixture disables networking and requests no host
-ports or mounts. The setup uses `conjet vm start` to avoid shell and desktop
-integration. The launcher verifies the daemon peer PID and executable,
-checks the VM asset paths and the private `conjet-speedup` Docker endpoint,
-and records binary digests, production identities, health, configuration
-fingerprints, and background load in `session.json`.
+Use the verified ARM64 kernel and its adjacent SHA-512 sidecar. Stage the
+image package and receipt as described in the [adapter contract](docker-native-adapter.md).
+The signing step applies the local hypervisor entitlement for QA. The guest
+has two vCPUs and 2,048 MiB and runs with no network device. The launcher owns
+the branch-built VMM and the adapter, verifies their identity and the private
+`conjet-speedup` endpoint, and records binary hashes, production observations,
+and shutdown evidence in `launcher.json`. Pass `--` followed by a supported
+Docker command to run it in that session. The default command runs an output
+canary. An unsupported operation fails at this endpoint.
 
-The launcher owns its daemon and waits for shutdown. SIGINT and SIGTERM
-enter cleanup. Use `--hold-seconds 60` to
+The launcher waits for the owned adapter and guest to shut down. SIGINT and
+SIGTERM enter cleanup. Use `--hold-seconds 60` to
 exercise cancellation after the smoke fixture prints its success marker.
 Production and the competitor must stay outside the candidate session.
 
-To reuse the release downloads, pass `--core-assets` with the earlier
+For a historical Docker/containerd baseline, pass `--legacy-baseline` and
+`--network-helper`, and omit the native arguments. To reuse the release downloads,
+pass `--core-assets` with the earlier
 session's `h/profiles/speedup/state/vm` directory. The launcher copies the
 compressed release artifact and kernel with their sidecars, verifies the
 checksums, and imports fresh mutable disks. The candidate uses host networking
@@ -87,8 +92,9 @@ child processes and uses an explicit private Docker config and context.
 
 ## Run the fresh lifecycle baseline
 
-Append `--benchmark-output PATH --benchmark-samples 100` to the candidate
-build-and-run command. Use a new output directory under ExternalSSD. Run the
+For the historical Docker/containerd lane, append
+`--benchmark-output PATH --benchmark-samples 100` to the legacy launcher
+command. Use a new output directory under ExternalSSD. Run the
 competitor in a separate foreground session:
 
 ```sh

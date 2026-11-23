@@ -66,8 +66,9 @@ experimental release gate. SPEED-015 can start without waiting for release/signi
 each following task depends on the preceding task. A valid slower result or an
 explicitly unsupported operation is evidence, not a reason to fabricate a pass.
 Do not call the native API Docker-compatible until actual Docker client operations
-and their semantics are verified. Integration work in SPEED-018 must stay isolated
-and opt-in; broader support gaps become explicit implementation tasks.
+and their semantics are verified. SPEED-018 defaults to native routing inside
+the isolated `conjet-speedup` launcher. Wider promotion requires separate
+compatibility evidence.
 
 ## BACKLOG
 
@@ -390,7 +391,7 @@ Title: Benchmark Docker run and container lifecycle
 
 Description: Measure fresh Docker API and docker run end-to-end against Kiri, retaining native API measurements as a distinct comparison.
 
-Is blocked by task: None for the declared subset. SPEED-018 validated the opt-in source route.
+Is blocked by task: None for the declared subset. SPEED-018 validated the isolated native route.
 
 Acceptance Criteria:
 
@@ -427,8 +428,10 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Continue the remaining frozen pairs and groups. Keep the new
-source adapter lane separate. Its full-sample runner verifies one-use guest
+Next Action: Run the matched release-build native/Kiri comparison, profile the
+adapter and remeasure justified changes. Legacy repetitions stopped on the
+user's direction at pair 3, leaving its partial report and verified cleanup.
+The earlier source adapter runner verifies one-use guest
 cleanup on every operation and uses UID/GID 65532. The baseline uses the
 image-default user, so their measurements remain distinct.
 The full-sample runner handles cancellation through its Docker adapter and
@@ -436,8 +439,7 @@ VM ownership cleanup and retains partial rows.
 The no-network Alpine `true` CLI series at `eb31229` completed pair 1 with
 2,000 samples per engine and no failures. It retained a canceled next boot
 with verified cleanup to allow local validation of the hosted CI fix without
-overlapping compilation and timing. Resume the remaining pairs with the same
-frozen harness and fresh output paths.
+overlapping compilation and timing.
 Pairs 2 through 5 resumed on that same harness under the series' `remaining`
 directory. The canceled preliminary boot is preserved outside the counted
 pair set.
@@ -446,6 +448,16 @@ and zero on Kiri. Both Conjet errors reported Go thread creation failure
 under the declared four-PID cap and cleaned up successfully. Investigate
 the guest runc startup path using a separate diagnostic and keep the
 predeclared limits and failure records in the benchmark.
+
+The serial release pilot from source `98d4148` is retained in
+`SPEED-019/{native-default-pilot-3,kiri-native-default-pilot-3}`. Both
+engines completed 100 API and 100 CLI samples under matched UID/GID and
+limits with zero failures. Native p50/p95/p99 were 34.201/39.674/43.706 ms
+(API) and 47.845/52.008/52.984 ms (CLI). Kiri recorded
+4.116/4.776/5.204 ms (API) and 21.341/22.796/23.813 ms (CLI).
+The native API's median observed adapter sleep was 27.393 ms.
+Profiling and final independent sessions remain open. Kiri guest cleanup
+is unknown.
 
 
 ### SPEED-008
@@ -672,7 +684,7 @@ Next Action: Collect required CI and independent review before merging.
 
 Title: Qualify Docker-to-native routing before claiming Docker acceleration
 
-Description: Define and, for the explicitly supported subset, implement an opt-in Docker-compatible route to the new native execution service; qualify it before performance measurement.
+Description: Implement and verify the Docker-compatible native route for the explicitly supported subset in the isolated candidate.
 
 Is blocked by task: SPEED-017.
 
@@ -681,7 +693,7 @@ Acceptance Criteria:
 - Write a supported Docker operation/option contract and single-owner lifecycle design before implementation. General Alpine/OCI execution requires verified image/rootfs admission and execution support, not a static-binary substitution.
 - Support the selected real docker run lifecycle, including API negotiation, create/start, attach/output, actual exit status, wait conditions, inspect and removal. Test event ordering, names/IDs, cancellation and disconnect recovery.
 - Record backend selection per container. Reject unsupported requests clearly or route them explicitly to the existing Docker backend before allocation/start; never silently ignore flags or retry after ambiguous execution.
-- Verify isolation, bounded resources, image semantics and no leaks on success/failure. Keep the experimental route isolated and opt-in; ordinary production routing is unchanged.
+- Verify isolation, bounded resources, image semantics and no leaks on success/failure. The isolated candidate defaults to native with no fallback. Ordinary production routing remains under the installed runtime.
 - If integration is not viable within the declared subset, record an unavailable accelerated Docker lane and a reviewed follow-up implementation task. Benchmark existing Docker and native lanes separately; do not claim this benchmark work created Docker acceleration.
 
 Problem and Evidence: [Supported adapter contract](docker-native-adapter.md). The initial
@@ -695,12 +707,20 @@ of owned sockets/directories. A separate 20-sample pilot ran each Docker
 transport through the new adapter. Rust workspace tests, strict ARM64
 guest Clippy, adapter tests and image validation tests passed. Retained
 failed experiments and successful proofs are under ExternalSSD `SPEED-018`.
+The native-first launcher booted release-optimized CLI, VMM and guest
+binaries. `SPEED-018/native-default-build` retains the source revision,
+logs and binary digests. The matched pilot verified distinct native workload
+handles, guest cleanup, VM reclamation, removal of the private socket and
+session directory, and an exact production snapshot match.
+A TERM after smoke returned 143 and verified the same cleanup and
+production checks in `SPEED-018/native-default-cancel/launcher.json`.
+The Python adapter, image admission and benchmark suites passed 29 tests.
 
 Subtasks:
 - Validate and stage the pinned rootfs.
 - Execute a bounded OCI process in the existing native sandbox.
-- Run the opt-in Docker owner and verify the actual Docker CLI lifecycle.
-- Keep the supported subset explicit and leave default Docker routing in place.
+- Default the isolated candidate to the native Docker owner and verify the actual Docker CLI lifecycle.
+- Keep the supported subset explicit and preserve installed production routing.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),
