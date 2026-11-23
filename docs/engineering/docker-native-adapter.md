@@ -41,9 +41,9 @@ The pilot copied `/bin/busybox` from the verified Alpine image using Docker.
 It is ARM64 ELF with the interpreter `/lib/ld-musl-aarch64.so.1`. A branch-built
 Jetstream `serve` with those exact bytes returned
 `executable has an interpreter; static linking required` before any VM boot.
-The guest currently copies one executable into `/bin/probe` and owns no OCI
-loader/preparation lifecycle. Removing the ELF interpreter check alone still
-leaves no image root, default process configuration or Docker lifecycle.
+At that point the guest copied one executable into `/bin/probe`. Enabling
+dynamic linking required a staged image root, default process configuration
+and Docker lifecycle ownership.
 
 `benchmarks/oci-image-admission.py` verifies a single-layer Docker-save
 archive's pinned config and uncompressed layer digest. Its optional native
@@ -90,3 +90,10 @@ python3 benchmarks/test-native-oci-live.py \
 The first rejection and later native and Docker proofs are retained under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-018`.
 Small timing pilots remain distinct from qualification.
+`--benchmark-lifecycle` selects the frozen per-session CLI and API sample
+budgets for the Alpine no-network `true` workload. Every sample verifies
+backend attribution, a unique one-use execution and guest cleanup from
+the owned event snapshot after the measured operation. Throughput windows
+include those verification requests. The ordinary Docker baseline uses
+the image-default user. Report the native adapter's UID/GID 65532 lane
+separately.

@@ -440,7 +440,9 @@ Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
 Next Action: Continue the remaining frozen pairs and groups. Keep the new
-source adapter pilot separate until matching credentials and timing are qualified.
+source adapter lane separate. Its full-sample runner verifies one-use guest
+cleanup on every operation and uses UID/GID 65532. The baseline uses the
+image-default user, so their measurements remain distinct.
 
 
 ### SPEED-008

@@ -4,6 +4,7 @@
 import argparse
 import base64
 import json
+import os
 from pathlib import Path
 import runpy
 import select
@@ -72,6 +73,58 @@ def verify_native(process, session, ready, report):
         call(channel, 7, {'budget_ms': 3000}, 16)
 
 
+def api_true(api, image, name=None):
+    create = '/v1.44/containers/create' + ('?name=' + name if name else '')
+    response = TOOLS['api'](api, 'POST', create, (201,), {
+        'Image': image, 'User': '65532:65532', 'Cmd': ['/bin/true'],
+        'HostConfig': {'NetworkMode': 'none', 'Memory': 16777216,
+                       'NanoCpus': 500000000, 'PidsLimit': 4}})
+    path = '/v1.44/containers/' + response['Id']
+    TOOLS['api'](api, 'POST', path + '/start', (204,))
+    result = TOOLS['api'](api, 'POST', path + '/wait?condition=next-exit', (200,))
+    if result['StatusCode'] != 0 or result.get('Error'):
+        raise RuntimeError('native Docker API workload failed')
+    TOOLS['api'](api, 'DELETE', path, (204,))
+
+
+def measure_lifecycle(report, counts, run, api, events, image, limits):
+    report['lifecycle'] = series = {}
+    workload_ids = set()
+    cli = ['run', '--rm', '--pull', 'never', *limits]
+    for lane in ('cli', 'api'):
+        series[lane] = data = {'warmups': [], 'samples': []}
+        for bucket, count in [('warmups', counts['warmups']), ('samples', counts['samples_per_session'])]:
+            window = time.monotonic_ns()
+            for index in range(count):
+                name = f'oci-{lane}-{bucket}-{index}'
+                before = time.monotonic_ns()
+                row = {'name': name, 'elapsed_ns': None, 'error': None}
+                data[bucket].append(row)
+                try:
+                    if lane == 'cli':
+                        run([*cli, '--name', name, image, '/bin/true'], stdout=b'', stderr=b'')
+                    else:
+                        api_true(api, image, name)
+                    row['elapsed_ns'] = time.monotonic_ns() - before
+                    history = [event for event in events() if event['Actor']['Attributes']['name'] == name]
+                    if [event['Action'] for event in history] != ['create', 'start', 'die', 'destroy']:
+                        raise RuntimeError('missing one-use Docker lifecycle witness')
+                    terminal = history[2]['Actor']['Attributes']
+                    handle = terminal['conjet.native_handle']
+                    if (terminal['conjet.guest_cleanup'], terminal['exitCode'], terminal['conjet.backend']) != (
+                            'complete', '0', 'jetstream-native-oci') or not handle or handle in workload_ids:
+                        raise RuntimeError('missing verified native execution or cleanup')
+                    workload_ids.add(handle)
+                    row['terminal'] = terminal
+                except Exception as failure:
+                    row['error'] = str(failure)
+                    if row['elapsed_ns'] is None:
+                        row['elapsed_ns'] = time.monotonic_ns() - before
+                    raise
+                finally:
+                    data[f'{bucket}_wall_ns'] = time.monotonic_ns() - window
+
+
 def verify_docker(args, session, report):
     image = args.image
     adapter = HERE.parent / 'build-support/conjet-native-docker.py'
@@ -91,6 +144,7 @@ def verify_docker(args, session, report):
         command = [sys.executable, str(adapter), '--experimental', '--native-session', str(session),
                    '--receipt', str(args.receipt), '--image', image, '--socket', str(endpoint)]
         report['adapter_argv'] = command
+        report['binary_sha256'].update(adapter=TOOLS['file_hash'](adapter), docker=TOOLS['file_hash'](Path(docker[0])))
         with (args.output / 'adapter.stderr').open('w') as log:
             with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=log,
                                   text=True) as bridge:
@@ -125,6 +179,13 @@ def verify_docker(args, session, report):
                     run(['rm', name])
                     name = 'oci-cancel'
                     run(['run', '-d', '--name', name, '--pull', 'never', *limits, image, '/bin/sleep', '15'])
+                    denied = TOOLS['api'](api, 'POST', '/v1.44/containers/create?name=oci-over-capacity', (409,), {
+                        'Image': image, 'User': '65532:65532', 'Cmd': ['/bin/true'],
+                        'HostConfig': {'NetworkMode': 'none', 'Memory': 16777216,
+                                       'NanoCpus': 500000000, 'PidsLimit': 4}})
+                    if 'capacity is occupied' not in denied['message']:
+                        raise RuntimeError('native adapter did not refuse admission at capacity')
+                    report['capacity_rejected'] = True
                     run(['rm', '-f', name])
 
                     def events():
@@ -169,18 +230,19 @@ def verify_docker(args, session, report):
                         pilot['cli'].append(time.monotonic_ns() - before)
 
                         before = time.monotonic_ns()
-                        response = TOOLS['api'](api, 'POST', '/v1.44/containers/create', (201,),
-                            {'Image': image, 'User': '65532:65532', 'Cmd': ['/bin/true'],
-                             'HostConfig': {'NetworkMode': 'none', 'Memory': 16777216,
-                                            'NanoCpus': 500000000, 'PidsLimit': 4}})
-                        path = '/v1.44/containers/' + response['Id']
-                        TOOLS['api'](api, 'POST', path + '/start', (204,))
-                        result = TOOLS['api'](api, 'POST', path + '/wait?condition=next-exit', (200,))
-                        if result['StatusCode'] != 0:
-                            raise RuntimeError('native Docker API pilot workload failed')
-                        TOOLS['api'](api, 'DELETE', path, (204,))
+                        api_true(api, image)
                         pilot['api'].append(time.monotonic_ns() - before)
                     report['final_pilot_events'] = events()
+                    if args.benchmark_lifecycle:
+                        manifest = json.loads((HERE / 'scenarios/docker-comparison-v1.json').read_bytes())
+                        counts = manifest['suites']['lifecycle']
+                        ps = ['/bin/ps', '-p', f"{report['native_engine_pid']},{bridge.pid}",
+                              '-o', 'pid=,time=,rss=']
+                        report['process_before'] = TOOLS['run'](ps)
+                        try:
+                            measure_lifecycle(report, counts, run, api, events, image, limits)
+                        finally:
+                            report['process_after'] = TOOLS['run'](ps)
                     api.close()
                     report['ordinary_docker_cli'] = True
                 finally:
@@ -199,9 +261,13 @@ def main():
     parser.add_argument('--receipt', type=Path)
     parser.add_argument('--image')
     parser.add_argument('--samples', type=int, choices=range(0, 21), default=0)
+    parser.add_argument('--benchmark-lifecycle', action='store_true',
+                        help='run the full no-network native OCI CLI and API sample budgets')
     args = parser.parse_args()
     if bool(args.receipt) != bool(args.image):
         parser.error('--receipt and --image must be supplied together')
+    if args.benchmark_lifecycle and (not args.receipt or args.samples):
+        parser.error('--benchmark-lifecycle requires Docker mode and a separate run from --samples')
     for name in ('vmm', 'kernel', 'guest', 'package'):
         value = getattr(args, name).resolve(strict=True)
         if not value.is_relative_to(SCRATCH):
@@ -211,7 +277,8 @@ def main():
         parser.error('output must reside on ExternalSSD')
     args.output.mkdir(mode=0o700)
     before = PRODUCTION['production']()
-    report = {'production_before': before, 'passed': False}
+    report = {'production_before': before, 'passed': False, 'load_before': os.getloadavg(),
+              'harness_revision': TOOLS['run'](['/usr/bin/git', '-C', HERE.parent, 'rev-parse', 'HEAD'])}
     argv = [str(args.vmm), 'native', '--experimental', 'serve', '--scratch', str(SCRATCH),
             '--kernel', str(args.kernel), '--kernel-sha512',
             args.kernel.with_name(args.kernel.name + '.sha512sum').read_text().split()[0],
@@ -235,6 +302,7 @@ def main():
                     session = Path(ready['session'])
                     if process.pid != ready['pid'] or TOOLS['current_executable'](process.pid) != args.vmm:
                         raise RuntimeError('OCI session does not own the requested executable')
+                    report['native_engine_pid'] = process.pid
                     if args.receipt:
                         verify_docker(args, session, report)
                         subprocess.run([args.vmm, 'native', '--experimental', 'stop',
@@ -259,6 +327,7 @@ def main():
         raise
     finally:
         report['production_after'] = PRODUCTION['production']()
+        report['load_after'] = os.getloadavg()
         report['passed'] &= before == report['production_after']
         (args.output / 'session.json').write_text(json.dumps(report, indent=2) + '\n')
     if not report['passed']:
