@@ -111,7 +111,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Run the paired concurrency and bounded OOM fixture, then inspect active-data and cleanup evidence.
+Next Action: Inspect the paired concurrency and bounded OOM results, then run the native product's pressure, exhaustion, cancellation and active-work shutdown checks. The native runner now verifies cleanup after a task-owned SIGTERM with an admitted workload and tests that its old handle cannot be claimed after reboot.
 
 
 ### SPEED-014

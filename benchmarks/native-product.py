@@ -270,6 +270,11 @@ def live_check(candidate, record):
         record['disconnect_cancel'] = cleaned(cancel['stdout']['result'])
     record['deadline'] = candidate.command('run', '--timeout-ms', '150', expected='verified cleanup')
     record['recovery'] = success(candidate.command('run')['stdout']['result']['state'])
+    with candidate.channel() as (channel, boot):
+        sequence = call(channel, 20, {'budget_ms': 1000}, 20)['last_sequence'] + 1
+        request = candidate.request(boot, sequence)
+        active = wait_phase(channel, call(channel, 8, request, 13), 'running')
+        record['active_at_shutdown'] = active['handle']
     candidate.vm.send_signal(signal.SIGTERM)
     assert candidate.vm.wait(timeout=12) == 0
     record['foreground_sigterm'] = True
@@ -294,6 +299,7 @@ def main():
             setattr(args, name, path)
     if not args.output.parent.resolve().is_relative_to(SCRATCH):
         parser.error('--output must reside on ExternalSSD')
+    signal.signal(signal.SIGTERM, lambda *_: signal.raise_signal(signal.SIGINT))
     args.output.mkdir(mode=0o700)
     before = PRODUCTION['production']()
     report = {
@@ -315,7 +321,13 @@ def main():
         report['explicit_opt_in'] = True
         with candidate.boot(args.canary) as record:
             live_check(candidate, record)
+            old_handle = record['active_at_shutdown']
         with candidate.boot(args.executable) as record:
+            with candidate.channel() as (channel, boot):
+                assert boot != old_handle['boot_id']
+                stale = {'handle': old_handle, 'spec': candidate.request(boot, 1)['spec'], 'budget_ms': 1000}
+                record['stale_previous_boot'] = call(channel, 18, stale, 15)
+                assert record['stale_previous_boot']['code'] == 'stale_generation'
             collect_samples(candidate, record, args.samples)
         report['passed'] = True
     except BaseException as error:
