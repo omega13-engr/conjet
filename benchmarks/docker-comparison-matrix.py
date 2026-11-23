@@ -27,7 +27,7 @@ class Docker:
         self.report['operations'] = self.rows = []
 
     def call(self, scenario, args, *, timeout=90, expected=None, phase=None,
-             expected_code=0, expected_stderr=None):
+             expected_code=0, expected_stderr=None, stdin=None):
         argv = [str(arg) for arg in [*self.prefix, *args]]
         row = {'scenario': scenario, 'phase': phase, 'argv': argv, 'elapsed_ns': None,
                'error': None}
@@ -35,7 +35,7 @@ class Docker:
         self.report['in_flight'] = scenario
         start = time.monotonic_ns()
         try:
-            result = subprocess.run(argv, env=self.env, capture_output=True, timeout=timeout)
+            result = subprocess.run(argv, env=self.env, input=stdin, capture_output=True, timeout=timeout)
             row['elapsed_ns'] = time.monotonic_ns() - start
             row.update(exit_code=result.returncode, stdout=result.stdout[:8192].decode(errors='replace'),
                        stderr=result.stderr[:8192].decode(errors='replace'))
@@ -43,7 +43,10 @@ class Docker:
                     or (expected_stderr is not None and result.stderr != expected_stderr)):
                 raise RuntimeError(f'Docker returned {result.returncode} or failed the output canary')
             return result.stdout
-        except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+        except subprocess.TimeoutExpired as error:
+            row.update(error=str(error), timed_out=True)
+            return None
+        except (RuntimeError, OSError) as error:
             row['error'] = str(error)
             return None
         finally:
@@ -529,6 +532,53 @@ def run_compose(docker, manifest):
                     raise RuntimeError(f'Compose project left resources: {kind}')
 
 
+def lifecycle_event_order(data, identifier):
+    actions = []
+    for line in data.splitlines():
+        event = json.loads(line)
+        if event.get('Actor', {}).get('ID') != identifier:
+            return False
+        actions.append(event.get('Action'))
+    expected = iter(('create', 'start', 'die', 'destroy'))
+    next_action = next(expected)
+    for action in actions:
+        if action == next_action:
+            next_action = next(expected, None)
+    return next_action is None
+
+
+def run_attach(docker, image, options, phase, index):
+    name = f'{docker.token}-attach-{index}'
+    since = datetime.now(timezone.utc).isoformat()
+    created = docker.call('attach-create', ['create', '-i', '--name', name, *options, image,
+                          'sh', '-c', 'read -r line || exit 91; printf "out:%s" "$line"; '
+                          'printf "err:%s" "$line" >&2; exit 23'], phase='setup')
+    if created is None:
+        return
+    removed = False
+    try:
+        if docker.call('attach-start', ['start', name], phase='setup') is None:
+            return
+        docker.call('attach.stdin-streams', ['attach', name], timeout=20, phase=phase,
+                    stdin=b'attach-proof\n', expected=b'out:attach-proof', expected_stderr=b'err:attach-proof',
+                    expected_code=23)
+        docker.call('logs.streams', ['logs', name], phase=phase,
+                    expected=b'out:attach-proof', expected_stderr=b'err:attach-proof')
+        removed = docker.call('attach-remove', ['rm', name], phase='cleanup') is not None
+        if not removed:
+            return
+        identifier = created.decode().strip()
+        events = docker.call('events.lifecycle', ['events', '--since', since, '--until',
+                             datetime.now(timezone.utc).isoformat(), '--filter', 'type=container',
+                             '--filter', f'container={identifier}', '--format', '{{json .}}'],
+                             timeout=15, phase=phase)
+        if events is not None and not lifecycle_event_order(events, identifier):
+            docker.rows[-1]['error'] = 'owned lifecycle events are missing or out of order'
+    finally:
+        if not removed and docker.call('attach-force-remove', ['rm', '-f', name], phase='cleanup') is None:
+            raise RuntimeError('could not remove the owned attach container')
+
+
 def run_control(docker, manifest):
     budget = manifest['suites']['control']
     image = manifest['images']['alpine']['ref']
@@ -542,6 +592,17 @@ def run_control(docker, manifest):
     try:
         docker.call('exec.large-output', ['exec', target, 'dd', 'if=/dev/zero', 'bs=1024', 'count=128'],
                     expected=bytes(128 * 1024), phase='verification')
+        docker.call('exec.tty', ['exec', '-t', target, 'sh', '-c', 'test -t 1 && printf tty-ok'],
+                    expected=b'tty-ok', phase='verification')
+        # A deliberately idle attach must time out without harming the owner.
+        docker.call('attach.disconnect', ['attach', '--no-stdin', target], timeout=2,
+                    phase='verification')
+        if docker.rows[-1].get('timed_out'):
+            docker.rows[-1].update(error=None, expected_disconnect=True)
+            docker.call('attach.disconnect-recovery', ['exec', target, 'printf', 'still-running'],
+                        expected=b'still-running', phase='verification')
+        else:
+            docker.rows[-1]['error'] = 'idle attach returned before the client disconnect deadline'
         for i in range(budget['samples_per_session'] + budget['warmups']):
             phase = 'warmup' if i < budget['warmups'] else 'sample'
             docker.call('exec.streams', ['exec', target, 'sh', '-c',
@@ -549,21 +610,22 @@ def run_control(docker, manifest):
                         phase=phase, expected=b'exec-out', expected_code=23, expected_stderr=b'exec-err')
             docker.call('inspect.one', ['inspect', target], phase=phase)
             docker.call('list.one', ['ps', '-aq', '--filter', f'label={LABEL}={docker.token}'], phase=phase)
+            run_attach(docker, image, args, phase, i)
             # File data is deterministic. Its transfers and integrity checks
             # are distinct from CLI execution timing.
-            size = 4096 if i % 2 == 0 else 8 * 1024 * 1024
             source = docker.output / 'control-input'
             restored = docker.output / 'control-output'
-            source.write_bytes(b'conjet-control-1' * (size // 16))
-            if docker.call(f'cp.in.{size}', ['cp', source, f'{target}:/tmp/control'],
-                           phase=phase) is None:
-                continue
-            if docker.call(f'cp.out.{size}', ['cp', f'{target}:/tmp/control', restored],
-                           phase=phase) is None:
-                continue
-            if hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(restored.read_bytes()).digest():
-                docker.rows[-1]['error'] = 'roundtrip SHA-256 mismatch'
-            restored.unlink()
+            for size in (4096, 8 * 1024 * 1024):
+                source.write_bytes(b'conjet-control-1' * (size // 16))
+                if docker.call(f'cp.in.{size}', ['cp', source, f'{target}:/tmp/control'],
+                               phase=phase) is None:
+                    continue
+                if docker.call(f'cp.out.{size}', ['cp', f'{target}:/tmp/control', restored],
+                               phase=phase) is None:
+                    continue
+                if hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(restored.read_bytes()).digest():
+                    docker.rows[-1]['error'] = 'roundtrip SHA-256 mismatch'
+                restored.unlink()
     finally:
         (docker.output / 'control-input').unlink(missing_ok=True)
         (docker.output / 'control-output').unlink(missing_ok=True)

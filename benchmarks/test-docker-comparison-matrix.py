@@ -56,6 +56,17 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(app['depends_on']['redis']['condition'], 'service_healthy')
         self.assertEqual(cache['volumes'], ['cache:/data'])
 
+    def test_event_order_ignores_extra_actions_but_requires_owned_lifecycle(self):
+        check = MATRIX['lifecycle_event_order']
+
+        def stream(actions, identifier='owned'):
+            return '\n'.join(json.dumps({'Action': action, 'Actor': {'ID': identifier}})
+                             for action in actions)
+
+        self.assertTrue(check(stream(('create', 'attach', 'start', 'die', 'destroy')), 'owned'))
+        self.assertFalse(check(stream(('create', 'die', 'start', 'destroy')), 'owned'))
+        self.assertFalse(check(stream(('create', 'start', 'die', 'destroy'), 'other'), 'owned'))
+
 
 if __name__ == '__main__':
     unittest.main()
