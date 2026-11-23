@@ -68,6 +68,16 @@ The worker canceled the next private Kiri boot before counting it to run
 local validation of the hosted CI fix outside a measurement window. The
 complete first pair and the canceled boot's cleanup evidence are retained.
 
+The resumed pair 2 produced 2,000 samples per engine. Conjet retained two
+exit-127 failures with Go thread-creation errors under the four-PID cap.
+Both recovery removals and fixture inventories passed. Among successful
+samples, Conjet p50/p95/p99 was 685.760/914.933/1077.914 ms. Kiri had
+zero failures and reported 22.063/27.592/33.850 ms. Pair 2 cannot qualify
+for a failure-free paired interval. A runc bootstrap thread hitting the
+PID limit is a hypothesis consistent with its upstream diagnostics. The
+recorded failure lacks a direct per-container `pids.events` witness.
+[Upstream runc thread-limit issue](https://github.com/opencontainers/runc/issues/4083)
+
 ## Earlier Docker pilot
 
 The pilot ran 20 operations per workload, network and timing boundary on
@@ -498,6 +508,7 @@ failed attempts and shutdown checks.
 | Rootfs receipts, backend audit and Docker-to-native pilot | `SPEED-018` |
 | Full paired no-network API row | `SPEED-019/alpine-true-none-api-pair-2` |
 | First full CLI pair and canceled next-boothalf evidence | `SPEED-019/alpine-true-none-cli-series` |
+| Resumed CLI pair with retained Conjet startup failures | `SPEED-019/alpine-true-none-cli-series/remaining/pair-2` |
 | Full-budget Docker-to-native OCI run with per-operation cleanup witnesses | `SPEED-019/native-oci-full-1` |
 | First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
 | Pinned image and loopback registry results with asymmetric transfer proof | `SPEED-020/pair-2` |

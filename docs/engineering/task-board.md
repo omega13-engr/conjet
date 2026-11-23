@@ -441,6 +441,11 @@ frozen harness and fresh output paths.
 Pairs 2 through 5 resumed on that same harness under the series' `remaining`
 directory. The canceled preliminary boot is preserved outside the counted
 pair set.
+Complete pair 2 retained two exit-127 errors on the existing Conjet path
+and zero on Kiri. Both Conjet errors reported Go thread creation failure
+under the declared four-PID cap and cleaned up successfully. Investigate
+the guest runc startup path using a separate diagnostic and keep the
+predeclared limits and failure records in the benchmark.
 
 
 ### SPEED-008
