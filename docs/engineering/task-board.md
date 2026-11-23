@@ -172,7 +172,11 @@ Next Action: Repeat remaining concurrency pairs and keep the Kiri pressure bound
 `kiri-effective-swap.log` later observed the requested 64 MiB memory
 ceiling and zero swap directly in Kiri's guest despite the inspect
 metadata discrepancy. The pressure test still enforces those effective
-limits before allocating. Repeat it to verify OOM attribution and recovery.
+limits before allocating. `SPEED-025/pair-3` verified both effective limits
+for both engines. Conjet attributed exit 137 to OOM and recovered. Kiri's
+wait timed out and its OOM flag stayed false despite the matched effective
+limits. Both passed survivor, recovery and owner cleanup. Further Kiri
+qualification needs a verified termination or OOM witness for this load.
 
 
 ### SPEED-024
@@ -290,6 +294,10 @@ Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
 Next Action: Repeat the verified offline Buildx workload at the remaining pair indices with effective builder resource attribution. Distinct temporary tags identify every case's exported image. The harness now samples cgroup CPU time, current and cumulative peak memory, and block I/O from the verified worker before and after application work, outside the timing window.
+`SPEED-021/pair-4` on `25ce7d7` verified all 72 timed operations per engine,
+with both BuildKit cgroup views reporting CPU, peak/current memory and
+I/O. `builder-counters.json` retains the raw-derived deltas. The report
+keeps intervals open until the compatible independent pairs are present.
 
 ### SPEED-022
 
@@ -430,6 +438,9 @@ The no-network Alpine `true` CLI series at `eb31229` completed pair 1 with
 with verified cleanup to allow local validation of the hosted CI fix without
 overlapping compilation and timing. Resume the remaining pairs with the same
 frozen harness and fresh output paths.
+Pairs 2 through 5 resumed on that same harness under the series' `remaining`
+directory. The canceled preliminary boot is preserved outside the counted
+pair set.
 
 
 ### SPEED-008
@@ -638,7 +649,9 @@ refresh stays in flight until the deferred event queues. Assertions are
 unchanged or stronger. Seven pulse tests passed three consecutive local
 runs. The full native SwiftPM suite executed 440 with two skips and zero
 failures. The logs and the two hosted failures are kept in
-`SPEED-026/final-local`. Hosted verification of the correction is pending.
+`SPEED-026/final-local`. On `63e9147`, [hosted CI](https://github.com/omega13-engr/conjet/actions/runs/45104363466)
+passed Swift, networking, app staging and benchmark checks. Later branch
+revisions still require current CI and independent review before merging.
 
 Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-policy),
 [release process](../release.md).

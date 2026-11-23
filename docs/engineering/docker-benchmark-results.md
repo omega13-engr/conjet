@@ -234,6 +234,26 @@ on Conjet and 1.071, 4.464 and 5.985 s on Kiri. `SPEED-021/pair-3/summary.json`
 contains the per-session distributions. This adds cleanup evidence. Detailed
 worker counters and compatible independent pairs remain open.
 
+Pair 4 on `25ce7d7` verified each worker's cgroup and added CPU, memory
+and block I/O observations. Each engine passed all 36 build/export, load
+and runnable-image checks. The table shows median counter deltas across
+three independent workers per language in this pair and their highest
+recorded memory peak. CPU and I/O deltas start after base preload.
+Memory peaks include the preceding preload in the same worker.
+
+| Engine and fixture | CPU s | Peak MiB | Read MiB | Written MiB |
+| --- | ---: | ---: | ---: | ---: |
+| Conjet Rust | 1.60 | 1562.7 | 0.2 | 25.5 |
+| Conjet Go | 19.61 | 770.8 | 0.0 | 132.0 |
+| Conjet Node | 2.70 | 332.7 | 0.0 | 25.3 |
+| Kiri Rust | 1.43 | 1393.6 | 575.4 | 24.7 |
+| Kiri Go | 20.76 | 697.1 | 1355.3 | 174.8 |
+| Kiri Node | 2.61 | 356.6 | 523.7 | 26.6 |
+
+The VM caches and storage paths can change these guest cgroup counters.
+The evidence supports observed resource use for this pair. Equivalent
+cross-session builder resource and cache effects remain under review.
+
 ## Compose first pair
 
 Both existing Docker engines completed the real Node/Redis workload in
@@ -363,8 +383,12 @@ both existing engines' bounded concurrency timings.
 The follow-up read-only probe showed Kiri's actual `memory.max` was
 67,108,864 bytes and `memory.swap.max` was zero for the requested profile.
 It also reported no guest swap. This identifies an inspect metadata
-discrepancy. The corrected pressure run must verify both effective cgroup
-values before allocating and then verify exit, OOM attribution and recovery.
+discrepancy. In pair 3 on `25ce7d7` both engines verified these effective
+values before allocating. Conjet again reported exit 137 and an OOM. On
+Kiri, `docker wait` timed out after 20 seconds and the OOM flag remained
+false during the bounded inspection window. Both engines preserved sibling
+data, passed fresh recovery and cleaned up the owned workloads. Kiri's
+termination and attribution boundary is unresolved under this configuration.
 
 ## Separate native timings
 
@@ -455,7 +479,7 @@ and a different cleanup boundary from existing Docker and Kiri.
 | Node/Redis Compose | Both existing Docker engines | Two measured pairs. One verifies effective quotas. Comparative intervals pending |
 | Persistent exec and control | Both existing Docker engines | One complete pair after the event-observation correction |
 | Storage and sustained service | Both existing Docker engines | One measured pair. Conjet ExternalSSD bind unsupported in the tested configuration |
-| Concurrency and pressure | Both existing Docker engines and separate native product | Two Docker sweeps. Conjet OOM and native-pressure recovery verified. Kiri OOM attribution requires rerun |
+| Concurrency and pressure | Both existing Docker engines and separate native product | Three Docker sweeps. Conjet OOM and native-pressure recovery verified. Kiri's wait timeout and absent OOM attribution reproduced under matched limits |
 
 Buildx, Compose, persistent exec and service networking keep the existing
 Docker backend where supported. The source adapter uses the declared
@@ -483,6 +507,7 @@ failed attempts and shutdown checks.
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
 | Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
 | Buildx per-case output-tag and worker cleanup verification | `SPEED-021/pair-3`, `SPEED-021/pair-3/summary.json` |
+| Buildx worker CPU, peak-memory and I/O evidence | `SPEED-021/pair-4`, `SPEED-021/pair-4/builder-counters.json` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
 | Compose repeat with effective service resource verification | `SPEED-022/pair-2` |
 | Canceled historical-event run and corrected paired control matrix | `SPEED-023/pair-1`, `SPEED-023/pair-2` |
@@ -490,6 +515,7 @@ failed attempts and shutdown checks.
 | Launch concurrency, memory attribution and recovery attempts | `SPEED-025/pair-1` |
 | Second concurrency pair and corrected Conjet OOM attribution | `SPEED-025/pair-2` |
 | Read-only effective memory and swap validation on Kiri | `SPEED-025/kiri-effective-swap.log` |
+| Matched guest pressure limits, successful recovery and reproduced Kiri wait timeout | `SPEED-025/pair-3` |
 | Full-budget native static product and active-shutdown canaries | `SPEED-025/native-product-full-1` |
 
 Production stayed in service throughout. The records preserve unknown
