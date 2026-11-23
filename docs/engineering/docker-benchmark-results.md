@@ -9,6 +9,24 @@ descriptive results at the stated boundaries. SPEED-008 remains unresolved.
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Supported optimized Docker route](docker-native-adapter.md)
 
+## Measured environment
+
+The machine was an Apple M1 Pro with 16 GiB RAM, macOS 27.2.1 (`26B131`)
+and an APFS ExternalSSD benchmark root. Production Conjet remained active.
+Each launcher recorded process identities, VM backing paths, host load,
+CPU time and RSS before and after its measurements. Docker 29.10.0,
+Buildx 0.39.1 and Compose 5.8.0 were pinned throughout. The existing
+Conjet Docker and opt-in native host binaries were development builds.
+The Linux native supervisor was a release build. These timings describe
+the measured binaries and host conditions.
+
+| Runtime artifact | SHA-256 |
+| --- | --- |
+| Conjet baseline VMM | `b7b7b489f6da12a9f048c31800a8acce33cc6cd7f855c026b254b3cd6d17445e` |
+| Conjet candidate VMM | `49992b4166bd4692fd8226e29e935046fab3f344dbf1ad89e73980da7e5f13d6` |
+| Candidate native supervisor | `6a3839855383e674e59a854fa197e56c2489c09d2594665b702dbcd733f0f42a` |
+| Official Kiri daemon | `c5cd8edefc69d3e4de4cf38a8149d07d6c4c4f1d522167c890541c17f2630884` |
+
 ## Existing Docker lifecycle
 
 The baseline runtime was built from `7e075c0`. Conjet used Core Docker with
@@ -314,6 +332,26 @@ directories. Prepared claims lowered API latency in this session. Refill
 reduced measured full-window throughput. This single-session result remains
 separate from equivalent Docker and Kiri qualification.
 
+The Docker-to-native source adapter also completed a full-budget session
+on `4da6d3b`. Each of the 4,000 measured operations had a unique native
+workload ID, exit zero and verified guest cleanup. The live canaries also
+passed capacity rejection, force removal and lost Start response handling.
+Throughput includes the event verification between operations. The CLI
+used the pinned Docker client. The API includes explicit removal. These
+operations ran as UID/GID 65532. Existing Docker no-network `true` runs
+used the image-default user and measured removal acknowledgement.
+
+| Native OCI Docker lane | Samples | Failures | p50 / p95 / p99 (ms) | Successes/s |
+| --- | ---: | ---: | ---: | ---: |
+| Docker CLI `run --rm` | 2,000 | 0 | 47.900/54.525/59.707 | 20.411 |
+| Docker API lifecycle | 2,000 | 0 | 28.381/33.940/34.537 | 34.063 |
+
+The VMM accrued 26.10 s of CPU time and grew from 146.63 to 152.64 MiB
+RSS across the run. The adapter accrued 7.09 s of CPU time, with an
+ending RSS of 32.56 MiB. The owned adapter socket and VM session were
+removed. This is a separate runtime result with different credentials
+and a different cleanup boundary from existing Docker and Kiri.
+
 ## Coverage and retained evidence
 
 The full suite remains underway. Image, builds, Compose, control, storage
@@ -334,6 +372,7 @@ failed attempts and shutdown checks.
 | Native and Docker pilots and capability checks | `SPEED-017` |
 | Rootfs receipts, backend audit and Docker-to-native pilot | `SPEED-018` |
 | Full paired no-network API row | `SPEED-019/alpine-true-none-api-pair-2` |
+| Full-budget Docker-to-native OCI run with per-operation cleanup witnesses | `SPEED-019/native-oci-full-1` |
 | First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
 | Pinned image and loopback registry results with asymmetric transfer proof | `SPEED-020/pair-2` |
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |

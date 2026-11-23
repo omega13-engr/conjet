@@ -426,6 +426,11 @@ failures. Median/p95/p99 were 594.953/819.515/871.010 ms on Conjet and
 3.944/4.742/6.988 ms on Kiri. Timing ends at API removal acknowledgement.
 Only one of five pairs is complete for this row; source revision and raw
 data are in `SPEED-019/alpine-true-none-api-pair-2`.
+`SPEED-019/native-oci-full-1` used `4da6d3b` and recorded 2,000 CLI and
+2,000 API samples with no failures. Every operation had a distinct native
+workload ID and verified guest cleanup. The API p50/p95/p99 was
+28.381/33.940/34.537 ms and CLI p50/p95/p99 was 47.900/54.525/59.707 ms.
+The opt-in environment rejected excess admission and preserved production.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),
