@@ -71,44 +71,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 
 ## BACKLOG
 
-### SPEED-015
-
-Title: Freeze the Docker comparison contract and capability matrix
-
-Description: Create benchmarks/scenarios/docker-comparison-v1.json and docs/engineering/docker-benchmark-plan.md defining the workloads, adapters, timing boundaries, and qualification rules.
-
-Is blocked by task: None; uses completed SPEED-000 through SPEED-012 evidence. Does not wait for SPEED-014.
-
-Acceptance Criteria:
-
-- List four separate lanes: official Kiri Docker API/CLI, existing Conjet Docker API/CLI, native fresh/prepared API, and any verified Docker-to-native adapter. Record supported/unsupported operations per lane; never substitute native execution for docker build or Compose.
-- Pin official Kiri version/hash, candidate revision, ARM64 image digests, Docker/Compose/Buildx clients, guest resources, storage placement, network behavior, and cache policies. Record effective limits, not only requested values.
-- Predeclare warmups, repetitions, concurrency, timeouts, failure treatment, session ordering and statistics. Lifecycle qualification retains at least 10,000 operations per scenario across five sessions; declare practical independent-session counts for expensive builds/Compose before measuring.
-- Scope local conclusions to the M1 Pro. Preserve the deferred second-host, energy and equivalent-teardown requirements; unavailable observability must produce unknown, not pass.
-
-Problem and Evidence: Previous comparisons mixed native and Docker endpoints; the experimental native product cannot yet run general OCI images, bridge workloads, or Docker commands.
-
-Approach:
-
-1. Inventory the existing harnesses and runtime capabilities without changing production.
-2. Write the scenario manifest and an ASCII diagram for each execution path; identify integration gaps as separate implementation prerequisites.
-3. Review the manifest against each requested Docker operation and freeze the initial measurement policy.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-015`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Write the lane/capability table and pinned workload manifest.
-
 ### SPEED-016
 
 Title: Make the benchmark orchestrator safe and reproducible
@@ -750,6 +712,41 @@ and review requirements before merge.
 Next Action: Collect required CI and independent review before merging.
 
 ## DONE
+
+### SPEED-015
+
+Title: Freeze the Docker comparison contract and capability matrix
+
+Description: Create benchmarks/scenarios/docker-comparison-v1.json and docs/engineering/docker-benchmark-plan.md defining the workloads, adapters, timing boundaries, and qualification rules.
+
+Is blocked by task: None; uses completed SPEED-000 through SPEED-012 evidence. Does not wait for SPEED-014.
+
+Acceptance Criteria:
+
+- List four separate lanes: official Kiri Docker API/CLI, existing Conjet Docker API/CLI, native fresh/prepared API, and any verified Docker-to-native adapter. Record supported/unsupported operations per lane; never substitute native execution for docker build or Compose.
+- Pin official Kiri version/hash, candidate revision, ARM64 image digests, Docker/Compose/Buildx clients, guest resources, storage placement, network behavior, and cache policies. Record effective limits, not only requested values.
+- Predeclare warmups, repetitions, concurrency, timeouts, failure treatment, session ordering and statistics. Lifecycle qualification retains at least 10,000 operations per scenario across five sessions; declare practical independent-session counts for expensive builds/Compose before measuring.
+- Scope local conclusions to the M1 Pro. Preserve the deferred second-host, energy and equivalent-teardown requirements; unavailable observability must produce unknown, not pass.
+
+Problem and Evidence: Previous comparisons mixed native and Docker endpoints; the experimental native product cannot yet run general OCI images, bridge workloads, or Docker commands.
+
+Approach:
+
+1. Inventory the existing harnesses and runtime capabilities without changing production.
+2. Write the scenario manifest and an ASCII diagram for each execution path; identify integration gaps as separate implementation prerequisites.
+3. Review the manifest against each requested Docker operation and freeze the initial measurement policy.
+
+Evidence: [Frozen contract](docker-benchmark-plan.md) and [manifest](../../benchmarks/scenarios/docker-comparison-v1.json). Verified the installed Kiri signature and host client hashes. Resolved Docker Hub ARM64 child manifests through the registry and checked the HTTP digest against each index body. Baseline source is `7e075c0`. No timing samples were taken for this task.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Checked the four execution paths, minimum lifecycle sample budget, paired-session resampling and separate timing boundaries against the previous gates. Unobserved cleanup and effective limits remain unknown.
+
+Next Action: Apply the manifest in SPEED-016.
 
 ### SPEED-012
 
