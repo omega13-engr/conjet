@@ -172,6 +172,28 @@ are retained under `conjet-speedup-evidence/SPEED-027` on ExternalSSD.
 Every launcher verified unchanged production and removal of its native
 session and Docker socket.
 
+## SPEED-028 authenticated connection reuse diagnostics
+
+Three isolated traced boots reused the same release artifacts as SPEED-027.
+Each boot completed 176 operations and used one authenticated native socket.
+The last boot included 11 seconds of idle time between warmup and measurement.
+The previous adapter authenticated once per operation in addition to
+startup. Per-operation authentication now contributes zero handshakes,
+compared with the previous CLI canary medians of 0.578–0.596 ms.
+
+| Diagnostic lane | SPEED-027 traced session medians (ms) | SPEED-028 traced session medians (ms) |
+| --- | ---: | ---: |
+| API true | 3.935–4.652 | 3.248–3.462 |
+| API both streams, exit 23 | 4.169–4.324 | 3.197–3.566 |
+| CLI true | 24.377–26.207 | 22.007–23.233 |
+| CLI both streams, exit 23 | 24.617–25.274 | 22.084–23.990 |
+
+These diagnostic sessions establish the request-count change. Different boot
+and host conditions limit how much of the overall timing difference can be
+attributed to connection reuse. Every launcher verified production
+preservation and owned-resource cleanup. Trace, client and launcher reports
+are under `conjet-speedup-evidence/SPEED-028` on ExternalSSD.
+
 ## Release-build static native API and CLI
 
 A separate release-build run used `cabbea9`, the same CLI, VMM, kernel and

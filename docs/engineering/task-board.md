@@ -165,8 +165,17 @@ Approach:
 2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
 3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
 
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
+Evidence: DONE. Used the `cf0a94e` release artifacts from SPEED-027 with the
+updated adapter on `a4c5c8c`. Ran
+`python3 build-support/run-conjet-speedup.py --diagnostics trace` three times
+with the pinned release assets and summarized with
+`python3 benchmarks/native-docker-diagnostic.py`. All 528 operations passed
+with one authenticated connection per boot and unique native workload IDs.
+The final boot reused the channel after 11 seconds idle. The six tests in
+`python3 benchmarks/test-native-docker-adapter.py` passed, including injected
+disconnect before reply, disconnect after admission, timeout, different
+boot generation, and cancellation without replay. Exact commands, hashes,
+observations and cleanup are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-028`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
@@ -175,10 +184,15 @@ Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [detailed result format](docker-benchmark-results.md),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local diff and isolated runtime checks passed. One lease owns the
+authenticated socket until shutdown or failure. Any failed exchange closes it
+and preserves the pending launch identity. The adapter does not reconnect or
+replay. The launcher verified guest cleanup, socket removal, and unchanged
+production for all three boots. Fault injection used the adapter transport
+boundary. Independent PR review is separate.
 
-Next Action: Implement a bounded connection lease and boot-generation invalidation tests.
+Next Action: Add bounded terminal output delivery in SPEED-029. The two
+post-cleanup stream requests remain on every launch.
 
 ### SPEED-029
 

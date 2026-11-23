@@ -1,12 +1,12 @@
-from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 HERE = Path(__file__).resolve().parent
 SERVER = runpy.run_path(str(HERE.parent / 'build-support/conjet-native-docker.py'))
@@ -28,17 +28,95 @@ class TransportStub:
 
 
 class NativeDockerTests(unittest.TestCase):
+    def make_native(self, exchange, *, trace=None):
+        with tempfile.TemporaryDirectory(dir=SERVER['SCRATCH']) as temporary:
+            root = Path(temporary)
+            (root / 'launch.key').write_bytes(bytes(32))
+            (root / 'native-session.json').write_text(json.dumps({
+                'pid': os.getpid(), 'image_digest': METADATA['config_digest']}))
+            connection = Mock()
+            connection.getsockopt.return_value = os.getpid()
+            auth = Mock(return_value='boot')
+            native_type = SERVER['Native']
+            with patch.object(native_type.execute.__globals__['socket'], 'socket', return_value=connection):
+                with patch.dict(native_type.execute.__globals__['WIRE'], {'authenticate': auth, 'call': exchange}):
+                    native = native_type(root, METADATA['config_digest'], trace)
+        self.addCleanup(native.close)
+        auth.assert_called_once_with(connection, bytes(32), 'native_oci_arm64_v1')
+        return native, connection
+
+    def test_one_authenticated_lease_advances_identity_and_closes(self):
+        handle = {'boot_id': 'boot', 'workload_id': 'workload'}
+        operations = []
+
+        def exchange(_channel, opcode, request):
+            if opcode == 20:
+                return 20, {'image_digest': METADATA['config_digest'], 'workload': None,
+                            'boot_id': 'boot', 'last_sequence': 4}
+            if opcode == 8:
+                operations.append(request)
+                return 13, {'handle': handle, 'cleanup': 'complete', 'exit': {'code': 0},
+                            'exec': 'confirmed'}
+            self.assertEqual(opcode, 12)
+            return 14, {'data': '', 'dropped_bytes': 0, 'eof': True}
+
+        trace = SERVER['Trace']()
+        native, connection = self.make_native(exchange, trace=trace)
+        with patch.dict(native.execute.__globals__['WIRE'], {'call': exchange}):
+            cancellation = threading.Event()
+            cancellation.set()
+            self.assertEqual(native.execute({}, cancellation)[0], 137)
+            cancellation.clear()
+            for _ in range(2):
+                self.assertEqual(native.execute({}, cancellation)[0], 0)
+        self.assertEqual([op['sequence'] for op in operations], [5, 6])
+        self.assertEqual(len({op['operation_id'] for op in operations}), 2)
+        self.assertEqual([row['event'] for row in trace.rows].count('native_connect'), 1)
+        self.assertIsNone(native.pending)
+        native.close()
+        native.close()
+        connection.close.assert_called_once()
+
+    def test_disconnect_timeout_and_reboot_fail_closed_without_replaying(self):
+        for case in ('disconnect-before-reply', 'disconnect-after-admit', 'timeout', 'boot-changed'):
+            with self.subTest(case=case):
+                opcodes = []
+
+                def exchange(_channel, opcode, request):
+                    opcodes.append(opcode)
+                    if opcode == 20:
+                        return 20, {'image_digest': METADATA['config_digest'], 'workload': None,
+                                    'boot_id': 'boot', 'last_sequence': 0}
+                    if opcode == 8:
+                        if case == 'disconnect-before-reply':
+                            raise EOFError('no launch reply')
+                        return 13, {'cleanup': 'pending', 'handle': {'workload_id': 'workload',
+                                    'boot_id': 'rebooted' if case == 'boot-changed' else 'boot'}}
+                    self.assertEqual(opcode, 10)
+                    if case == 'timeout':
+                        raise TimeoutError('native channel deadline')
+                    raise ConnectionResetError('native channel reset')
+
+                native, connection = self.make_native(exchange)
+                with patch.dict(native.execute.__globals__['WIRE'], {'call': exchange}):
+                    with self.assertRaises((EOFError, OSError, RuntimeError)):
+                        native.execute({}, threading.Event())
+                    with self.assertRaisesRegex(RuntimeError, 'channel is closed'):
+                        native.execute({}, threading.Event())
+                self.assertEqual(opcodes.count(8), 1)
+                self.assertEqual(native.pending['sequence'], 1)
+                self.assertEqual('handle' in native.pending, case in ('disconnect-after-admit', 'timeout'))
+                connection.close.assert_called_once()
+
     def test_terminal_wait_timeout_observes_cancellation_without_replay(self):
-        native_type = SERVER['Native']
-        native = native_type.__new__(native_type)
-        native.boot = 'boot'
-        native.sequence = 0
-        native.channel = lambda: nullcontext((None, native.boot))
         cancellation = threading.Event()
         operations = []
         handle = {'boot_id': 'boot', 'workload_id': 'workload'}
 
         def exchange(_channel, opcode, request):
+            if opcode == 20:
+                return 20, {'image_digest': METADATA['config_digest'], 'workload': None,
+                            'boot_id': 'boot', 'last_sequence': 0}
             operations.append(opcode)
             if opcode == 8:
                 self.assertEqual(request['sequence'], 1)
@@ -54,6 +132,7 @@ class NativeDockerTests(unittest.TestCase):
             self.assertEqual(opcode, 12)
             return 14, {'data': '', 'dropped_bytes': 0, 'eof': True}
 
+        native, _ = self.make_native(exchange)
         with patch.dict(native.execute.__globals__['WIRE'], {'call': exchange}):
             code, stdout, stderr, state = native.execute({'argv': ['/bin/true']}, cancellation)
         self.assertEqual((code, stdout, stderr), (137, b'', b''))

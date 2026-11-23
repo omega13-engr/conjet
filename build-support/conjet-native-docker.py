@@ -56,38 +56,59 @@ class Rejected(ValueError):
 
 
 class Native:
-    trace = None
-
     def __init__(self, session, digest, trace=None):
         if (session.resolve() != session or not session.is_relative_to(SCRATCH)
                 or not session.is_dir() or session.stat().st_mode & 0o077):
             raise Rejected('native session directory is not private')
         self.sock = session / 'native-launch.sock'
-        self.key = (session / 'launch.key').read_bytes()
-        if len(self.key) != 32:
+        key = (session / 'launch.key').read_bytes()
+        if len(key) != 32:
             raise Rejected('native session key is invalid')
         identity = json.loads((session / 'native-session.json').read_text())
         self.pid = identity['pid']
         self.digest = digest
         self.trace = trace
+        self.lock = threading.Lock()
+        self.pending = None
         if identity['image_digest'] != digest:
             raise Rejected('staged OCI digest differs from the receipt')
-        with self.channel() as (channel, boot):
-            status = self.call(channel, 20, {'budget_ms': 1000}, 20)
-            if status['image_digest'] != digest or status['workload'] is not None:
+        self.connection = socket.socket(socket.AF_UNIX)
+        try:
+            if trace:
+                trace.mark('native_connect')
+            self.connection.settimeout(10)
+            self.connection.connect(str(self.sock))
+            if self.connection.getsockopt(0, 2) != self.pid:
+                raise Rejected('native socket peer changed')
+            self.boot = WIRE['authenticate'](self.connection, key, 'native_oci_arm64_v1')
+            status = self.call(self.connection, 20, {'budget_ms': 1000}, 20)
+            if (status['boot_id'] != self.boot or status['image_digest'] != digest
+                    or status['workload'] is not None):
                 raise Rejected('native session must begin dedicated and idle')
-            self.boot = boot
             self.sequence = status['last_sequence']
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        with self.lock:
+            if self.connection is not None:
+                self.connection.close()
+                self.connection = None
 
     @contextmanager
-    def channel(self):
-        with socket.socket(socket.AF_UNIX) as channel:
-            channel.settimeout(10)
-            channel.connect(str(self.sock))
-            if channel.getsockopt(0, 2) != self.pid:
-                raise Rejected('native socket peer changed')
-            boot = WIRE['authenticate'](channel, self.key, 'native_oci_arm64_v1')
-            yield channel, boot
+    def lease(self):
+        with self.lock:
+            if self.connection is None:
+                raise RuntimeError('authenticated native channel is closed')
+            try:
+                yield self.connection
+            except BaseException:
+                # The peer may have committed the pending operation even if
+                # its response was lost. Keep its identity and fail closed.
+                self.connection.close()
+                self.connection = None
+                raise
 
     def call(self, channel, opcode, body, expected):
         kind, response = WIRE['call'](channel, opcode, body)
@@ -98,17 +119,12 @@ class Native:
     def execute(self, process, cancellation):
         began = time.monotonic_ns()
         trace = self.trace
-        if trace:
-            trace.mark('native_connect')
-        with self.channel() as (channel, boot):
-            authenticated = time.monotonic_ns()
-            if boot != self.boot:
-                raise RuntimeError('native guest incarnation changed')
-            self.sequence += 1
-            request = {'boot_id': boot, 'sequence': self.sequence, 'operation_id': uuid.uuid4().hex,
-                       'budget_ms': 1000, 'spec': process}
+        with self.lease() as channel:
             if cancellation.is_set():
                 return 137, b'', b'', {'cancelled_before_admission': True}
+            self.sequence += 1
+            self.pending = {'boot_id': self.boot, 'sequence': self.sequence, 'operation_id': uuid.uuid4().hex}
+            request = {**self.pending, 'budget_ms': 1000, 'spec': process}
             if trace:
                 trace.mark('native_launch_request', operation=request['operation_id'])
             state = self.call(channel, 8, request, 13)
@@ -116,6 +132,9 @@ class Native:
             wait_calls = 0
             bound = time.monotonic() + 32
             handle = state['handle']
+            if handle['boot_id'] != self.boot:
+                raise RuntimeError('native guest incarnation changed')
+            self.pending['handle'] = handle
             if trace:
                 trace.mark('native_admitted', workload=handle['workload_id'])
             sent_cancel = False
@@ -124,6 +143,8 @@ class Native:
                     raise RuntimeError('native workload cleanup is unresolved')
                 if cancellation.is_set() and not sent_cancel:
                     state = self.call(channel, 11, {'handle': handle, 'budget_ms': 1000}, 13)
+                    if state['handle'] != handle:
+                        raise RuntimeError('native cancellation returned a different workload')
                     sent_cancel = True
                     continue
                 # Wait for the terminal revision. A short budget bounds the
@@ -135,6 +156,8 @@ class Native:
                     continue
                 if kind != 13:
                     raise RuntimeError(f'native terminal wait rejected: {result}')
+                if result['handle'] != handle:
+                    raise RuntimeError('native wait returned a different workload')
                 state = result
             terminal = time.monotonic_ns()
             if trace:
@@ -156,16 +179,18 @@ class Native:
                     if not piece:
                         raise RuntimeError('native output did not advance')
                 output.append(bytes(data))
-            state['adapter_timings_ns'] = {'authenticate': authenticated - began,
-                                           'admit': admitted - authenticated,
+            state['adapter_timings_ns'] = {'authenticate': 0,
+                                           'admit': admitted - began,
                                            'terminal': terminal - admitted,
                                            'output': time.monotonic_ns() - terminal}
             state['adapter_wait_calls'] = wait_calls
             if sent_cancel and state['exit'] is None and not state.get('helper_failed'):
+                self.pending = None
                 return 137, *output, state
             if state['exec'] != 'confirmed' or state.get('helper_failed'):
                 raise RuntimeError('OCI exec was not confirmed after allocation')
             status = state['exit']
+            self.pending = None
             return status.get('code', 128 + status.get('signal', 0)), *output, state
 
 
@@ -610,34 +635,37 @@ def main():
                        or os.path.lexists(args.trace)):
         parser.error('trace must be a new file on ExternalSSD')
     trace = Trace() if args.trace else None
-    native = Native(args.native_session, metadata['config_digest'], trace)
-    owner = Owner(native, args.image, metadata, trace)
     stop = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stop.set())
     descriptor = os.open(args.native_session / 'admission.lock', os.O_WRONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        server = Server(endpoint, owner)
+        native = Native(args.native_session, metadata['config_digest'], trace)
         try:
-            endpoint.chmod(0o600)
-            print(json.dumps({'socket': str(endpoint), 'boot_id': native.boot,
-                              'backend': 'jetstream-native-oci'}), flush=True)
-            while not stop.is_set():
-                server.handle_request()
-        finally:
+            owner = Owner(native, args.image, metadata, trace)
+            server = Server(endpoint, owner)
             try:
-                with owner.cv:
-                    if owner.record is not None:
-                        owner.record.cancellation.set()
-                    owner.cv.notify_all()
-                if owner.worker:
-                    owner.worker.join(35)
+                endpoint.chmod(0o600)
+                print(json.dumps({'socket': str(endpoint), 'boot_id': native.boot,
+                                  'backend': 'jetstream-native-oci'}), flush=True)
+                while not stop.is_set():
+                    server.handle_request()
             finally:
-                server.server_close()
-                endpoint.unlink(missing_ok=True)
-                if trace:
-                    trace.write(args.trace)
+                try:
+                    with owner.cv:
+                        if owner.record is not None:
+                            owner.record.cancellation.set()
+                        owner.cv.notify_all()
+                    if owner.worker:
+                        owner.worker.join(35)
+                finally:
+                    server.server_close()
+                    endpoint.unlink(missing_ok=True)
+        finally:
+            native.close()
+            if trace:
+                trace.write(args.trace)
 
 
 if __name__ == '__main__':

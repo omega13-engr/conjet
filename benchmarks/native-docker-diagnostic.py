@@ -35,6 +35,10 @@ def collect(endpoint, peer, docker, env, directory):
             raise RuntimeError('diagnostic endpoint or fixture differs from the native contract')
         with (directory / 'client.jsonl').open('x') as samples:
             for index in range(44):
+                if index == 4:
+                    # An idle period longer than the native I/O timeout
+                    # exercises connection reuse outside a request deadline.
+                    time.sleep(11)
                 for fixture, (argv, code, stdout, stderr) in CANARIES.items():
                     for lane in ('api', 'cli'):
                         name = f'cjdiag-{fixture}-{lane}-{index}'
