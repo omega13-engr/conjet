@@ -59,6 +59,20 @@ class WorkloadTests(unittest.TestCase):
             MATRIX['seed_registry'](connection, '127.0.0.1:5000', 'owner/fixture', '0', b'config', [])
         self.assertEqual(connection.requested, ('POST', '/v2/owner/fixture/blobs/uploads/'))
 
+    def test_registry_cleanup_uses_config_identity_when_repo_digest_is_empty(self):
+        repo, identity = '127.0.0.1:5000/owned', 'sha256:' + 'a' * 64
+        image = {'Repository': repo, 'ID': identity, 'Tag': '<none>', 'Digest': ''}
+        replies = iter((json.dumps(image).encode(), b'deleted', b''))
+        calls = []
+
+        def call(_scenario, args, *, phase):
+            calls.append(args)
+            return next(replies)
+
+        MATRIX['remove_registry_image'](SimpleNamespace(call=call), repo, identity)
+        self.assertEqual(calls[1], ['image', 'rm', identity])
+        self.assertEqual(calls[0], calls[2])
+
     def test_build_inputs_separate_source_and_local_dependency(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             for language in ('go', 'node', 'rust'):

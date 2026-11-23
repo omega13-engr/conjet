@@ -361,6 +361,11 @@ Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
 Next Action: Repeat the corrected controlled-registry workload at the remaining pair indices. `SPEED-020/pair-2` passed both image pins, warm save/load and run. Its host timestamp filter missed Conjet registry witnesses. `SPEED-020/pair-3` on `b31afde` observed all expected config and layer bytes for all ten measured first pulls per engine. Both engines passed archive, run and labeled-registry cleanup checks with zero scenario failures. Keep the prior unknown transfer records.
+The subsequent private Kiri inventory found 24 owned digest-only registry
+images omitted by the earlier repository-filtered listing. Removed their
+exact config IDs and verified absence without pruning. The harness now
+validates those IDs against the full private image inventory and verifies
+their removal. See `SPEED-026/final-local/kiri-image-inventory*.log`.
 
 ### SPEED-026
 

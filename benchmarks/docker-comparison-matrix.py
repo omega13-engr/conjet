@@ -206,6 +206,25 @@ def received_blobs(log, repository):
     return matched
 
 
+def remove_registry_image(docker, name, config_digest):
+    inventory = ['image', 'ls', '--all', '--no-trunc', '--format', '{{json .}}']
+
+    def find():
+        data = docker.call('registry-fixture-inventory', inventory, phase='cleanup')
+        if data is None or len(data) > 1024 * 1024:
+            raise RuntimeError('could not verify owned registry image cleanup')
+        return [row for line in data.splitlines() if (row := json.loads(line))['Repository'] == name]
+
+    present = find()
+    if any(row['ID'] != config_digest or row['Tag'] != '<none>' for row in present):
+        raise RuntimeError('unexpected image in the task-owned registry repository')
+    if present:
+        if docker.call('registry-fixture-remove', ['image', 'rm', config_digest], phase='cleanup') is None:
+            raise RuntimeError('could not remove the owned registry image')
+        if find():
+            raise RuntimeError('owned registry image is still present after removal')
+
+
 def run_registry(docker, manifest):
     budget = manifest['suites']['images']
     path = Path('/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/common-image/image/workload')
@@ -281,14 +300,7 @@ def run_registry(docker, manifest):
                                    phase='verification', expected=b'') is None:
                         first['error'] = 'registry runnable layers failed the canary'
                 finally:
-                    existing = docker.call('registry-fixture-inventory', ['image', 'ls', '--digests',
-                                           '--format', '{{.Repository}}@{{.Digest}}', f'{address}/{repository}'],
-                                           phase='cleanup')
-                    if existing is None:
-                        raise RuntimeError('could not verify registry fixture cleanup')
-                    if reference.encode() in existing.splitlines() and docker.call(
-                            'registry-fixture-remove', ['image', 'rm', reference], phase='cleanup') is None:
-                        raise RuntimeError('could not remove registry fixture')
+                    remove_registry_image(docker, f'{address}/{repository}', descriptors['config']['digest'])
     finally:
         if connection is not None:
             connection.close()
