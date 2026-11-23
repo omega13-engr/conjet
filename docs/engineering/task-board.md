@@ -275,9 +275,7 @@ Approach:
 2. Execute the cache matrix serially and validate each output image.
 3. Publish per-project and per-cache-state comparisons with builder provenance.
 
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-021`.
+Evidence: `SPEED-021/pair-2` records harness `1253da3`. Both existing engines completed all 36 pinned Buildx build/export and load rows and 36 artifact canaries each. Raw reports, builder endpoint/driver/version and cleanup witnesses are retained with failed `pair-1`. Four independent pairs with the corrected workload and detailed peak CPU, memory and I/O attribution remain.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),
@@ -288,7 +286,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Validate the repaired Node export using both engines and complete the paired sessions.
+Next Action: Repeat the verified offline Buildx workload at the remaining pair indices with effective builder resource attribution.
 
 ### SPEED-022
 

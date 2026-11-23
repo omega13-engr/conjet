@@ -96,7 +96,33 @@ Kiri bootstrapped the pinned worker but Docker Hub HTTPS timed out inside
 the worker for all three build fixtures. Kiri has no timed rows in this
 pair. The correction uses npm's local package install mode and provides
 both workers with the same verified OCI bases outside the timing window.
-Buildx comparisons remain inconclusive.
+
+Pair 2 ran the corrected harness at `1253da3`. Both engines completed
+36 build/exports and 36 loads on BuildKit v0.23.2. All 36 final images
+on each engine passed the artifact canary. Buildx used a fresh guest worker
+volume per repetition on both engines. The named OCI contexts were local,
+platform-pinned and checked against the original registry manifests.
+
+| Fixture and cache state | Conjet p50 / p95 / p99 (ms, rounded down) | Kiri p50 / p95 / p99 (ms, rounded down) |
+| --- | ---: | ---: |
+| Rust empty | 1645/1729/1729 | 929/990/990 |
+| Rust unchanged | 749/908/908 | 255/255/255 |
+| Rust source | 1148/1401/1401 | 851/965/965 |
+| Rust dependency | 1129/1744/1744 | 594/937/937 |
+| Go empty | 5148/5211/5211 | 4697/5048/5048 |
+| Go unchanged | 774/863/863 | 253/259/259 |
+| Go source | 5166/5256/5256 | 4439/5760/5760 |
+| Go dependency | 5188/5260/5260 | 4706/4875/4875 |
+| Node empty | 9653/9765/9765 | 6148/6265/6265 |
+| Node unchanged | 4102/4410/4410 | 427/521/521 |
+| Node source | 4063/4082/4082 | 595/1082/1082 |
+| Node dependency | 9526/9952/9952 | 6283/6405/6405 |
+
+These are three observations per engine per row, timing build plus export.
+The separate load and base-preload samples are in the raw files. Kiri's
+median was lower for every workload in this pair. The Buildx verdict
+remains inconclusive until the remaining compatible pairs and matched
+builder resource evidence are available.
 
 ## Compose first pair
 
@@ -172,6 +198,7 @@ failed attempts and shutdown checks.
 | Full paired no-network API row | `SPEED-019/alpine-true-none-api-pair-2` |
 | First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
+| Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
 
 Production stayed in service throughout. The records preserve unknown
