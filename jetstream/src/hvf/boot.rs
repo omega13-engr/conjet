@@ -2709,19 +2709,21 @@ impl HvfBootRunner {
                 }
             }
         }
-        if let Some(bridge) = shared
-            .vm_state
-            .lock()
-            .expect("VM state mutex poisoned")
-            .devices
-            .native_launch_bridge
-            .as_ref()
         {
-            let native_vcpu_ids = vcpu_ids.clone();
-            bridge.set_native_wake(move || {
-                let ids = native_vcpu_ids.lock().expect("vCPU id mutex poisoned");
-                let _ = exit_vcpus(&ids);
-            });
+            let state = shared.vm_state.lock().expect("VM state mutex poisoned");
+            for bridge in [
+                &state.devices.native_launch_bridge,
+                &state.devices.docker_bridge,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let ids = vcpu_ids.clone();
+                bridge.set_ingress_wake(move || {
+                    let ids = ids.lock().expect("vCPU id mutex poisoned");
+                    let _ = exit_vcpus(&ids);
+                });
+            }
         }
         let memory_control = if let Some(socket_path) = self.options.memory_control_socket.clone() {
             match spawn_memory_control_socket(

@@ -215,10 +215,13 @@ def session(args, root):
     }
     if args.retained_trace:
         env['CONJET_DOCKER_TRANSPORT_TRACE'] = '1'
+    if args.retained_event_wake:
+        env['CONJET_DOCKER_EVENT_WAKE'] = '1'
     before = production()
     if before['endpoint'] == f'unix://{docker_socket}':
         raise RuntimeError('candidate overlaps production Docker')
     evidence = {'revision': run(['/usr/bin/git', '-C', REPO, 'rev-parse', 'HEAD']),
+                'retained_event_wake': args.retained_event_wake,
                 'tracked_diff_sha256': hashlib.sha256(
                     run(['/usr/bin/git', '-C', REPO, 'diff', '--binary', 'HEAD']).encode()
                 ).hexdigest(),
@@ -591,6 +594,7 @@ def main():
     parser.add_argument('--benchmark-output', type=Path, help='run the pinned fresh lifecycle benchmark')
     parser.add_argument('--retained-trace-output', type=Path)
     parser.add_argument('--retained-trace', action='store_true')
+    parser.add_argument('--retained-event-wake', action='store_true')
     parser.add_argument('--retained-host-only', action='store_true')
     parser.add_argument('--benchmark-samples', type=int, default=100, help='samples per lane and network')
     parser.add_argument('--benchmark-scenario', type=Path, help='use a staged lifecycle scenario')
@@ -630,6 +634,8 @@ def main():
         if not resolved.is_relative_to(SCRATCH) or os.path.lexists(resolved):
             parser.error('retained trace output must be a new ExternalSSD directory')
         args.retained_trace_output = resolved
+    if args.retained_event_wake and not args.legacy_baseline:
+        parser.error('event wake is limited to the isolated retained Docker profile')
     if not args.image or args.image.startswith('-'):
         parser.error('image must be a Docker image reference')
     if not SSD.is_mount() or SCRATCH.resolve() != SCRATCH:

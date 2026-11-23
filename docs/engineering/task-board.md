@@ -83,44 +83,6 @@ retain their old acceptance criteria for research provenance.
 
 ## BACKLOG
 
-### SPEED-048
-
-Title: Evaluate event-driven ingress on the retained Docker VSOCK bridge
-
-Description: Wake the existing Jetstream queue owner on private Docker
-socket readiness. Retain the current engine and 25 ms fallback tick.
-
-Is blocked by task: SPEED-047 (DONE).
-
-Acceptance Criteria:
-
-- Reuse the existing owned readiness watcher, with an isolated opt-in
-  and a rollback to the polling path.
-- Preserve ordinary Docker lifecycle results, stream framing, EOF and
-  cleanup. Test the listener wake and socket ownership directly.
-- Compare release builds with ingress wake off and on in separate
-  boots. Measure transport publication and complete workload latency.
-  Keep the experiment opt-in if the workload result remains uncertain.
-
-Problem and Evidence: SPEED-047 observed 4.44–8.58 ms of median
-start-request delay between host queueing and guest-ring publication
-in the host-only traces. The Docker accept loop polls every
-10 ms and the initialized guest can wait for the VMM tick.
-
-Approach: Apply the scoped readiness notification used by the
-native-launch transport to Docker ingress. Keep the host queue,
-credit, Docker engine and guest lifecycle owners intact.
-
-Evidence: Pending release A/B runs and correctness checks.
-
-Source: [SPEED-047](#speed-047),
-[`vsock.rs`](../../jetstream/src/devices/vsock.rs).
-
-Review: Pending isolated transport and workload evidence.
-
-Next Action: Implement the reversible readiness path after SPEED-047
-finishes. Freeze the matched Kiri comparison separately.
-
 ### SPEED-014
 
 Title: Validate and release the next Conjet version
@@ -179,6 +141,43 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: Set matching version metadata and release notes for the reviewed package scope before tagging an independently approved, qualified revision. Confirm Developer ID and notarization credential availability through the release environment.
 
 ## INPROGRESS
+
+### SPEED-049
+
+Title: Compare retained Docker event wake with official Kiri
+
+Description: Measure the frozen no-network Alpine true API and CLI
+groups with the scoped ingress candidate and official Kiri 0.2.2.
+
+Is blocked by task: SPEED-048 (DONE).
+
+Acceptance Criteria:
+
+- Run five independent alternating pairs per lane, with 2,000 timed
+  operations and ten warmups per engine and boot.
+- Keep Docker API and CLI results separate. Record matching workloads,
+  resource settings, backend identities and cleanup witnesses.
+- Retain failures and partial runs. Use the existing report's paired
+  95% method and 1.05 CLI parity threshold for eligible pairs.
+
+Problem and Evidence: The isolated Conjet A/B pilot verified lower
+ingress and lifecycle medians on the same release binary. It has no
+matched Kiri result.
+
+Approach: Use the frozen lifecycle harness and signed pinned Kiri
+release. Enable event wake only in the candidate. Keep trace
+instrumentation disabled during timing.
+
+Evidence: Pending matched release runs under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-049`.
+
+Source: [Benchmark contract](docker-benchmark-plan.md),
+[result format](docker-benchmark-results.md).
+
+Review: Pending independent paired evidence and cleanup.
+
+Next Action: Verify release identities, freeze the manifest and run
+the API group followed by the CLI group.
 
 ### SPEED-025
 
@@ -1165,6 +1164,57 @@ Next Action: Preserve the source and diagnostics. The retained Docker
 path has no dependency on this experiment.
 
 ## DONE
+
+### SPEED-048
+
+Title: Evaluate event-driven ingress on the retained Docker VSOCK bridge
+
+Description: Wake the existing Jetstream queue owner on private Docker
+socket readiness. Retain the current engine and 25 ms fallback tick.
+
+Is blocked by task: SPEED-047 (DONE).
+
+Acceptance Criteria:
+
+- Reuse the existing owned readiness watcher, with an isolated opt-in
+  and a rollback to the polling path.
+- Preserve ordinary Docker lifecycle results, stream framing, EOF and
+  cleanup. Test the listener wake and socket ownership directly.
+- Compare release builds with ingress wake off and on in separate
+  boots. Measure transport publication and complete workload latency.
+  Keep the experiment opt-in if the workload result remains uncertain.
+
+Problem and Evidence: SPEED-047 observed 4.44–8.58 ms of median
+start-request delay between host queueing and guest-ring publication
+in the host-only traces. The Docker accept loop polls every
+10 ms and the initialized guest can wait for the VMM tick.
+
+Approach: Apply the scoped readiness notification used by the
+native-launch transport to Docker ingress. Keep the host queue,
+credit, Docker engine and guest lifecycle owners intact.
+
+Evidence: DONE. At `e716f8b` plus this change, the same release VMM
+ran two alternating untraced pairs. Event-wake medians were 272.374
+and 270.252 ms versus polling's 338.245 and 338.693 ms. Separate
+host-only traces recorded start queue-to-ring medians of 0.106–0.124
+ms with wake and 10.693–14.622 ms with polling. The retained Docker
+API and CLI fixture passed all 48 measured operations and 40 warmups
+across no-network and bridge cases in `docker-flow-verified`. The
+first correctness report was overwritten by the launcher summary,
+so the retained raw check was rerun. Commands, hashes and raw results
+are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-048`.
+
+Source: [SPEED-047](#speed-047),
+[`vsock.rs`](../../jetstream/src/devices/vsock.rs).
+
+Review: The Jetstream suite and direct event-listener test passed.
+The optional path uses the same private endpoint and Docker engine.
+Each boot verified unchanged production and exact owned cleanup.
+The observations support this opt-in candidate. The small pilots
+do not qualify a tail or competitive verdict.
+
+Next Action: Run SPEED-049 from the frozen release build.
 
 ### SPEED-047
 

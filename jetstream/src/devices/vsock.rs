@@ -596,6 +596,12 @@ impl HostUnixVsockBridge {
         first_host_port: u32,
     ) -> Result<Self, VsockError> {
         let socket_path = socket_path.as_ref().to_path_buf();
+        #[cfg(target_os = "macos")]
+        if guest_port == DOCKER_BRIDGE_PORT
+            && std::env::var_os("CONJET_DOCKER_EVENT_WAKE").is_some_and(|value| value == "1")
+        {
+            return Self::bind_event_listener(socket_path, guest_port, first_host_port);
+        }
         if socket_path.exists() {
             std::fs::remove_file(&socket_path)?;
         }
@@ -626,6 +632,14 @@ impl HostUnixVsockBridge {
     }
 
     pub fn bind_native_launch(socket_path: PathBuf) -> Result<Self, VsockError> {
+        Self::bind_event_listener(socket_path, NATIVE_LAUNCH_PORT, 55_000)
+    }
+
+    fn bind_event_listener(
+        socket_path: PathBuf,
+        guest_port: u32,
+        first_host_port: u32,
+    ) -> Result<Self, VsockError> {
         let parent = socket_path
             .parent()
             .ok_or(std::io::ErrorKind::InvalidInput)
@@ -634,7 +648,7 @@ impl HostUnixVsockBridge {
         if !directory.is_dir() || directory.mode() & 0o077 != 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                "native launch requires a private socket directory",
+                "event-driven vsock requires a private socket directory",
             )
             .into());
         }
@@ -645,9 +659,9 @@ impl HostUnixVsockBridge {
             listener.set_nonblocking(true)?;
             std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
             let state = Arc::new(Mutex::new(HostUnixVsockBridgeState::new(
-                NATIVE_LAUNCH_PORT,
-                55_000,
-                false,
+                guest_port,
+                first_host_port,
+                guest_port == DOCKER_BRIDGE_PORT,
             )));
             let worker_state = Arc::clone(&state);
             #[cfg(target_os = "macos")]
@@ -660,7 +674,11 @@ impl HostUnixVsockBridge {
             #[cfg(target_os = "macos")]
             let worker_notifications = Arc::clone(&notifications);
             let thread = thread::Builder::new()
-                .name("jetstream-launch-vsock".into())
+                .name(if guest_port == DOCKER_BRIDGE_PORT {
+                    "jetstream-docker-vsock".into()
+                } else {
+                    "jetstream-launch-vsock".into()
+                })
                 .spawn(move || {
                     #[cfg(target_os = "macos")]
                     serve_native_events(listener, wake, worker_state, queue, worker_notifications);
@@ -696,7 +714,7 @@ impl HostUnixVsockBridge {
     }
 
     #[cfg(target_os = "macos")]
-    pub(crate) fn set_native_wake(&self, action: impl Fn() + Send + Sync + 'static) {
+    pub(crate) fn set_ingress_wake(&self, action: impl Fn() + Send + Sync + 'static) {
         if let Some(listener) = &self.native_listener {
             *listener.wake.0.lock().expect("native wake mutex poisoned") = Some(Arc::new(action));
         }
@@ -863,7 +881,9 @@ fn serve_native_events(
             match listener.accept() {
                 Ok((stream, _)) => {
                     let mut state = state.lock().expect("vsock bridge mutex poisoned");
-                    if state.streams.len() < MAX_NATIVE_BRIDGE_STREAMS {
+                    if state.guest_port != NATIVE_LAUNCH_PORT
+                        || state.streams.len() < MAX_NATIVE_BRIDGE_STREAMS
+                    {
                         match queue.watch(stream.as_raw_fd(), true) {
                             Ok(()) => {
                                 state.accept_stream(stream);
@@ -2421,7 +2441,7 @@ mod tests {
         let endpoint = dir.path().join("launch.sock");
         let bridge = HostUnixVsockBridge::bind_native_launch(endpoint.clone()).unwrap();
         let (wake, observed) = std::sync::mpsc::channel();
-        bridge.set_native_wake(move || {
+        bridge.set_ingress_wake(move || {
             let _ = wake.send(());
         });
         let mut client = UnixStream::connect(endpoint).unwrap();
@@ -3346,4 +3366,33 @@ fn diagnostic_tag_requires_a_bounded_http_header_and_valid_hex() {
     let digit = invalid.len() - 5;
     invalid[digit] = b'g';
     assert_eq!(docker_trace_tag(&invalid), None);
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn docker_event_listener_wakes_for_ingress_and_removes_its_socket_on_drop() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = root.path().join("docker.sock");
+    let bridge =
+        HostUnixVsockBridge::bind_event_listener(socket.clone(), DOCKER_BRIDGE_PORT, 40_000)
+            .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    bridge.set_ingress_wake(move || {
+        let _ = tx.send(());
+    });
+    let mut client = UnixStream::connect(&socket).unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    let request = b"POST /v1.44/containers/owned/start HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+    client.write_all(request).unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    {
+        let mut state = bridge.state.lock().unwrap();
+        state.poll_host_streams();
+        assert!(state.pending_guest_packets.iter().any(|packet| {
+            packet.dst_port == DOCKER_BRIDGE_PORT && packet.op == OP_RW && packet.payload == request
+        }));
+    }
+    drop(bridge);
+    assert!(!socket.exists());
 }

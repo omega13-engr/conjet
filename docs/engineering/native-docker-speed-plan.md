@@ -92,6 +92,13 @@ coverage tables. The CLI parity target remains an upper paired 95%
 endpoint of 1.05 for both p50 and p99. Retain the declared throughput
 rules for later workloads. [Benchmark contract](docker-benchmark-plan.md)
 
+SPEED-048 tested an opt-in Jetstream ingress wake through the retained
+Docker endpoint. Use `--retained-event-wake` on the isolated launcher
+or paired comparison command to select it. Omit the flag to select
+the original polling path. Both modes keep the 25 ms fallback tick.
+SPEED-049 qualifies the pinned no-network `alpine-true` API and CLI
+groups against the signed Kiri 0.2.2 release.
+
 Use explicit private contexts, session-owned foreground services and
 ExternalSSD scratch for artifacts and evidence. Keep builds and
 timings separate. Check the installed production process identities,

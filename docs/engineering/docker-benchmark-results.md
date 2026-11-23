@@ -9,6 +9,36 @@ descriptive results at the stated boundaries. SPEED-008 remains unresolved.
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Native OCI research scope](docker-native-adapter.md)
 
+## SPEED-048 retained Docker ingress wake pilot
+
+The same release Jetstream executable ran with the Docker ingress
+watcher off and on. The candidate reused the owned kqueue watcher
+to wake the existing VMM queue owner and retained the 25 ms fallback
+tick. Docker Engine 29.1.3, containerd 2.2.1, runc and Core 1.3.1
+executed the same pinned no-network ARM64 fixture.
+
+| Pair | Polling, lifecycle median (ms) | Event wake, lifecycle median (ms) | Event wake / polling |
+| --- | ---: | ---: | ---: |
+| A | 338.245 | 272.374 | 0.805 |
+| B | 338.693 | 270.252 | 0.798 |
+
+These are untraced release pilots with four warmups and 12 measured
+API operations per boot. The following measurements use separate
+host-only trace boots and report queue-to-ring intervals.
+
+| Pair | Start polling / event wake (ms) | Wait polling / event wake (ms) |
+| --- | ---: | ---: |
+| A | 14.622 / 0.124 | 12.431 / 0.099 |
+| B | 10.693 / 0.106 | 10.471 / 0.098 |
+
+The code addresses the measured host publication delay. Time after
+guest-ring publication remains in the trace and contains several
+guest and transport stages. The ingress change is opt-in. These
+two-pair pilots have no qualification interval or Kiri verdict.
+Release binaries, host-only and untraced observations, and exact
+cleanup records are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-048`.
+
 ## SPEED-047 retained Docker start and wait trace
 
 The release host tools, Core 1.3.1 and the same pinned ARM64 fixture

@@ -232,6 +232,8 @@ def run_pair(args, output, order):
             command += ['--comparison-build-bases', str(args.build_bases)]
         if engine == 'conjet':
             command += ['--legacy-baseline', '--image', contract()['images']['alpine']['ref']]
+            if args.retained_event_wake:
+                command.append('--retained-event-wake')
             for name in ('swift_bin', 'core', 'network_helper', 'core_assets'):
                 command += ['--' + name.replace('_', '-'), str(getattr(args, name))]
         before = production()
@@ -279,6 +281,8 @@ def main():
     selection.add_argument('--pair', type=int, choices=range(1, 6), default=1)
     selection.add_argument('--all-pairs', action='store_true', help='run all frozen pairs in one foreground session')
     parser.add_argument('--timeout', type=int, default=900)
+    parser.add_argument('--retained-event-wake', action='store_true',
+                        help='enable the isolated retained Docker ingress candidate for Conjet')
     parser.add_argument('--build-bases', type=Path, help='verified ExternalSSD OCI layouts for offline Buildx input')
     lifecycle = contract()['suites']['lifecycle']
     parser.add_argument('--group', choices=[f'{workload}/{network}/{lane}'
