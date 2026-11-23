@@ -205,6 +205,15 @@ verdict remains inconclusive until the remaining four independent pairs
 and effective-resource equivalence checks are available. The native routes
 have no Compose implementation.
 
+Pair 2 on `b31afde` repeated the five measured transitions with zero
+failures. Both engines reported the requested effective 128 MiB,
+64-PID and 500-millicore limits for each service. Pre-pulled startup p50,
+p95 and p99 were 3890.375/4286.321/4286.321 ms for Conjet and
+3117.938/3144.268/3144.268 ms for Kiri. All other transition distributions
+are in the per-session report. Pair 1 predates the cgroup check, so it is
+descriptive alongside pair 2. Three more independent pairs remain, plus a
+repeat of the first pair with effective-resource verification.
+
 ## Persistent exec and control
 
 Pair 2 used harness `7be17a3` and separate long-lived Alpine containers.
@@ -402,6 +411,7 @@ failed attempts and shutdown checks.
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
 | Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
+| Compose repeat with effective service resource verification | `SPEED-022/pair-2` |
 | Canceled historical-event run and corrected paired control matrix | `SPEED-023/pair-1`, `SPEED-023/pair-2` |
 | Storage, guest transport and the sustained services | `SPEED-024/pair-1` |
 | Launch concurrency, memory attribution and recovery attempts | `SPEED-025/pair-1` |
