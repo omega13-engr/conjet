@@ -287,7 +287,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Repeat the verified offline Buildx workload at the remaining pair indices with effective builder resource attribution.
+Next Action: Repeat the verified offline Buildx workload at the remaining pair indices with effective builder resource attribution. Distinct temporary tags now identify every case's exported image so cleanup can remove all of them. The builder and image inventory remain separately checked.
 
 ### SPEED-022
 

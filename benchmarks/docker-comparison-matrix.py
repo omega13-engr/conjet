@@ -385,7 +385,7 @@ def run_builds(docker, manifest, context, build_bases=None):
             if create is None:
                 break
             directory = docker.output / builder
-            tag = f'{docker.token}:{language}-{repetition}'
+            results = []
             try:
                 details = docker.call('builder-bootstrap', ['buildx', 'inspect', '--bootstrap', builder],
                                       timeout=180, phase='setup')
@@ -436,6 +436,8 @@ def run_builds(docker, manifest, context, build_bases=None):
                         (directory / source).write_text(sources[source].replace('source-one', 'source-two'))
                     if change == 'dependency':
                         (directory / dependency).write_text(sources[dependency].replace('dep-one', 'dep-two'))
+                    tag = f'{docker.token}:{language}-{repetition}-{change}'
+                    results.append(tag)
                     archive = docker.output / (builder + '.tar')
                     try:
                         if docker.call(f'{language}.{change}.build-export',
@@ -458,13 +460,16 @@ def run_builds(docker, manifest, context, build_bases=None):
                     finally:
                         archive.unlink(missing_ok=True)
             finally:
-                existing = docker.call('fixture-cleanup-inspect', ['image', 'ls', '--quiet', tag], phase='cleanup')
-                if existing is None:
-                    raise RuntimeError('could not verify task-owned build image cleanup')
-                if existing and docker.call('fixture-image-remove', ['image', 'rm', tag], phase='cleanup') is None:
-                    raise RuntimeError('could not remove task-owned build result')
+                cleanup_failed = False
+                for tag in results:
+                    existing = docker.call('fixture-cleanup-inspect', ['image', 'ls', '--quiet', tag], phase='cleanup')
+                    if existing is None or (existing and docker.call('fixture-image-remove', ['image', 'rm', tag],
+                                                                     phase='cleanup') is None):
+                        cleanup_failed = True
                 if docker.call('builder-remove', ['buildx', 'rm', builder], phase='cleanup') is None:
-                    raise RuntimeError('could not remove task-owned builder')
+                    cleanup_failed = True
+                if cleanup_failed:
+                    raise RuntimeError('could not clean up all owned build results and the builder')
 
 
 APP = r"""
