@@ -251,7 +251,7 @@ Acceptance Criteria:
 - Collect host plus attributed guest CPU/memory, idle footprint, disk growth and reclamation with measurement limitations. Run energy sampling separately only when authorized and available; otherwise mark it unavailable.
 - Observe cleanup lag and steady-state resource growth independently from API acknowledgement. Unknown Kiri guest teardown remains unknown.
 
-Problem and Evidence: The matrix implements a bounded Docker launch concurrency sweep. Pressure, recovery and sustained validity evidence are still pending.
+Problem and Evidence: The matrix implements a bounded Docker launch concurrency sweep and a distinct per-container OOM canary. It requires exit 137, an OOM flag, an unchanged active-data canary in a sibling container and a fresh recovery launch. Host-wide or guest-wide reclamation, runtime loss and prepared-slot tests are separate requirements and remain open for this program.
 
 Raw evidence: Fast sequential medians can hide queueing, memory reservation, deferred cleanup and recovery costs.
 
@@ -274,7 +274,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Add the concurrency matrix and owned-resource leak inventory.
+Next Action: Run the paired concurrency and bounded OOM fixture, then inspect active-data and cleanup evidence.
 
 
 ### SPEED-014

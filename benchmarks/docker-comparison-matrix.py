@@ -852,6 +852,55 @@ def matches_cgroup_limits(observed, limits):
             and period > 0 and quota * 1000 == limits['cpu_millicores'] * period)
 
 
+def memory_limit_probe(docker, manifest):
+    alpine = manifest['images']['alpine']['ref']
+    node = manifest['images']['node']['ref']
+    if docker.call('pressure-prepull', ['pull', '--platform', 'linux/arm64', node],
+                   timeout=180, phase='setup') is None:
+        return
+    session = ['--network', 'none', '--label', f'{LABEL}={docker.token}', '--cpus', '0.5']
+    survivor = f'{docker.token}-survivor'
+    target = f'{docker.token}-limited'
+    identity = docker.call('pressure-survivor-create', ['create', '--name', survivor, *session,
+                           '--memory', '32m', '--pids-limit', '8', alpine, 'sh', '-c',
+                           'printf active-before-oom >/tmp/canary; exec sleep 1800'], phase='setup')
+    if identity is None:
+        return
+    try:
+        if docker.call('pressure-survivor-start', ['start', survivor], phase='setup') is None:
+            return
+        marker = ['exec', survivor, 'cat', '/tmp/canary']
+        if docker.call('pressure-survivor-before', marker, phase='verification',
+                       expected=b'active-before-oom') is None:
+            return
+        created = docker.call('pressure-create', ['create', '--name', target, *session,
+                              '--memory', '64m', '--pids-limit', '32', node, 'node', '-e',
+                              'const retained=[]; for(let i=0;i<256;i++) '
+                              'retained.push(Buffer.alloc(1024*1024, 0x6d)); process.exit(42)'], phase='setup')
+        if created is None:
+            return
+        try:
+            memory = docker.call('pressure-limit-inspect', ['inspect', '--format',
+                                 '{{.HostConfig.Memory}}', target], phase='verification',
+                                 expected=b'67108864\n')
+            if memory is None or docker.call('pressure-start', ['start', target], phase='verification') is None:
+                return
+            docker.call('pressure-oom-exit', ['wait', target], timeout=20,
+                        expected=b'137\n', phase='verification')
+            docker.call('pressure-oom-inspect', ['inspect', '--format', '{{.State.OOMKilled}}', target],
+                        expected=b'true\n', phase='verification')
+            docker.call('pressure-survivor-after', marker, phase='verification', expected=b'active-before-oom')
+        finally:
+            if docker.call('pressure-target-remove', ['rm', '-f', target], phase='cleanup') is None:
+                raise RuntimeError('could not clean up the memory-limited task container')
+        docker.call('pressure-recovery', ['run', '--rm', *session, '--memory', '16m', '--pids-limit', '4',
+                    alpine, '/bin/echo', 'pressure-recovered'], phase='verification',
+                    expected=b'pressure-recovered\n')
+    finally:
+        if docker.call('pressure-survivor-remove', ['rm', '-f', survivor], phase='cleanup') is None:
+            raise RuntimeError('could not clean up the active-data canary')
+
+
 def run_stress(docker, manifest):
     budget = manifest['suites']['stress']
     image = manifest['images']['alpine']['ref']
@@ -882,3 +931,4 @@ def run_stress(docker, manifest):
                         docker.rows.append({'scenario': group, 'phase': phase, **row})
             if phase == 'sample':
                 docker.report.setdefault('windows_ns', {})[group] = time.monotonic_ns() - begin
+    memory_limit_probe(docker, manifest)
