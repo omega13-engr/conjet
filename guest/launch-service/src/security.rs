@@ -221,9 +221,14 @@ impl WorkloadFilter {
                 libc::SYS_connect,
                 libc::SYS_sendto,
                 libc::SYS_recvfrom,
+                libc::SYS_recvmsg,
                 libc::SYS_setsockopt,
                 libc::SYS_getsockopt,
                 libc::SYS_getsockname,
+                libc::SYS_listen,
+                libc::SYS_accept,
+                libc::SYS_accept4,
+                libc::SYS_shutdown,
             ] {
                 program.push(next_or_skip(syscall as u32));
                 program.push(statement(BPF_RETURN, RET_ALLOW));

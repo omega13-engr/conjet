@@ -178,6 +178,8 @@ struct Record {
     exit: Option<Value>,
     helper_failed: bool,
     network_cleanup: &'static str,
+    network_alias: Option<String>,
+    network_address: Option<std::net::Ipv4Addr>,
     trace: Option<Trace>,
     slot: Option<Slot>,
     slot_expires: Option<Instant>,
@@ -223,6 +225,9 @@ impl Record {
         });
         if let Some(trace) = &self.trace {
             state["guest_phase_ns"] = json!(trace.events);
+        }
+        if let Some(address) = self.network_address {
+            state["network_address"] = json!(address);
         }
         if let Some(slot) = &self.slot {
             state["prepared_claimed"] = json!(slot.claimed());
@@ -369,6 +374,7 @@ pub(crate) struct FreshFixture {
     allow_crash: bool,
     intent: Intent,
     ledger: Mutex<Ledger>,
+    private_network: Mutex<Option<crate::bridge_fixture::NetworkOwner>>,
     changed: Condvar,
 }
 
@@ -530,6 +536,7 @@ impl FreshFixture {
             allow_crash,
             intent,
             ledger: Mutex::new(Ledger::default()),
+            private_network: Mutex::new(None),
             changed: Condvar::new(),
         }))
     }
@@ -572,7 +579,7 @@ impl FreshFixture {
         let benchmark = self.benchmark_digest.as_ref() == Some(&spec.image_digest);
         let mode = match argv.as_slice() {
             _ if self.oci
-                && spec.network == "none"
+                && (spec.network == "none" || spec.network_alias.is_some())
                 && spec.limits == crate::spec::NATIVE_LIMITS
                 && !prepared =>
             {
@@ -581,7 +588,7 @@ impl FreshFixture {
             _ if self.oci => {
                 return Err((
                     "unsupported_option",
-                    "OCI requires a fresh, constrained no-network launch",
+                    "OCI requires a fresh constrained launch with no network or a private DNS alias",
                 ));
             }
             ["/bin/probe"]
@@ -630,13 +637,14 @@ impl FreshFixture {
                 "preparation requires no network and at most 32 MiB",
             ));
         }
-        if bridge && !self.bridge_available {
+        if bridge && !self.oci && !self.bridge_available {
             return Err((
                 "unsupported_option",
                 "private bridge unavailable in this guest",
             ));
         }
         if bridge
+            && !self.oci
             && !matches!(
                 mode,
                 "once"
@@ -683,6 +691,17 @@ impl FreshFixture {
         if ledger.closing {
             return Err(("busy", "fresh fixture is draining"));
         }
+        if let Some(alias) = &spec.network_alias
+            && (!self.oci
+                || ledger.active().any(|record| {
+                    record
+                        .network_alias
+                        .as_ref()
+                        .is_some_and(|active| active.eq_ignore_ascii_case(alias))
+                }))
+        {
+            return Err(("unsupported_option", "private network alias is unavailable"));
+        }
         if prepared
             && (ledger.pressure
                 || crate::memory::pressures_reserve(crate::memory::available_bytes()))
@@ -720,6 +739,8 @@ impl FreshFixture {
             exit: None,
             helper_failed: false,
             network_cleanup: if bridge { "pending" } else { "not_applicable" },
+            network_alias: spec.network_alias.clone(),
+            network_address: None,
             trace: (benchmark && self.trace_benchmark).then(|| Trace {
                 admitted: Instant::now(),
                 events: BTreeMap::new(),
@@ -816,6 +837,7 @@ impl FreshFixture {
         self.update(&workload, |record| {
             record.control = None;
             record.exec_context = None;
+            record.network_address = None;
             if let Some(slot) = &mut record.slot {
                 slot.discard();
             }
@@ -927,7 +949,8 @@ impl FreshFixture {
         let mut exit_received = false;
         let mut network_removed = !bridge;
         let result = (|| -> io::Result<()> {
-            while let Some((event, target)) = crate::exec_fixture::receive_event(peer.as_raw_fd())?
+            while let Some((event, mut descriptors)) =
+                crate::exec_fixture::receive_event(peer.as_raw_fd())?
             {
                 match event {
                     b'P' => self.update(&workload, |record| {
@@ -966,6 +989,33 @@ impl FreshFixture {
                             self.changed.notify_all();
                         }
                     }
+                    b'V' if bridge && oci_process.is_some() => {
+                        let mut response =
+                            UnixStream::from(descriptors.pop().expect("bridge response"));
+                        let target = fs::File::from(descriptors.pop().expect("bridge target"));
+                        let alias = self
+                            .ledger
+                            .lock()
+                            .expect("fresh ledger")
+                            .record(&workload)
+                            .expect("owned workload")
+                            .network_alias
+                            .clone()
+                            .ok_or_else(|| io::Error::other("missing bridge alias"))?;
+                        let mut private = self.private_network.lock().expect("private bridge");
+                        if private.is_none() {
+                            *private = Some(crate::bridge_fixture::NetworkOwner::new()?);
+                        }
+                        let address = private
+                            .as_mut()
+                            .expect("private bridge")
+                            .attach(id, target, &alias)?;
+                        self.update(&workload, |record| {
+                            record.network_address = Some(address);
+                            record.revision += 1;
+                        });
+                        response.write_all(&[1])?;
+                    }
                     b'E' => {
                         if mode == "crash-supervisor" {
                             // Only the explicit disposable-guest recovery mode can
@@ -978,7 +1028,7 @@ impl FreshFixture {
                             });
                         }
                         self.update(&workload, |record| {
-                            if let (Some(spec), Some(target)) = (oci_process, target)
+                            if let (Some(spec), Some(target)) = (oci_process, descriptors.pop())
                                 && let Ok(spec) = serde_json::from_str(spec)
                             {
                                 record.exec_context = Some((spec, target));
@@ -1013,6 +1063,11 @@ impl FreshFixture {
                         exit_received = true;
                         self.update(&workload, |record| record.change(Phase::Cleaning));
                     }
+                    b'R' if exit_received && bridge && oci_process.is_some() => {
+                        self.release_private_network(id)?;
+                        removed = true;
+                        break;
+                    }
                     b'B' if exit_received && !network_removed => {
                         network_removed = true;
                         self.update(&workload, |record| {
@@ -1045,6 +1100,9 @@ impl FreshFixture {
                 -1
             })?;
             crate::sandbox_fixture::recover(id, oci_process.is_some())?;
+            if bridge && oci_process.is_some() {
+                self.release_private_network(id)?;
+            }
             println!("conjet-launchd recovered helper failure for {}", hex(&id));
         }
         let stdout = stdout.join();
@@ -1052,6 +1110,18 @@ impl FreshFixture {
         stdout.map_err(|_| io::Error::other("stdout reader failed"))??;
         stderr.map_err(|_| io::Error::other("stderr reader failed"))??;
         Ok(recovered)
+    }
+
+    fn release_private_network(&self, id: [u8; 16]) -> io::Result<()> {
+        if let Some(network) = self
+            .private_network
+            .lock()
+            .expect("private bridge")
+            .as_mut()
+        {
+            network.detach(id)?;
+        }
+        Ok(())
     }
 
     fn operation(self: &Arc<Self>, frame: &Frame, boot: &str, connection: ConnectionId) -> Reply {
@@ -1385,9 +1455,12 @@ impl FreshFixture {
         ledger.closing = true;
         loop {
             if !ledger.exec_active && ledger.records.iter().all(|record| record.phase.terminal()) {
-                return !ledger
+                let cleaned = !ledger
                     .active()
                     .any(|record| record.phase == Phase::CleanupFailed);
+                drop(ledger);
+                let mut network = self.private_network.lock().expect("private bridge");
+                return cleaned && network.take().is_none_or(|network| network.close().is_ok());
             }
             for record in &mut ledger.records {
                 record.cancel();

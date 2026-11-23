@@ -155,7 +155,7 @@ pub fn run_helper(
         let spec = args.next().ok_or("missing OCI process spec")?;
         let spec: crate::spec::LaunchSpec =
             serde_json::from_str(spec.to_str().ok_or("invalid OCI process spec")?)?;
-        if spec.network != "none" || spec.limits != limits || prepared {
+        if spec.network != network.to_string_lossy() || spec.limits != limits || prepared {
             return Err("invalid OCI helper limits or mode".into());
         }
         Some(spec)
@@ -163,7 +163,7 @@ pub fn run_helper(
         None
     };
     if !matches!(network.to_str(), Some("bridge" | "none"))
-        || (matches!(mode, "native" | "native-oci") && network != "none")
+        || (mode == "native" && network != "none")
         || args.next().is_some()
     {
         return Err("unexpected fixture helper arguments".into());
@@ -242,7 +242,9 @@ fn run(
     }
     let cgroup = WorkloadCgroup::create(&scope, id, limits)?;
     inject(mode, "fault-cgroup");
-    let mut bridge = network.then(Bridge::create).transpose()?;
+    let mut bridge = (network && process.is_none())
+        .then(Bridge::create)
+        .transpose()?;
     inject(mode, "fault-bridge");
     let probe = clone_and_reap(
         &cgroup,
@@ -455,6 +457,9 @@ fn clone_and_reap(
                 bridge.attach(pid)?;
                 inject(mode, "fault-bridge-child");
             }
+            if process.is_some_and(|spec| spec.network == "bridge") {
+                attach_private_peer(pid)?;
+            }
             if controlled {
                 notify_control(b'C', &[])?;
                 pause_for_cancel(mode, "pause-child")?;
@@ -471,7 +476,7 @@ fn clone_and_reap(
             Ok(ExecObservation::Confirmed) => {
                 if controlled {
                     let event = if process.is_some() {
-                        crate::exec_fixture::send_pidfd(0, pidfd.as_raw_fd())
+                        crate::exec_fixture::send_descriptors(0, b'E', &[pidfd.as_raw_fd()])
                     } else {
                         notify_control(b'E', &[])
                     };
@@ -516,6 +521,22 @@ fn clone_and_reap(
     ready?;
     authorization?;
     Ok(Some(status))
+}
+
+fn attach_private_peer(pid: libc::pid_t) -> io::Result<()> {
+    use std::os::unix::net::UnixStream;
+    let namespace = File::open(format!("/proc/{pid}/ns/net"))?;
+    let (mut result, reply) = UnixStream::pair()?;
+    result.set_read_timeout(Some(Duration::from_secs(3)))?;
+    crate::exec_fixture::send_descriptors(0, b'V', &[namespace.as_raw_fd(), reply.as_raw_fd()])?;
+    drop(reply);
+    let mut status = [0];
+    result.read_exact(&mut status)?;
+    if status == [1] {
+        Ok(())
+    } else {
+        Err(io::Error::other("private network peer rejected"))
+    }
 }
 
 fn stop_for_tracer() -> io::Result<()> {

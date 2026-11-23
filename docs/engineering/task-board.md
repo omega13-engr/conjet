@@ -881,7 +881,57 @@ the launcher removed its owned scratch directory. Docker network
 ownership remains open. Independent PR review remains required.
 
 Next Action: Route private bridge peer leases and resolver configuration
-through the real OCI workload supervisor in SPEED-035.
+through the real OCI workload supervisor in SPEED-035C.
+
+### SPEED-035C
+
+Title: Attach the private bridge to native OCI processes
+
+Description: Launch two pinned Linux ARM64 Alpine workloads through the
+authenticated OCI lifecycle and exchange DNS and HTTP traffic.
+
+Is blocked by task: SPEED-035B (DONE).
+
+Acceptance Criteria:
+
+- Resolve a supplied alias and obtain the exact HTTP canary from a
+  sibling OCI workload. Reject invalid and duplicate aliases before admission.
+- Verify that a no-network workload cannot reach the bridge. Confirm
+  terminal link cleanup and NXDOMAIN when the service alias is removed.
+- Release all guest bridge resources at orderly session shutdown.
+
+Problem and Evidence: The guest bridge and DNS tests used trusted
+subprocesses. The OCI workload supervisor had no shared peer handoff.
+The first Alpine tests also exposed the resolver's AD request flag and
+musl's use of `recvmsg` to read its UDP answers.
+
+Approach: Pass the new network namespace descriptor from the helper to
+the owning supervisor before releasing the OCI start barrier. Bind
+each port and resolver alias to the admitted workload identity. Scope
+resolver writes to its private overlay and apply socket allowances only
+to bridged workloads.
+
+Evidence: DONE. Release build and isolated diagnostics on `5c2488d` plus this
+change passed `run-conjet-speedup.py --diagnostics guest-bridge`. Two
+transactions returned the same exact fixture body. Invalid and duplicate
+aliases consumed no admission sequence. The separate `--diagnostics exec`
+regression check passed with the same guest build. A no-network workload was
+denied a socket and a later peer received NXDOMAIN for the removed
+service. Artifact hashes, adverse pilots, exact commands and verification
+logs are retained under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-035C`.
+
+Source: [Launch service contract](launch-service-contract.md),
+[guest OCI canary](../../benchmarks/native-oci-bridge.py).
+
+Review: Local diff and isolated checks passed. Workload teardown releases
+the scoped link before removal acknowledgement. Orderly shutdown
+stops the DNS thread and verifies disposal of the bridge.
+Production snapshots matched and the owned VMM, session and Docker
+socket were removed. Independent PR review remains required.
+
+Next Action: Expose one named bridge and its attachments through the
+Docker API and exercise it with the Docker CLI in SPEED-035.
 
 ### SPEED-035
 
@@ -889,7 +939,7 @@ Title: Connect native containers to one private bridge and DNS
 
 Description: Wire the verified guest bridge implementation to native Docker network ownership.
 
-Is blocked by task: SPEED-035B (DONE).
+Is blocked by task: SPEED-035C (DONE).
 
 Acceptance Criteria:
 

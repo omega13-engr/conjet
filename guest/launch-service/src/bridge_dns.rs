@@ -1,6 +1,8 @@
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 use std::net::Ipv4Addr;
-
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 const HEADER: usize = 12;
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 pub(super) const MAX_MESSAGE: usize = 512;
 
 fn label(bytes: &[u8]) -> bool {
@@ -17,14 +19,17 @@ pub(super) fn valid_name(name: &str) -> bool {
 }
 
 /// Answer one uncompressed IN question without forwarding it anywhere.
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 pub(super) fn answer(
     message: &[u8],
     lookup: impl FnOnce(&str) -> Option<Ipv4Addr>,
 ) -> Option<Vec<u8>> {
-    let [_, _, flags, 0, 0, 1, 0, 0, 0, 0, 0, 0, ..] = message else {
+    let [_, _, flags, resolver_flags, 0, 1, 0, 0, 0, 0, 0, 0, ..] = message else {
         return None;
     };
-    if *flags & !1 != 0 || message.len() > MAX_MESSAGE {
+    // Recognize the resolver's AD/CD request bits. This local registry
+    // does no DNSSEC validation and never sets those response bits.
+    if *flags & !1 != 0 || *resolver_flags & !0x30 != 0 || message.len() > MAX_MESSAGE {
         return None;
     }
     let mut cursor = HEADER;
@@ -82,7 +87,9 @@ mod tests {
 
     #[test]
     fn authoritative_case_insensitive_a_answer() {
-        let reply = answer(QUERY, |name| (name == "app.test").then_some(IP)).unwrap();
+        let mut query = QUERY.to_vec();
+        query[3] = 0x20;
+        let reply = answer(&query, |name| (name == "app.test").then_some(IP)).unwrap();
         assert_eq!(&reply[..8], &[0x12, 0x34, 0x85, 0, 0, 1, 0, 1]);
         assert_eq!(&reply[reply.len() - 4..], &IP.octets());
     }

@@ -20,8 +20,7 @@ const TARGET_ROOT: libc::c_int = 4;
 const RESULT_PIPE: libc::c_int = 5;
 const INLINE_OUTPUT_CAP: usize = 8192;
 
-pub(crate) fn send_pidfd(socket: i32, pidfd: i32) -> io::Result<()> {
-    let mut event = b'E';
+pub(crate) fn send_descriptors(socket: i32, mut event: u8, descriptors: &[i32]) -> io::Result<()> {
     let mut vector = libc::iovec {
         iov_base: (&mut event as *mut u8).cast(),
         iov_len: 1,
@@ -31,15 +30,22 @@ pub(crate) fn send_pidfd(socket: i32, pidfd: i32) -> io::Result<()> {
     msg.msg_iov = &mut vector;
     msg.msg_iovlen = 1;
     msg.msg_control = control.as_mut_ptr().cast();
-    msg.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<i32>() as u32) } as _;
+    let length = size_of_val(descriptors) as u32;
+    if !(1..=2).contains(&descriptors.len()) {
+        return Err(io::Error::other("invalid helper descriptor count"));
+    }
+    msg.msg_controllen = unsafe { libc::CMSG_SPACE(length) } as _;
     // Transfer the kernel reference itself, so the supervisor never has
     // to look up a reusable numeric PID to identify the target.
     unsafe {
         let header = libc::CMSG_FIRSTHDR(&msg);
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(size_of::<i32>() as u32) as _;
-        libc::CMSG_DATA(header).cast::<i32>().write_unaligned(pidfd);
+        (*header).cmsg_len = libc::CMSG_LEN(length) as _;
+        let data = libc::CMSG_DATA(header).cast::<i32>();
+        for (index, fd) in descriptors.iter().enumerate() {
+            data.add(index).write_unaligned(*fd);
+        }
         if libc::sendmsg(socket, &msg, libc::MSG_NOSIGNAL) != 1 {
             return Err(io::Error::last_os_error());
         }
@@ -47,7 +53,7 @@ pub(crate) fn send_pidfd(socket: i32, pidfd: i32) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn receive_event(socket: i32) -> io::Result<Option<(u8, Option<OwnedFd>)>> {
+pub(crate) fn receive_event(socket: i32) -> io::Result<Option<(u8, Vec<OwnedFd>)>> {
     let mut event = 0u8;
     let mut vector = libc::iovec {
         iov_base: (&mut event as *mut u8).cast(),
@@ -87,13 +93,15 @@ pub(crate) fn receive_event(socket: i32) -> io::Result<Option<(u8, Option<OwnedF
             header = libc::CMSG_NXTHDR(&msg, header);
         }
     }
-    if msg.msg_flags & libc::MSG_CTRUNC != 0
-        || received.len() > 1
-        || (!received.is_empty() && event != b'E')
-    {
+    let valid = match event {
+        b'E' => received.len() <= 1,
+        b'V' => received.len() == 2,
+        _ => received.is_empty(),
+    };
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 || !valid {
         return Err(io::Error::other("unexpected helper event descriptors"));
     }
-    Ok(Some((event, received.pop())))
+    Ok(Some((event, received)))
 }
 
 fn target_root(pidfd: &OwnedFd) -> io::Result<File> {
@@ -294,11 +302,7 @@ pub fn run_helper(
     }
     let spec: LaunchSpec = serde_json::from_str(&specification)?;
     spec.validate_exec()?;
-    if spec.uid != WORKLOAD_UID
-        || spec.gid != WORKLOAD_GID
-        || spec.network != "none"
-        || spec.limits != NATIVE_LIMITS
-    {
+    if spec.uid != WORKLOAD_UID || spec.gid != WORKLOAD_GID || spec.limits != NATIVE_LIMITS {
         return Err("unsupported exec credentials or resources".into());
     }
 
@@ -360,7 +364,7 @@ pub fn run_helper(
     checked(unsafe { libc::fchdir(TARGET_ROOT) })?;
     checked(unsafe { libc::chroot(c".".as_ptr()) })?;
     checked(unsafe { libc::chdir(cwd.as_ptr()) })?;
-    let filter = security::WorkloadFilter::new(false);
+    let filter = security::WorkloadFilter::new(spec.network == "bridge");
     let mut lifeline = [-1; 2];
     checked(unsafe { libc::pipe2(lifeline.as_mut_ptr(), libc::O_CLOEXEC) })?;
     let child = unsafe { libc::fork() };

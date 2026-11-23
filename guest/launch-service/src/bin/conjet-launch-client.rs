@@ -47,6 +47,7 @@ fn launch(
             uid: conjet_launch_service::spec::WORKLOAD_UID,
             gid: conjet_launch_service::spec::WORKLOAD_GID,
             network,
+            network_alias: None,
             limits: ResourceLimits {
                 memory_bytes: MIN_MEMORY_BYTES,
                 pids: 4,

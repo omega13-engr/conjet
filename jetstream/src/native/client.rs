@@ -356,6 +356,7 @@ fn execute(
         uid: WORKLOAD_UID,
         gid: WORKLOAD_GID,
         network: "none".into(),
+        network_alias: None,
         limits: NATIVE_LIMITS,
     };
     let started = Instant::now();

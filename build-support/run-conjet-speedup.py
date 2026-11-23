@@ -468,6 +468,9 @@ def native_session(args, root):
             elif args.diagnostics == 'exec':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-exec.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
+            elif args.diagnostics == 'guest-bridge':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-bridge.py'))
+                diagnostic['collect'](directory, vm.pid, output)
             elif args.diagnostics in ('oci', 'oci-import'):
                 oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
                 oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
@@ -557,7 +560,8 @@ def main():
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
-                                                  'concurrency', 'concurrency-loss', 'streaming', 'exec'),
+                                                  'concurrency', 'concurrency-loss', 'streaming', 'exec',
+                                                  'guest-bridge'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
@@ -613,7 +617,8 @@ def main():
             parser.error('run diagnostics separately from qualification or a custom workload')
         if args.diagnostics == 'trace' and args.docker_owner != 'python':
             parser.error('request Python reference tracing with --docker-owner python')
-        if args.diagnostics in ('concurrency', 'concurrency-loss', 'streaming', 'exec') and args.docker_owner != 'rust':
+        if (args.diagnostics in ('concurrency', 'concurrency-loss', 'streaming', 'exec', 'guest-bridge')
+                and args.docker_owner != 'rust'):
             parser.error('Docker overlap and streaming checks require the Rust owner')
         if any((args.network_helper, args.core_assets, args.benchmark_output, args.comparison_output)):
             parser.error('legacy settings require --legacy-baseline')

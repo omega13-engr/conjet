@@ -8,6 +8,8 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::bridge_dns;
@@ -424,7 +426,7 @@ impl SharedLinks {
     fn create() -> io::Result<Self> {
         checked(unsafe { libc::unshare(libc::CLONE_NEWNET) })?;
         let mut route = Route::open()?;
-        let namespace = File::open("/proc/self/ns/net")?;
+        let namespace = File::open("/proc/thread-self/ns/net")?;
         let bridge = route.create_link(BRIDGE, c"bridge", &[])?;
         let mut links = Self {
             route,
@@ -488,6 +490,7 @@ impl SharedLinks {
                 let mut route = Route::open()?;
                 let peer = interface_index(PEER)?;
                 route.configure_link(peer, true, &[])?;
+                route.configure_link(interface_index(c"lo")?, true, &[])?;
                 route.address_with_prefix(peer, address, SHARED_PREFIX)
             });
             enter_namespace(&self.namespace)?;
@@ -567,6 +570,127 @@ impl Drop for SharedLinks {
         if self.bridge != 0 {
             let _ = self.route.remove(self.bridge);
         }
+    }
+}
+
+pub(crate) struct NetworkOwner {
+    links: Arc<Mutex<SharedLinks>>,
+    workloads: [Option<[u8; 16]>; 8],
+    stop: UnixStream,
+    dns: JoinHandle<io::Result<()>>,
+}
+
+impl NetworkOwner {
+    pub(crate) fn new() -> io::Result<Self> {
+        let original = File::open("/proc/thread-self/ns/net")?;
+        let setup = (|| {
+            let links = SharedLinks::create()?;
+            let dns = UdpSocket::bind((BRIDGE_IP, DNS_PORT))?;
+            dns.set_nonblocking(true)?;
+            Ok::<_, io::Error>((links, dns))
+        })();
+        enter_namespace(&original)?;
+        let (links, socket) = setup?;
+        let links = Arc::new(Mutex::new(links));
+        let registry = Arc::clone(&links);
+        let (stop, shutdown) = UnixStream::pair()?;
+        let dns = std::thread::Builder::new()
+            .name("private-bridge-dns".into())
+            .spawn(move || {
+                let mut files = [shutdown.as_raw_fd(), socket.as_raw_fd()].map(|fd| libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+                loop {
+                    if unsafe { libc::poll(files.as_mut_ptr(), files.len() as _, -1) } < 0 {
+                        let error = io::Error::last_os_error();
+                        if error.kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    if files[0].revents != 0 {
+                        return Ok(());
+                    }
+                    if files[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                        return Err(io::Error::other("private bridge DNS socket failed"));
+                    }
+                    if let Err(error) = registry
+                        .lock()
+                        .expect("private bridge registry")
+                        .receive_dns(&socket)
+                        && error.kind() != io::ErrorKind::WouldBlock
+                    {
+                        eprintln!("private bridge could not answer DNS: {error}");
+                    }
+                }
+            })?;
+        Ok(Self {
+            links,
+            workloads: Default::default(),
+            stop,
+            dns,
+        })
+    }
+
+    pub(crate) fn attach(
+        &mut self,
+        owner: [u8; 16],
+        target: File,
+        alias: &str,
+    ) -> io::Result<Ipv4Addr> {
+        if self.workloads.contains(&Some(owner)) {
+            return Err(io::Error::other(
+                "workload already owns a private bridge port",
+            ));
+        }
+        let slot = self
+            .workloads
+            .iter()
+            .position(Option::is_none)
+            .ok_or_else(|| io::Error::other("private bridge capacity exhausted"))?;
+        let address = self.in_bridge(|links| links.attach(slot, target, alias))?;
+        self.workloads[slot] = Some(owner);
+        Ok(address)
+    }
+
+    pub(crate) fn detach(&mut self, owner: [u8; 16]) -> io::Result<()> {
+        if let Some(slot) = self
+            .workloads
+            .iter()
+            .position(|entry| *entry == Some(owner))
+        {
+            self.in_bridge(|links| links.detach(slot))?;
+            self.workloads[slot] = None;
+        }
+        Ok(())
+    }
+
+    fn in_bridge<T>(
+        &self,
+        operation: impl FnOnce(&mut SharedLinks) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let original = File::open("/proc/thread-self/ns/net")?;
+        let mut links = self.links.lock().expect("private bridge registry");
+        enter_namespace(&links.namespace)?;
+        let result = operation(&mut links);
+        enter_namespace(&original)?;
+        result
+    }
+
+    pub(crate) fn close(self) -> io::Result<()> {
+        self.stop.shutdown(std::net::Shutdown::Both)?;
+        self.dns
+            .join()
+            .map_err(|_| io::Error::other("private bridge DNS panicked"))??;
+        let original = File::open("/proc/thread-self/ns/net")?;
+        let links = Arc::into_inner(self.links).expect("joined private bridge worker");
+        let links = links.into_inner().expect("private bridge registry");
+        enter_namespace(&links.namespace)?;
+        let result = links.close();
+        enter_namespace(&original)?;
+        result
     }
 }
 

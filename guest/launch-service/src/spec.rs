@@ -45,6 +45,8 @@ pub struct LaunchSpec {
     pub uid: u32,
     pub gid: u32,
     pub network: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_alias: Option<String>,
     pub limits: ResourceLimits,
 }
 
@@ -181,7 +183,11 @@ impl LaunchSpec {
         if spec.uid != WORKLOAD_UID || spec.gid != WORKLOAD_GID {
             return Err(SpecError::Identity);
         }
-        if !matches!(spec.network.as_str(), "none" | "bridge") {
+        if !matches!(spec.network.as_str(), "none" | "bridge")
+            || spec.network_alias.as_ref().is_some_and(|alias| {
+                spec.network != "bridge" || !crate::bridge_dns::valid_name(alias)
+            })
+        {
             return Err(SpecError::Network);
         }
         let limits = spec.limits;
@@ -236,6 +242,7 @@ mod tests {
                 uid: WORKLOAD_UID,
                 gid: WORKLOAD_GID,
                 network: "none".into(),
+                network_alias: None,
                 limits: ResourceLimits {
                     memory_bytes: MIN_MEMORY_BYTES,
                     pids: 4,

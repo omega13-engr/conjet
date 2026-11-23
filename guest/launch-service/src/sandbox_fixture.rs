@@ -23,6 +23,7 @@ pub(crate) struct Sandbox {
     overlay: CString,
     cwd: CString,
     filter: WorkloadFilter,
+    configure_resolver: bool,
     stdin: File,
 }
 
@@ -65,7 +66,7 @@ impl Sandbox {
                 base.join("lower")
             };
             std::fs::write(base.join("lower/work/immutable"), b"verified fixture\n")?;
-            if bridge {
+            if bridge && oci.is_none() {
                 std::fs::create_dir(base.join("lower/etc"))?;
                 std::fs::write(
                     base.join("lower/etc/resolv.conf"),
@@ -107,6 +108,7 @@ impl Sandbox {
                     base.display()
                 ))?,
                 filter: WorkloadFilter::new(bridge),
+                configure_resolver: bridge && oci.is_some(),
                 stdin: File::open("/dev/null")?,
             })
         })();
@@ -181,6 +183,21 @@ impl Sandbox {
             "working directory",
             security::checked(unsafe { libc::chdir(self.cwd.as_ptr()) }),
         )?;
+        if self.configure_resolver {
+            if !std::fs::symlink_metadata("/etc")?.is_dir() {
+                return Err(io::Error::other(
+                    "networked image requires an /etc directory",
+                ));
+            }
+            match std::fs::remove_file("/etc/resolv.conf") {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            use std::io::Write;
+            File::create_new("/etc/resolv.conf")?
+                .write_all(crate::bridge_fixture::RESOLVER_CONFIG.as_bytes())?;
+        }
         // Only stdio may survive. The fixture's syscall code needs no inherited directory handle.
         if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } != 0 {
             return Err(io::Error::other(format!(

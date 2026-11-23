@@ -395,3 +395,20 @@ cleanup before success and never retry an indeterminate submission.
 The guest can retain an admitted workload after client disconnect. It
 remains cancellable and has a 30-second execution ceiling. A subsequent
 admission can replace the last terminal record.
+
+## Isolated OCI bridge
+
+The direct `native_oci_arm64_v1` launch profile accepts `network: "bridge"`
+with a required `network_alias`. Aliases are DNS names and are unique
+among active peers regardless of case. Admission retains the existing
+fixed UID/GID and resource limits. Legacy fixture messages with an
+omitted alias retain their prior behavior.
+
+The OCI supervisor attaches a veth to the workload's new network
+namespace before allowing it to exec. All attached workloads share a
+guest-only bridge and receive a scoped address and an authoritative
+resolver. The resolver reads records from live peer leases and has no
+upstream forwarding. State reports `network_address` while the port is
+owned. Terminal cleanup verifies link and address removal. It removes
+the DNS alias before acknowledging the workload as removed. The bridge
+and DNS listener are closed on orderly shutdown.
