@@ -545,8 +545,56 @@ Restart inventory reconciliation was reviewed. The OCI live checks did not
 kill the supervisor. Production snapshots matched and sessions were removed.
 Independent PR review is separate.
 
-Next Action: Route guest lifecycle transitions to a bounded record table
-and scope helper reaping before allowing simultaneous work in SPEED-033.
+Next Action: Qualify simultaneous admission through the guest protocol
+in SPEED-033C.
+
+### SPEED-033C
+
+Title: Admit eight independent workloads in the OCI guest supervisor
+
+Description: Replace the guest's single lifecycle slot with a bounded
+OCI record table and scope helper recovery to each workload.
+
+Is blocked by task: SPEED-033B (DONE).
+
+Acceptance Criteria:
+
+- Admit 1, 2, 4 and 8 simultaneously populated native workloads with
+  distinct resource paths. Reject a ninth without consuming a sequence.
+- Preserve exact replay of an admitted operation, reject conflicting
+  replays, and cancel each workload without disturbing its siblings.
+- Verify complete cleanup for each workload and preserve the guest's
+  static fixture and Docker owner admission surfaces.
+
+Problem and Evidence: Unique resource paths and persistent intents
+enabled independent ownership. The guest ledger still stored one active
+record and assumed a global reaper for failure after helper startup.
+
+Approach: Route updates and protocol calls by native handle, reserve
+eight active records and bounded terminal history, and isolate each
+native helper's process group for recovery.
+
+Evidence: DONE. Built the release guest and VMM on `063a4aa`. Ran
+`python3 build-support/run-conjet-speedup.py --diagnostics oci-import`
+with the expanded guest-overlap checks. Observed the full live 1/2/4/8
+admission sweep, ninth-request rejection, unchanged sequence on rejection,
+exact and conflicting replay, and independent cancellation and cleanup.
+The Docker owner subsequently ran the pinned fixture in the same boot.
+Guest tests, ARM64 Clippy, formatting and Jetstream tests passed.
+Logs and release hashes are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-033C`.
+
+Source: [Launch service contract](launch-service-contract.md),
+[`fresh_fixture.rs`](../../guest/launch-service/src/fresh_fixture.rs).
+
+Review: Local diff and isolated checks passed with production unchanged
+and owned guest/socket removed. The concurrency sweep exercised the
+authenticated guest API. It did not run the Docker lifecycle sweep,
+force supervisor failure, or qualify pressure behavior. Independent PR
+review is separate.
+
+Next Action: Expose the verified admission capacity through the Rust
+Docker owner and implement stop, kill and restart in SPEED-033.
 
 ### SPEED-033
 
@@ -554,7 +602,7 @@ Title: Replace the single workload slot with bounded lifecycle records
 
 Description: Implement native create/start/wait/stop/kill/restart/remove for up to eight admitted containers.
 
-Is blocked by task: SPEED-033B (DONE).
+Is blocked by task: SPEED-033C (DONE).
 
 Acceptance Criteria:
 

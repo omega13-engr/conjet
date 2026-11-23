@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -90,6 +91,8 @@ struct Output {
 }
 
 const OUTPUT_CHUNK_LIMIT: usize = 8192;
+const OCI_CONCURRENCY: usize = 8;
+const OCI_RECORDS: usize = 24;
 
 fn output_chunk(output: &Capture, offset: usize, limit: usize, terminal: bool) -> Value {
     let next = (offset + limit).min(output.bytes.len());
@@ -230,12 +233,30 @@ struct Ledger {
     highest_sequence: u64,
     closing: bool,
     waiting: usize,
-    record: Option<Record>,
+    records: VecDeque<Record>,
     pressure: bool,
     evictions: u64,
 }
 
 impl Ledger {
+    fn record(&self, id: &str) -> Option<&Record> {
+        self.records
+            .iter()
+            .find(|record| record.handle.workload_id == id)
+    }
+
+    fn record_mut(&mut self, id: &str) -> Option<&mut Record> {
+        self.records
+            .iter_mut()
+            .find(|record| record.handle.workload_id == id)
+    }
+
+    fn active(&self) -> impl Iterator<Item = &Record> {
+        self.records
+            .iter()
+            .filter(|record| record.phase != Phase::Removed)
+    }
+
     fn memory_snapshot(&self, oci: bool) -> Value {
         let available = crate::memory::available_bytes();
         let mut snapshot = json!({
@@ -245,11 +266,8 @@ impl Ledger {
             "prepared_floor_bytes": crate::memory::MIN_AVAILABLE_BYTES,
             "pressure_evictions": self.evictions,
         });
-        if let Some(record) = self
-            .record
-            .as_ref()
-            .filter(|record| record.phase != Phase::Removed)
-        {
+        let mut active_workloads = Vec::new();
+        for record in self.active() {
             let prepared_scope = record.slot.is_some();
             let active = record.slot.as_ref().is_none_or(Slot::claimed);
             let observed = crate::kernel_fixture::cgroup_observation(
@@ -258,7 +276,7 @@ impl Ledger {
                 oci,
             )
             .ok();
-            snapshot[if active { "active" } else { "prepared" }] = json!({
+            let mut state = json!({
                 "handle": record.handle, "phase": record.phase.name(),
                 "scope": if prepared_scope { "prepared" } else { "active" },
                 "limit_bytes": record.memory_limit_bytes,
@@ -270,11 +288,18 @@ impl Ledger {
                 let (mount, scope) =
                     crate::kernel_fixture::cgroup_paths(&record.handle.workload_id, true);
                 let overlay = crate::sandbox_fixture::owned_path(id, true);
-                snapshot["active"]["paths"] = json!({
+                state["paths"] = json!({
                     "cgroup_mount":mount,"cgroup_scope":scope,"overlay":overlay,
                     "overlay_present":overlay.is_dir(),
                 });
             }
+            if oci && active {
+                active_workloads.push(state.clone());
+            }
+            snapshot[if active { "active" } else { "prepared" }] = state;
+        }
+        if oci {
+            snapshot["active_workloads"] = json!(active_workloads);
         }
         snapshot
     }
@@ -282,7 +307,7 @@ impl Ledger {
     fn set_pressure(&mut self, pressure: bool) {
         self.pressure = pressure;
         if pressure
-            && let Some(record) = &mut self.record
+            && let Some(record) = self.records.back_mut()
             && !record.phase.terminal()
             && !record.cancelled
             && record.slot.as_ref().is_some_and(|slot| !slot.claimed())
@@ -480,9 +505,9 @@ impl FreshFixture {
         self.bridge_available
     }
 
-    fn update(&self, f: impl FnOnce(&mut Record)) {
+    fn update(&self, id: &str, f: impl FnOnce(&mut Record)) {
         let mut ledger = self.ledger.lock().expect("fresh ledger");
-        if let Some(record) = &mut ledger.record {
+        if let Some(record) = ledger.record_mut(id) {
             f(record);
             self.changed.notify_all();
         }
@@ -596,19 +621,23 @@ impl FreshFixture {
         {
             return Err(("unsupported_option", "requested OCI image is not installed"));
         }
-        if let Some(record) = &ledger.record {
-            if record.sequence == request.sequence {
-                if record.body != body {
-                    return Err(("id_conflict", "sequence has a different admitted request"));
-                }
-                return Ok((Kind::State, record.state()));
+        if let Some(record) = ledger
+            .records
+            .iter()
+            .find(|record| record.sequence == request.sequence)
+        {
+            if record.body != body {
+                return Err(("id_conflict", "sequence has a different admitted request"));
             }
-            if !record.phase.terminal() || record.phase == Phase::CleanupFailed {
-                return Err((
-                    "busy",
-                    "native service already owns a workload or unresolved cleanup",
-                ));
-            }
+            return Ok((Kind::State, record.state()));
+        }
+        let capacity = if self.oci { OCI_CONCURRENCY } else { 1 };
+        if ledger.active().count() >= capacity
+            || ledger
+                .active()
+                .any(|record| record.phase == Phase::CleanupFailed)
+        {
+            return Err(("busy", "native workload capacity is occupied or unresolved"));
         }
         if ledger.closing {
             return Err(("busy", "fresh fixture is draining"));
@@ -664,7 +693,17 @@ impl FreshFixture {
         };
         let reply = record.state();
         ledger.highest_sequence = request.sequence;
-        ledger.record = Some(record);
+        if !self.oci {
+            ledger.records.clear();
+        } else if ledger.records.len() >= OCI_RECORDS {
+            let index = ledger
+                .records
+                .iter()
+                .position(|record| record.phase == Phase::Removed)
+                .expect("bounded OCI history contains a terminal record");
+            ledger.records.remove(index);
+        }
+        ledger.records.push_back(record);
         let owner = Arc::clone(self);
         let limits = spec.limits;
         let mode = mode.to_owned();
@@ -678,7 +717,7 @@ impl FreshFixture {
             })
             .is_err()
         {
-            let record = ledger.record.as_mut().expect("reserved record");
+            let record = ledger.records.back_mut().expect("reserved record");
             record.exec = "failed";
             if bridge {
                 record.network_cleanup = "complete";
@@ -698,9 +737,10 @@ impl FreshFixture {
         prepared: bool,
         oci_process: Option<&str>,
     ) {
+        let workload = hex(&id);
         {
             let mut ledger = self.ledger.lock().expect("fresh ledger");
-            let record = ledger.record.as_mut().expect("admitted workload");
+            let record = ledger.record_mut(&workload).expect("admitted workload");
             if record.cancelled {
                 record.exec = "failed";
                 if bridge {
@@ -730,7 +770,7 @@ impl FreshFixture {
         if let Err(error) = &result {
             eprintln!("fresh fixture did not confirm cleanup: {error}");
         }
-        self.update(|record| {
+        self.update(&workload, |record| {
             record.control = None;
             if let Some(slot) = &mut record.slot {
                 slot.discard();
@@ -771,7 +811,30 @@ impl FreshFixture {
         let (mut peer, helper) = UnixStream::pair()?;
         peer.set_read_timeout(Some(Duration::from_secs(32)))?;
         let owner = peer.try_clone()?;
-        let mut child = Command::new("/init")
+        let workload = hex(&id);
+        let mut command = Command::new("/init");
+        if oci_process.is_some() {
+            command.process_group(0);
+            let owner_pid = std::process::id() as libc::pid_t;
+            // Stop this task-owned helper if its supervisor dies before it
+            // records cleanup. It never runs outside the disposable guest.
+            unsafe {
+                command.pre_exec(move || {
+                    crate::security::checked(libc::prctl(
+                        libc::PR_SET_PDEATHSIG,
+                        libc::SIGKILL,
+                        0,
+                        0,
+                        0,
+                    ))?;
+                    if libc::getppid() != owner_pid {
+                        return Err(io::Error::from_raw_os_error(libc::ECHILD));
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let mut child = command
             .args([
                 "--run-fresh-fixture",
                 &std::process::id().to_string(),
@@ -793,11 +856,12 @@ impl FreshFixture {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        let process_group = -(child.id() as libc::pid_t);
         let out = child.stdout.take().expect("piped stdout");
         let err = child.stderr.take().expect("piped stderr");
         let stdout = thread::spawn(move || capture(out));
         let stderr = thread::spawn(move || capture(err));
-        self.update(|record| {
+        self.update(&workload, |record| {
             record.control = Some(owner);
             if record.cancelled {
                 let _ = record.control.as_mut().unwrap().write_all(&[CANCEL]);
@@ -810,17 +874,17 @@ impl FreshFixture {
             let mut code = [0];
             while peer.read(&mut code)? == 1 {
                 match code[0] {
-                    b'P' => self.update(|record| {
+                    b'P' => self.update(&workload, |record| {
                         if !record.cancelled {
                             record.change(Phase::Preparing);
                         }
                     }),
-                    b'C' => self.update(|record| {
+                    b'C' => self.update(&workload, |record| {
                         if !record.cancelled {
                             record.change(Phase::ChildCreated);
                         }
                     }),
-                    b'Q' if prepared => self.update(|record| {
+                    b'Q' if prepared => self.update(&workload, |record| {
                         if !record.cancelled
                             && let (Some(slot), Some(expires)) =
                                 (&mut record.slot, record.slot_expires)
@@ -829,14 +893,14 @@ impl FreshFixture {
                             record.change(Phase::PreparedReady);
                         }
                     }),
-                    b'T' if prepared => self.update(|record| {
+                    b'T' if prepared => self.update(&workload, |record| {
                         record.slot_expired = true;
                         record.slot.as_mut().expect("prepared record").discard();
                         record.change(Phase::Exiting);
                     }),
                     b'M' if prepared => {
                         let mut ledger = self.ledger.lock().expect("fresh ledger");
-                        let record = ledger.record.as_mut().expect("prepared record");
+                        let record = ledger.record_mut(&workload).expect("prepared record");
                         if !record.cancelled {
                             record.cancelled = true;
                             let slot = record.slot.as_mut().expect("prepared slot");
@@ -857,7 +921,7 @@ impl FreshFixture {
                                 io::Error::last_os_error()
                             });
                         }
-                        self.update(|record| {
+                        self.update(&workload, |record| {
                             record.exec = "confirmed";
                             record.mark("exec_confirmed");
                             if !record.cancelled {
@@ -873,7 +937,7 @@ impl FreshFixture {
                             return Err(io::Error::other("duplicate fixture exit record"));
                         }
                         exit_received = true;
-                        self.update(|record| {
+                        self.update(&workload, |record| {
                             record.exit = if libc::WIFEXITED(status) {
                                 Some(json!({"code": libc::WEXITSTATUS(status)}))
                             } else if libc::WIFSIGNALED(status) {
@@ -886,11 +950,11 @@ impl FreshFixture {
                     }
                     b'N' if !exit_received => {
                         exit_received = true;
-                        self.update(|record| record.change(Phase::Cleaning));
+                        self.update(&workload, |record| record.change(Phase::Cleaning));
                     }
                     b'B' if exit_received && !network_removed => {
                         network_removed = true;
-                        self.update(|record| {
+                        self.update(&workload, |record| {
                             record.network_cleanup = "complete";
                             record.revision += 1;
                             record.mark("network_removed");
@@ -907,14 +971,18 @@ impl FreshFixture {
         })();
         if result.is_err() {
             let _ = peer.shutdown(std::net::Shutdown::Both);
-            self.update(|record| record.control = None);
+            self.update(&workload, |record| record.control = None);
             child.kill()?;
         }
         let finished = child.wait()?;
         let recovered = result.is_err() || !finished.success() || !removed;
         if recovered {
             crate::kernel_fixture::recover_cgroup(id, oci_process.is_some())?;
-            crate::recovery_fixture::reap_owned_children(-1)?;
+            crate::recovery_fixture::reap_owned_children(if oci_process.is_some() {
+                process_group
+            } else {
+                -1
+            })?;
             crate::sandbox_fixture::recover(id, oci_process.is_some())?;
             println!("conjet-launchd recovered helper failure for {}", hex(&id));
         }
@@ -947,8 +1015,7 @@ impl FreshFixture {
                 return Err(("stale_generation", "unexpected boot ID"));
             }
             if ledger
-                .record
-                .as_ref()
+                .record(&handle.workload_id)
                 .is_none_or(|record| record.handle != *handle)
             {
                 return Err(("not_found", "unknown native workload"));
@@ -977,7 +1044,9 @@ impl FreshFixture {
                 if guard.closing || Instant::now() >= expires {
                     return Err(("slot_unavailable", "prepared claim is no longer admissible"));
                 }
-                let record = guard.record.as_mut().expect("checked record");
+                let record = guard
+                    .record_mut(&request.handle.workload_id)
+                    .expect("checked record");
                 let slot = record
                     .slot
                     .as_mut()
@@ -1015,8 +1084,9 @@ impl FreshFixture {
                         "boot_id": boot,
                         "image_digest": self.image_digest,
                         "last_sequence": guard.highest_sequence,
-                        "workload": guard.record.as_ref().map(Record::state),
+                        "workload": guard.records.back().map(Record::state),
                         "installed_images": guard.images.snapshot(),
+                        "active_workloads": guard.active().map(Record::state).collect::<Vec<_>>(),
                     }),
                 ))
             }
@@ -1029,16 +1099,15 @@ impl FreshFixture {
                 if guard.closing {
                     return Err(("busy", "fresh fixture is draining"));
                 }
-                let live_image = guard
-                    .record
-                    .as_ref()
-                    .filter(|record| record.phase != Phase::Removed)
-                    .map(|record| record.image_digest.clone());
+                let live_images: BTreeSet<_> = guard
+                    .active()
+                    .map(|record| record.image_digest.clone())
+                    .collect();
                 let response = guard.images.handle(
                     request,
                     connection,
                     &self.image_digest,
-                    live_image.as_deref(),
+                    &live_images,
                     expires,
                 )?;
                 Ok((Kind::Image, response))
@@ -1062,7 +1131,9 @@ impl FreshFixture {
                 let request: Control = parse(frame)?;
                 deadline(request.budget_ms)?;
                 check(&guard, &request.handle)?;
-                let record = guard.record.as_mut().expect("checked record");
+                let record = guard
+                    .record_mut(&request.handle.workload_id)
+                    .expect("checked record");
                 if frame.kind == Kind::Cancel {
                     record.cancel();
                     self.changed.notify_all();
@@ -1081,7 +1152,9 @@ impl FreshFixture {
                     if let Err(error) = check(&guard, &request.handle) {
                         break Err(error);
                     }
-                    let record = guard.record.as_ref().expect("checked record");
+                    let record = guard
+                        .record(&request.handle.workload_id)
+                        .expect("checked record");
                     if record.revision > request.after_revision || record.phase.terminal() {
                         let mut state = record.state();
                         if request.terminal_output && record.phase == Phase::Removed {
@@ -1112,7 +1185,9 @@ impl FreshFixture {
                 let request: Output = parse(frame)?;
                 deadline(request.budget_ms)?;
                 check(&guard, &request.handle)?;
-                let record = guard.record.as_ref().expect("checked record");
+                let record = guard
+                    .record(&request.handle.workload_id)
+                    .expect("checked record");
                 let output = match request.stream.as_str() {
                     "stdout" => &record.stdout,
                     "stderr" => &record.stderr,
@@ -1158,11 +1233,15 @@ impl FreshFixture {
     pub(crate) fn drain(&self, deadline: Instant) -> bool {
         let mut ledger = self.ledger.lock().expect("fresh ledger");
         ledger.closing = true;
-        while let Some(record) = &mut ledger.record {
-            if record.phase.terminal() {
-                return record.phase == Phase::Removed;
+        loop {
+            if ledger.records.iter().all(|record| record.phase.terminal()) {
+                return !ledger
+                    .active()
+                    .any(|record| record.phase == Phase::CleanupFailed);
             }
-            record.cancel();
+            for record in &mut ledger.records {
+                record.cancel();
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return false;
@@ -1173,7 +1252,6 @@ impl FreshFixture {
                 .expect("fresh ledger")
                 .0;
         }
-        true
     }
 }
 

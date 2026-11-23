@@ -50,7 +50,10 @@ pub(in crate::native) fn install(options: InstallOptions) -> anyhow::Result<()> 
     ensure!(peer.oci, "native guest lacks OCI capability");
     let state = peer.inspect()?;
     ensure!(
-        state["workload"].is_null() || state["workload"]["cleanup"] == "complete",
+        (state["workload"].is_null() || state["workload"]["cleanup"] == "complete")
+            && state["active_workloads"]
+                .as_array()
+                .map_or(true, Vec::is_empty),
         "native image installation requires an idle Docker guest"
     );
     let response = install_with_peer(&mut peer, &image, &options.sha256, &package)?;

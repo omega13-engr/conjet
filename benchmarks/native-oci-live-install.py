@@ -83,14 +83,16 @@ def preflight(session, pid, digest, output):
     return report['boot_id']
 
 
+def launch_request(state, image_digest, argv):
+    return {'boot_id': state['boot_id'], 'sequence': state['last_sequence'] + 1,
+            'operation_id': uuid.uuid4().hex, 'budget_ms': 1000,
+            'spec': {'image_digest': image_digest, 'argv': argv,
+                     'env': [], 'cwd': '/', 'uid': 65532, 'gid': 65532, 'network': 'none',
+                     'limits': {'memory_bytes': 16777216, 'pids': 4, 'cpu_millicores': 500}}}
+
+
 def launch(stream, state, image_digest, argv, error=None):
-    return exchange(stream, 8, {'boot_id': state['boot_id'], 'sequence': state['last_sequence'] + 1,
-                               'operation_id': uuid.uuid4().hex, 'budget_ms': 1000,
-                               'spec': {'image_digest': image_digest, 'argv': argv,
-                                        'env': [], 'cwd': '/', 'uid': 65532, 'gid': 65532,
-                                        'network': 'none',
-                                        'limits': {'memory_bytes': 16777216, 'pids': 4,
-                                                   'cpu_millicores': 500}}}, 15 if error else 13, error)
+    return exchange(stream, 8, launch_request(state, image_digest, argv), 15 if error else 13, error)
 
 
 def terminal(stream, handle):
@@ -160,3 +162,57 @@ def verify_removal(session, pid, digest, expected_boot, output):
             raise RuntimeError('the original OCI image failed after removing the imported root')
     result = {'boot_id': boot, 'removed': removed, 'rejected': rejected, 'boot_image': original}
     (output / 'installation-removal.json').write_text(json.dumps(result, indent=2) + '\n')
+
+
+def verify_guest_overlap(session, pid, digest, expected_boot, output):
+    samples = []
+    with channel(session, pid) as (stream, boot):
+        if boot != expected_boot:
+            raise RuntimeError('guest concurrency checked the wrong boot')
+        for count in (1, 2, 4, 8):
+            requests, ownership = [], []
+            for _ in range(count):
+                request = launch_request(inspect(stream), digest, ['/bin/busybox', 'sleep', '30'])
+                requests.append(request)
+                ownership.append(exchange(stream, 8, request, 13))
+            handles = [item['handle'] for item in ownership]
+            ids = {handle['workload_id'] for handle in handles}
+            if len(ids) != count:
+                raise RuntimeError('concurrent admission reused a workload identity')
+            deadline = time.monotonic() + 5
+            while True:
+                observed = exchange(stream, 19, {'budget_ms': 1000, 'boot_id': boot}, 19)['active_workloads']
+                populated = {row['handle']['workload_id'] for row in observed
+                             if row['sample_valid'] and row['populated'] and row['paths']['overlay_present']}
+                if populated == ids:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f'guest did not populate {count} concurrent workloads: {observed}')
+                time.sleep(0.02)
+            if len({row['paths']['overlay'] for row in observed}) != count:
+                raise RuntimeError('overlapping OCI workloads shared a writable path')
+            exhausted = None
+            replay = exchange(stream, 8, requests[0], 13)
+            conflict = exchange(stream, 8, {**requests[0], 'operation_id': uuid.uuid4().hex},
+                                15, 'id_conflict')
+            if replay['handle'] != handles[0] or inspect(stream)['last_sequence'] != requests[-1]['sequence']:
+                raise RuntimeError('exact replay changed OCI admission ownership')
+            if count == 8:
+                state = inspect(stream)
+                exhausted = launch(stream, state, digest, ['/bin/true'], error='busy')
+                if inspect(stream)['last_sequence'] != state['last_sequence']:
+                    raise RuntimeError('failed ninth admission reserved a sequence')
+            receipts = []
+            while handles:
+                handle = handles.pop()
+                exchange(stream, 11, {'handle': handle, 'budget_ms': 1000}, 13)
+                finished = terminal(stream, handle)
+                if finished['cleanup'] != 'complete':
+                    raise RuntimeError('overlapping OCI workload did not verify cleanup')
+                receipts.append(finished)
+                if {row['handle']['workload_id'] for row in inspect(stream)['active_workloads']} != {
+                        entry['workload_id'] for entry in handles}:
+                    raise RuntimeError('cancellation affected another active workload')
+            samples.append({'count': count, 'observed': observed, 'exhausted': exhausted,
+                            'replay': replay, 'conflict': conflict, 'receipts': receipts})
+    (output / 'guest-overlap.json').write_text(json.dumps(samples, indent=2) + '\n')

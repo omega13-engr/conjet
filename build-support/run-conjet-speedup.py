@@ -411,6 +411,7 @@ def native_session(args, root):
             if report['install']['boot_id'] != boot:
                 raise RuntimeError('image was installed into a different boot')
             diagnostic['postflight'](directory, vm.pid, config_digest, boot, output)
+            diagnostic['verify_guest_overlap'](directory, vm.pid, config_digest, boot, output)
         run(docker + ['context', 'create', CONTEXT, '--docker', f'host={host}'], env=env)
         if run(docker + ['context', 'inspect', CONTEXT, '--format', '{{.Endpoints.docker.Host}}'], env=env) != host:
             raise RuntimeError('private native Docker context endpoint mismatch')

@@ -147,7 +147,10 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
                         .iter()
                         .any(|image| image["config_digest"] == metadata.config_digest)
                 }))
-            && (status["workload"].is_null() || status["workload"]["cleanup"] == "complete"),
+            && (status["workload"].is_null() || status["workload"]["cleanup"] == "complete")
+            && status["active_workloads"]
+                .as_array()
+                .map_or(true, Vec::is_empty),
         "native guest must be dedicated, idle and own the requested image"
     );
     let store = options

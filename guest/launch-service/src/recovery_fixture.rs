@@ -51,6 +51,11 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
                 recover_oci(id)?;
                 intent.complete(id)?;
             }
+            // Native helpers are in their own process groups. The parent's
+            // death signal stopped the helpers and scoped cgroup recovery
+            // stopped their descendants before PID 1 reaps adopted children.
+            reap_owned_children(-1)?;
+            crate::image_store::reset_generation()?;
         } else if let Some(id) = intent.read()? {
             kernel_fixture::recover_cgroup(id, false)?;
             sandbox_fixture::recover(id, false)?;
@@ -105,8 +110,9 @@ fn kill_owned_group(pgid: libc::pid_t) -> io::Result<()> {
 pub(crate) fn reap_owned_children(selector: libc::pid_t) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        // PID 1 selects the owned group. The fixture subreaper has only its
-        // one admitted helper's descendants and can select all its children.
+        // PID 1 selects its service group, or all adopted children after
+        // every owned cgroup was drained. The live OCI subreaper selects
+        // only the failing helper's group.
         let reaped = unsafe { libc::waitpid(selector, std::ptr::null_mut(), libc::WNOHANG) };
         if reaped > 0 {
             continue;

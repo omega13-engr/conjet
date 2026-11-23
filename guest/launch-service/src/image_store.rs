@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs::{self, Permissions};
 use std::io::{self, Write};
@@ -125,7 +125,7 @@ impl Store {
         request: Request,
         owner: ConnectionId,
         boot_image: &str,
-        live_image: Option<&str>,
+        live_images: &BTreeSet<String>,
         deadline: Instant,
     ) -> Result<Value, Failure> {
         if self
@@ -227,7 +227,7 @@ impl Store {
             Action::Remove { config_digest } => {
                 let path =
                     imported_root(&config_digest).ok_or(("malformed", "invalid OCI digest"))?;
-                if config_digest == boot_image || live_image == Some(&config_digest) {
+                if config_digest == boot_image || live_images.contains(&config_digest) {
                     return Err(("busy", "OCI root is currently referenced"));
                 }
                 if !self.contains(&config_digest) {
@@ -239,6 +239,20 @@ impl Store {
                 Ok(json!({"state":"removed"}))
             }
         }
+    }
+}
+
+pub(crate) fn reset_generation() -> io::Result<()> {
+    let path = Path::new(DIRECTORY);
+    match path.symlink_metadata() {
+        Ok(metadata)
+            if metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o777 == 0o711 =>
+        {
+            fs::remove_dir_all(path)
+        }
+        Ok(_) => Err(io::Error::other("invalid guest OCI generation store")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
