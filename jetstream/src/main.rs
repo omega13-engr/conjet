@@ -85,6 +85,9 @@ enum Command {
         /// Expose the isolated native launch transport on native-launch.sock.
         #[arg(long)]
         enable_native_launch: bool,
+        /// Omit the guest Ethernet device for guest-local network diagnostics.
+        #[arg(long)]
+        airgap: bool,
         /// Emit pretty JSON boot report.
         #[arg(long)]
         json: bool,
@@ -143,6 +146,7 @@ fn main() -> anyhow::Result<()> {
             memory_control_socket,
             trace_guest_readiness,
             enable_native_launch,
+            airgap,
             json,
             dry_run,
         } => {
@@ -173,6 +177,7 @@ fn main() -> anyhow::Result<()> {
                 memory_control_socket,
                 trace_guest_readiness,
                 enable_native_launch,
+                native_airgap: airgap,
                 ..HvfBootOptions::default()
             });
             if json {

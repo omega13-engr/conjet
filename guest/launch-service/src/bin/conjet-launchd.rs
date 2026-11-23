@@ -74,12 +74,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             conjet_launch_service::bridge_fixture::check()?;
         }
         #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--check-shared-bridge" && args.next().is_none() => {
+            conjet_launch_service::bridge_fixture::check_shared()?;
+            unsafe { libc::reboot(libc::RB_POWER_OFF) };
+            return Err(std::io::Error::last_os_error().into());
+        }
+        #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--check-bridge-availability" && args.next().is_none() => {
             conjet_launch_service::bridge_fixture::check_available()?;
         }
         #[cfg(target_arch = "aarch64")]
         Some(argument)
-            if argument == "--check-bridge-peer" || argument == "--check-bridge-scope" =>
+            if argument == "--check-bridge-peer"
+                || argument == "--check-bridge-scope"
+                || argument == "--check-shared-bridge-peer" =>
         {
             let parent = args
                 .next()
@@ -91,6 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if argument == "--check-bridge-peer" {
                 conjet_launch_service::bridge_fixture::check_peer(parent)?;
+            } else if argument == "--check-shared-bridge-peer" {
+                conjet_launch_service::bridge_fixture::check_shared_peer(parent)?;
             } else {
                 conjet_launch_service::bridge_fixture::check_scope(parent)?;
             }

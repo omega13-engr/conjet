@@ -795,13 +795,58 @@ PR review remains required.
 Next Action: Connect two independently owned OCI workloads to a private
 bridge in SPEED-035.
 
+### SPEED-035A
+
+Title: Verify independent peer allocation on a shared guest bridge
+
+Description: Add a bounded guest bridge port owner and prove that two
+separate Linux network namespaces can exchange TCP traffic while their
+links retain independent ownership.
+
+Is blocked by task: SPEED-034 (DONE).
+
+Acceptance Criteria:
+
+- Exchange exact TCP canaries between two peers on one guest-only bridge.
+- Force failure after a veth is created, verify rollback, then allocate
+  that address again while a sibling listener remains usable.
+- Verify deletion of the bridge and both sets of ports and addresses,
+  with no network device on the VM's guest-to-host boundary.
+
+Problem and Evidence: The existing launch fixture attached one peer per
+bridge. It used the bridge helper itself as the TCP destination.
+
+Approach: Reuse route netlink requests and keep eight independent slots
+with their own interface indices and namespace descriptors. Roll back
+partial allocations and verify teardown in both namespaces.
+
+Evidence: DONE. Ran guest format, tests and ARM64 Clippy. Built release
+Jetstream and ARM64 guest from the working tree on `51ab17a`.
+`python3 benchmarks/native-shared-bridge.py` verified two TCP exchanges,
+partial allocation rollback, address reuse, clean PSCI shutdown and
+zero virtio network backends. The successful run and initial harness
+failure are retained with commands, artifact hashes and cleanup results
+under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-035A`.
+
+Source: [Bridge owner and fixture](../../guest/launch-service/src/bridge_fixture.rs),
+[isolated proof runner](../../benchmarks/native-shared-bridge.py).
+
+Review: Local diff and live check passed. The proof uses trusted guest
+subprocesses and covers the link primitive. Native OCI ownership and
+Docker DNS remain in SPEED-035. Production snapshots matched and owned
+scratch was removed. Independent PR review remains required.
+
+Next Action: Wire bridge leases and DNS names to native OCI lifecycle and
+Docker network operations in SPEED-035.
+
 ### SPEED-035
 
 Title: Connect native containers to one private bridge and DNS
 
 Description: Wire the verified guest bridge implementation to native Docker network ownership.
 
-Is blocked by task: SPEED-034.
+Is blocked by task: SPEED-035A (DONE).
 
 Acceptance Criteria:
 

@@ -1,4 +1,4 @@
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::mem::size_of;
@@ -160,7 +160,11 @@ impl Route {
     }
 
     fn address(&mut self, index: u32, address: Ipv4Addr) -> io::Result<()> {
-        let mut message = vec![libc::AF_INET as u8, PREFIX, 0, libc::RT_SCOPE_UNIVERSE];
+        self.address_with_prefix(index, address, PREFIX)
+    }
+
+    fn address_with_prefix(&mut self, index: u32, address: Ipv4Addr, prefix: u8) -> io::Result<()> {
+        let mut message = vec![libc::AF_INET as u8, prefix, 0, libc::RT_SCOPE_UNIVERSE];
         message.extend_from_slice(&index.to_ne_bytes());
         attribute(&mut message, libc::IFA_LOCAL, &address.octets());
         attribute(&mut message, libc::IFA_ADDRESS, &address.octets());
@@ -173,6 +177,19 @@ impl Route {
 
     fn remove(&mut self, index: u32) -> io::Result<()> {
         self.request(libc::RTM_DELLINK, 0, &link_message(index, 0))
+    }
+
+    fn attach_peer(&mut self, name: &CStr, target: &File) -> io::Result<u32> {
+        let mut peer = link_message(0, 0);
+        attribute(&mut peer, libc::IFLA_IFNAME, PEER.to_bytes_with_nul());
+        attribute(
+            &mut peer,
+            libc::IFLA_NET_NS_FD,
+            &target.as_raw_fd().to_ne_bytes(),
+        );
+        let mut data = Vec::new();
+        attribute(&mut data, VETH_INFO_PEER | NESTED, &peer);
+        self.create_link(name, c"veth", &data)
     }
 
     fn remove_owned_group(&mut self) -> io::Result<()> {
@@ -237,18 +254,9 @@ impl Links {
             .bridge
             .ok_or_else(|| io::Error::other("bridge link is not live"))?;
         let peer_namespace = File::open(format!("/proc/{pid}/ns/net"))?;
-        let mut other = link_message(0, 0);
-        attribute(&mut other, libc::IFLA_IFNAME, PEER.to_bytes_with_nul());
         // Register the peer in its final namespace, avoiding the separate
         // namespace move and its network grace period.
-        attribute(
-            &mut other,
-            libc::IFLA_NET_NS_FD,
-            &peer_namespace.as_raw_fd().to_ne_bytes(),
-        );
-        let mut data = Vec::new();
-        attribute(&mut data, VETH_INFO_PEER | NESTED, &other);
-        let port = self.route.create_link(PORT, c"veth", &data)?;
+        let port = self.route.attach_peer(PORT, &peer_namespace)?;
         self.port = Some(port);
         self.route
             .configure_link(port, true, &[(libc::IFLA_MASTER, &bridge.to_ne_bytes())])?;
@@ -392,6 +400,129 @@ fn enter_namespace(target: &File) -> io::Result<()> {
 fn in_namespace<T>(target: &File, work: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     enter_namespace(target)?;
     work()
+}
+
+const SHARED_PREFIX: u8 = 28;
+
+struct BridgePort {
+    index: u32,
+    name: CString,
+    target: File,
+    address: Ipv4Addr,
+}
+
+struct SharedLinks {
+    route: Route,
+    bridge: u32,
+    namespace: File,
+    ports: [Option<BridgePort>; 8],
+}
+
+impl SharedLinks {
+    fn create() -> io::Result<Self> {
+        checked(unsafe { libc::unshare(libc::CLONE_NEWNET) })?;
+        let mut route = Route::open()?;
+        let namespace = File::open("/proc/self/ns/net")?;
+        let bridge = route.create_link(BRIDGE, c"bridge", &[])?;
+        let mut links = Self {
+            route,
+            bridge,
+            namespace,
+            ports: Default::default(),
+        };
+        links.route.configure_link(bridge, true, &[])?;
+        links
+            .route
+            .address_with_prefix(bridge, BRIDGE_IP, SHARED_PREFIX)?;
+        Ok(links)
+    }
+
+    fn attach(&mut self, slot: usize, target: File) -> io::Result<Ipv4Addr> {
+        let owner = self
+            .ports
+            .get_mut(slot)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid bridge slot"))?;
+        if owner.is_some() || target.metadata()?.ino() == self.namespace.metadata()?.ino() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "invalid bridge peer ownership",
+            ));
+        }
+        let name = CString::new(format!("cjport{slot}")).expect("numeric link name");
+        let address = Ipv4Addr::new(198, 18, 0, 2 + slot as u8);
+        let index = self.route.attach_peer(&name, &target)?;
+        *owner = Some(BridgePort {
+            index,
+            name,
+            target,
+            address,
+        });
+        let port = owner.as_ref().expect("owned bridge port");
+        let result = (|| {
+            self.route.configure_link(
+                index,
+                true,
+                &[(libc::IFLA_MASTER, &self.bridge.to_ne_bytes())],
+            )?;
+            let configured = in_namespace(&port.target, || {
+                assert_link_absent(BRIDGE)?;
+                let mut route = Route::open()?;
+                let peer = interface_index(PEER)?;
+                route.configure_link(peer, true, &[])?;
+                route.address_with_prefix(peer, address, SHARED_PREFIX)
+            });
+            enter_namespace(&self.namespace)?;
+            configured
+        })();
+        if let Err(error) = result {
+            self.detach(slot)?;
+            return Err(error);
+        }
+        Ok(address)
+    }
+
+    fn detach(&mut self, slot: usize) -> io::Result<()> {
+        let owner = self
+            .ports
+            .get_mut(slot)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid bridge slot"))?;
+        let port = owner
+            .as_ref()
+            .ok_or_else(|| io::Error::other("bridge slot is empty"))?;
+        self.route.remove(port.index)?;
+        assert_link_absent(&port.name)?;
+        let result = in_namespace(&port.target, || {
+            assert_link_absent(PEER)?;
+            assert_address_absent(port.address)
+        });
+        enter_namespace(&self.namespace)?;
+        result?;
+        *owner = None;
+        Ok(())
+    }
+
+    fn close(mut self) -> io::Result<()> {
+        for slot in 0..self.ports.len() {
+            if self.ports[slot].is_some() {
+                self.detach(slot)?;
+            }
+        }
+        self.route.remove(self.bridge)?;
+        self.bridge = 0;
+        assert_link_absent(BRIDGE)?;
+        assert_address_absent(BRIDGE_IP)
+    }
+}
+
+impl Drop for SharedLinks {
+    fn drop(&mut self) {
+        for port in self.ports.iter().flatten() {
+            let _ = self.route.remove(port.index);
+        }
+        if self.bridge != 0 {
+            let _ = self.route.remove(self.bridge);
+        }
+    }
 }
 
 fn configure_peer() -> io::Result<()> {
@@ -541,6 +672,126 @@ fn read_byte(stream: &mut UnixStream) -> io::Result<u8> {
     let mut byte = [0];
     stream.read_exact(&mut byte)?;
     Ok(byte[0])
+}
+
+pub fn check_shared() -> io::Result<()> {
+    if std::process::id() != 1 {
+        return Err(io::Error::other(
+            "shared bridge proof requires a disposable guest init",
+        ));
+    }
+    let _proc = crate::kernel_fixture::ProcMount::new()?;
+    let untouched = File::open("/proc/self/ns/net")?;
+    let mut bridge = SharedLinks::create()?;
+    let target =
+        |process: &FixtureProcess| File::open(format!("/proc/{}/ns/net", process.child.id()));
+    let mut server = FixtureProcess::spawn("--check-shared-bridge-peer")?;
+    let mut client = FixtureProcess::spawn("--check-shared-bridge-peer")?;
+    let failed = FixtureProcess::spawn("--check-shared-bridge-peer")?;
+    let configured = in_namespace(&target(&failed)?, || {
+        Route::open()?.create_link(BRIDGE, c"bridge", &[])?;
+        Ok(())
+    });
+    enter_namespace(&bridge.namespace)?;
+    configured?;
+    if bridge.attach(1, target(&failed)?).is_ok() || bridge.ports[1].is_some() {
+        return Err(io::Error::other(
+            "partial peer allocation did not roll back",
+        ));
+    }
+    let server_ip = bridge.attach(0, target(&server)?)?;
+    let client_ip = bridge.attach(1, target(&client)?)?;
+    if bridge.attach(1, target(&failed)?).is_ok() || server_ip == client_ip {
+        return Err(io::Error::other(
+            "bridge did not preserve distinct address ownership",
+        ));
+    }
+    server.control.write_all(&[1])?;
+    if read_byte(&mut server.control)? != 1 {
+        return Err(io::Error::other("bridge server did not bind"));
+    }
+    client.control.write_all(&[2])?;
+    if read_byte(&mut client.control)? != 1 || read_byte(&mut server.control)? != 2 {
+        return Err(io::Error::other("bridge TCP verification failed"));
+    }
+    bridge.detach(1)?;
+    client.control.write_all(&[3])?;
+    client.finish()?;
+    // A replacement inherits the free address while the server and its
+    // listening socket remain live.
+    let mut replacement = FixtureProcess::spawn("--check-shared-bridge-peer")?;
+    if bridge.attach(1, target(&replacement)?)? != client_ip {
+        return Err(io::Error::other("bridge address was not reused"));
+    }
+    replacement.control.write_all(&[2])?;
+    if read_byte(&mut replacement.control)? != 1 || read_byte(&mut server.control)? != 2 {
+        return Err(io::Error::other(
+            "sibling listener did not survive replacement",
+        ));
+    }
+    bridge.close()?;
+    for peer in [&mut server, &mut replacement] {
+        peer.control.write_all(&[3])?;
+        peer.finish()?;
+    }
+    enter_namespace(&untouched)?;
+    assert_link_absent(BRIDGE)?;
+    assert_address_absent(BRIDGE_IP)?;
+    println!(
+        "conjet-launchd verified shared bridge TCP, rollback, address reuse and isolated teardown"
+    );
+    Ok(())
+}
+
+pub fn check_shared_peer(parent: u32) -> io::Result<()> {
+    let mut control = fixture_control(parent)?;
+    let server = Ipv4Addr::new(198, 18, 0, 2);
+    let client = Ipv4Addr::new(198, 18, 0, 3);
+    assert_link_absent(BRIDGE)?;
+    let own = match read_byte(&mut control)? {
+        1 => {
+            let listener = TcpListener::bind((server, CANARY_PORT))?;
+            control.write_all(&[1])?;
+            for _ in 0..2 {
+                wait(
+                    listener.as_raw_fd(),
+                    libc::POLLIN,
+                    None,
+                    Some(Instant::now() + TIMEOUT),
+                )?;
+                let (mut stream, from) = listener.accept()?;
+                stream.set_read_timeout(Some(TIMEOUT))?;
+                stream.set_write_timeout(Some(TIMEOUT))?;
+                let mut request = [0; 4];
+                stream.read_exact(&mut request)?;
+                if from.ip() != client || &request != b"ping" {
+                    return Err(io::Error::other("wrong canary request"));
+                }
+                stream.write_all(b"pong")?;
+                control.write_all(&[2])?;
+            }
+            server
+        }
+        2 => {
+            let mut stream = TcpStream::connect_timeout(&(server, CANARY_PORT).into(), TIMEOUT)?;
+            stream.set_read_timeout(Some(TIMEOUT))?;
+            stream.set_write_timeout(Some(TIMEOUT))?;
+            stream.write_all(b"ping")?;
+            let mut reply = [0; 4];
+            stream.read_exact(&mut reply)?;
+            if &reply != b"pong" {
+                return Err(io::Error::other("wrong canary response"));
+            }
+            control.write_all(&[1])?;
+            client
+        }
+        _ => return Err(io::Error::other("invalid shared bridge peer role")),
+    };
+    if read_byte(&mut control)? != 3 {
+        return Err(io::Error::other("missing bridge teardown signal"));
+    }
+    assert_link_absent(PEER)?;
+    assert_address_absent(own)
 }
 
 fn check_concurrent() -> io::Result<()> {
