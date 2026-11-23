@@ -157,7 +157,7 @@ Approach:
 2. Run bounded stress and recovery sessions with canaries and before/after inventories.
 3. Analyze scaling, tails, failure rates, resource reclamation and optional energy without discarding adverse sessions.
 
-Evidence: `SPEED-025/pair-1` on `187e1ab` completed all 400 measured launches per engine with zero launch failures. Both observed active data after the pressure attempt and passed isolated recovery and production-preservation checks. Pressure attribution and remaining independent pairs are open. The [interim results](docker-benchmark-results.md#concurrency-and-recovery) retain both failures and successful rows.
+Evidence: `SPEED-025/pair-1` on `187e1ab` completed all 400 measured launches per engine with zero launch failures. Both observed active data after the pressure attempt and passed isolated recovery and production-preservation checks. `native-product-full-1` on `4da6d3b` passed the injected native pressure/recovery, bounded output, overload, cancellation, active shutdown and stale prior-boot handle canaries. Both native session directories were removed. It recorded 2,000 measured samples per fresh and prepared CLI/API lane. Docker pressure attribution and the remaining independent pairs are open. The [interim results](docker-benchmark-results.md#concurrency-and-recovery) retain both failures and successful rows.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),

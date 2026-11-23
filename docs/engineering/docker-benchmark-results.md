@@ -286,6 +286,34 @@ attributes tied execution to a real Jetstream handle and recorded
 verified guest cleanup. No performance claim follows from these pilot
 numbers.
 
+The later full-budget static product run used harness `4da6d3b` and the
+same workload executable. It completed 2,000 measured operations per lane
+with no failures. API time begins at admission or claim and ends at
+verified cleanup. CLI time covers spawn through exit. Throughput includes
+the refill when used, together with harness operations in the measured
+window.
+
+| Static native lane | p50 / p95 / p99 (ms) | Full-window successes/s |
+| --- | ---: | ---: |
+| Fresh API | 2.642/3.867/5.560 | 320.394 |
+| Prepared API claim | 1.914/2.532/3.610 | 265.503 |
+| Prepared API refill | 1.390/2.056/3.220 | — |
+| Fresh CLI | 22.863/26.877/30.774 | 42.758 |
+| Prepared CLI claim | 21.965/27.784/33.673 | 22.387 |
+| Prepared CLI refill | 21.051/26.627/32.178 | — |
+
+The spent-slot and expired-slot request times were 19.109 and 20.140 ms
+respectively through the CLI. Neither includes preparation or expiry
+waiting time. The host engine accrued 55.25 s of CPU time during the
+sampled boot and had 54.55 MiB RSS at its end. The live checks confirmed
+one-use ownership under contention, bounded output, admission backpressure,
+expiry, cancellation, preserved active memory under pressure, verified
+cleanup with active work at foreground termination and stale-handle
+rejection after reboot. Both boots exited cleanly and removed their private
+directories. Prepared claims lowered API latency in this session. Refill
+reduced measured full-window throughput. This single-session result remains
+separate from equivalent Docker and Kiri qualification.
+
 ## Coverage and retained evidence
 
 The full suite remains underway. Image, builds, Compose, control, storage
@@ -314,6 +342,7 @@ failed attempts and shutdown checks.
 | Canceled historical-event run and corrected paired control matrix | `SPEED-023/pair-1`, `SPEED-023/pair-2` |
 | Storage, guest transport and the sustained services | `SPEED-024/pair-1` |
 | Launch concurrency, memory attribution and recovery attempts | `SPEED-025/pair-1` |
+| Full-budget native static product and active-shutdown canaries | `SPEED-025/native-product-full-1` |
 
 Production stayed in service throughout. The records preserve unknown
 guest teardown, unmeasured energy and observed contention. The original
