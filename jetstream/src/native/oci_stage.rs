@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use super::oci::{self, Kind, Record, Root};
 
 const SCRATCH: &str = "/Volumes/ExternalSSD/dev_workspace/tmp";
-const METADATA_LIMIT: usize = 64 * 1024;
-const LAYER_BUDGET: usize = 40 * 1024 * 1024;
+pub(super) const METADATA_LIMIT: usize = 64 * 1024;
+pub(super) const LAYER_BUDGET: usize = 40 * 1024 * 1024;
 const LAYERS_LIMIT: usize = 16;
 
 #[derive(Debug, Args)]
@@ -33,19 +33,19 @@ pub(super) struct Options {
 }
 
 #[derive(Deserialize)]
-struct Descriptor {
+pub(super) struct Descriptor {
     #[serde(rename = "mediaType")]
     media_type: String,
-    size: usize,
-    digest: String,
+    pub(super) size: usize,
+    pub(super) digest: String,
 }
 
 #[derive(Deserialize)]
-struct Manifest {
+pub(super) struct Manifest {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
-    config: Descriptor,
-    layers: Vec<Descriptor>,
+    pub(super) config: Descriptor,
+    pub(super) layers: Vec<Descriptor>,
 }
 
 struct Entry {
@@ -59,7 +59,7 @@ struct Entry {
 
 type Tree = BTreeMap<String, Arc<Entry>>;
 
-fn read_bounded(root: &Path, path: &Path, bound: usize) -> anyhow::Result<Vec<u8>> {
+pub(super) fn read_bounded(root: &Path, path: &Path, bound: usize) -> anyhow::Result<Vec<u8>> {
     ensure!(
         path.starts_with(root) && path.canonicalize()? == path,
         "invalid OCI blob path"
@@ -79,7 +79,7 @@ fn read_bounded(root: &Path, path: &Path, bound: usize) -> anyhow::Result<Vec<u8
     Ok(bytes)
 }
 
-fn blob(root: &Path, digest: &str, bound: usize) -> anyhow::Result<Vec<u8>> {
+pub(super) fn blob(root: &Path, digest: &str, bound: usize) -> anyhow::Result<Vec<u8>> {
     let suffix = digest
         .strip_prefix("sha256:")
         .context("expected a SHA-256 OCI digest")?;
@@ -385,7 +385,7 @@ fn process_metadata(config: &Value) -> anyhow::Result<Value> {
     Ok(defaults)
 }
 
-fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)> {
+pub(super) fn read_manifest(layout: &Path, manifest_digest: &str) -> anyhow::Result<Manifest> {
     let manifest: Manifest =
         serde_json::from_slice(&blob(layout, manifest_digest, METADATA_LIMIT)?)?;
     ensure!(
@@ -394,6 +394,11 @@ fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)>
             && manifest.config.media_type == "application/vnd.oci.image.config.v1+json",
         "expected a bounded OCI image manifest"
     );
+    Ok(manifest)
+}
+
+fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)> {
+    let manifest = read_manifest(layout, manifest_digest)?;
     let config: Value =
         serde_json::from_slice(&read_descriptor(layout, &manifest.config, METADATA_LIMIT)?)?;
     ensure!(
@@ -462,16 +467,34 @@ pub(super) fn stage(options: Options) -> anyhow::Result<()> {
         .file_name()
         .context("missing staging directory name")?;
     let output = parent.join(name);
-    let (tree, receipt) = verify(&layout, &options.manifest_digest)?;
+    let package_sha256 = publish(&layout, &options.manifest_digest, &output)?;
+    println!(
+        "{}",
+        json!({"output":output, "package_sha256":package_sha256,
+                         "manifest_digest":options.manifest_digest})
+    );
+    Ok(())
+}
+
+pub(super) fn publish(layout: &Path, manifest: &str, output: &Path) -> anyhow::Result<String> {
+    let parent = output.parent().context("missing OCI output parent")?;
+    let (tree, mut receipt) = verify(layout, manifest)?;
     let package = serde_json::to_vec(&tree)?;
     ensure!(
         package.len() <= oci::PACKAGE_LIMIT as usize,
         "staged rootfs exceeds package bound"
     );
     Root::read(&package)?;
+    let package_sha256 = hex(&Sha256::digest(&package));
+    receipt["package_sha256"] = json!(package_sha256);
     let staged = tempfile::tempdir_in(parent)?;
-    File::create(staged.path().join("package.json"))?.write_all(&package)?;
-    File::create(staged.path().join("receipt.json"))?.write_all(&serde_json::to_vec(&receipt)?)?;
+    let write = |name: &str, data: &[u8]| -> std::io::Result<()> {
+        let mut file = File::create(staged.path().join(name))?;
+        file.write_all(data)?;
+        file.sync_all()
+    };
+    write("package.json", &package)?;
+    write("receipt.json", &serde_json::to_vec(&receipt)?)?;
     let source = std::ffi::CString::new(staged.path().as_os_str().as_bytes())?;
     let destination = std::ffi::CString::new(output.as_os_str().as_bytes())?;
     // Exclusive rename publishes both complete outputs without replacing
@@ -480,10 +503,5 @@ pub(super) fn stage(options: Options) -> anyhow::Result<()> {
         return Err(std::io::Error::last_os_error()).context("cannot publish staged OCI package");
     }
     let _ = staged.keep();
-    println!(
-        "{}",
-        json!({"output":output, "package_sha256":hex(&Sha256::digest(&package)),
-                         "manifest_digest":options.manifest_digest})
-    );
-    Ok(())
+    Ok(package_sha256)
 }

@@ -84,8 +84,16 @@ and opaque directories. The guest maps image ownership into the sandbox's
 existing ID range. It copies complete linked groups into the private
 upper layer so writes through an alias are visible to the other names
 while the underlying image remains immutable. The default Docker owner
-still selects one pre-staged image per boot. Registry pull and live image
-installation are separate work.
+begins with one pre-staged image. An explicitly configured loopback
+registry can supply additional pinned Linux ARM64 OCI images while the
+guest is idle. The Rust owner verifies the manifest and every blob, uses
+an ExternalSSD content store with shared-layer ownership, and installs
+the verified package in the current guest generation. Docker image
+inspect exposes the pinned config identity. Removing an image that
+is referenced by the boot or any current container returns a conflict.
+The registry fixture covers immutable digest pulls. Tag resolution,
+manifest lists, remote registries and credentials remain outside the
+verified scope.
 
 The candidate is managed from source and general promotion requires broader
 compatibility. Live streaming, interactive input, Compose, networking, build,

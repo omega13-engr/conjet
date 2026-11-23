@@ -1,0 +1,12 @@
+{
+  "small": {
+    "manifest_digest": "sha256:fbd755dc191ae62e6b2ff191a9b74e9ff738604c1ecafa8d3b8fae774b779175",
+    "config_digest": "sha256:09b8a338715220bba680f0bddcace92c6951189b4fb2d0b654ee8d5d70042b09",
+    "layers": [
+      "sha256:6d535112455af7ca562f929f39736bd47667d7d2965492e176a3d03245e581c4"
+    ],
+    "diff_ids": [
+      "sha256:621fd7acfa4c183c97dd79aef0e00fbb69d70efd44ecfa24d854de22d3efea2b"
+    ]
+  }
+}

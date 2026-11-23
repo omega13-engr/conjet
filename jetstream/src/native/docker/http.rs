@@ -329,13 +329,43 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
         }
         ("GET", _) if path.starts_with("/images/") && path.ends_with("/json") => {
             let reference = decode(&path["/images/".len()..path.len() - "/json".len()])?;
-            if reference != owner.image.reference && reference != owner.image.config_digest {
-                return Err(Rejected(404, "image is not staged".into()));
+            Reply::json(200, owner.inspect_image(&reference)?)
+        }
+        ("POST", "/images/create") => {
+            if query
+                .keys()
+                .any(|key| !matches!(key.as_str(), "fromImage" | "tag" | "platform"))
+                || query
+                    .get("platform")
+                    .is_some_and(|value| value != "linux/arm64")
+                || !request.body.is_empty()
+            {
+                return Err(Rejected::bad(
+                    "only pinned Linux ARM64 registry pulls are supported",
+                ));
+            }
+            let from = query
+                .get("fromImage")
+                .ok_or_else(|| Rejected::bad("missing registry image reference"))?;
+            let reference = query
+                .get("tag")
+                .filter(|value| !value.is_empty())
+                .map_or_else(|| from.to_owned(), |tag| format!("{from}@{tag}"));
+            let mut reply = Reply::json(200, owner.pull_image(&reference)?);
+            reply.data.push(b'\n');
+            reply
+        }
+        ("DELETE", _) if path.starts_with("/images/") => {
+            if query
+                .keys()
+                .any(|key| !matches!(key.as_str(), "force" | "noprune"))
+                || !disabled(query.get("force"))
+            {
+                return Err(Rejected::bad("forced image removal is unsupported"));
             }
             Reply::json(
                 200,
-                json!({"Id":owner.image.config_digest,"Os":"linux","Architecture":"arm64",
-                                    "Config":owner.image.defaults}),
+                owner.remove_image(&decode(&path["/images/".len()..])?)?,
             )
         }
         _ => return container(owner, method, path, query),

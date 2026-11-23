@@ -426,9 +426,20 @@ Approach:
 2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
 3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
 
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-032`.
+Evidence: DONE. Built the release Rust owner on `47e7b65` and reused the
+source-identical release Swift CLI and guest supervisor. Generated and
+verified the pinned registry fixtures with
+`python3 benchmarks/native-docker-registry.py`, then ran
+`python3 build-support/run-conjet-speedup.py --diagnostics registry`.
+Unmodified Docker verified pull, inspect, run and removal for both
+fixtures. Corrupted and interrupted transfers retained no partial image.
+The cached pull made no registry request and retained the staged package
+inode. Pulling and deleting the related image preserved the shared layer,
+and deleting the final image freed all fixture blobs. In-use deletion,
+mutable references and off-allowlist references were rejected. Jetstream
+tests and Rust formatting passed. The existing Clippy errors are recorded
+in SPEED-030. Commands, requests, hashes, prior pilot and final evidence
+are under `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-032`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [adapter contract](docker-native-adapter.md),
@@ -436,10 +447,16 @@ Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [detailed result format](docker-benchmark-results.md),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local diff and isolated runtime checks passed. Host registry
+traffic is confined to the explicit loopback endpoint and the pinned
+content is verified before native guest admission. The launcher checked
+ExternalSSD backing, native execution, production preservation, and
+cleanup of its registry, sockets, guest and image store. The store does
+not qualify general registry authorization, tags, or image indexes.
+Independent PR review is separate.
 
-Next Action: Implement digest-addressed download/admission and Docker image inspect using the SPEED-031 fixtures.
+Next Action: Separate per-workload guest resource ownership before increasing
+admission in SPEED-033.
 
 ### SPEED-033
 

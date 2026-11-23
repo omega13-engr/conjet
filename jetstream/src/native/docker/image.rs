@@ -96,7 +96,10 @@ pub(super) fn install_with_peer(
     );
     let mut offset = 0;
     for chunk in package.chunks(CHUNK) {
-        ensure!(Instant::now() < deadline, "OCI transfer deadline elapsed");
+        ensure!(
+            Instant::now() < deadline && !super::STOP.load(std::sync::atomic::Ordering::Acquire),
+            "OCI transfer deadline elapsed or the owner stopped"
+        );
         let reply = image_request(
             peer,
             json!({

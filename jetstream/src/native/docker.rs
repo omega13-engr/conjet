@@ -1,6 +1,7 @@
 //! Bounded Docker compatibility endpoint for the isolated OCI candidate.
 mod http;
 mod image;
+mod registry;
 mod request;
 
 pub(super) use image::{install, InstallOptions};
@@ -8,6 +9,7 @@ pub(super) use image::{install, InstallOptions};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, Read};
+use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
@@ -44,6 +46,10 @@ pub(super) struct Options {
     receipt: PathBuf,
     #[arg(long)]
     image: String,
+    #[arg(long, requires = "registry")]
+    image_store: Option<PathBuf>,
+    #[arg(long, requires = "image_store")]
+    registry: Option<SocketAddr>,
 }
 
 extern "C" fn stop_signal(_: libc::c_int) {
@@ -144,7 +150,12 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             && (status["workload"].is_null() || status["workload"]["cleanup"] == "complete"),
         "native guest must be dedicated, idle and own the requested image"
     );
-    serve_endpoint(options.socket, metadata, peer, status)
+    let store = options
+        .image_store
+        .zip(options.registry)
+        .map(|(root, address)| registry::Store::open(root, address, &status))
+        .transpose()?;
+    serve_endpoint(options.socket, metadata, peer, status, store)
 }
 
 fn admission_lock(directory: &Path) -> anyhow::Result<fs::File> {
@@ -160,6 +171,7 @@ fn serve_endpoint(
     metadata: request::Image,
     peer: client::Connection,
     status: Value,
+    store: Option<registry::Store>,
 ) -> anyhow::Result<()> {
     let boot = peer.boot.clone();
     let sequence = status["last_sequence"]
@@ -180,7 +192,7 @@ fn serve_endpoint(
         "{}",
         json!({"socket":_socket.0, "boot_id":boot, "backend":BACKEND})
     );
-    let owner = Arc::new(Owner::new(metadata, native));
+    let owner = Arc::new(Owner::new(metadata, native, store));
     let mut handlers: Vec<JoinHandle<()>> = Vec::with_capacity(CONNECTIONS);
     let result = loop {
         for i in (0..handlers.len()).rev() {
@@ -517,19 +529,134 @@ struct Owner {
     image: request::Image,
     native: Mutex<Native>,
     ledger: Mutex<Ledger>,
+    store: Option<Mutex<registry::Store>>,
 }
 
 impl Owner {
-    fn new(image: request::Image, native: Native) -> Self {
+    fn new(image: request::Image, native: Native, store: Option<registry::Store>) -> Self {
         Self {
             image,
             native: Mutex::new(native),
             ledger: Mutex::new(Ledger::default()),
+            store: store.map(Mutex::new),
         }
     }
 
+    fn boot_reference(&self, reference: &str) -> bool {
+        reference == self.image.reference || reference == self.image.config_digest
+    }
+
+    fn image_store(&self) -> Result<MutexGuard<'_, registry::Store>, Rejected> {
+        self.store
+            .as_ref()
+            .map(|store| store.lock().unwrap())
+            .ok_or_else(|| Rejected(501, "native registry store is not configured".into()))
+    }
+
+    fn with_guest<T>(
+        &self,
+        call: impl FnOnce(&mut client::Connection) -> anyhow::Result<T>,
+    ) -> Result<T, Rejected> {
+        let mut native = self.native.lock().unwrap();
+        let peer = native
+            .peer
+            .as_mut()
+            .ok_or_else(|| Rejected::internal("authenticated native channel is closed"))?;
+        let result = call(peer);
+        if let Err(error) = &result {
+            if error
+                .downcast_ref::<WireError>()
+                .is_some_and(|err| !matches!(err, WireError::PeerError(_)))
+            {
+                native.peer = None;
+            }
+        }
+        result.map_err(|error| Rejected::internal(format!("{error:#}")))
+    }
+
+    fn process(&self, config: &Value) -> Result<Value, Rejected> {
+        let reference = config["Image"]
+            .as_str()
+            .ok_or_else(|| Rejected::bad("require an immutable image reference"))?;
+        if reference == self.image.reference || self.store.is_none() {
+            return self.image.process(config);
+        }
+        let mut store = self.image_store()?;
+        let image = store
+            .get(reference)
+            .map_err(|error| Rejected::bad(error.to_string()))?
+            .ok_or_else(|| Rejected(404, "image is not staged".into()))?;
+        let spec = image.metadata.process(config)?;
+        self.with_guest(|peer| store.ensure_guest(peer, &image))?;
+        Ok(spec)
+    }
+
+    fn inspect_image(&self, reference: &str) -> Result<Value, Rejected> {
+        let info = |image: &request::Image| {
+            json!({
+                "Id":image.config_digest,"Os":"linux","Architecture":"arm64",
+                "Config":image.defaults,"RepoDigests":[image.reference],
+            })
+        };
+        if self.boot_reference(reference) {
+            return Ok(info(&self.image));
+        }
+        let missing = || Rejected(404, "image is not staged".into());
+        let store = self.store.as_ref().ok_or_else(missing)?.lock().unwrap();
+        store
+            .get(reference)
+            .map_err(|_| missing())?
+            .as_ref()
+            .map(|image| info(&image.metadata))
+            .ok_or_else(missing)
+    }
+
+    fn pull_image(&self, reference: &str) -> Result<Value, Rejected> {
+        let ledger = self.ledger.lock().unwrap();
+        if ledger.active.is_some() || ledger.poisoned || ledger.closing {
+            return Err(Rejected(
+                409,
+                "native guest must be idle to pull an image".into(),
+            ));
+        }
+        if self.boot_reference(reference) {
+            return Ok(json!({"status":"Image is already staged","id":reference}));
+        }
+        let mut store = self.image_store()?;
+        store
+            .validate_reference(reference)
+            .map_err(|error| Rejected::bad(error.to_string()))?;
+        let image = store
+            .prepare(reference)
+            .map_err(|error| Rejected::internal(format!("{error:#}")))?;
+        self.with_guest(|peer| store.ensure_guest(peer, &image))?;
+        Ok(json!({"status":"Image is staged","id":reference}))
+    }
+
+    fn remove_image(&self, reference: &str) -> Result<Value, Rejected> {
+        let ledger = self.ledger.lock().unwrap();
+        if ledger.active.is_some()
+            || ledger.poisoned
+            || ledger.closing
+            || self.boot_reference(reference)
+        {
+            return Err(Rejected(
+                409,
+                "image is referenced by the boot or a container".into(),
+            ));
+        }
+        let mut store = self.image_store()?;
+        let image = store
+            .get(reference)
+            .map_err(|error| Rejected::bad(error.to_string()))?
+            .ok_or_else(|| Rejected(404, "image is not staged".into()))?;
+        let config = image.metadata.config_digest.clone();
+        self.with_guest(|peer| store.remove(peer, image))?;
+        Ok(json!([{"Untagged":reference},{"Deleted":config}]))
+    }
+
     fn event(&self, ledger: &mut Ledger, action: &str, item: &Item, terminal: Option<&Terminal>) {
-        let mut attributes = json!({"name":item.container.name,"image":self.image.reference,"conjet.backend":BACKEND});
+        let mut attributes = json!({"name":item.container.name,"image":item.container.config["Image"],"conjet.backend":BACKEND});
         if let Some(terminal) = terminal {
             let state = &terminal.witness;
             attributes["exitCode"] = json!(terminal.code.to_string());
@@ -565,7 +692,6 @@ impl Owner {
     }
 
     fn create(&self, name: Option<&str>, config: Value) -> Result<Arc<Item>, Rejected> {
-        let spec = self.image.process(&config)?;
         if name.is_some_and(|name| !request::name(name)) {
             return Err(Rejected::bad("invalid container name"));
         }
@@ -576,6 +702,7 @@ impl Owner {
                 "native OCI capacity is occupied or unresolved".into(),
             ));
         }
+        let spec = self.process(&config)?;
         let id = hex(&random::<32>()
             .map_err(|_| Rejected::internal("cannot allocate container identity"))?);
         let name = name.unwrap_or(&id[..12]).to_owned();

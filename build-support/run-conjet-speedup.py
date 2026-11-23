@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the isolated Conjet native Docker candidate in the foreground."""
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import os
@@ -370,6 +371,8 @@ def native_session(args, root):
               'revision': run(['/usr/bin/git', '-C', REPO, 'rev-parse', 'HEAD']),
               'load_before': os.getloadavg()}
     vm = bridge = directory = None
+    registry_scope = ExitStack()
+    registry = None
     try:
         if host == before['endpoint']:
             raise RuntimeError('candidate endpoint overlaps production')
@@ -415,6 +418,16 @@ def native_session(args, root):
         bridge_command = [sys.executable, adapter] if python_owner else [args.core, 'native', 'docker-serve']
         bridge_command += ['--native-session', directory, '--receipt', args.import_receipt or args.native_receipt,
                            '--image', args.image, '--socket', endpoint]
+        if args.diagnostics == 'registry':
+            registry_test = runpy.run_path(str(REPO / 'benchmarks/native-docker-registry.py'))
+            registry = registry_scope.enter_context(registry_test['Registry'](args.registry_fixtures).serve())
+            store = root / 'image-store'
+            store.mkdir(mode=0o700)
+            if store.resolve(strict=True) != store or store.stat().st_dev != SCRATCH.stat().st_dev:
+                raise RuntimeError('native image store does not have the expected ExternalSSD backing')
+            bridge_command += ['--image-store', store, '--registry', registry.authority]
+            report['image_store'] = str(store)
+            report['registry'] = registry.authority
         if args.diagnostics == 'trace':
             bridge_command += ['--trace', output / 'adapter-trace.json']
         report['adapter_command'] = list(map(str, bridge_command))
@@ -438,7 +451,9 @@ def native_session(args, root):
         report['backend'] = version['Platform']['Name']
         print(f'Native Docker ready: {host}', flush=True)
         if args.diagnostics:
-            if args.diagnostics in ('oci', 'oci-import'):
+            if registry is not None:
+                registry_test['collect'](endpoint, bridge.pid, docker, env, output, registry, store)
+            elif args.diagnostics in ('oci', 'oci-import'):
                 oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
                 oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
                 if args.diagnostics == 'oci-import':
@@ -496,6 +511,12 @@ def native_session(args, root):
                 process.stdout.close()
         report['native_session_removed'] = directory is None or not directory.exists()
         report['adapter_socket_removed'] = not os.path.lexists(endpoint)
+        try:
+            registry_scope.close()
+            if registry is not None:
+                report['registry_stopped'] = True
+        except RuntimeError as error:
+            cleanup.append(str(error))
         report['cleanup_errors'] = cleanup
         try:
             report['production_after'] = production()
@@ -517,10 +538,10 @@ def main():
     parser.add_argument('--legacy-baseline', action='store_true', help='explicit historical Docker/containerd lane')
     parser.add_argument('--network-helper', type=Path)
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output',
-                 'import-package', 'import-receipt'):
+                 'import-package', 'import-receipt', 'registry-fixtures'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
-    parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import'),
+    parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
@@ -548,6 +569,12 @@ def main():
         native_assets += ('import_package', 'import_receipt')
     elif args.import_package or args.import_receipt:
         parser.error('import package and receipt require OCI import diagnostics')
+    if args.diagnostics == 'registry':
+        if not (args.registry_fixtures and args.docker_owner == 'rust'):
+            parser.error('registry diagnostics require the Rust owner and pinned registry fixtures')
+        native_assets += ('registry_fixtures',)
+    elif args.registry_fixtures:
+        parser.error('registry fixtures require registry diagnostics')
     if (bool(args.benchmark_scenario) != bool(args.benchmark_archive)
             or (args.benchmark_scenario and not args.benchmark_output)):
         parser.error('a staged scenario requires benchmark output and an image archive')
