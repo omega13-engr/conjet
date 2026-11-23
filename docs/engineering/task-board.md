@@ -360,7 +360,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Run the corrected transfer observation at the next pair index. `SPEED-020/pair-2` passed both pins, warm save/load, byte-verified image run and owner cleanup. Kiri witnessed all ten measured first-pull transfers. Conjet's CLI indicated downloads, but guest registry clock skew made the host timestamp filter lose its witnesses. The correction uses a dedicated repository per repetition and a bounded log tail to correlate each exact blob without cross-clock timestamps. The registry store has a labeled volume with explicit session cleanup. The prior unknowns remain in the evidence.
+Next Action: Repeat the corrected controlled-registry workload at the remaining pair indices. `SPEED-020/pair-2` passed both image pins, warm save/load and run. Its host timestamp filter missed Conjet registry witnesses. `SPEED-020/pair-3` on `b31afde` observed all expected config and layer bytes for all ten measured first pulls per engine. Both engines passed archive, run and labeled-registry cleanup checks with zero scenario failures. Keep the prior unknown transfer records.
 
 ### SPEED-026
 

@@ -121,6 +121,19 @@ memory in this run. Earlier sessions that queried metadata before Kiri VM
 startup still have unknown guest memory. The image comparison remains
 inconclusive pending complete paired transfer and cache-state evidence.
 
+Pair 3 used `b31afde` with unique registry repositories per repetition.
+Both engines witnessed the complete config and layer transfer for all ten
+measured first pulls. Both passed cached pulls, archive and runnable-image
+checks and verified removal of the labeled registry store. Each row has
+five timed samples per engine with no failures.
+
+| Loopback operation | Conjet p50 / p95 / p99 (ms) | Kiri p50 / p95 / p99 (ms) |
+| --- | ---: | ---: |
+| Small first pull | 120.608/152.502/152.502 | 62.603/67.012/67.012 |
+| Small cached pull | 94.184/112.049/112.049 | 34.752/42.774/42.774 |
+| Multilayer first pull | 171.621/197.132/197.132 | 73.838/76.742/76.742 |
+| Multilayer cached pull | 100.036/114.363/114.363 | 32.208/50.546/50.546 |
+
 ## Buildx first session
 
 The first Buildx pair used the pinned BuildKit v0.23.2 `docker-container`
@@ -375,6 +388,7 @@ failed attempts and shutdown checks.
 | Full-budget Docker-to-native OCI run with per-operation cleanup witnesses | `SPEED-019/native-oci-full-1` |
 | First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
 | Pinned image and loopback registry results with asymmetric transfer proof | `SPEED-020/pair-2` |
+| Complete paired registry transfer and labeled-store cleanup | `SPEED-020/pair-3` |
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
 | Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
