@@ -7,10 +7,13 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import re
 import runpy
+import select
 import subprocess
 import tarfile
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -648,9 +651,53 @@ def lifecycle_event_order(data, identifier):
     return next_action is None
 
 
+def observe_lifecycle(docker, identifier, phase):
+    argv = [str(part) for part in [*docker.prefix, 'events', '--since', '60s',
+            '--filter', 'type=container', '--filter', f'container={identifier}', '--format', '{{json .}}']]
+    row = {'scenario': 'events.lifecycle', 'phase': phase, 'argv': argv, 'error': None}
+    docker.rows.append(row)
+    data = bytearray()
+    began = time.monotonic_ns()
+    try:
+        with tempfile.TemporaryFile(dir=docker.output) as stderr:
+            with subprocess.Popen(argv, env=docker.env, stdout=subprocess.PIPE, stderr=stderr) as process:
+                try:
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
+                        if not ready:
+                            break
+                        chunk = os.read(process.stdout.fileno(), 4096)
+                        if not chunk:
+                            break
+                        data.extend(chunk)
+                        if len(data) > 65536:
+                            raise RuntimeError('owned Docker event stream exceeded its output cap')
+                        complete = data.rpartition(b'\n')[0]
+                        if lifecycle_event_order(complete, identifier):
+                            return
+                    raise RuntimeError('owned Docker lifecycle events were absent, incomplete or unordered')
+                finally:
+                    row['elapsed_ns'] = time.monotonic_ns() - began
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=3)
+                    row['exit_code'] = process.returncode
+                    stderr.seek(0)
+                    row['stderr'] = stderr.read(8192).decode(errors='replace')
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+        row['error'] = str(error)
+    finally:
+        row.setdefault('elapsed_ns', time.monotonic_ns() - began)
+        row['stdout'] = data[:65536].decode(errors='replace')
+
+
 def run_attach(docker, image, options, phase, index):
     name = f'{docker.token}-attach-{index}'
-    since = datetime.now(timezone.utc).isoformat()
     created = docker.call('attach-create', ['create', '-i', '--name', name, *options, image,
                           'sh', '-c', 'read -r line || exit 91; printf "out:%s" "$line"; '
                           'printf "err:%s" "$line" >&2; exit 23'], phase='setup')
@@ -668,13 +715,7 @@ def run_attach(docker, image, options, phase, index):
         removed = docker.call('attach-remove', ['rm', name], phase='cleanup') is not None
         if not removed:
             return
-        identifier = created.decode().strip()
-        events = docker.call('events.lifecycle', ['events', '--since', since, '--until',
-                             datetime.now(timezone.utc).isoformat(), '--filter', 'type=container',
-                             '--filter', f'container={identifier}', '--format', '{{json .}}'],
-                             timeout=15, phase=phase)
-        if events is not None and not lifecycle_event_order(events, identifier):
-            docker.rows[-1]['error'] = 'owned lifecycle events are missing or out of order'
+        observe_lifecycle(docker, created.decode().strip(), phase)
     finally:
         if not removed and docker.call('attach-force-remove', ['rm', '-f', name], phase='cleanup') is None:
             raise RuntimeError('could not remove the owned attach container')

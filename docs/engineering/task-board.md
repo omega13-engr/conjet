@@ -97,9 +97,7 @@ Approach:
 2. Run operation-specific latency and throughput cases with correctness assertions.
 3. Inspect backpressure, cancellation and cleanup evidence before publishing results.
 
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-023`.
+Evidence: The canceled Conjet half of `SPEED-023/pair-1` retains 274 attempted operations. It confirmed working persistent API and CLI exec, attach, TTY, disconnect/recovery and controlled file copies in the observed repetitions. All 17 observed historical event queries produced empty streams and failed the lifecycle canary. Candidate shutdown removed the private root and production matched its starting snapshot. The bounded stream observer now waits for a complete ordered witness and closes its own client. The corrected pair remains pending.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),
@@ -110,7 +108,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Run the paired control fixture after the current Buildx and Compose sessions and verify any failed canaries.
+Next Action: Verify live event delivery using the bounded observer and complete the corrected paired control workload.
 
 ### SPEED-024
 

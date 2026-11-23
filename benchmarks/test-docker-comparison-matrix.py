@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 import runpy
 import struct
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -88,6 +89,17 @@ class WorkloadTests(unittest.TestCase):
         self.assertTrue(check(stream(('create', 'attach', 'start', 'die', 'destroy')), 'owned'))
         self.assertFalse(check(stream(('create', 'die', 'start', 'destroy')), 'owned'))
         self.assertFalse(check(stream(('create', 'start', 'die', 'destroy'), 'other'), 'owned'))
+
+    def test_event_observer_stops_after_complete_witness(self):
+        events = '\n'.join(json.dumps({'Action': action, 'Actor': {'ID': 'owned'}})
+                           for action in ('create', 'start', 'die', 'destroy'))
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            docker = SimpleNamespace(rows=[], output=temporary, env={'PATH': '/usr/bin:/bin'},
+                                     prefix=[sys.executable, '-c', f'import time; print({events!r}, flush=True); time.sleep(60)'])
+            MATRIX['observe_lifecycle'](docker, 'owned', 'sample')
+        self.assertIsNone(docker.rows[0]['error'])
+        self.assertEqual(docker.rows[0]['stdout'], events + '\n')
+        self.assertLess(docker.rows[0]['exit_code'], 0)
 
     def test_cgroup_limits_require_numeric_cpu_quota_and_use_the_observed_period(self):
         check = MATRIX['matches_cgroup_limits']
