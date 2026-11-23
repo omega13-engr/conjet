@@ -151,6 +151,14 @@ state change increments its unsigned 64-bit revision. Wait accepts an
 exclusive lower revision bound and can return a terminal state repeatedly.
 Status and wait use the same state record.
 
+Wait may request `terminal_output: true`. When cleanup is complete, the
+terminal state then carries stdout and stderr chunks, each with its cursor,
+EOF and dropped-byte count. The two inline chunks share an 8 KiB decoded
+budget within the existing 16 KiB frame bound. A reader resumes each
+incomplete stream at its next offset using Output. The capture limit remains
+64 KiB per stream. Output delivery and overflow reporting do not move the
+guest cleanup boundary.
+
 | Phase | Transition owner and rule |
 |---|---|
 | accepted | Supervisor reserves a bounded record and writes an intent before making resources. |

@@ -74,6 +74,8 @@ struct Wait {
     handle: Handle,
     budget_ms: u64,
     after_revision: u64,
+    #[serde(default)]
+    terminal_output: bool,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +86,18 @@ struct Output {
     stream: String,
     offset: usize,
     max_bytes: usize,
+}
+
+const OUTPUT_CHUNK_LIMIT: usize = 8192;
+
+fn output_chunk(output: &Capture, offset: usize, limit: usize, terminal: bool) -> Value {
+    let next = (offset + limit).min(output.bytes.len());
+    json!({
+        "offset": offset, "next_offset": next,
+        "data": base64::engine::general_purpose::STANDARD.encode(&output.bytes[offset..next]),
+        "eof": terminal && next == output.bytes.len(),
+        "dropped_bytes": output.dropped,
+    })
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1000,7 +1014,17 @@ impl FreshFixture {
                     }
                     let record = guard.record.as_ref().expect("checked record");
                     if record.revision > request.after_revision || record.phase.terminal() {
-                        break Ok((Kind::State, record.state()));
+                        let mut state = record.state();
+                        if request.terminal_output && record.phase == Phase::Removed {
+                            // Share the chunk budget across streams to preserve
+                            // space for terminal metadata in the 16 KiB frame.
+                            let stdout_limit = record.stdout.bytes.len().min(OUTPUT_CHUNK_LIMIT);
+                            state["terminal_output"] = json!({
+                                "stdout": output_chunk(&record.stdout, 0, stdout_limit, true),
+                                "stderr": output_chunk(&record.stderr, 0, OUTPUT_CHUNK_LIMIT - stdout_limit, true),
+                            });
+                        }
+                        break Ok((Kind::State, state));
                     }
                     let remaining = expires.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
@@ -1025,19 +1049,19 @@ impl FreshFixture {
                     "stderr" => &record.stderr,
                     _ => return Err(("malformed", "invalid output stream")),
                 };
-                if request.offset > output.bytes.len() || !(1..=8192).contains(&request.max_bytes) {
+                if request.offset > output.bytes.len()
+                    || !(1..=OUTPUT_CHUNK_LIMIT).contains(&request.max_bytes)
+                {
                     return Err(("malformed", "invalid output cursor or reply bound"));
                 }
-                let next = (request.offset + request.max_bytes).min(output.bytes.len());
-                let bytes = &output.bytes[request.offset..next];
                 Ok((
                     Kind::OutputChunk,
-                    json!({
-                        "offset": request.offset, "next_offset": next,
-                        "data": base64::engine::general_purpose::STANDARD.encode(bytes),
-                        "eof": record.phase.terminal() && next == output.bytes.len(),
-                        "dropped_bytes": output.dropped,
-                    }),
+                    output_chunk(
+                        output,
+                        request.offset,
+                        request.max_bytes,
+                        record.phase.terminal(),
+                    ),
                 ))
             }
             _ => Err((

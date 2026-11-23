@@ -55,10 +55,13 @@ class NativeDockerTests(unittest.TestCase):
                             'boot_id': 'boot', 'last_sequence': 4}
             if opcode == 8:
                 operations.append(request)
-                return 13, {'handle': handle, 'cleanup': 'complete', 'exit': {'code': 0},
-                            'exec': 'confirmed'}
-            self.assertEqual(opcode, 12)
-            return 14, {'data': '', 'dropped_bytes': 0, 'eof': True}
+                return 13, {'handle': handle, 'cleanup': 'pending'}
+            self.assertEqual(opcode, 10)
+            self.assertTrue(request['terminal_output'])
+            stdout = {'data': 'b3V0', 'offset': 0, 'next_offset': 3, 'dropped_bytes': 0, 'eof': True}
+            stderr = {'data': '', 'offset': 0, 'next_offset': 0, 'dropped_bytes': 0, 'eof': True}
+            return 13, {'handle': handle, 'cleanup': 'complete', 'exit': {'code': 0}, 'exec': 'confirmed',
+                        'terminal_output': {'stdout': stdout, 'stderr': stderr}}
 
         trace = SERVER['Trace']()
         native, connection = self.make_native(exchange, trace=trace)
@@ -68,7 +71,9 @@ class NativeDockerTests(unittest.TestCase):
             self.assertEqual(native.execute({}, cancellation)[0], 137)
             cancellation.clear()
             for _ in range(2):
-                self.assertEqual(native.execute({}, cancellation)[0], 0)
+                code, stdout, stderr, state = native.execute({}, cancellation)
+                self.assertEqual((code, stdout, stderr), (0, b'out', b''))
+                self.assertEqual(state['adapter_output_calls'], 0)
         self.assertEqual([op['sequence'] for op in operations], [5, 6])
         self.assertEqual(len({op['operation_id'] for op in operations}), 2)
         self.assertEqual([row['event'] for row in trace.rows].count('native_connect'), 1)
@@ -76,6 +81,12 @@ class NativeDockerTests(unittest.TestCase):
         native.close()
         native.close()
         connection.close.assert_called_once()
+
+    def test_malformed_inline_cursor_is_rejected(self):
+        native = SERVER['Native'].__new__(SERVER['Native'])
+        stdout = {'data': 'b3V0', 'offset': 0, 'next_offset': 2, 'dropped_bytes': 0, 'eof': True}
+        with self.assertRaisesRegex(RuntimeError, 'invalid native output chunk'):
+            native.read_output(None, {}, {'terminal_output': {'stdout': stdout, 'stderr': {}}})
 
     def test_disconnect_timeout_and_reboot_fail_closed_without_replaying(self):
         for case in ('disconnect-before-reply', 'disconnect-after-admit', 'timeout', 'boot-changed'):
@@ -130,7 +141,7 @@ class NativeDockerTests(unittest.TestCase):
             if opcode == 11:
                 return 13, {'handle': handle, 'cleanup': 'complete', 'exit': None}
             self.assertEqual(opcode, 12)
-            return 14, {'data': '', 'dropped_bytes': 0, 'eof': True}
+            return 14, {'data': '', 'offset': 0, 'next_offset': 0, 'dropped_bytes': 0, 'eof': True}
 
         native, _ = self.make_native(exchange)
         with patch.dict(native.execute.__globals__['WIRE'], {'call': exchange}):

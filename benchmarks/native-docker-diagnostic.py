@@ -18,6 +18,64 @@ CANARIES = {
 }
 
 
+def collect_output_checks(connection, docker, env, directory, handles):
+    tools = MATCHED['TOOLS']
+    image = MATCHED['IMAGE']['ref']
+    prefix = MATCHED['PREFIX']
+    full_stream = 'n=0; while [ "$n" -lt 64 ]; do printf "%01024d" 0; n=$((n+1)); done'
+    expected = b'0' * 65536
+    checks = {}
+    for size in (65535, 65536):
+        name = f'cjdiag-boundary-{size}'
+        command = full_stream if size == 65536 else full_stream.replace(
+            '-lt 64', '-lt 63') + '; printf "%01023d" 0'
+        MATCHED['invoke'](docker, env, ['run', *MATCHED['FLAGS'], '--name', name, image,
+                                        '/bin/sh', '-c', command], stdout=expected[:size])
+        checks[name] = MATCHED['native_terminal'](connection, name, handles)
+    for case in ('overflow', 'slow-reader', 'disconnect'):
+        name = 'cjdiag-' + case
+        path = prefix + '/containers/' + name
+        command = {'overflow': full_stream + '; printf x',
+                   'slow-reader': full_stream + '; { ' + full_stream + '; } >&2',
+                   'disconnect': full_stream}[case]
+        tools['api'](connection, 'POST', prefix + '/containers/create?name=' + name, (201,), {
+            'Image': image, 'User': MATCHED['USER'], 'Cmd': ['/bin/sh', '-c', command],
+            'HostConfig': MATCHED['HOST_CONFIG']})
+        attach = None
+        response = None
+        try:
+            if case != 'overflow':
+                attach = tools['UnixHTTP'](connection.endpoint, connection.pid)
+                attach.request('POST', path + '/attach?stream=1&stdout=1&stderr=1')
+                response = attach.getresponse()
+                if response.status != 101:
+                    raise RuntimeError(f'{case} attach upgrade failed')
+                if case == 'disconnect':
+                    response.close()
+                    attach.close()
+            tools['api'](connection, 'POST', path + '/start', (204,))
+            wait = tools['api'](connection, 'POST', path + '/wait?condition=not-running', (200,))
+            if case == 'overflow':
+                expected_wait = {'StatusCode': 125, 'Error': {
+                    'Message': 'OCI output exceeds the Docker adapter limit'}}
+            else:
+                expected_wait = {'StatusCode': 0, 'Error': None}
+            if wait != expected_wait:
+                raise RuntimeError(f'{case} returned unexpected wait status: {wait}')
+            tools['api'](connection, 'DELETE', path, (204,))
+            checks[name] = {'wait': wait, 'witness': MATCHED['native_terminal'](connection, name, handles)}
+            # Confirm a subsequent real launch completes even if the earlier
+            # attach client has left all of its output unread.
+            MATCHED['lifecycle'](connection, name + '-reuse', {})
+            checks[name]['reuse'] = MATCHED['native_terminal'](connection, name + '-reuse', handles)
+        finally:
+            if response is not None:
+                response.close()
+            if attach is not None:
+                attach.close()
+    (directory / 'output-checks.json').write_text(json.dumps(checks, indent=2) + '\n')
+
+
 def collect(endpoint, peer, docker, env, directory):
     tools = MATCHED['TOOLS']
     manifest = MATCHED['MANIFEST']
@@ -64,6 +122,8 @@ def collect(endpoint, peer, docker, env, directory):
                                                       'host_end_ns': ended, 'api_stages_ns': stages,
                                                       'guest_witness': witness, 'error': error}) + '\n')
                             samples.flush()
+        if 'conjet.output_calls' in witness:
+            collect_output_checks(connection, docker, env, directory, handles)
     finally:
         connection.close()
 
@@ -92,6 +152,9 @@ def summarize(directory):
                                      for stage in ('authenticate', 'admit', 'terminal', 'output')},
                 'wait_calls': dict(Counter(row['guest_witness']['conjet.wait_calls'] for row in sample)),
             }
+            if 'conjet.output_calls' in sample[0]['guest_witness']:
+                group['output_calls'] = dict(Counter(row['guest_witness']['conjet.output_calls']
+                                                     for row in sample))
             if lane == 'api':
                 group['api_median_ns'] = {stage: median(row['api_stages_ns'][stage] for row in sample)
                                           for stage in ('create', 'start', 'wait', 'remove')}

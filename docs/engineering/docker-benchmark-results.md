@@ -194,6 +194,27 @@ attributed to connection reuse. Every launcher verified production
 preservation and owned-resource cleanup. Trace, client and launcher reports
 are under `conjet-speedup-evidence/SPEED-028` on ExternalSSD.
 
+## SPEED-029 terminal output diagnostics
+
+Two traced release boots delivered terminal stdout and stderr inline for
+every measured true and mixed-stream canary. Each completed one terminal
+wait and zero follow-up native Output requests, down from two follow-up
+requests per operation in SPEED-028. The CLI median host span from verified
+guest cleanup to completing output collection fell to 0.017 ms, from
+about 0.32 ms in SPEED-028. Median CLI true elapsed time ranged from
+22.604 to 23.393 ms and mixed-stream elapsed time from 22.229 to
+23.025 ms. The run sizes and boot variation support a boundary-level
+attribution, with no matched Kiri verdict.
+
+Each boot also verified byte-exact 65,535- and 65,536-byte results over the
+unmodified Docker CLI. The 65,537-byte test received a bounded output error
+and retained a guest cleanup witness with exit zero. An unread attachment
+held 64 KiB per stream while wait, removal and another native launch
+completed. A client disconnected before start also left wait, removal and
+reuse working. The launcher verified unchanged production and owned-resource
+cleanup. Exact commands, hashes, trace and canary results are under
+`conjet-speedup-evidence/SPEED-029` on ExternalSSD.
+
 ## Release-build static native API and CLI
 
 A separate release-build run used `cabbea9`, the same CLI, VMM, kernel and

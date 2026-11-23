@@ -216,8 +216,15 @@ Approach:
 2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
 3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
 
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
+Evidence: DONE. Rebuilt the release guest and VMM from the SPEED-029
+working tree on `7fbc189` and reused the source-identical Swift release CLI.
+Ran `python3 build-support/run-conjet-speedup.py --diagnostics trace` twice
+with the pinned assets and summarized with
+`python3 benchmarks/native-docker-diagnostic.py`. Both boots passed 176 standard
+canaries and eight supplemental output and capacity checks each.
+Ran `python3 benchmarks/test-native-docker-adapter.py`, guest `cargo test --locked`,
+`cargo fmt --check`, and `cargo clippy --locked --target aarch64-unknown-linux-musl -- -D warnings`.
+Commands, artifact hashes, tests, raw transcripts and cleanup records are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-029`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
@@ -226,10 +233,16 @@ Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [detailed result format](docker-benchmark-results.md),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local diff and runtime checks passed. Terminal wait carries a bounded
+inline prefix and explicit EOF and truncation states. Exact 65,535- and
+65,536-byte output passed through the real Docker CLI. Overflow returned an
+explicit wait error and retained the observed guest exit. Slow and disconnected
+attach clients did not block native teardown, removal or reuse. Both launchers
+verified unchanged production and removed their sessions and sockets.
+Independent PR review is separate.
 
-Next Action: Specify bounded terminal/output framing and implement its codec and lifecycle tests.
+Next Action: Port this contract to the Rust host in SPEED-030 while retaining
+the Python adapter as the comparison reference.
 
 ### SPEED-030
 

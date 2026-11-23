@@ -27,6 +27,8 @@ TOOLS = runpy.run_path(str(REPO / 'benchmarks/fresh-lifecycle.py'))
 SCRATCH = WIRE['SCRATCH']
 LIMITS = {'memory_bytes': 16777216, 'pids': 4, 'cpu_millicores': 500}
 NAME = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}')
+OUTPUT_CHUNK_LIMIT = 8192
+OUTPUT_STREAM_LIMIT = 65536
 
 
 class Trace:
@@ -116,6 +118,47 @@ class Native:
             raise RuntimeError(f'native operation {opcode} rejected: {response}')
         return response
 
+    def read_output(self, channel, handle, state):
+        bundle = state.pop('terminal_output', {})
+        if bundle and set(bundle) != {'stdout', 'stderr'}:
+            raise RuntimeError('native terminal output lacks a stream')
+        streams = []
+        calls = 0
+        truncated = False
+        for name in ('stdout', 'stderr'):
+            data = bytearray()
+            chunk = bundle.get(name)
+            while True:
+                inline = chunk is not None
+                if not inline:
+                    calls += 1
+                    chunk = self.call(channel, 12, {'handle': handle, 'stream': name,
+                                      'offset': len(data), 'max_bytes': OUTPUT_CHUNK_LIMIT,
+                                      'budget_ms': 1000}, 14)
+                piece = base64.b64decode(chunk['data'], validate=True)
+                if (chunk['offset'] != len(data) or chunk['next_offset'] != len(data) + len(piece)
+                        or len(piece) > OUTPUT_CHUNK_LIMIT or len(data) + len(piece) > OUTPUT_STREAM_LIMIT
+                        or type(chunk['eof']) is not bool or type(chunk['dropped_bytes']) is not int
+                        or chunk['dropped_bytes'] < 0):
+                    raise RuntimeError('invalid native output chunk')
+                if chunk['dropped_bytes']:
+                    truncated = True
+                    break
+                data.extend(piece)
+                if chunk['eof']:
+                    if self.trace:
+                        self.trace.mark('native_stream_eof', stream=name, size=len(data))
+                    break
+                if not piece and not inline:
+                    raise RuntimeError('native output did not advance')
+                chunk = None
+            streams.append(bytes(data))
+        state['adapter_output_calls'] = calls
+        if truncated:
+            state['delivery_error'] = 'OCI output exceeds the Docker adapter limit'
+            return b'', b''
+        return tuple(streams)
+
     def execute(self, process, cancellation):
         began = time.monotonic_ns()
         trace = self.trace
@@ -151,7 +194,7 @@ class Native:
                 # time before we check for cancellation again.
                 wait_calls += 1
                 kind, result = WIRE['call'](channel, 10, {
-                    'handle': handle, 'after_revision': 2**64 - 1, 'budget_ms': 100})
+                    'handle': handle, 'after_revision': 2**64 - 1, 'budget_ms': 100, 'terminal_output': True})
                 if kind == 15 and result.get('code') == 'deadline_exceeded':
                     continue
                 if kind != 13:
@@ -162,23 +205,7 @@ class Native:
             terminal = time.monotonic_ns()
             if trace:
                 trace.mark('native_cleanup_verified', wait_calls=wait_calls, exit=state['exit'])
-            output = []
-            for name in ('stdout', 'stderr'):
-                data = bytearray()
-                while True:
-                    chunk = self.call(channel, 12, {'handle': handle, 'stream': name,
-                                      'offset': len(data), 'max_bytes': 8192, 'budget_ms': 1000}, 14)
-                    piece = base64.b64decode(chunk['data'], validate=True)
-                    data.extend(piece)
-                    if chunk['dropped_bytes'] or len(data) > 65536:
-                        raise RuntimeError('OCI output exceeds the Docker adapter limit')
-                    if chunk['eof']:
-                        if trace:
-                            trace.mark('native_stream_eof', stream=name, size=len(data))
-                        break
-                    if not piece:
-                        raise RuntimeError('native output did not advance')
-                output.append(bytes(data))
+            output = self.read_output(channel, handle, state)
             state['adapter_timings_ns'] = {'authenticate': 0,
                                            'admit': admitted - began,
                                            'terminal': terminal - admitted,
@@ -273,6 +300,7 @@ class Container:
         self.removed = False
         self.code = None
         self.error = None
+        self.delivery_error = None
         self.stdout = self.stderr = b''
 
 
@@ -301,6 +329,8 @@ class Owner:
                                item.native.get('adapter_timings_ns', {}).items()})
             if 'adapter_wait_calls' in item.native:
                 attributes['conjet.wait_calls'] = str(item.native['adapter_wait_calls'])
+            if 'adapter_output_calls' in item.native:
+                attributes['conjet.output_calls'] = str(item.native['adapter_output_calls'])
         self.events.append({'Type': 'container', 'Action': action,
                             'Actor': {'ID': item.id, 'Attributes': attributes},
                             'time': int(time.time()), 'timeNano': time.time_ns()})
@@ -349,6 +379,7 @@ class Owner:
             return
         with self.cv:
             item.code, item.stdout, item.stderr = code, stdout, stderr
+            item.delivery_error = native.get('delivery_error')
             item.native = native
             self.event('die', item)
             if item.auto_remove:
@@ -386,8 +417,8 @@ class Owner:
             if not self.cv.wait_for(lambda: item.error or (
                     item.removed if condition == 'removed' else item.code is not None), 35):
                 raise Rejected('wait deadline elapsed', 500)
-            if item.error:
-                raise Rejected(item.error, 500)
+            if item.error or item.delivery_error:
+                raise Rejected(item.error or item.delivery_error, 500)
             return item.code or 0
 
 
