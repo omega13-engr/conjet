@@ -206,6 +206,35 @@ inconclusive pending independent pairs. Native OCI supports its own bounded
 noninteractive attach and event snapshots. Persistent exec, TTY, logs and
 copy measurements use the existing Docker engines.
 
+## Storage and sustained service
+
+Pair 1 used harness `187e1ab`. Both existing engines passed writable-layer
+and named-volume checks, including readback of the fsynced 16 MiB file in
+a second container. Kiri also passed the ExternalSSD host bind and host
+checksum. Conjet's existing Docker endpoint rejected the host path before
+execution on all five samples and the warmup. There is no matched host-bind
+timing for this configuration. The native routes provide no equivalent
+host bind or service networking.
+
+| Operation | Conjet p50 / p95 / p99 (ms) | Kiri p50 / p95 / p99 (ms) |
+| --- | ---: | ---: |
+| Writable-layer workload through Docker CLI | 607.414/666.240/666.240 | 138.929/144.456/144.456 |
+| Named-volume workload through Docker CLI | 570.061/640.078/640.078 | 132.202/135.301/135.301 |
+| ExternalSSD host bind through Docker CLI | Unsupported in the tested Conjet configuration | 243.153/251.763/251.763 |
+| Guest Redis DNS | 3.155/8.540/8.540 | 2.800/2.962/2.962 |
+| Guest TCP connection | 1.733/1.960/1.960 | 1.602/1.738/1.738 |
+| Guest Redis ping after connection | 1.056/5.441/5.441 | 0.965/1.027/1.027 |
+| Host HTTP transaction over a fresh connection | 20.825/41.118/63.657 | 2.754/7.595/24.923 |
+
+The last row uses the separate 60 s Node/Redis service window. Conjet
+completed 2,648 verified transactions (44.125/s) and Kiri completed
+4,776 (79.590/s), with zero failed checks. Both reported matching guest
+cgroup quotas for the app and Redis. The end-of-run app memory snapshots
+were 75.66 MiB for Conjet and 14.3 MiB for Kiri. They are point-in-time
+observations. The raw files separately retain measured guest fsync and I/O
+stages, snapshots, throughput windows and teardown. The comparison remains
+inconclusive with one pair and no matching host bind.
+
 ## Separate native timings
 
 The static workload uses the same pinned payload bytes as the
@@ -260,6 +289,7 @@ failed attempts and shutdown checks.
 | Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
 | Canceled historical-event run and corrected paired control matrix | `SPEED-023/pair-1`, `SPEED-023/pair-2` |
+| Storage, guest transport and the sustained services | `SPEED-024/pair-1` |
 
 Production stayed in service throughout. The records preserve unknown
 guest teardown, unmeasured energy and observed contention. The original

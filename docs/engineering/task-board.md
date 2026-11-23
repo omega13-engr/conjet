@@ -72,47 +72,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 ## BACKLOG
 
 
-### SPEED-024
-
-Title: Benchmark filesystem, networking and sustained workloads
-
-Description: Measure storage and network performance plus realistic long-running service throughput.
-
-Is blocked by task: SPEED-023.
-
-Acceptance Criteria:
-
-- Test named volumes, supported host bind mounts and container writable layers separately: metadata/small files, sequential/random I/O, and fsync durability. Keep datasets and backing files on ExternalSSD.
-- Measure container-to-container DNS/TCP, published host ports, connection churn, request latency and throughput with identical topology/payload; record unsupported native networking.
-- Validate checksums, acknowledged durable writes and application responses. Use task-owned services and ports; record filesystem/cache settings and client placement.
-- Run at least one sustained application workload with latency under load and active-data canaries. Capture CPU, memory and disk growth with a declared steady-state interval.
-- Keep raw transport throughput, application readiness and launch latency as separate metrics.
-
-Problem and Evidence: The matrix implements writable-layer, volume and bind integrity workloads and a sustained Node/Redis service. It times guest DNS, Redis TCP handshake and Redis round-trip separately from the host HTTP transaction window. The storage check exercises sequential and random writes with fsync and verifies the resulting named-volume checksum in a different container. It captures effective service cgroup limits and an owned-service resource snapshot. Paired runtime timing and bulk transport coverage remain open.
-
-Raw evidence: Bridge creation timings do not measure packet performance, and static no-network execution does not establish Docker workload compatibility.
-
-Approach:
-
-1. Reuse existing filesystem/network benchmark utilities with the pinned datasets.
-2. Run storage and networking cases independently, then the application load fixture.
-3. Verify data integrity and publish topology, throughput, latency and resource observations.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-024`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Run the paired storage and service fixture and inspect durability, cgroup and teardown evidence.
-
 ### SPEED-025
 
 Title: Qualify concurrency, pressure, recovery and efficiency
@@ -213,6 +172,45 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: Set matching version metadata and release notes for the reviewed package scope before tagging an independently approved, qualified revision. Confirm Developer ID and notarization credential availability through the release environment.
 
 ## INPROGRESS
+
+### SPEED-024
+
+Title: Benchmark filesystem, networking and sustained workloads
+
+Description: Measure storage and network performance plus realistic long-running service throughput.
+
+Is blocked by task: SPEED-023.
+
+Acceptance Criteria:
+
+- Test named volumes, supported host bind mounts and container writable layers separately: metadata/small files, sequential/random I/O, and fsync durability. Keep datasets and backing files on ExternalSSD.
+- Measure container-to-container DNS/TCP, published host ports, connection churn, request latency and throughput with identical topology/payload; record unsupported native networking.
+- Validate checksums, acknowledged durable writes and application responses. Use task-owned services and ports; record filesystem/cache settings and client placement.
+- Run at least one sustained application workload with latency under load and active-data canaries. Capture CPU, memory and disk growth with a declared steady-state interval.
+- Keep raw transport throughput, application readiness and launch latency as separate metrics.
+
+Problem and Evidence: The matrix implements writable-layer, volume and bind integrity workloads and a sustained Node/Redis service. It times guest DNS, Redis TCP handshake and Redis round-trip separately from the host HTTP transaction window. The storage check exercises sequential and random writes with fsync and verifies the resulting named-volume checksum in a different container. It captures effective service cgroup limits and an owned-service resource snapshot. Paired runtime timing and bulk transport coverage remain open.
+
+Raw evidence: Bridge creation timings do not measure packet performance, and static no-network execution does not establish Docker workload compatibility.
+
+Approach:
+
+1. Reuse existing filesystem/network benchmark utilities with the pinned datasets.
+2. Run storage and networking cases independently, then the application load fixture.
+3. Verify data integrity and publish topology, throughput, latency and resource observations.
+
+Evidence: `SPEED-024/pair-1` on harness `187e1ab` passed named volume, writable layer, guest transport and sustained transaction checks on both engines. Conjet refused the ExternalSSD host bind before work in all six attempts. Kiri passed it. Both reported matching service cgroup limits and clean session teardown; Conjet completed 2,648 and Kiri 4,776 verified transactions in their respective 60 s windows.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Repeat supported workloads at the remaining pair indices and add standalone bulk transport evidence. Keep the failed Conjet host-bind samples.
 
 ### SPEED-023
 
