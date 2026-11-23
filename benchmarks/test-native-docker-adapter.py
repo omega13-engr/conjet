@@ -36,6 +36,34 @@ class NativeDockerTests(unittest.TestCase):
         with self.assertRaisesRegex(SERVER['Rejected'], 'Binds'):
             make(spec, IMAGE, METADATA)
 
+    def test_lost_backend_disposition_prevents_replay_and_new_admission(self):
+        class LostTransport:
+            calls = 0
+
+            def execute(self, process, cancellation):
+                self.calls += 1
+                raise ConnectionResetError('guest exited with execution unresolved')
+
+        transport = LostTransport()
+        owner = SERVER['Owner'](transport, IMAGE, METADATA)
+        request = {'Image': IMAGE, 'User': '65532:65532', 'Cmd': ['/bin/sh'],
+                   'HostConfig': {'NetworkMode': 'none', 'Memory': 16777216,
+                                  'NanoCpus': 500000000, 'PidsLimit': 4}}
+        item = owner.create('lost-backend', request)
+        owner.start(item)
+        owner.worker.join(3)
+        self.assertFalse(owner.worker.is_alive())
+        self.assertTrue(owner.poisoned)
+        self.assertEqual(item.code, 125)
+        self.assertEqual(item.error, 'guest exited with execution unresolved')
+        with self.assertRaisesRegex(SERVER['Rejected'], 'already been submitted'):
+            owner.start(item)
+        with self.assertRaisesRegex(SERVER['Rejected'], 'cleanup is unresolved'):
+            owner.remove(item, True)
+        with self.assertRaisesRegex(SERVER['Rejected'], 'capacity is occupied or unresolved'):
+            owner.create('next', request)
+        self.assertEqual(transport.calls, 1)
+
     def test_unmodified_docker_cli_negotiates_attaches_and_waits_once(self):
         docker = Path('/opt/homebrew/bin/docker')
         transport = TransportStub()
