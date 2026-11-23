@@ -1,7 +1,6 @@
 """Extended Docker workloads for verified, launcher-owned sessions."""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 import gzip
 import hashlib
 import http.client
@@ -33,7 +32,7 @@ class Docker:
         self.report['operations'] = self.rows = []
 
     def call(self, scenario, args, *, timeout=90, expected=None, phase=None,
-             expected_code=0, expected_stderr=None, stdin=None):
+             expected_code=0, expected_stderr=None, stdin=None, output_limit=8192):
         argv = [str(arg) for arg in [*self.prefix, *args]]
         row = {'scenario': scenario, 'phase': phase, 'argv': argv, 'elapsed_ns': None,
                'error': None}
@@ -43,8 +42,8 @@ class Docker:
         try:
             result = subprocess.run(argv, env=self.env, input=stdin, capture_output=True, timeout=timeout)
             row['elapsed_ns'] = time.monotonic_ns() - start
-            row.update(exit_code=result.returncode, stdout=result.stdout[:8192].decode(errors='replace'),
-                       stderr=result.stderr[:8192].decode(errors='replace'))
+            row.update(exit_code=result.returncode, stdout=result.stdout[:output_limit].decode(errors='replace'),
+                       stderr=result.stderr[:output_limit].decode(errors='replace'))
             if (result.returncode != expected_code or (expected is not None and result.stdout != expected)
                     or (expected_stderr is not None and result.stderr != expected_stderr)):
                 raise RuntimeError(f'Docker returned {result.returncode} or failed the output canary')
@@ -248,19 +247,18 @@ def run_registry(docker, manifest):
         for label, size, layers in (('small', 64 * 1024, 1), ('multilayer', 1024 * 1024, 3)):
             for repetition in range(budget['samples_per_session'] + budget['warmups']):
                 phase = 'warmup' if repetition < budget['warmups'] else 'sample'
-                repository = f'{docker.token}/{label}'
+                repository = f'{docker.token}/{label}-{repetition}'
                 base, contents = registry_image(executable, size, layers, pair, repetition)
                 manifest_id, descriptors = seed_registry(connection, address, repository, str(repetition), base, contents)
                 expected = {item['digest']: item['size'] for item in [descriptors['config'], *descriptors['layers']]}
                 reference = f'{address}/{repository}@{manifest_id}'
                 try:
-                    since = datetime.now(timezone.utc).isoformat()
                     if docker.call(f'registry.{label}.first-pull', ['pull', reference], phase=phase, timeout=180) is None:
                         continue
                     first = docker.rows[-1]
                     first.update(cache_state='no engine-side seed; transfer unknown', expected_registry_blobs=expected)
-                    docker.call('registry-transfer-observation', ['logs', '--since', since, name],
-                                phase='verification')
+                    docker.call('registry-transfer-observation', ['logs', '--tail', '24', name],
+                                phase='verification', output_limit=32768)
                     logs = docker.rows[-1]
                     returned = received_blobs(logs.get('stderr', '') + logs.get('stdout', ''), repository)
                     first['registry_blobs_returned'] = returned
@@ -877,11 +875,56 @@ measure('random_read', () => {
   }
   fs.closeSync(fd);
 });
+measure('random_write_fsync', () => {
+  fd = fs.openSync(path, 'r+');
+  const changed = Buffer.alloc(4096, 0xd2);
+  for (let i = 0; i < 128; i++) {
+    const offset = ((i * 2069) & 4095) * 4096;
+    if (fs.writeSync(fd, changed, 0, changed.length, offset) !== changed.length) throw new Error('short random write');
+    changed.copy(buffer, offset);
+  }
+  fs.fsyncSync(fd);
+  fs.closeSync(fd);
+});
 measure('small_file_metadata', () => {
   for (let i = 0; i < 128; i++) fs.writeFileSync('/dataset/r' + i, record, {flag:'wx'});
   for (let i = 0; i < 128; i++) if (fs.statSync('/dataset/r' + i).size !== 4096) throw new Error('metadata mismatch');
 });
-console.log(JSON.stringify({bytes, measured, trace:crypto.createHash('sha256').update(buffer).digest('hex')}));
+const trace = crypto.createHash('sha256').update(fs.readFileSync(path)).digest('hex');
+if (trace !== crypto.createHash('sha256').update(buffer).digest('hex')) throw new Error('random write canary mismatch');
+console.log(JSON.stringify({bytes, measured, trace}));
+"""
+
+
+TRANSPORT = r"""
+const dns = require('dns').promises;
+const net = require('net');
+(async () => {
+  const start = process.hrtime.bigint();
+  const address = (await dns.lookup('redis', {family: 4})).address;
+  const lookup = process.hrtime.bigint();
+  let connected;
+  await new Promise((resolve, reject) => {
+    const socket = net.createConnection(6379, address, () => {
+      connected = process.hrtime.bigint();
+      socket.write('PING\r\n');
+    });
+    let reply = '';
+    socket.setTimeout(2000, () => socket.destroy(new Error('Redis probe timed out')));
+    socket.once('error', reject);
+    socket.on('data', data => {
+      reply += data;
+      if (reply.includes('\r\n')) {
+        socket.destroy();
+        if (reply === '+PONG\r\n') resolve();
+        else reject(new Error('wrong Redis response'));
+      }
+    });
+    socket.once('end', () => reject(new Error('Redis closed before the response')));
+  });
+  console.log(JSON.stringify({dns: Number(lookup - start), tcp_connect: Number(connected - lookup),
+    redis_ping: Number(process.hrtime.bigint() - connected)}));
+})().catch(error => { console.error(error.message); process.exitCode = 1; });
 """
 
 
@@ -959,19 +1002,29 @@ def run_service(docker, manifest):
         endpoint = published_endpoint(docker, prefix)
         if endpoint is None:
             return
-        docker.call('service-dns-and-tcp', [*prefix, 'exec', '-T', 'app', 'node', '-e',
-                    "require('dns').lookup('redis', e=>{if(e)process.exit(1);"
-                    "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)})"
-                    ".catch(()=>process.exit(1));})"], phase='verification')
+        budget = manifest['suites']['storage_network']
+        for index in range(budget['samples_per_session'] + budget['warmups']):
+            phase = 'warmup' if index < budget['warmups'] else 'sample'
+            probe = docker.call('service.guest.transport-probe', [*prefix, 'exec', '-T', 'app', 'node', '-e',
+                               TRANSPORT], timeout=15, phase='verification')
+            if probe is not None:
+                observed = json.loads(probe)
+                if set(observed) != {'dns', 'tcp_connect', 'redis_ping'} or any(
+                        not isinstance(value, int) or value <= 0 for value in observed.values()):
+                    docker.rows[-1]['error'] = 'invalid guest transport measurements'
+                    continue
+                for stage, elapsed in observed.items():
+                    docker.rows.append({'scenario': 'service.guest.' + stage, 'phase': phase,
+                                        'elapsed_ns': elapsed, 'error': None})
         docker.report['service_limits_matched'] = check_service_limits(docker, prefix, manifest['service_limits'])
         reader = build_opener(ProxyHandler({}))
         if read_response(reader, endpoint + '/health') != proof + ' +PONG':
             raise RuntimeError('service readiness response differs')
         begin = time.monotonic_ns()
         end = begin + manifest['suites']['storage_network']['steady_state_seconds'] * 1_000_000_000
-        next_tick = begin
         expected = 1
         while time.monotonic_ns() < end:
+            sent = time.monotonic_ns()
             value = transaction(docker, reader, endpoint, proof, 'service.transaction')
             docker.rows[-1]['phase'] = 'sample'
             if value != expected:
@@ -979,8 +1032,7 @@ def run_service(docker, manifest):
                 break
             expected += 1
             # Cap the offered rate at 100 fresh HTTP connections per second.
-            next_tick += 10_000_000
-            time.sleep(max(0, (next_tick - time.monotonic_ns()) / 1e9))
+            time.sleep(max(0, (sent + 10_000_000 - time.monotonic_ns()) / 1e9))
         docker.report.setdefault('windows_ns', {})['service.transaction'] = time.monotonic_ns() - begin
         ids = docker.call('service-container-ids', [*prefix, 'ps', '--quiet'], phase='verification')
         if ids:

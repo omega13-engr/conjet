@@ -126,7 +126,7 @@ Acceptance Criteria:
 - Run at least one sustained application workload with latency under load and active-data canaries. Capture CPU, memory and disk growth with a declared steady-state interval.
 - Keep raw transport throughput, application readiness and launch latency as separate metrics.
 
-Problem and Evidence: The matrix implements writable-layer, volume and bind integrity workloads and a sustained Node/Redis service with DNS and HTTP transaction checks. It verifies the named-volume checksum again in a different container after the writing container is removed, and records effective service cgroup limits and an owned-service resource snapshot. Runtime timing and standalone network coverage are pending.
+Problem and Evidence: The matrix implements writable-layer, volume and bind integrity workloads and a sustained Node/Redis service. It times guest DNS, Redis TCP handshake and Redis round-trip separately from the host HTTP transaction window. The storage check exercises sequential and random writes with fsync and verifies the resulting named-volume checksum in a different container. It captures effective service cgroup limits and an owned-service resource snapshot. Paired runtime timing and bulk transport coverage remain open.
 
 Raw evidence: Bridge creation timings do not measure packet performance, and static no-network execution does not establish Docker workload compatibility.
 
@@ -359,7 +359,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Rerun with verified image config pins and the controlled-registry correction. The fixture seeds the owned registry through host HTTP rather than loading into the tested engine. It records each expected and observed blob digest and size and keeps unknown transfer outcomes visible.
+Next Action: Run the corrected transfer observation at the next pair index. `SPEED-020/pair-2` passed both pins, warm save/load, byte-verified image run and owner cleanup. Kiri witnessed all ten measured first-pull transfers. Conjet's CLI indicated downloads, but guest registry clock skew made the host timestamp filter lose its witnesses. The correction uses a dedicated repository per repetition and a bounded log tail to correlate each exact blob without cross-clock timestamps. The prior unknowns remain in the evidence.
 
 ### SPEED-026
 
