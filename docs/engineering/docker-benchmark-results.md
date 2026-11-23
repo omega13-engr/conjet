@@ -77,6 +77,27 @@ Conjet. Kiri started a task-owned pinned BuildKit separately. That
 bootstrap alone does not measure a build. Both failures of the initial
 Compose applet choice and the successful Redis correction were retained.
 
+## Buildx first session
+
+The first Buildx pair used the pinned BuildKit v0.23.2 `docker-container`
+driver and a fresh owned build volume for each repetition. On Conjet all
+three Rust and Go results per cache state loaded and ran the expected
+artifact. The median combined build-and-export times in milliseconds are
+descriptive for this session.
+
+| Conjet workload | Empty | Unchanged | Source change | Dependency change |
+| --- | ---: | ---: | ---: | ---: |
+| Rust | 1556 | 739 | 1122 | 1089 |
+| Go | 5165 | 768 | 5368 | 5320 |
+
+All three Conjet Node empty builds exported and loaded, then failed the
+execution canary with `MODULE_NOT_FOUND`. Those are failed operations.
+Kiri bootstrapped the pinned worker but Docker Hub HTTPS timed out inside
+the worker for all three build fixtures. Kiri has no timed rows in this
+pair. The correction uses npm's local package install mode and provides
+both workers with the same verified OCI bases outside the timing window.
+Buildx comparisons remain inconclusive.
+
 ## Separate native timings
 
 The static workload uses the same pinned payload bytes as the
@@ -125,6 +146,8 @@ failed attempts and shutdown checks.
 | Native and Docker pilots and capability checks | `SPEED-017` |
 | Rootfs receipts, backend audit and Docker-to-native pilot | `SPEED-018` |
 | Full paired no-network API row | `SPEED-019/alpine-true-none-api-pair-2` |
+| First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
+| First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
 
 Production stayed in service throughout. The records preserve unknown
 guest teardown, unmeasured energy and observed contention. The original
