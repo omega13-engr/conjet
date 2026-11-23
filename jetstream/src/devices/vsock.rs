@@ -68,7 +68,10 @@ fn docker_trace_tag(payload: &[u8]) -> Option<[u8; 32]> {
     let header = payload.get(..header_end)?;
     let mut lines = header.split(|b| *b == b'\n');
     let request = lines.next()?;
-    if !request.starts_with(b"POST ") {
+    if ![b"POST ".as_slice(), b"GET ", b"DELETE "]
+        .iter()
+        .any(|method| request.starts_with(method))
+    {
         return None;
     }
     lines.find_map(|line| {
@@ -90,7 +93,7 @@ fn docker_trace(tag: &[u8; 32], phase: &str, at: Instant) {
     // Clamp to the diagnostic budget without writing request paths or bytes.
     if EVENTS
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-            (n < 512).then_some(n + 1)
+            (n < 2048).then_some(n + 1)
         })
         .is_ok()
     {
@@ -1174,7 +1177,9 @@ impl HostUnixVsockBridgeState {
             }
             OP_RW => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
-                    let trace_tag = stream.trace_tag.take();
+                    let trace_tag = stream
+                        .trace_tag
+                        .filter(|_| stream.bytes_received_from_guest == 0);
                     if let Some(tag) = &trace_tag {
                         docker_trace(tag, "guest_response_rx", Instant::now());
                     }
@@ -1223,6 +1228,11 @@ impl HostUnixVsockBridgeState {
             OP_SHUTDOWN => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
                     stream.update_guest_credit(&packet);
+                    if !stream.guest_shutdown_pending && !stream.guest_shutdown {
+                        if let Some(tag) = &stream.trace_tag {
+                            docker_trace(tag, "guest_shutdown_rx", Instant::now());
+                        }
+                    }
                     // Do not half-close the host socket until every response
                     // byte already accepted from the guest has been written.
                     // Closing here can truncate a Content-Length response and
@@ -1298,6 +1308,8 @@ struct HostUnixVsockStream {
     socket: UnixStream,
     accepted_at: Option<Instant>,
     trace_tag: Option<[u8; 32]>,
+    trace_write_blocked: bool,
+    trace_write_complete: bool,
     bytes_received_from_guest: u64,
     bytes_forwarded_to_host: u64,
     last_advertised_guest_forward_count: u32,
@@ -1334,6 +1346,8 @@ impl HostUnixVsockStream {
             socket,
             accepted_at: docker_trace_enabled().then(Instant::now),
             trace_tag: None,
+            trace_write_blocked: false,
+            trace_write_complete: false,
             bytes_received_from_guest: 0,
             bytes_forwarded_to_host: 0,
             last_advertised_guest_forward_count: 0,
@@ -1643,13 +1657,29 @@ impl HostUnixVsockStream {
                     ));
                 }
                 Ok(count) => {
+                    if let Some(tag) = self.trace_tag.filter(|_| self.trace_write_blocked) {
+                        docker_trace(&tag, "client_write_resumed", Instant::now());
+                        self.trace_write_blocked = false;
+                    }
                     self.host_output.drain(..count);
                     self.bytes_forwarded_to_host =
                         self.bytes_forwarded_to_host.wrapping_add(count as u64);
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Some(tag) = self.trace_tag.filter(|_| !self.trace_write_blocked) {
+                        docker_trace(&tag, "client_write_blocked", Instant::now());
+                        self.trace_write_blocked = true;
+                    }
+                    break;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
+            }
+        }
+        if self.host_output.is_empty() && self.response_framing.is_complete() {
+            if let Some(tag) = self.trace_tag.filter(|_| !self.trace_write_complete) {
+                docker_trace(&tag, "client_write_complete", Instant::now());
+                self.trace_write_complete = true;
             }
         }
         self.finish_guest_shutdown_if_drained();
@@ -1666,6 +1696,9 @@ impl HostUnixVsockStream {
             && !self.guest_shutdown
         {
             let _ = self.socket.shutdown(Shutdown::Write);
+            if let Some(tag) = &self.trace_tag {
+                docker_trace(tag, "client_shutdown", Instant::now());
+            }
             self.guest_shutdown = true;
             self.guest_shutdown_pending = false;
         }
@@ -3354,6 +3387,13 @@ fn diagnostic_tag_requires_a_bounded_http_header_and_valid_hex() {
     ]
     .concat();
     assert_eq!(docker_trace_tag(&request), Some(*tag));
+    for method in ["GET", "DELETE"] {
+        let request = format!(
+            "{method} / HTTP/1.1\r\nX-Conjet-Benchmark-Trace: {}\r\n\r\n",
+            std::str::from_utf8(tag).unwrap()
+        );
+        assert_eq!(docker_trace_tag(request.as_bytes()), Some(*tag));
+    }
     let in_body = [
         b"POST /start HTTP/1.1\r\n\r\nX-Conjet-Benchmark-Trace: ".as_slice(),
         tag,

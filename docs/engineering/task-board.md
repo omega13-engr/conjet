@@ -89,95 +89,6 @@ retain their old acceptance criteria for research provenance.
 
 ## BACKLOG
 
-### SPEED-051
-
-Title: Diagnose and correct the retained Docker four-PID CLI failure
-
-Description: Isolate the intermittent CLI exit 127 on the pinned
-no-network Alpine true fixture with four PIDs.
-
-Is blocked by task: None. SPEED-049 records the failed operation.
-
-Acceptance Criteria:
-
-- Attribute the thread-creation failure to a guest process or runtime
-  stage using the fixed fixture and a bounded diagnostic boot. Preserve
-  the four-PID workload, operation output and error on failure.
-- Validate a narrow correction at the same effective cgroup limits
-  and check cleanup after failure and success.
-- Keep this diagnostic separate from the five-pair CLI requalification.
-
-Problem and Evidence: The fifth SPEED-049 Conjet CLI boot recorded
-one failure. SPEED-019's retained-engine pair 2 had two failures with
-the same signature. The event wake change came after those failures.
-
-Approach: Capture guest engine and OCI runtime diagnostics around
-the failed operation before recovery. Record the workload cgroup's
-PID events and identify the emitting binary before changing it.
-
-Evidence: SPEED-049 `cli/pair-5/conjet/session.json`, measured sample
-index 139. Historical comparison is under SPEED-019
-`alpine-true-none-cli-series/remaining/pair-2/conjet/session.json`.
-The isolated `run-pid-hypothesis.py` probe and raw output are in
-SPEED-049 `pid-hypothesis`. Production and teardown checks passed.
-
-Source: [SPEED-049](#speed-049).
-
-Review: In the bounded `runc --version` diagnostic, 12/12 runs at
-four PIDs returned a Go thread error. All 13 runs at eight PIDs
-passed, including setup. The qualified CLI failure still needs a
-direct process and cgroup witness.
-
-Next Action: Add a bounded guest failure capture with the pinned
-four-PID CLI fixture. Use a verified result to select the correction.
-
-### SPEED-050
-
-Title: Isolate the retained Docker start and wait scheduling delay
-
-Description: Attribute the remaining start and wait latency on the
-pinned no-network Alpine API fixture with event wake enabled.
-
-Is blocked by task: None. Uses the completed API evidence in SPEED-049.
-
-Acceptance Criteria:
-
-- Measure the same 12 timed operations and four warmups in two
-  untraced and two bounded diagnostic boots with the 25 ms tick in
-  place. Report the observer effect.
-- Record guest monotonic receipt and response spans for start and
-  wait and host monotonic guest-ring publication and response
-  spans. Pair operations by ID and preserve their separate clocks.
-- Run the same lifecycle directly against guest `/var/run/docker.sock`
-  and through the host endpoint serially; preserve limits, image, operation
-  order and removal boundary. Include `_ping` transport controls.
-- Capture request delivery, first-byte and complete-response durations on
-  each clock independently. Record reclaim activity, memory targets and
-  runtime cgroup CPU/PID counter deltas. Do not subtract unrelated medians.
-- Identify whether the residual lies inside or outside the guest
-  Docker request handler. Retain inconclusive runs and record host
-  and guest cleanup evidence. Require attribution before selecting
-  an implementation.
-
-Problem and Evidence: The ingress wake reduced host queue-to-ring
-delay. SPEED-049 still measured Conjet API start at 190–214 ms and
-wait at 217–229 ms by boot median. The guest containerd task runtime
-observed in SPEED-047 was about 2 ms under diagnostic conditions.
-
-Approach: Instrument the released conjet-netd-c guest relay at
-request delivery to the dockerd Unix socket and first response read.
-Compare these spans with the existing host spans. Keep resource
-settings and runtime ownership fixed.
-
-Evidence: [Retained Docker qualification results](docker-benchmark-results.md#speed-049-retained-docker-release-lifecycle-against-kiri).
-
-Source: [SPEED-047](#speed-047), [SPEED-048](#speed-048), [SPEED-049](#speed-049).
-
-Review: Pending live attribution.
-
-Next Action: Add the guest-local control lane and tagged relay spans; run
-the four isolated boots using the [architecture protocol](retained-docker-latency-architecture.md#1-establish-the-floor-before-optimizing).
-
 ### SPEED-052
 
 Title: Test quiet-dwell scheduling for routine stream-triggered reclaim
@@ -345,6 +256,42 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: Set matching version metadata and release notes for the reviewed package scope before tagging an independently approved, qualified revision. Confirm Developer ID and notarization credential availability through the release environment.
 
 ## INPROGRESS
+
+### SPEED-051
+
+Title: Diagnose and correct the retained Docker four-PID CLI failure
+
+Description: Isolate the intermittent CLI exit 127 on the pinned
+no-network Alpine true fixture with four PIDs.
+
+Is blocked by task: None. SPEED-049 records the failed operation.
+
+Acceptance Criteria:
+
+- Attribute the thread-creation failure to a guest process or runtime
+  stage using the fixed fixture and a bounded diagnostic boot. Preserve
+  the four-PID workload, operation output and error on failure.
+- Validate a narrow correction at the same effective cgroup limits
+  and check cleanup after failure and success.
+- Keep this diagnostic separate from the five-pair CLI requalification.
+
+Problem and Evidence: SPEED-049 `cli/pair-5/conjet/session.json`, measured sample
+139, and [SPEED-051 live diagnostics](docker-benchmark-results.md#speed-051-four-pid-cli-failure-capture).
+The traced boot ran 550 clean launches. The cgroup-observer boot ran
+2,000 clean launches and observed runc init inside the intended
+four-PID workload scopes. Neither boot reproduced the exit-127
+signature. Raw results are under `conjet-speedup-evidence/SPEED-051`.
+Production and owned host cleanup checks passed.
+
+Source: [SPEED-049](#speed-049).
+
+Review: Runtime stage narrowed. No failing process was captured and
+no fix was validated. The historical failure remains a blocker for
+CLI requalification.
+
+Next Action: Capture a failing launch with its process and PID
+controller event using the unchanged limits before selecting a fix.
+
 
 ### SPEED-025
 
@@ -811,6 +758,55 @@ then rerun the original matrix. Experimental release proceeds under local
 acceptance without changing the SPEED-008 verdict.
 
 ## UNDERREVIEW
+
+### SPEED-050
+
+Title: Isolate the retained Docker start and wait scheduling delay
+
+Description: Attribute the remaining start and wait latency on the
+pinned no-network Alpine API fixture with event wake enabled.
+
+Is blocked by task: None. Uses the completed API evidence in SPEED-049.
+
+Acceptance Criteria:
+
+- Measure the same 12 timed operations and four warmups in two
+  untraced and two bounded diagnostic boots with the 25 ms tick in
+  place. Report the observer effect.
+- Record guest monotonic receipt and response spans for start and
+  wait and host monotonic guest-ring publication and response
+  spans. Pair operations by ID and preserve their separate clocks.
+- Run the same lifecycle directly against guest `/var/run/docker.sock`
+  and through the host endpoint serially; preserve limits, image, operation
+  order and removal boundary. Include `_ping` transport controls.
+- Capture request delivery, first-byte and complete-response durations on
+  each clock independently. Record reclaim activity, memory targets and
+  runtime cgroup CPU/PID counter deltas. Do not subtract unrelated medians.
+- Identify whether the residual lies inside or outside the guest
+  Docker request handler. Retain inconclusive runs and record host
+  and guest cleanup evidence. Require attribution before selecting
+  an implementation.
+
+Problem and Evidence: [SPEED-050 diagnostic results](docker-benchmark-results.md#speed-050-guest-local-retained-docker-lifecycle).
+Two untraced and two traced boots completed with 12 timed operations
+and four warmups on each lane. The guest-unforwarded floor was
+112–117 ms on the untraced boots. The traces place 74–77 ms of the
+start request inside the guest Docker path before its first byte.
+Raw records, artifact hashes and resource observations are under
+`conjet-speedup-evidence/SPEED-050`.
+
+Source: [SPEED-047](#speed-047), [SPEED-048](#speed-048), [SPEED-049](#speed-049).
+
+Review: Host and guest traces correlated by tag. Dynamic memory and
+the 25 ms tick ran throughout. The traced relay was rebuilt and
+restarted, so the observer cost could not be isolated. The separate
+SPEED-051 syscall evidence implicates OCI setup, with exact untraced
+component attribution still open. No performance change is qualified.
+
+Next Action: Review the diagnostic and collect pre/post engine cgroup
+counters with a same-binary observer-off comparison if deeper
+attribution is needed.
+
 
 ### SPEED-049
 

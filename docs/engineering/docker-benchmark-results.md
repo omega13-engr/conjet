@@ -9,6 +9,108 @@ boundary. SPEED-008 remains unresolved.
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Native OCI research scope](docker-native-adapter.md)
 
+## SPEED-051 four-PID CLI failure capture
+
+Two bounded diagnostics ran the pinned SPEED-049 CLI fixture against
+the same release artifacts and unchanged four-PID, 16 MiB and
+500-millicore limits. The first attempt to collect tracefs evidence
+found the mount absent in the pinned guest. The next attempt followed
+the guest containerd process and runtime children with strace. All
+550 launches returned exit 0 with empty stdout and stderr. The trace
+showed `runc create`, the application of `pids.max=4`, `runc start`,
+and the workload exec. It captured no `EAGAIN` or Go thread error.
+
+A separate private boot ran a guest cgroup observer without ptrace.
+All 2,000 CLI launches succeeded. The observer read 1,631 PID event
+snapshots, all `max 0`. One other read raced scope removal and had
+no event data. It saw `runc:[2:INIT]` inside the actual four-PID
+workload scopes, including snapshots with up to eight charged tasks.
+Linux permits that transient state when processes move into a
+cgroup or its limit is applied to existing tasks. New clones
+remain subject to the limit. [Linux PID controller](https://docs.kernel.org/admin-guide/cgroup-v2.html#pid)
+
+The two observers narrow the runtime stage but leave the actual
+SPEED-049 failure unattributed. The measured operation did not recur,
+and the snapshots do not establish which process wrote the original
+error. No correction or limit change was selected. Raw process output,
+syscalls, cgroup membership and launcher cleanup are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-051`.
+Both completed capture boots passed production and host cleanup guards.
+
+## SPEED-050 guest-local retained Docker lifecycle
+
+Four private boots on the SPEED-049 host used two vCPUs, a 2 GiB ceiling,
+Core 1.3.1, Docker 29.1.3, containerd 2.2.1, runc 1.3.4, VMM ingress wake,
+and the 25 ms recovery tick. The diagnostic client executed API 1.44
+create, start, wait and remove, in order, against the guest Docker Unix
+socket and the forwarded Unix socket. Each lane used four warmups and
+12 measured operations per boot with the pinned ARM64 Alpine config,
+`/bin/true`, no networking, 16 MiB, four PIDs, 500 millicores, all
+capabilities dropped and no-new-privileges. Both lanes sent the same
+per-workload Conjet cgroup parent. The lane order alternated within
+each boot. All 96 measured lifecycles and 32 warmups succeeded.
+
+| Boot | Guest-local lifecycle median (ms) | Forwarded lifecycle median (ms) | Guest start / wait (ms) | Forwarded start / wait (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| Control 3 | 112.306 | 152.656 | 78.179 / 22.170 | 99.203 / 34.770 |
+| Control 4 | 117.316 | 134.210 | 79.374 / 22.484 | 90.499 / 26.102 |
+| Trace 3 | 92.247 | 111.037 | 66.240 / 14.344 | 75.960 / 22.025 |
+| Trace 4 | 91.970 | 105.037 | 69.878 / 16.381 | 79.246 / 15.168 |
+
+The guest-local retained-engine floor on the untraced boots was
+112–117 ms, with start as the largest stage. The below-5-ms median
+target failed for this diagnostic workload, including with transport
+bypassed. The trace configurations observed lower medians on both
+lanes. The traced boots staged a diagnostic VMM and rebuilt guest
+relay, restarted that relay before measurement, and had lower
+`system.slice` CPU usage during the lane snapshots. Those differences
+prevent isolating logging overhead from the boot/configuration effect.
+This diagnostic client and boot budget differ from the frozen
+SPEED-049 qualification.
+
+All tagged forwarded measurements joined by request ID. Each duration
+uses only its own monotonic clock.
+
+| API stage | Host accept → ring publication (ms) | Host ring → first response (ms) | Host first response → final client write (ms) | Guest receipt → dockerd delivery (ms) | Guest delivery → first dockerd response byte (ms) | Guest first byte → response complete (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Create | 0.108–0.133 | 5.232–6.270 | 0.829–0.956 | 0.020–0.031 | 4.646–5.734 | 0.917–1.023 |
+| Start | 0.098–0.106 | 74.850–78.047 | 0.908–1.137 | 0.021–0.039 | 74.291–76.879 | 1.024–1.254 |
+| Wait | 0.112–0.114 | 6.421–7.933 | 6.394–10.250 | 0.019–0.026 | 5.185–7.421 | 6.541–10.392 |
+| Remove | 0.097–0.116 | 1.690–2.125 | 0.647–0.806 | 0.019–0.029 | 1.309–1.642 | 0.712–0.901 |
+
+Host accept-to-ring values come from per-request intervals. The host
+logged guest shutdown receipt and client half-close separately.
+The guest clock places most start time after delivery to dockerd and
+before its first response. The separate SPEED-051 syscall capture
+shows guest `runc create` and `runc start` process spans well above
+the Alpine payload's exec-to-exit span. Ptrace perturbs the absolute
+spans. This evidence identifies OCI setup as an expensive stage but
+leaves the untraced per-component dockerd/containerd/runc breakdown
+open.
+
+Dynamic memory was enabled, with a 512 MiB idle target and observed
+1 ms configured quiet dwell. The before/after snapshots during both
+lifecycle lanes reported 2,048 MiB. The untraced forwarded trials
+recorded 2 and 3 accepted reclaim requests over the snapshot
+intervals. Both traced forwarded trials recorded 34. Those counters
+measure submissions and include observer traffic near the windows.
+They do not time worker completion or demonstrate a cache drop.
+No range bytes were reported. The services slice reported zero
+PID-limit and CPU-throttle counter increases at the sampled parent.
+Per-container scopes had disappeared by the after snapshots.
+
+Raw samples, timestamps, checksums, resource counters, failed setup
+attempts and the diagnostic client and runner live under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-050`.
+`floor-summary.json` identifies `control-{3,4}` and `host-trace-{3,4}`.
+The diagnostic VMM SHA-256 was
+`b104e6d5f9782feecc6df18423e4fef9c21b0fd440ea79a5e2b008e85fe9378b`.
+The diagnostic guest relay SHA-256 was
+`09a80e58cecb798858c35ebe63d671e945124c1cdb9979d7cbc27152a8531d87`.
+Every measured boot verified private process, socket and backing-file
+cleanup and production fingerprints. API removal acknowledgement is the
+measurement endpoint. Kiri parity was outside this diagnostic.
+
 ## SPEED-049 retained Docker release lifecycle against Kiri
 
 This series compares the isolated Conjet event-wake candidate at

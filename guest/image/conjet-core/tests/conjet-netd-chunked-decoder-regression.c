@@ -901,8 +901,27 @@ static void test_handle_docker_proxy_keeps_streaming_logs_upstream_open_after_cl
     );
 }
 
+static void test_docker_trace_tag_only_reads_complete_headers(void) {
+    const char valid[] =
+        "POST /start HTTP/1.1\r\n"
+        "X-Conjet-Benchmark-Trace: 0123456789abcdef0123456789abcdef\r\n\r\n";
+    const char in_body[] =
+        "POST /start HTTP/1.1\r\n\r\n"
+        "X-Conjet-Benchmark-Trace: 0123456789abcdef0123456789abcdef\r\n\r\n";
+    const char invalid[] =
+        "POST /start HTTP/1.1\r\n"
+        "X-Conjet-Benchmark-Trace: 0123456789abcdef0123456789abcdeg\r\n\r\n";
+    char tag[33] = {0};
+    require_int("trace header", read_docker_trace_tag((const uint8_t *)valid, strlen(valid), tag), 1);
+    require_int("trace value", strcmp(tag, "0123456789abcdef0123456789abcdef"), 0);
+    require_int("trace body", read_docker_trace_tag((const uint8_t *)in_body, strlen(in_body), tag), 0);
+    require_int("trace hex", read_docker_trace_tag((const uint8_t *)invalid, strlen(invalid), tag), 0);
+    require_int("partial trace header", read_docker_trace_tag((const uint8_t *)valid, strlen(valid) - 1, tag), 0);
+}
+
 int main(void) {
     test_vsock_peer_requires_host_cid();
+    test_docker_trace_tag_only_reads_complete_headers();
     test_decodes_single_chunk();
     test_decodes_multiple_chunks();
     test_rejects_truncated_chunk();

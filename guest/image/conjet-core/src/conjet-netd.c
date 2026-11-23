@@ -39,6 +39,7 @@ static int conjet_netd_unit_test_mount_stub(const char *source, const char *targ
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,6 +148,7 @@ struct pump_args {
     int from;
     int to;
     int shutdown_to_on_eof;
+    char docker_trace_tag[33];
 };
 
 struct frame_reader {
@@ -161,6 +163,65 @@ static struct metrics g_metrics = {
 };
 static pthread_mutex_t g_targets_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct target *g_targets = NULL;
+static int g_docker_trace_enabled = 0;
+
+static uint64_t docker_trace_time_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static int read_docker_trace_tag(const uint8_t *request, size_t length, char tag[33]) {
+    static const char prefix[] = "X-Conjet-Benchmark-Trace: ";
+    static const char crlf[] = "\r\n";
+    const uint8_t *end = memmem(request, length < 8192 ? length : 8192, "\r\n\r\n", 4);
+    if (end == NULL) {
+        return 0;
+    }
+    const uint8_t *line = memmem(request, (size_t)(end - request), crlf, 2);
+    if (line == NULL) {
+        return 0;
+    }
+    for (line += 2; line < end;) {
+        const uint8_t *next = memmem(line, (size_t)(end - line), crlf, 2);
+        if (next == NULL) {
+            next = end;
+        }
+        if ((size_t)(next - line) == sizeof(prefix) - 1 + 32 &&
+            memcmp(line, prefix, sizeof(prefix) - 1) == 0) {
+            const uint8_t *value = line + sizeof(prefix) - 1;
+            for (size_t i = 0; i < 32; ++i) {
+                if (!((value[i] >= '0' && value[i] <= '9') ||
+                      (value[i] >= 'a' && value[i] <= 'f'))) {
+                    return 0;
+                }
+            }
+            memcpy(tag, value, 32);
+            tag[32] = '\0';
+            return 1;
+        }
+        line = next + 2;
+    }
+    return 0;
+}
+
+static void docker_trace(const char tag[33], const char *phase, uint64_t ns) {
+    static atomic_uint records = 0;
+    if (tag[0] == '\0' || ns == 0) {
+        return;
+    }
+    unsigned used = atomic_load_explicit(&records, memory_order_relaxed);
+    while (used < 2048) {
+        if (atomic_compare_exchange_weak_explicit(
+                &records, &used, used + 1, memory_order_relaxed, memory_order_relaxed)) {
+            fprintf(stderr, "conjet-docker-guest-trace %s %s %llu\n",
+                    tag, phase, (unsigned long long)ns);
+            return;
+        }
+    }
+}
 
 static int connect_unix_socket(const char *path);
 static int connect_tcp_target(const char *host, uint16_t port);
@@ -2110,6 +2171,8 @@ static void *docker_response_pump_thread(void *raw) {
     size_t body_seen = 0;
     int chunked = 0;
     int no_response_body = 0;
+    int first_byte = 1;
+    int response_complete = 0;
     struct chunked_response_parser chunked_parser;
     chunked_response_parser_init(&chunked_parser);
 
@@ -2120,6 +2183,10 @@ static void *docker_response_pump_thread(void *raw) {
 
         ssize_t n = read(args->from, buf, sizeof(buf));
         if (n > 0) {
+            if (first_byte && args->docker_trace_tag[0] != '\0') {
+                docker_trace(args->docker_trace_tag, "first_response_byte", docker_trace_time_ns());
+                first_byte = 0;
+            }
             if ((size_t)n > sizeof(pending) - pending_len) {
                 break;
             }
@@ -2173,6 +2240,7 @@ static void *docker_response_pump_thread(void *raw) {
                     memmove(pending, pending + header_total, pending_len - header_total);
                     pending_len -= header_total;
                     if (no_response_body) {
+                        response_complete = 1;
                         goto done;
                     }
                     continue;
@@ -2189,6 +2257,7 @@ static void *docker_response_pump_thread(void *raw) {
                 if (chunked && body_len > 0) {
                     int chunk_status = chunked_response_parser_feed(&chunked_parser, pending, body_len);
                     if (chunk_status > 0) {
+                        response_complete = 1;
                         goto done;
                     }
                     if (chunk_status < 0) {
@@ -2196,6 +2265,7 @@ static void *docker_response_pump_thread(void *raw) {
                     }
                 }
                 if (has_content_length && body_seen >= content_length) {
+                    response_complete = 1;
                     goto done;
                 }
                 if (body_len < pending_len) {
@@ -2209,10 +2279,14 @@ static void *docker_response_pump_thread(void *raw) {
         } else if (n < 0 && errno == EINTR) {
             continue;
         } else {
+            response_complete = n == 0 && header_done && !has_content_length && !chunked;
             break;
         }
     }
 done:
+    if (response_complete && args->docker_trace_tag[0] != '\0') {
+        docker_trace(args->docker_trace_tag, "response_complete", docker_trace_time_ns());
+    }
     shutdown(args->to, SHUT_WR);
     free(args);
     return NULL;
@@ -2257,6 +2331,7 @@ static int connect_unix_socket(const char *path) {
 }
 
 static void handle_docker_proxy(int client, const uint8_t *first, size_t first_len) {
+    uint64_t received_at = g_docker_trace_enabled ? docker_trace_time_ns() : 0;
     int upstream = connect_unix_socket(docker_unix_socket_path());
     if (upstream < 0) {
         write_http_response(client, "503 Service Unavailable", "text/plain", "Conjet guest bridge could not connect to Docker\n");
@@ -2296,6 +2371,11 @@ static void handle_docker_proxy(int client, const uint8_t *first, size_t first_l
 
     const int upgraded_stream = docker_request_is_upgraded_stream(request_to_send, request_to_send_len);
     const int streaming_http = docker_request_is_streaming_http(request_to_send, request_to_send_len);
+    char trace_tag[33] = {0};
+    if (received_at != 0 && !upgraded_stream && !streaming_http && request_complete &&
+        read_docker_trace_tag(request_storage, request_storage_len, trace_tag)) {
+        docker_trace(trace_tag, "request_received", received_at);
+    }
     size_t connection_close_request_len = 0;
     if (!upgraded_stream && !streaming_http && request_complete &&
         rewrite_http_request_connection_close(
@@ -2321,6 +2401,9 @@ static void handle_docker_proxy(int client, const uint8_t *first, size_t first_l
         close_fd(upstream);
         close_fd(client);
         return;
+    }
+    if (trace_tag[0] != '\0') {
+        docker_trace(trace_tag, "request_delivered", docker_trace_time_ns());
     }
 
     if (!upgraded_stream && streaming_http && request_complete) {
@@ -2356,6 +2439,7 @@ static void handle_docker_proxy(int client, const uint8_t *first, size_t first_l
         ba->from = upstream;
         ba->to = client;
         ba->shutdown_to_on_eof = 1;
+        memcpy(ba->docker_trace_tag, trace_tag, sizeof(trace_tag));
         pthread_t response_thread;
         if (pthread_create(&response_thread, NULL, docker_response_pump_thread, ba) != 0) {
             free(ba);
@@ -2952,6 +3036,8 @@ static void *handle_client(void *raw) {
 }
 
 int main(int argc, char **argv) {
+    const char *trace_mode = getenv("CONJET_DOCKER_TRANSPORT_TRACE");
+    g_docker_trace_enabled = trace_mode != NULL && strcmp(trace_mode, "1") == 0;
     if (argc > 1) {
         if (strcmp(argv[1], "--version") == 0) {
             printf("conjet-netd-c 0.1\n");
