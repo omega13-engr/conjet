@@ -337,6 +337,11 @@ Docker inspection returned `MemorySwap=0` after the harness requested
 before allocating memory. Kiri therefore has no equivalent pressure
 measurement with verified limits in this run. The pair still retained
 both existing engines' bounded concurrency timings.
+The follow-up read-only probe showed Kiri's actual `memory.max` was
+67,108,864 bytes and `memory.swap.max` was zero for the requested profile.
+It also reported no guest swap. This identifies an inspect metadata
+discrepancy. The corrected pressure run must verify both effective cgroup
+values before allocating and then verify exit, OOM attribution and recovery.
 
 ## Separate native timings
 
@@ -448,6 +453,7 @@ failed attempts and shutdown checks.
 | Storage, guest transport and the sustained services | `SPEED-024/pair-1` |
 | Launch concurrency, memory attribution and recovery attempts | `SPEED-025/pair-1` |
 | Second concurrency pair and corrected Conjet OOM attribution | `SPEED-025/pair-2` |
+| Read-only effective memory and swap validation on Kiri | `SPEED-025/kiri-effective-swap.log` |
 | Full-budget native static product and active-shutdown canaries | `SPEED-025/native-product-full-1` |
 
 Production stayed in service throughout. The records preserve unknown

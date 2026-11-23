@@ -1146,8 +1146,17 @@ def memory_limit_probe(docker, manifest):
         try:
             memory = docker.call('pressure-limit-inspect', ['inspect', '--format',
                                  '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}', target],
-                                 phase='verification', expected=b'67108864 67108864\n')
-            if memory is None or docker.call('pressure-start', ['start', target], phase='verification') is None:
+                                 phase='verification')
+            if memory is None:
+                return
+            values = memory.split()
+            if len(values) != 2 or values[0] != b'67108864':
+                docker.rows[-1]['error'] = 'Docker did not report the requested memory ceiling'
+                return
+            docker.rows[-1]['swap_metadata_matched'] = values[1] == b'67108864'
+            # The workload checks effective memory.max and memory.swap.max
+            # before allocating. Kiri can report a different API swap value.
+            if docker.call('pressure-start', ['start', target], phase='verification') is None:
                 return
             docker.call('pressure-oom-exit', ['wait', target], timeout=20,
                         expected=b'137\n', phase='verification')

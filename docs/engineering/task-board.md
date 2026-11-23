@@ -169,6 +169,10 @@ Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
 Next Action: Repeat remaining concurrency pairs and keep the Kiri pressure boundary unresolved. `SPEED-025/pair-2` demonstrated Conjet exit 137 and `OOMKilled=true` with verified 64 MiB memory and disabled swap. The sibling and recovery canaries passed. Kiri reported `MemorySwap=0` instead of the requested 64 MiB, so the guard stopped its pressure workload before allocation. Both engines ran the bounded launch sweep. Preserve pair 1's timeout and OOM attribution failure.
+`kiri-effective-swap.log` later observed the requested 64 MiB memory
+ceiling and zero swap directly in Kiri's guest despite the inspect
+metadata discrepancy. The pressure test still enforces those effective
+limits before allocating. Repeat it to verify OOM attribution and recovery.
 
 
 ### SPEED-024
