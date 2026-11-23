@@ -392,6 +392,8 @@ or across mixed executable, harness or manifest revisions. It retains setup,
 warmup and artifact-verification failures alongside measured rows.
 Controlled-registry intervals additionally require complete witnessed config
 and layer transfer for every first-pull sample in each accepted pair.
+The report generator derives archived bytes per second from the exact saved
+artifact size and exposes guest I/O stages independently of Docker CLI time.
 The remaining modes and claim review are still in progress.
 The local full check retained the default SwiftPM Metal failure and passed
 all 440 Swift tests on the documented native build system with two skips.

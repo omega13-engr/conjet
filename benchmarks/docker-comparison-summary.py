@@ -57,6 +57,8 @@ def summarize(path):
     rows = defaultdict(list)
     for row in data.get('operations', []):
         rows[row['scenario']].append(row)
+    archives = {row['argv'][row['argv'].index('--output') + 1]: row['bytes']
+                for row in data.get('operations', []) if row['scenario'].endswith('.save') and 'bytes' in row}
     for name, operations in rows.items():
         samples = [row for row in operations if row.get('phase') == 'sample']
         if samples:
@@ -66,6 +68,18 @@ def summarize(path):
             if name.endswith('.first-pull'):
                 groups[name]['verified_registry_transfers'] = sum(
                     row.get('cache_state') == 'complete config and layer transfer observed' for row in samples)
+            if name.endswith(('.save', '.warm-load')):
+                rates = []
+                for row in samples:
+                    size = row.get('bytes', archives.get(row['argv'][-1]))
+                    if row.get('error') is None and size and row['elapsed_ns']:
+                        rates.append(round(size * 1e9 / row['elapsed_ns']))
+                groups[name]['archive_bytes_per_second'] = (statistics.median(rates) if rates else None)
+            stages = {key for row in samples for key in row.get('guest', {}).get('measured', {})}
+            for stage in sorted(stages):
+                measurements = [{'elapsed_ns': row.get('guest', {}).get('measured', {}).get(stage),
+                                 'error': row.get('error')} for row in samples]
+                groups[name + '.guest.' + stage] = summarized_samples(measurements)
     result['groups'] = groups
     result['operation_failures'] = [
         {'scenario': row['scenario'], 'phase': row.get('phase'), 'error': row['error']}
