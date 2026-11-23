@@ -71,44 +71,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 
 ## BACKLOG
 
-### SPEED-017
-
-Title: Capture current Docker and native baselines
-
-Description: Run a bounded pilot of the unchanged engines and native product before implementing an accelerated Docker adapter.
-
-Is blocked by task: SPEED-016.
-
-Acceptance Criteria:
-
-- Capture direct Docker API and actual Docker CLI lifecycle on both engines, plus separately labeled native fresh/prepared timings for the same supported payload.
-- Probe build, Compose, exec, volumes and networking capabilities; record unsupported/error outcomes explicitly and retain them in coverage.
-- Record native preparation/refill and misses separately; retain original data and do not combine pilot samples with final qualification.
-- Identify which Docker operations reach Docker/containerd and which, if any, reach the native service using runtime dispatch evidence.
-
-Problem and Evidence: Native fixture speed does not establish that Docker clients receive the improvement.
-
-Approach:
-
-1. Run small pinned pilot workloads through each adapter.
-2. Validate outputs, exit codes, selected backend and timing endpoints.
-3. Publish the baseline and concrete Docker-to-native integration gaps.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-017`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Run the no-network pilot with the existing fresh-lifecycle harness.
-
 ### SPEED-018
 
 Title: Qualify Docker-to-native routing before claiming Docker acceleration
@@ -674,6 +636,49 @@ and review requirements before merge.
 Next Action: Collect required CI and independent review before merging.
 
 ## DONE
+
+### SPEED-017
+
+Title: Capture current Docker and native baselines
+
+Description: Run a bounded pilot of the unchanged engines and native product before implementing an accelerated Docker adapter.
+
+Is blocked by task: SPEED-016.
+
+Acceptance Criteria:
+
+- Capture direct Docker API and actual Docker CLI lifecycle on both engines, plus separately labeled native fresh/prepared timings for the same supported payload.
+- Probe build, Compose, exec, volumes and networking capabilities; record unsupported/error outcomes explicitly and retain them in coverage.
+- Record native preparation/refill and misses separately; retain original data and do not combine pilot samples with final qualification.
+- Identify which Docker operations reach Docker/containerd and which, if any, reach the native service using runtime dispatch evidence.
+
+Problem and Evidence: Under ExternalSSD `conjet-speedup-evidence/SPEED-017`, the initial
+pair retained 240 measured and 120 warmup lifecycle records per Docker
+engine, with zero failures. Both engines observed 16 MiB, 4 PIDs and a
+500-millicore CPU quota inside the Alpine canary. Kiri reported VM memory
+as zero in /info, so its guest memory total is unknown. Conjet's Docker
+engine reported runc on the existing bridged Docker/containerd path;
+Kiri reported its own runtime. The Docker API timings end at removal
+acknowledgement. Separate native endpoint measurements verified cleanup
+and reported fresh/claim/refill/miss separately. The follow-up Compose
+probe verified a Redis write/read transaction through service DNS on each
+engine. Image save and basic exec, volume and network probes passed.
+Conjet's embedded BuildKit built and verified the canary. Kiri started a
+private pinned BuildKit container; a build through it remains for SPEED-021.
+The initial missing Compose applet error was preserved. Both launchers
+verified production and shutdown.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Audited stream canaries, exit 23, cgroup observations, actual
+engine identities and cleanup. Keep one-session pilot results out of the
+qualifying distributions.
+
+Next Action: Address OCI admission and runtime ownership in SPEED-018.
 
 ### SPEED-016
 

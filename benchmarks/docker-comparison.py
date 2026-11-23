@@ -118,7 +118,9 @@ def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None):
     output.mkdir(mode=0o700)
     manifest = contract()
     report = {'mode': mode, 'engine': engine, 'endpoint': str(endpoint), 'peer_pid': peer,
-              'manifest_sha256': TOOLS['file_hash'](MANIFEST), 'passed': False}
+              'manifest_sha256': TOOLS['file_hash'](MANIFEST),
+              'harness_revision': TOOLS['run'](['/usr/bin/git', '-C', REPO, 'rev-parse', 'HEAD']),
+              'passed': False}
     resources = ExitStack()
     peer_args = SimpleNamespace(engine=engine, socket=endpoint, config=config, peer_pid=peer, docker=DOCKER)
     try:
@@ -255,7 +257,7 @@ def run_pair(args, output, order):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=('preflight', 'pilot'), default='preflight')
+    parser.add_argument('--mode', choices=('preflight', 'pilot', 'probes', 'lifecycle'), default='preflight')
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--pair', type=int, choices=range(1, 6), default=1)
     parser.add_argument('--timeout', type=int, default=900)
