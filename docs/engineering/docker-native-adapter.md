@@ -74,9 +74,18 @@ and `--cpus 0.5`. It accepts the enforced constraints
 `--cap-drop ALL` and `--security-opt no-new-privileges`.
 Commands use an absolute executable path. The verified
 subset supports inherited OCI Entrypoint, Cmd and Env defaults and the tested
-explicit argv, environment and working directory. It permits regular files,
-directories and symlinks in a single rootfs layer. It declines unsupported
-permissions, multiple layers and hard links during staging.
+explicit argv, environment and working directory.
+
+`jetstream native docker-stage` verifies a pinned OCI manifest and its
+config, compressed layers, and uncompressed diff IDs from an ExternalSSD
+content layout. The pinned two-layer fixture covers regular files,
+directories, hard links, guest-root-relative symlinks, replacement, deletion
+and opaque directories. The guest maps image ownership into the sandbox's
+existing ID range. It copies complete linked groups into the private
+upper layer so writes through an alias are visible to the other names
+while the underlying image remains immutable. The default Docker owner
+still selects one pre-staged image per boot. Registry pull and live image
+installation are separate work.
 
 The candidate is managed from source and general promotion requires broader
 compatibility. Live streaming, interactive input, Compose, networking, build,

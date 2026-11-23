@@ -3,39 +3,77 @@ use std::collections::BTreeMap;
 use anyhow::{ensure, Context};
 use base64::Engine;
 use conjet_launch_service::handshake::unhex;
-use serde::Deserialize;
+use conjet_launch_service::spec::{GID_BASE, ID_MAP_WIDTH, UID_BASE};
+use serde::{Deserialize, Serialize};
 
 pub(super) const PACKAGE_LIMIT: u64 = 64 * 1024 * 1024;
-const MAX_RECORDS: usize = 4096;
+pub(super) const MAX_RECORDS: usize = 4096;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Root {
     pub(super) config_digest: String,
-    records: Vec<Record>,
+    pub(super) records: Vec<Record>,
 }
 
-#[derive(Clone, Copy, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum Kind {
+pub(super) enum Kind {
     Directory,
     File,
     Symlink,
+    Hardlink,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Record {
-    path: String,
-    mode: u32,
-    uid: u32,
-    gid: u32,
-    data: String,
-    target: String,
-    kind: Kind,
+pub(super) struct Record {
+    pub(super) path: String,
+    pub(super) mode: u32,
+    pub(super) uid: u32,
+    pub(super) gid: u32,
+    pub(super) data: String,
+    pub(super) target: String,
+    pub(super) kind: Kind,
+}
+
+pub(super) fn rooted_symlink(path: &str, target: &str) -> bool {
+    if target.is_empty() || target.len() > 1024 || target.contains('\0') {
+        return false;
+    }
+    let mut depth = if target.starts_with('/') {
+        0
+    } else {
+        path.matches('/').count()
+    };
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if depth == 0 => return false,
+            ".." => depth -= 1,
+            _ => depth += 1,
+        }
+    }
+    true
+}
+
+pub(super) fn root_path(path: &str) -> bool {
+    path.len() <= 1024
+        && !path.contains('\0')
+        && !path.split('/').any(|part| matches!(part, "" | "." | ".."))
 }
 
 impl Root {
+    pub(super) fn link_groups(&self) -> BTreeMap<&str, Vec<&str>> {
+        let mut groups: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for record in &self.records {
+            if record.kind == Kind::Hardlink {
+                groups.entry(&record.target).or_default().push(&record.path);
+            }
+        }
+        groups
+    }
+
     pub(super) fn read(bytes: &[u8]) -> anyhow::Result<Self> {
         let root: Self = serde_json::from_slice(bytes).context("invalid OCI staging package")?;
         let digest = root
@@ -49,17 +87,11 @@ impl Root {
         );
         let mut types = BTreeMap::new();
         for record in &root.records {
+            ensure!(root_path(&record.path), "invalid OCI rootfs path");
             ensure!(
-                record.path.len() <= 1024
-                    && !record.path.contains('\0')
-                    && !record
-                        .path
-                        .split('/')
-                        .any(|part| matches!(part, "" | "." | "..")),
-                "invalid OCI rootfs path"
-            );
-            ensure!(
-                record.mode & !0o1777 == 0 && record.uid <= 65535 && record.gid <= 65535,
+                record.mode & !0o1777 == 0
+                    && record.uid < ID_MAP_WIDTH
+                    && record.gid < ID_MAP_WIDTH,
                 "invalid OCI rootfs mode or ownership"
             );
             ensure!(
@@ -68,14 +100,13 @@ impl Root {
             );
             ensure!(
                 (record.kind == Kind::File || record.data.is_empty())
-                    && (record.kind == Kind::Symlink || record.target.is_empty()),
+                    && (matches!(record.kind, Kind::Symlink | Kind::Hardlink)
+                        || record.target.is_empty()),
                 "invalid OCI rootfs entry payload"
             );
             if record.kind == Kind::Symlink {
                 ensure!(
-                    !record.target.is_empty()
-                        && record.target.len() <= 1024
-                        && !record.target.contains('\0'),
+                    rooted_symlink(&record.path, &record.target),
                     "invalid OCI rootfs symlink"
                 );
             }
@@ -88,30 +119,75 @@ impl Root {
                 );
             }
         }
+        for record in &root.records {
+            if record.kind == Kind::Hardlink {
+                ensure!(
+                    types.get(record.target.as_str()) == Some(&Kind::File),
+                    "OCI hard link must refer to a regular file"
+                );
+            }
+        }
         Ok(root)
     }
 
     pub(super) fn append(
         &self,
-        mut write: impl FnMut(&str, u32, u32, u32, &[u8]) -> std::io::Result<()>,
+        mut write: impl FnMut(&str, u32, u32, u32, &[u8], Option<(u32, u32)>) -> std::io::Result<()>,
     ) -> anyhow::Result<()> {
         const PREFIX: &str = "etc/conjet/oci-root";
-        write(PREFIX, 0o40755, 0, 0, &[])?;
+        write(PREFIX, 0o40755, 0, 0, &[], None)?;
         let mut entries: Vec<_> = self.records.iter().collect();
         // Lexical order puts every validated directory before its children.
         entries.sort_unstable_by_key(|part| &part.path);
+        let mut groups = BTreeMap::new();
+        for record in &entries {
+            if record.kind == Kind::Hardlink {
+                *groups.entry(record.target.as_str()).or_insert(1u32) += 1;
+            }
+        }
+        let groups: BTreeMap<_, _> = groups
+            .into_iter()
+            .enumerate()
+            .map(|(index, (path, count))| (path, (0x8000_0000 + index as u32, count)))
+            .collect();
+        let files: BTreeMap<_, _> = entries
+            .iter()
+            .filter(|entry| entry.kind == Kind::File)
+            .map(|entry| (entry.path.as_str(), *entry))
+            .collect();
+        let mut remaining = groups.clone();
         for record in entries {
             let name = format!("{PREFIX}/{}", record.path);
-            let mode = record.mode;
-            let (type_mode, payload) = match record.kind {
-                Kind::Directory => (0o040000, Vec::new()),
-                Kind::File => (
-                    0o100000,
-                    base64::engine::general_purpose::STANDARD.decode(&record.data)?,
-                ),
-                Kind::Symlink => (0o120000, record.target.as_bytes().to_vec()),
+            let source = if record.kind == Kind::Hardlink {
+                files[record.target.as_str()]
+            } else {
+                record
             };
-            write(&name, type_mode | mode, record.uid, record.gid, &payload)?;
+            let link = groups.get(source.path.as_str()).copied();
+            let emit_data = if let Some((_, left)) = remaining.get_mut(source.path.as_str()) {
+                *left -= 1;
+                *left == 0
+            } else {
+                true
+            };
+            let (type_mode, payload) = match source.kind {
+                Kind::Directory => (0o040000, Vec::new()),
+                Kind::File if emit_data => (
+                    0o100000,
+                    base64::engine::general_purpose::STANDARD.decode(&source.data)?,
+                ),
+                Kind::File => (0o100000, Vec::new()),
+                Kind::Symlink => (0o120000, source.target.as_bytes().to_vec()),
+                Kind::Hardlink => unreachable!("hard link source was validated"),
+            };
+            write(
+                &name,
+                type_mode | source.mode,
+                UID_BASE + source.uid,
+                GID_BASE + source.gid,
+                &payload,
+                link,
+            )?;
         }
         Ok(())
     }

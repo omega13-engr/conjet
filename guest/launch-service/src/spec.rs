@@ -7,6 +7,9 @@ use crate::handshake;
 
 pub const WORKLOAD_UID: u32 = 65_532;
 pub const WORKLOAD_GID: u32 = 65_532;
+pub const UID_BASE: u32 = 100_000;
+pub const GID_BASE: u32 = 100_000;
+pub const ID_MAP_WIDTH: u32 = 65_536;
 pub const MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIDS: u32 = 64;

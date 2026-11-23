@@ -382,23 +382,28 @@ fn build_archive(
         .mode(0o600)
         .open(path)?;
     let mut inode = 0u32;
-    let mut append = |name: &str,
+    let mut append_entry = |name: &str,
                       mode: u32,
                       data: &[u8],
                       major: u32,
                       minor: u32,
                       uid: u32,
-                      gid: u32|
+                      gid: u32,
+                      link: Option<(u32, u32)>|
      -> std::io::Result<()> {
         inode += 1;
+        let (ino, nlink) = link.unwrap_or((inode, 1));
         write!(archive,
-            "070701{inode:08x}{mode:08x}{uid:08x}{gid:08x}0000000100000000{:08x}0000000000000000{major:08x}{minor:08x}{:08x}00000000",
+            "070701{ino:08x}{mode:08x}{uid:08x}{gid:08x}{nlink:08x}00000000{:08x}0000000000000000{major:08x}{minor:08x}{:08x}00000000",
             data.len(), name.len() + 1
         )?;
         archive.write_all(name.as_bytes())?;
         archive.write_all(&[0; 4][..1 + (4 - (110 + name.len() + 1) % 4) % 4])?;
         archive.write_all(data)?;
         archive.write_all(&[0; 3][..(4 - data.len() % 4) % 4])
+    };
+    let mut append = |name: &str, mode, data: &[u8], major, minor, uid, gid| {
+        append_entry(name, mode, data, major, minor, uid, gid, None)
     };
     for name in [
         "dev",
@@ -425,7 +430,23 @@ fn build_archive(
             0,
             0,
         )?;
-        root.append(|name, mode, uid, gid, data| append(name, mode, data, 0, 0, uid, gid))?;
+        let groups = root.link_groups();
+        if !groups.is_empty() {
+            let groups = serde_json::to_vec(&groups)?;
+            ensure!(groups.len() <= 5 * 1024 * 1024, "OCI hard-link manifest exceeds its bound");
+            append(
+                "etc/conjet/native-oci-hardlinks.json",
+                0o100400,
+                &groups,
+                0,
+                0,
+                0,
+                0,
+            )?;
+        }
+        root.append(|name, mode, uid, gid, data, link| append_entry(name, mode, data, 0, 0, uid, gid, link))?;
+        append_entry("TRAILER!!!", 0, &[], 0, 0, 0, 0, None)?;
+        return Ok(());
     } else {
         append(
             "etc/conjet/native-executable",

@@ -1,21 +1,19 @@
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::CString;
-use std::fs::File;
-use std::io;
+use std::fs::{self, File, Metadata};
+use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use crate::security::{self, WorkloadFilter};
-use crate::spec::{WORKLOAD_GID, WORKLOAD_UID};
+use crate::spec::{GID_BASE, ID_MAP_WIDTH, UID_BASE, WORKLOAD_GID, WORKLOAD_UID};
 
 const BASE: &str = "/run/conjet/workload-probe";
 pub(crate) const BENCHMARK_EXECUTABLE: &str = "/etc/conjet/benchmark-executable";
 pub(crate) const OCI_ROOT: &str = "/etc/conjet/oci-root";
 pub(crate) const NATIVE_EXECUTABLE: &str = "/etc/conjet/native-executable";
-const UID_BASE: u32 = 100_000;
-const GID_BASE: u32 = 100_000;
-const UID_WIDTH: u32 = 65_536;
 
 pub(crate) struct Sandbox {
     new_root: CString,
@@ -43,6 +41,8 @@ impl Sandbox {
                     base.join("lower/bin/probe"),
                     std::fs::Permissions::from_mode(0o555),
                 )?;
+            } else {
+                prepare_oci_hardlinks(&base.join("upper"))?;
             }
             std::fs::write(base.join("lower/work/immutable"), b"verified fixture\n")?;
             if bridge {
@@ -102,11 +102,11 @@ impl Sandbox {
         std::fs::write(process.join("setgroups"), "deny")?;
         std::fs::write(
             process.join("uid_map"),
-            format!("0 {UID_BASE} {UID_WIDTH}\n"),
+            format!("0 {UID_BASE} {ID_MAP_WIDTH}\n"),
         )?;
         std::fs::write(
             process.join("gid_map"),
-            format!("0 {GID_BASE} {UID_WIDTH}\n"),
+            format!("0 {GID_BASE} {ID_MAP_WIDTH}\n"),
         )
     }
 
@@ -252,4 +252,93 @@ pub fn verify_after_exec() -> io::Result<()> {
         "conjet-launchd application verified private root, credentials, and seccomp after exec"
     );
     Ok(())
+}
+
+// On the tested overlay filesystem, copying up one lower hard link breaks
+// its aliases even with index=on. Seed complete groups in the private upper
+// before mounting it so both link identity and lower immutability survive.
+fn prepare_oci_hardlinks(upper: &Path) -> io::Result<()> {
+    const MANIFEST: &str = "/etc/conjet/native-oci-hardlinks.json";
+    const MAX_LINKS: usize = 4096;
+    const MAX_METADATA: u64 = 5 * 1024 * 1024;
+    const MAX_CONTENT: u64 = 40 * 1024 * 1024;
+
+    let file = match File::open(MANIFEST) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+        || metadata.len() > MAX_METADATA
+    {
+        return Err(io::Error::other("invalid native OCI hard-link manifest"));
+    }
+    let groups: BTreeMap<String, Vec<String>> = serde_json::from_reader(file.take(MAX_METADATA))?;
+    let lower = Path::new(OCI_ROOT);
+    let mut seen = HashSet::new();
+    let mut copied = 0;
+    for (source, aliases) in &groups {
+        if aliases.is_empty() {
+            return Err(io::Error::other("OCI hard-link group is empty"));
+        }
+        for path in std::iter::once(source).chain(aliases) {
+            if path.len() > 1024
+                || path.contains('\0')
+                || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+                || seen.len() == MAX_LINKS
+                || !seen.insert(path)
+            {
+                return Err(io::Error::other("invalid OCI hard-link path"));
+            }
+            for (index, _) in path.match_indices('/') {
+                let directory = &path[..index];
+                let origin = lower.join(directory).symlink_metadata()?;
+                if !origin.is_dir() {
+                    return Err(io::Error::other("OCI hard link traverses a non-directory"));
+                }
+                let target = upper.join(directory);
+                match fs::create_dir(&target) {
+                    Ok(()) => copy_owner_mode(&target, &origin)?,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::AlreadyExists
+                            && target.symlink_metadata()?.is_dir() => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        let origin = lower.join(source).symlink_metadata()?;
+        copied = origin
+            .len()
+            .checked_add(copied)
+            .ok_or_else(|| io::Error::other("OCI hard-link content overflow"))?;
+        if !origin.is_file() || copied > MAX_CONTENT {
+            return Err(io::Error::other("invalid OCI hard-link source"));
+        }
+        for alias in aliases {
+            let metadata = lower.join(alias).symlink_metadata()?;
+            if !metadata.is_file()
+                || origin.ino() != metadata.ino()
+                || origin.dev() != metadata.dev()
+            {
+                return Err(io::Error::other("OCI hard-link identity changed"));
+            }
+        }
+        let target = upper.join(source);
+        fs::copy(lower.join(source), &target)?;
+        copy_owner_mode(&target, &origin)?;
+        for alias in aliases {
+            fs::hard_link(&target, upper.join(alias))?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_owner_mode(path: &Path, metadata: &Metadata) -> io::Result<()> {
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    // Origin is a verified inode under the boot-staged OCI lower root.
+    security::checked(unsafe { libc::chown(c_path.as_ptr(), metadata.uid(), metadata.gid()) })?;
+    fs::set_permissions(path, fs::Permissions::from_mode(metadata.mode() & 0o1777))
 }

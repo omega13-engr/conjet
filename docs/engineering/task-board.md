@@ -318,8 +318,17 @@ Approach:
 2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
 3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
 
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
+Evidence: DONE. Built release Jetstream and the ARM64 guest from the SPEED-031
+working tree on `4a19b0a`, with source-identical Swift CLI. Generated the
+pinned two-layer fixture and ran 14 negative staging cases with
+`python3 benchmarks/native-oci-two-layer.py`. Two independent staging runs
+produced identical packages. The release launcher with `--diagnostics oci`
+verified dynamic execution, inode identity, deletion and opaque whiteouts,
+symlinks, writes through hard links, and fresh overlay isolation. Guest and
+Jetstream tests, formatting checks, guest Clippy and existing Python
+admission tests passed. Full Jetstream Clippy retains the SPEED-030 baseline
+errors. Commands, source and artifact identities, failed pilots and verified
+live results are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-031`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
@@ -328,10 +337,55 @@ Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [detailed result format](docker-benchmark-results.md),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local diff and isolated runtime checks passed. The archive pipeline
+verifies all four digest boundaries and publishes a complete directory
+exclusively. Both failed and successful live launchers verified unchanged
+production and session cleanup. The final OCI test checked the same inode
+for both names, alias mutation within one workload, and original data in
+the next workload. The workload retains the existing capability and
+syscall restrictions. Independent PR review is separate.
 
-Next Action: Add a deterministic two-layer fixture and negative archive tests, then extend staging.
+Next Action: Integrate verified root staging with native pull. The current
+guest only selects an OCI image at boot. Resolve live image installation
+in SPEED-032A before exposing Docker pull.
+
+### SPEED-032A
+
+Title: Install a verified OCI root into an already booted guest
+
+Description: Add a generation-bound, bounded installation path for the pinned
+two-layer fixture, with an explicit image identity for launch selection.
+
+Is blocked by task: SPEED-031 (DONE).
+
+Acceptance Criteria:
+
+- On one live native boot, install the staged two-layer fixture through the
+  authenticated owner and run its canary with the original boot ID.
+- Reject stale boot IDs, invalid offsets, wrong digests, exceeded quotas,
+  and removal of a referenced lower root. Verify that interrupted transfers
+  create no runnable image and that retries cannot disturb existing roots.
+- Preserve original boot image execution, hard-link behavior, independent
+  writable overlays, and guest cleanup.
+
+Problem and Evidence: SPEED-031 delivers verified roots at boot. The existing
+guest admits exactly one configured digest and uses a fixed OCI lower path.
+Docker pull needs a runnable image in an already authenticated guest.
+
+Approach: Add a single bounded transfer lease, verify before publication,
+and bind the resulting lower root to the launch image digest.
+
+Evidence: Live installation checks pending. Retain raw evidence under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-032A`.
+
+Source: [Launch service contract](launch-service-contract.md),
+[`fresh_fixture.rs`](../../guest/launch-service/src/fresh_fixture.rs),
+[`sandbox_fixture.rs`](../../guest/launch-service/src/sandbox_fixture.rs).
+
+Review: Pending implementation and isolated runtime verification.
+
+Next Action: Implement bounded, authenticated installation and prove a
+same-boot launch of the pinned two-layer fixture.
 
 ### SPEED-032
 
@@ -339,7 +393,7 @@ Title: Implement native image pull, inspect and removal
 
 Description: Connect the native Docker image endpoints to a bounded content-addressed store on ExternalSSD.
 
-Is blocked by task: SPEED-031.
+Is blocked by task: SPEED-032A.
 
 Acceptance Criteria:
 

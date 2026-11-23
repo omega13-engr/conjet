@@ -23,7 +23,9 @@ thiserror = "2.0"
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 base64 = "0.22"
 conjet-launch-service = { path = "../guest/launch-service" }
+flate2 = "1"
 sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
 tempfile = "3.14"
 
 [dev-dependencies]

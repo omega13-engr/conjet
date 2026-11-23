@@ -101,6 +101,10 @@ impl Image {
             !name.is_empty() && !name.contains('@') && digest(pinned),
             "image reference must be pinned"
         );
+        ensure!(
+            metadata["manifest_digest"].is_null() || metadata["manifest_digest"] == pinned,
+            "image manifest differs from the staging receipt"
+        );
         let config_digest = metadata["config_digest"]
             .as_str()
             .filter(|value| digest(value))

@@ -426,8 +426,12 @@ def native_session(args, root):
         report['backend'] = version['Platform']['Name']
         print(f'Native Docker ready: {host}', flush=True)
         if args.diagnostics:
-            diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-diagnostic.py'))
-            diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
+            if args.diagnostics == 'oci':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.image)
+            else:
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-diagnostic.py'))
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
         elif args.matched_output:
             bench = runpy.run_path(str(REPO / 'benchmarks/native-docker-comparison.py'))
             bench['measure']('native', endpoint, bridge.pid, docker, env, args.matched_output,
@@ -499,7 +503,7 @@ def main():
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
-    parser.add_argument('--diagnostics', choices=('trace', 'control'), help='run the native-only diagnostic canaries')
+    parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci'), help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--image', default='alpine:3.22')
