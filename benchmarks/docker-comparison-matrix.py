@@ -490,6 +490,20 @@ def transaction(docker, reader, url, proof, scenario='compose.transaction'):
         return None
 
 
+def check_service_limits(docker, prefix, spec):
+    verified = True
+    for service in ('app', 'redis'):
+        observed = docker.call(f'service.{service}.cgroup', [*prefix, 'exec', '-T', service, 'cat',
+                               '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/pids.max',
+                               '/sys/fs/cgroup/cpu.max'], phase='verification')
+        if observed is None:
+            verified = False
+        elif not matches_cgroup_limits(observed, spec):
+            docker.rows[-1]['error'] = 'effective cgroup limits differ from the requested service resources'
+            verified = False
+    return verified
+
+
 def run_compose(docker, manifest):
     budget = manifest['suites']['compose']
     for image in ('node', 'redis'):
@@ -513,6 +527,11 @@ def run_compose(docker, manifest):
                 if docker.call(f'compose.{case}', [*prefix, *command], phase=phase,
                                timeout=budget['timeout_seconds']) is None:
                     break
+                timed = docker.rows[-1]
+                if case == 'up' and not check_service_limits(docker, prefix, manifest['service_limits']):
+                    docker.report['service_limits_matched'] = False
+                else:
+                    docker.report.setdefault('service_limits_matched', True)
                 for replica in range(1, replicas + 1):
                     endpoint = published_endpoint(docker, prefix, replica)
                     reader = build_opener(ProxyHandler({}))
@@ -534,10 +553,12 @@ def run_compose(docker, manifest):
                                             'elapsed_ns': time.monotonic_ns() - start,
                                             'error': None if ready else 'application did not recover'})
                         if not ready:
+                            timed['error'] = 'application did not recover after restart'
                             break
                     observed = transaction(docker, reader, endpoint, proof)
                     if observed is None or observed != previous + 1:
                         docker.rows[-1]['error'] = 'did not observe the persisted transaction sequence'
+                        timed['error'] = 'application transaction failed after this Compose command'
                         break
                     previous = observed
                 else:
@@ -807,12 +828,7 @@ def run_service(docker, manifest):
                     "require('dns').lookup('redis', e=>{if(e)process.exit(1);"
                     "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)})"
                     ".catch(()=>process.exit(1));})"], phase='verification')
-        for service in ('app', 'redis'):
-            observed = docker.call(f'service.{service}.cgroup', [*prefix, 'exec', '-T', service, 'cat',
-                                   '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/pids.max',
-                                   '/sys/fs/cgroup/cpu.max'], phase='verification')
-            if observed is not None and not matches_cgroup_limits(observed, manifest['service_limits']):
-                docker.rows[-1]['error'] = 'effective cgroup limits differ from the requested service resources'
+        docker.report['service_limits_matched'] = check_service_limits(docker, prefix, manifest['service_limits'])
         reader = build_opener(ProxyHandler({}))
         if read_response(reader, endpoint + '/health') != proof + ' +PONG':
             raise RuntimeError('service readiness response differs')

@@ -316,7 +316,7 @@ Approach:
 2. Run the workflow matrix in alternating engine sessions.
 3. Verify application correctness and project-scoped cleanup after every cycle.
 
-Evidence: `SPEED-022/pair-1` contains raw reports from harness `4a6de79`. Both existing engines passed five measured repetitions of each Compose operation and all functional and cleanup canaries. Four independent pairs and effective-resource verification remain. The [interim report](docker-benchmark-results.md#compose-first-pair) records the timings.
+Evidence: `SPEED-022/pair-1` contains raw reports from harness `4a6de79`. Both existing engines passed five measured repetitions of each Compose operation and all functional and cleanup canaries. The harness now verifies effective cgroup limits outside the startup timing window and annotates timed operations when their application canary fails. Four independent pairs and runtime verification of the added checks remain. The [interim report](docker-benchmark-results.md#compose-first-pair) records the timings.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),
