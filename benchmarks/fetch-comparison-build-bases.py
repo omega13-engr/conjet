@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import signal
 import tempfile
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -95,6 +96,7 @@ def main():
         parser.error('output must be a new ExternalSSD directory')
     manifest = json.loads(MANIFEST.read_bytes())
     reader = build_opener(ProxyHandler({}), RegistryRedirect())
+    signal.signal(signal.SIGTERM, lambda *_: signal.raise_signal(signal.SIGINT))
     work = Path(tempfile.mkdtemp(prefix='oci-build-bases-', dir=parent))
     try:
         for base in BASES:

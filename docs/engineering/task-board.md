@@ -444,6 +444,8 @@ Next Action: Continue the remaining frozen pairs and groups. Keep the new
 source adapter lane separate. Its full-sample runner verifies one-use guest
 cleanup on every operation and uses UID/GID 65532. The baseline uses the
 image-default user, so their measurements remain distinct.
+The full-sample runner handles cancellation through its Docker adapter and
+VM ownership cleanup and retains partial rows.
 
 
 ### SPEED-008

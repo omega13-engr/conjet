@@ -248,7 +248,11 @@ def verify_docker(args, session, report):
                 finally:
                     if bridge.poll() is None:
                         bridge.send_signal(signal.SIGTERM)
-                    output = bridge.communicate(timeout=45)[0]
+                    try:
+                        output = bridge.communicate(timeout=45)[0]
+                    except subprocess.TimeoutExpired:
+                        bridge.kill()
+                        output = bridge.communicate(timeout=5)[0]
                     (args.output / 'backend-dispatch.jsonl').write_text(output)
             if bridge.returncode or endpoint.exists():
                 raise RuntimeError('Docker adapter shutdown did not remove its socket')
@@ -275,6 +279,7 @@ def main():
         setattr(args, name, value)
     if not args.output.parent.resolve(strict=True).is_relative_to(SCRATCH):
         parser.error('output must reside on ExternalSSD')
+    signal.signal(signal.SIGTERM, lambda *_: signal.raise_signal(signal.SIGINT))
     args.output.mkdir(mode=0o700)
     before = PRODUCTION['production']()
     report = {'production_before': before, 'passed': False, 'load_before': os.getloadavg(),
