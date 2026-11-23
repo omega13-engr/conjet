@@ -71,45 +71,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 
 ## BACKLOG
 
-### SPEED-018
-
-Title: Qualify Docker-to-native routing before claiming Docker acceleration
-
-Description: Define and, for the explicitly supported subset, implement an opt-in Docker-compatible route to the new native execution service; qualify it before performance measurement.
-
-Is blocked by task: SPEED-017.
-
-Acceptance Criteria:
-
-- Write a supported Docker operation/option contract and single-owner lifecycle design before implementation. General Alpine/OCI execution requires verified image/rootfs admission and execution support, not a static-binary substitution.
-- Support the selected real docker run lifecycle, including API negotiation, create/start, attach/output, actual exit status, wait conditions, inspect and removal. Test event ordering, names/IDs, cancellation and disconnect recovery.
-- Record backend selection per container. Reject unsupported requests clearly or route them explicitly to the existing Docker backend before allocation/start; never silently ignore flags or retry after ambiguous execution.
-- Verify isolation, bounded resources, image semantics and no leaks on success/failure. Keep the experimental route isolated and opt-in; ordinary production routing is unchanged.
-- If integration is not viable within the declared subset, record an unavailable accelerated Docker lane and a reviewed follow-up implementation task. Benchmark existing Docker and native lanes separately; do not claim this benchmark work created Docker acceleration.
-
-Problem and Evidence: The present native product accepts restricted static ARM64 workloads and is not a Docker-compatible general container engine. Routing is an engineering prerequisite, not a benchmark switch.
-
-Approach:
-
-1. Design the smallest meaningful supported Docker workload subset and tests using the pilot gaps.
-2. Implement and validate the selected subset with the real Docker client and ordinary pinned image; avoid special-casing true or benchmark identifiers.
-3. Review lifecycle ownership and capture proof of the selected backend before freezing the adapter.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-018`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Write the Docker-to-native contract and estimate the concrete implementation gaps.
-
 ### SPEED-019
 
 Title: Benchmark Docker run and container lifecycle
@@ -474,6 +435,52 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: After the PR merges, inspect current versions and release workflows to select the release scope.
 
 ## INPROGRESS
+
+### SPEED-018
+
+Title: Qualify Docker-to-native routing before claiming Docker acceleration
+
+Description: Define and, for the explicitly supported subset, implement an opt-in Docker-compatible route to the new native execution service; qualify it before performance measurement.
+
+Is blocked by task: SPEED-017.
+
+Acceptance Criteria:
+
+- Write a supported Docker operation/option contract and single-owner lifecycle design before implementation. General Alpine/OCI execution requires verified image/rootfs admission and execution support, not a static-binary substitution.
+- Support the selected real docker run lifecycle, including API negotiation, create/start, attach/output, actual exit status, wait conditions, inspect and removal. Test event ordering, names/IDs, cancellation and disconnect recovery.
+- Record backend selection per container. Reject unsupported requests clearly or route them explicitly to the existing Docker backend before allocation/start; never silently ignore flags or retry after ambiguous execution.
+- Verify isolation, bounded resources, image semantics and no leaks on success/failure. Keep the experimental route isolated and opt-in; ordinary production routing is unchanged.
+- If integration is not viable within the declared subset, record an unavailable accelerated Docker lane and a reviewed follow-up implementation task. Benchmark existing Docker and native lanes separately; do not claim this benchmark work created Docker acceleration.
+
+Problem and Evidence: [Adapter contract and reproduced limitation](docker-native-adapter.md).
+The extracted pinned Alpine `/bin/busybox` needs a dynamic interpreter.
+The existing native loader rejected the exact executable before VM boot.
+Both engines exported the same image config and uncompressed rootfs diff ID.
+The archive admission checker verified matching 519-entry receipts without
+extracting a host file tree. Its digest, platform and path tests passed.
+The exact rejection and receipts are under ExternalSSD `SPEED-018`.
+
+Subtasks:
+- Verified image metadata and one-layer archive admission.
+- Stage that image as an immutable guest root and execute a bounded OCI
+  process spec through the native supervisor.
+- Add an explicit Docker socket owner with negotiation, attach, wait,
+  inspect, events and removal.
+- Qualify the real Docker CLI, cancellation/replay and cleanup before
+  measuring the accelerated lane.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Verified containerd and native dispatch boundaries, image config and
+layer verification, strict path checks and the static-only rejection.
+Docker backend qualification remains open.
+
+Next Action: Implement guest rootfs staging and the Docker protocol owner.
+The independent existing Docker and native lanes can run while this route is unavailable.
 
 ### SPEED-008
 
