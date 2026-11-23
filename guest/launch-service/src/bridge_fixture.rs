@@ -311,6 +311,18 @@ fn assert_address_absent(address: Ipv4Addr) -> io::Result<()> {
     }
 }
 
+fn assert_routes_absent(link: &CStr) -> io::Result<()> {
+    let routes = std::fs::read_to_string("/proc/thread-self/net/route")?;
+    if routes.lines().skip(1).any(|row| {
+        row.split_ascii_whitespace()
+            .next()
+            .is_some_and(|interface| interface.as_bytes() == link.to_bytes())
+    }) {
+        return Err(io::Error::other("owned interface retained an IPv4 route"));
+    }
+    Ok(())
+}
+
 pub(crate) struct Bridge {
     links: Links,
     dns: UdpSocket,
@@ -539,8 +551,10 @@ impl SharedLinks {
             .ok_or_else(|| io::Error::other("bridge slot is empty"))?;
         self.route.remove(port.index)?;
         assert_link_absent(&port.name)?;
+        assert_routes_absent(&port.name)?;
         let result = in_namespace(&port.target, || {
             assert_link_absent(PEER)?;
+            assert_routes_absent(PEER)?;
             assert_address_absent(port.address)
         });
         enter_namespace(&self.namespace)?;
@@ -558,6 +572,7 @@ impl SharedLinks {
         self.route.remove(self.bridge)?;
         self.bridge = 0;
         assert_link_absent(BRIDGE)?;
+        assert_routes_absent(BRIDGE)?;
         assert_address_absent(BRIDGE_IP)
     }
 }

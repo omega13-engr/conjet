@@ -58,6 +58,10 @@ pub struct ResourceLimits {
     pub cpu_millicores: u32,
 }
 
+pub fn valid_network_alias(alias: &str) -> bool {
+    crate::bridge_dns::valid_name(alias)
+}
+
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum SpecError {
     #[error("launch requires a valid boot ID")]
@@ -184,9 +188,10 @@ impl LaunchSpec {
             return Err(SpecError::Identity);
         }
         if !matches!(spec.network.as_str(), "none" | "bridge")
-            || spec.network_alias.as_ref().is_some_and(|alias| {
-                spec.network != "bridge" || !crate::bridge_dns::valid_name(alias)
-            })
+            || spec
+                .network_alias
+                .as_ref()
+                .is_some_and(|alias| spec.network != "bridge" || !valid_network_alias(alias))
         {
             return Err(SpecError::Network);
         }

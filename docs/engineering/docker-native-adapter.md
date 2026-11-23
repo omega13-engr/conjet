@@ -107,9 +107,18 @@ UID/GID 65532. It accepts absolute paths or resolves bare executable names
 using the workload's PATH. The candidate admits one active guest exec
 with a two-second deadline and 8 KiB combined output. Exec reports the
 actual process status and surfaces output overflow explicitly. Interactive
-input, TTY, exec context overrides, Compose, networking, build, full event
-streaming, guest root credentials and prepared OCI remain outside the
-verified subset.
+input, TTY, exec context overrides, Compose, build, full event streaming,
+guest root credentials and prepared OCI remain outside the verified subset.
+
+The candidate also supports one named internal IPv4 bridge. The
+unmodified CLI exercised network create, inspect, remove, connect and
+disconnect, including reconnecting an already-running bridged workload,
+and resolved one scoped DNS alias per container. The pinned Alpine
+workloads completed an HTTP transaction across the bridge. Container
+inspection reports the guest address after exec confirmation. Live
+connect requires a workload that was started with bridge permissions.
+The verified scope uses the fixed private subnet and no guest egress,
+custom IPAM, host networking or port publication.
 
 The retained live test command is:
 

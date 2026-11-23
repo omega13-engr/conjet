@@ -28,7 +28,7 @@ pub(super) fn name(value: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
 }
 
-fn falsey(value: &Value) -> bool {
+pub(super) fn falsey(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::Bool(value) => !value,
@@ -39,7 +39,10 @@ fn falsey(value: &Value) -> bool {
     }
 }
 
-fn object<'a>(value: &'a Value, name: &str) -> Result<Option<&'a Map<String, Value>>, Rejected> {
+pub(super) fn object<'a>(
+    value: &'a Value,
+    name: &str,
+) -> Result<Option<&'a Map<String, Value>>, Rejected> {
     if value.is_null() {
         Ok(None)
     } else {
@@ -50,7 +53,11 @@ fn object<'a>(value: &'a Value, name: &str) -> Result<Option<&'a Map<String, Val
     }
 }
 
-fn options(value: &Map<String, Value>, allow: &[&str], label: &str) -> Result<(), Rejected> {
+pub(super) fn options(
+    value: &Map<String, Value>,
+    allow: &[&str],
+    label: &str,
+) -> Result<(), Rejected> {
     for (key, value) in value {
         if !allow.contains(&key.as_str()) && !falsey(value) {
             return Err(Rejected::bad(format!(

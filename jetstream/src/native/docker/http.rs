@@ -341,6 +341,41 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             }
             reply
         }
+        ("GET", "/networks") if query.is_empty() => Reply::json(200, owner.list_networks()),
+        ("POST", "/networks/create") if query.is_empty() => {
+            let body = serde_json::from_slice(&request.body)
+                .map_err(|_| Rejected::bad("invalid Docker network request"))?;
+            Reply::json(201, owner.create_network(body)?)
+        }
+        (_, _) if path.starts_with("/networks/") => {
+            let route = &path["/networks/".len()..];
+            let (reference, operation) = route.split_once('/').unwrap_or((route, ""));
+            let reference = decode(reference)?;
+            if !super::request::name(&reference) {
+                return Err(Rejected::bad("invalid Docker network identifier"));
+            }
+            match (method, operation) {
+                ("GET", "")
+                    if query.iter().all(|(name, value)| {
+                        (name == "verbose" && disabled(Some(value)))
+                            || (name == "scope" && value.is_empty())
+                    }) =>
+                {
+                    Reply::json(200, owner.inspect_network(&reference)?)
+                }
+                ("DELETE", "") if query.is_empty() => {
+                    owner.remove_network(&reference)?;
+                    Reply::empty(204)
+                }
+                ("POST", "connect" | "disconnect") if query.is_empty() => {
+                    let body = serde_json::from_slice(&request.body)
+                        .map_err(|_| Rejected::bad("invalid Docker network change body"))?;
+                    super::network::change(owner, &reference, &body, operation == "connect")?;
+                    Reply::empty(200)
+                }
+                _ => return Err(Rejected::bad("unsupported Docker network request")),
+            }
+        }
         ("GET", _) if path.starts_with("/images/") && path.ends_with("/json") => {
             let reference = decode(&path["/images/".len()..path.len() - "/json".len()])?;
             Reply::json(200, owner.inspect_image(&reference)?)
@@ -539,7 +574,15 @@ fn container(
             );
             let container = &item.container;
             let mut config = container.config.clone();
+            let mut host = container.config["HostConfig"].clone();
             config["Tty"] = json!(false);
+            let networks = state.network.as_ref().map_or_else(|| json!({}), |attachment| {
+                json!({(attachment.network.name.as_str()):attachment.inspect(state.network_address.as_deref())})
+            });
+            host["NetworkMode"] = json!(state
+                .network
+                .as_ref()
+                .map_or("none", |attachment| attachment.network.name.as_str()));
             let specs = container.spec["argv"].as_array().expect("validated args");
             let mut reply = Reply::json(
                 200,
@@ -549,7 +592,7 @@ fn container(
                     "RestartCount":state.generation,
                     "State":{"Status":status,"Running":status=="running","ExitCode":code,
                              "Error":state.error.as_deref().unwrap_or("")},
-                    "Config":config,"HostConfig":container.config["HostConfig"],"NetworkSettings":{"Networks":{}},
+                    "Config":config,"HostConfig":host,"NetworkSettings":{"Networks":networks},
                 }),
             );
             reply.attributed = true;

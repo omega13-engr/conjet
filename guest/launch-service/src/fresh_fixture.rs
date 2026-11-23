@@ -109,6 +109,22 @@ struct Exec {
     argv: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetworkRequest {
+    boot_id: String,
+    budget_ms: u64,
+    operation: NetworkOperation,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum NetworkOperation {
+    Connect { handle: Handle, alias: String },
+    Disconnect { handle: Handle },
+    Remove,
+}
+
 const OUTPUT_CHUNK_LIMIT: usize = 8192;
 const OCI_CONCURRENCY: usize = 8;
 const OCI_RECORDS: usize = 24;
@@ -1124,6 +1140,97 @@ impl FreshFixture {
         Ok(())
     }
 
+    fn network(&self, operation: NetworkOperation, boot: &str, deadline: Instant) -> Reply {
+        let mut network = self.private_network.lock().expect("private bridge");
+        let mut ledger = self.ledger.lock().expect("fresh ledger");
+        if ledger.closing || deadline <= Instant::now() {
+            return Err(("busy", "private bridge is draining"));
+        }
+        let (handle, alias) = match operation {
+            NetworkOperation::Remove => {
+                if ledger.active().any(|record| record.network_alias.is_some()) {
+                    return Err(("busy", "private bridge still owns workloads"));
+                }
+                if let Some(owned) = network.take() {
+                    owned
+                        .close()
+                        .map_err(|_| ("cleanup_failed", "cannot verify bridge removal"))?;
+                }
+                return Ok((Kind::Network, json!({"removed":true})));
+            }
+            NetworkOperation::Connect { handle, alias } => {
+                if !crate::bridge_dns::valid_name(&alias) {
+                    return Err(("unsupported_option", "invalid private network alias"));
+                }
+                if ledger.active().any(|record| {
+                    record
+                        .network_alias
+                        .as_ref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&alias))
+                }) {
+                    return Err(("busy", "private network alias is already owned"));
+                }
+                (handle, Some(alias))
+            }
+            NetworkOperation::Disconnect { handle } => (handle, None),
+        };
+        if handle.boot_id != boot {
+            return Err(("stale_generation", "unexpected native workload boot ID"));
+        }
+        let record = ledger
+            .record_mut(&handle.workload_id)
+            .filter(|record| record.handle == handle && record.phase == Phase::Running)
+            .ok_or((
+                "not_running",
+                "native network requires the current running workload",
+            ))?;
+        let (_, pidfd) = record
+            .exec_context
+            .as_ref()
+            .filter(|(spec, _)| spec.network == "bridge")
+            .ok_or((
+                "unsupported_option",
+                "workload was not admitted with bridge permissions",
+            ))?;
+        let id = crate::handshake::unhex::<16>(&handle.workload_id)
+            .map_err(|_| ("malformed", "invalid workload ID"))?;
+        if let Some(alias) = alias {
+            if record.network_address.is_some() {
+                return Err(("busy", "workload already owns a bridge port"));
+            }
+            let target = crate::exec_fixture::target_network(pidfd)
+                .map_err(|_| ("not_running", "cannot retain its live network namespace"))?;
+            if network.is_none() {
+                *network = Some(
+                    crate::bridge_fixture::NetworkOwner::new()
+                        .map_err(|_| ("network_failed", "cannot create the private bridge"))?,
+                );
+            }
+            let address = network
+                .as_mut()
+                .expect("private bridge")
+                .attach(id, target, &alias)
+                .map_err(|_| ("network_failed", "private bridge peer attachment failed"))?;
+            record.network_address = Some(address);
+            record.network_alias = Some(alias);
+        } else {
+            if record.network_address.is_none() {
+                return Err(("not_found", "workload has no bridge port"));
+            }
+            network
+                .as_mut()
+                .ok_or(("cleanup_failed", "private bridge was not allocated"))?
+                .detach(id)
+                .map_err(|_| ("cleanup_failed", "cannot verify peer removal"))?;
+            record.network_address = None;
+            record.network_alias = None;
+        }
+        record.revision += 1;
+        let response = json!({"network_address":record.network_address});
+        self.changed.notify_all();
+        Ok((Kind::Network, response))
+    }
+
     fn operation(self: &Arc<Self>, frame: &Frame, boot: &str, connection: ConnectionId) -> Reply {
         fn parse<T: serde::de::DeserializeOwned>(frame: &Frame) -> Result<T, Failure> {
             frame
@@ -1256,6 +1363,15 @@ impl FreshFixture {
                     self.changed.notify_all();
                 }
                 Ok((Kind::Memory, guard.memory_snapshot(self.oci)))
+            }
+            Kind::Network if self.oci => {
+                let request: NetworkRequest = parse(frame)?;
+                if request.boot_id != boot {
+                    return Err(("stale_generation", "unexpected boot ID"));
+                }
+                let expires = deadline(request.budget_ms)?;
+                drop(guard);
+                self.network(request.operation, boot, expires)
             }
             Kind::Exec if self.oci => {
                 let request: Exec = parse(frame)?;

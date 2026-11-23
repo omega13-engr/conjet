@@ -104,7 +104,7 @@ pub(crate) fn receive_event(socket: i32) -> io::Result<Option<(u8, Vec<OwnedFd>)
     Ok(Some((event, received)))
 }
 
-fn target_root(pidfd: &OwnedFd) -> io::Result<File> {
+fn pinned_target(pidfd: &OwnedFd, open: impl FnOnce(i32) -> io::Result<File>) -> io::Result<File> {
     let live = || {
         checked(unsafe {
             libc::syscall(
@@ -126,14 +126,24 @@ fn target_root(pidfd: &OwnedFd) -> io::Result<File> {
         })
         .filter(|pid| *pid > 1)
         .ok_or_else(|| io::Error::other("target pidfd has no live PID"))?;
-    let root = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
-        .open(format!("/proc/{pid}/root"))?;
+    let file = open(pid)?;
     // A numeric PID can't be reused while its original process is live.
     // Recheck the pinned process before using the directory just opened.
     live()?;
-    Ok(root)
+    Ok(file)
+}
+
+fn target_root(pidfd: &OwnedFd) -> io::Result<File> {
+    pinned_target(pidfd, |pid| {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+            .open(format!("/proc/{pid}/root"))
+    })
+}
+
+pub(crate) fn target_network(pidfd: &OwnedFd) -> io::Result<File> {
+    pinned_target(pidfd, |pid| File::open(format!("/proc/{pid}/ns/net")))
 }
 
 fn dup_high(fd: i32) -> io::Result<OwnedFd> {

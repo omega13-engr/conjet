@@ -151,6 +151,7 @@ impl Server {
                         | Kind::Inspect
                         | Kind::Image
                         | Kind::Exec
+                        | Kind::Network
                 )
             {
                 fresh.dispatch(

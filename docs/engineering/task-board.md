@@ -948,16 +948,26 @@ Acceptance Criteria:
 - Test allocation rollback, address reuse, concurrent cleanup and namespace isolation. Confirm removal of owned veth, routes, addresses and DNS records.
 - No legacy networking owner or production interface may satisfy the fixture.
 
-Problem and Evidence: The source bridge research does not yet implement Docker or Compose network ownership on the native endpoint.
+Problem and Evidence: SPEED-035C connected real OCI workloads. Docker
+still required an explicit network owner and operations for guest teardown.
 
-Approach:
+Approach: Expose one named internal bridge on the Rust Docker owner.
+Validate its attachments before container admission. Send live peer
+changes to the authenticated guest using the current workload handle.
+Return success from network removal only after guest teardown.
 
-1. Add a two-container DNS/TCP integration fixture and attach it to the native lifecycle state machine.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
+Evidence: DONE. Built release guest and Jetstream from the working tree
+on `4d4a212`. Ran `run-conjet-speedup.py --diagnostics docker-network`,
+`guest-bridge`, and `control` in separate private VM boots. The
+unmodified Docker CLI ran the pinned Alpine DNS and HTTP transaction,
+inspected a bridge with two live endpoints, disconnected and reconnected
+a live peer, observed NXDOMAIN and then address reuse, removed two peers
+concurrently, and removed and recreated the network. Malformed options,
+a duplicate alias, a second bridge, and removal with attached
+containers were rejected. Guest link, address and route checks passed
+before teardown. The earlier SPEED-035A failure injection verified
+partial allocation rollback. Test logs, commands, artifact hashes and
+raw outcomes are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-035`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
@@ -966,10 +976,15 @@ Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [detailed result format](docker-benchmark-results.md),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local diff, guest and Jetstream tests, ARM64 guest Clippy and
+isolated checks passed. The verified Docker scope is one internal IPv4
+bridge and one alias per endpoint. Live attach requires a workload
+started with bridge permissions. The launchers verified unchanged
+production and removed their task-owned processes, sessions and sockets.
+Independent PR review remains required.
 
-Next Action: Add a two-container DNS/TCP integration fixture and attach it to the native lifecycle state machine.
+Next Action: Forward one loopback TCP port to a scoped native target
+in SPEED-036.
 
 ### SPEED-036
 
@@ -977,7 +992,7 @@ Title: Publish one native container port on host loopback
 
 Description: Implement a scoped loopback port mapping for the Node/Redis application fixture.
 
-Is blocked by task: SPEED-035.
+Is blocked by task: SPEED-035 (DONE).
 
 Acceptance Criteria:
 

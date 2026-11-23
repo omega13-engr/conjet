@@ -2,6 +2,7 @@
 mod exec;
 mod http;
 mod image;
+mod network;
 mod registry;
 mod request;
 
@@ -398,6 +399,7 @@ fn wait_for_native(
     let handle = state["handle"].clone();
     let mut sent_signal = 0;
     let mut waits = 0;
+    let mut awaiting_address = item.state().network.is_some();
     while state["cleanup"] != "complete" {
         ensure!(
             state["cleanup"] != "failed" && admitted.elapsed() < Duration::from_secs(32),
@@ -420,7 +422,7 @@ fn wait_for_native(
             };
             peer.exchange(
                 Kind::Wait, Kind::State,
-                &json!({"handle":handle,"after_revision":u64::MAX,"budget_ms":100,"terminal_output":true,
+                &json!({"handle":handle,"after_revision":if awaiting_address { state["revision"].as_u64().context("invalid workload revision")? } else { u64::MAX },"budget_ms":100,"terminal_output":true,
                         "live_output":{"stdout":stdout,"stderr":stderr}}),
                 Duration::from_secs(2),
             )
@@ -433,6 +435,17 @@ fn wait_for_native(
             state["handle"] == handle,
             "native workload identity changed"
         );
+        if let (true, Some("running"), Some(address)) = (
+            awaiting_address,
+            state["phase"].as_str(),
+            state["network_address"].as_str(),
+        ) {
+            let mut lifecycle = item.state();
+            if lifecycle.network.is_some() && lifecycle.network_address.is_none() {
+                lifecycle.network_address = Some(checked_network_address(address)?);
+            }
+            awaiting_address = false;
+        }
         if let Some(live) = state.get("live_output") {
             item.publish_output(generation, live)?;
         }
@@ -536,6 +549,8 @@ struct Lifecycle {
     previous: VecDeque<(u64, Arc<Terminal>)>,
     live: [Vec<u8>; 2],
     native_handle: Option<Value>,
+    network: Option<network::Attachment>,
+    network_address: Option<String>,
 }
 
 impl Lifecycle {
@@ -620,6 +635,16 @@ struct Ledger {
     execs: VecDeque<Arc<exec::Entry>>,
     poisoned: bool,
     closing: bool,
+    network: Option<network::Network>,
+}
+
+fn checked_network_address(address: &str) -> anyhow::Result<String> {
+    let octets = address.parse::<std::net::Ipv4Addr>()?.octets();
+    ensure!(
+        matches!(octets, [198, 18, 0, 2..=9]),
+        "invalid private bridge address"
+    );
+    Ok(address.to_owned())
 }
 
 struct Owner {
@@ -699,6 +724,210 @@ impl Owner {
             self.with_guest(|peer| store.ensure_guest(peer, &image))?;
         }
         Ok(spec)
+    }
+
+    fn check_network_alias(ledger: &Ledger, alias: &str) -> Result<(), Rejected> {
+        if ledger.active.iter().any(|item| {
+            item.state()
+                .network
+                .as_ref()
+                .is_some_and(|entry| entry.alias.eq_ignore_ascii_case(alias))
+        }) {
+            return Err(Rejected(409, "private DNS alias is already owned".into()));
+        }
+        Ok(())
+    }
+
+    fn create_network(&self, config: Value) -> Result<Value, Rejected> {
+        let mut ledger = self.ledger.lock().unwrap();
+        if ledger.closing || ledger.poisoned || ledger.network.is_some() {
+            return Err(Rejected(
+                409,
+                "private bridge is occupied or unresolved".into(),
+            ));
+        }
+        let id =
+            hex(&random::<32>()
+                .map_err(|_| Rejected::internal("cannot allocate network identity"))?);
+        ledger.network = Some(network::Network::new(&config, id.clone())?);
+        Ok(json!({"Id":id,"Warning":""}))
+    }
+
+    fn list_networks(&self) -> Value {
+        let ledger = self.ledger.lock().unwrap();
+        json!(ledger
+            .network
+            .iter()
+            .map(|network| network.inspect(json!({})))
+            .collect::<Vec<_>>())
+    }
+
+    fn inspect_network(&self, reference: &str) -> Result<Value, Rejected> {
+        let ledger = self.ledger.lock().unwrap();
+        let network = ledger
+            .network
+            .as_ref()
+            .filter(|entry| entry.matches(reference))
+            .ok_or_else(|| Rejected(404, "private bridge was not found".into()))?;
+        let mut endpoints = serde_json::Map::new();
+        for item in &ledger.active {
+            let state = item.state();
+            if let Some(ip) = &state.network_address {
+                endpoints.insert(item.container.id.clone(),
+                    json!({"Name":item.container.name,"IPv4Address":format!("{ip}/28"),"IPv6Address":""}));
+            }
+        }
+        Ok(network.inspect(Value::Object(endpoints)))
+    }
+
+    fn remove_network(&self, reference: &str) -> Result<(), Rejected> {
+        let mut ledger = self.ledger.lock().unwrap();
+        if !ledger
+            .network
+            .as_ref()
+            .is_some_and(|network| network.matches(reference))
+        {
+            return Err(Rejected(404, "private bridge was not found".into()));
+        }
+        if ledger
+            .active
+            .iter()
+            .any(|item| item.state().network.is_some())
+        {
+            return Err(Rejected(
+                409,
+                "private bridge still has attached containers".into(),
+            ));
+        }
+        let reply = self.exchange_network(json!({"action":"remove"}))?;
+        if reply["removed"] != true {
+            ledger.poisoned = true;
+            return Err(Rejected::internal(
+                "bridge removal acknowledgement was invalid",
+            ));
+        }
+        ledger.network = None;
+        Ok(())
+    }
+
+    fn change_network(
+        &self,
+        reference: &str,
+        item: &Item,
+        endpoint: Option<&Value>,
+    ) -> Result<(), Rejected> {
+        let _control = item.control.lock().unwrap();
+        let mut ledger = self.ledger.lock().unwrap();
+        if ledger.closing || ledger.poisoned {
+            return Err(Rejected(
+                409,
+                "private bridge is draining or unresolved".into(),
+            ));
+        }
+        let network = ledger
+            .network
+            .as_ref()
+            .filter(|entry| entry.matches(reference))
+            .ok_or_else(|| Rejected(404, "private bridge was not found".into()))?;
+        let attachment = endpoint
+            .map(|endpoint| network::Attachment::new(network, endpoint, &item.container.name))
+            .transpose()?;
+        if let Some(entry) = &attachment {
+            Self::check_network_alias(&ledger, &entry.alias)?;
+        }
+        let mut state = item.state();
+        if state.removed || state.error.is_some() {
+            return Err(Rejected(
+                404,
+                "container no longer owns an eligible lifecycle".into(),
+            ));
+        }
+        if state.network.is_some() == attachment.is_some() {
+            return Err(Rejected(
+                409,
+                "container already has that network disposition".into(),
+            ));
+        }
+        if state.started && state.terminal.is_none() {
+            let handle = state
+                .native_handle
+                .as_ref()
+                .ok_or_else(|| Rejected(409, "container launch is still pending".into()))?;
+            let operation = attachment.as_ref().map_or_else(
+                || json!({"action":"disconnect","handle":handle}),
+                |entry| json!({"action":"connect","handle":handle,"alias":entry.alias}),
+            );
+            let reply = self.exchange_network(operation)?;
+            let address = reply["network_address"]
+                .as_str()
+                .map(checked_network_address)
+                .transpose();
+            match address {
+                Ok(address) if address.is_some() == attachment.is_some() => {
+                    state.network_address = address;
+                }
+                _ => {
+                    ledger.poisoned = true;
+                    return Err(Rejected::internal(
+                        "bridge change acknowledgement was invalid",
+                    ));
+                }
+            }
+        }
+        state.network = attachment;
+        Ok(())
+    }
+
+    fn exchange_network(&self, operation: Value) -> Result<Value, Rejected> {
+        let mut native = self.native.lock().unwrap();
+        if native.broken {
+            return Err(Rejected::internal(
+                "authenticated native channel is unresolved",
+            ));
+        }
+        let mut transient;
+        let boot = native.boot.clone();
+        let peer = if let Some(peer) = native.pool.last_mut() {
+            peer
+        } else {
+            transient =
+                client::Connection::open(&native.peer_directory, &native.identity, &native.key)
+                    .map_err(|error| Rejected::internal(error.to_string()))?;
+            if transient.boot != boot {
+                return Err(Rejected::internal(
+                    "private bridge guest generation changed",
+                ));
+            }
+            &mut transient
+        };
+        match peer.exchange(
+            Kind::Network,
+            Kind::Network,
+            &json!({"boot_id":boot,"budget_ms":2500,"operation":operation}),
+            Duration::from_secs(3),
+        ) {
+            Ok(reply) => Ok(reply),
+            Err(WireError::PeerError(code)) => match code.as_str() {
+                "not_found" | "not_running" | "busy" => {
+                    Err(Rejected(409, format!("private bridge: {code}")))
+                }
+                "unsupported_option" => Err(Rejected::bad(
+                    "container requires bridge permissions at start",
+                )),
+                "cleanup_failed" => {
+                    native.broken = true;
+                    Err(Rejected::internal("private bridge cleanup is unresolved"))
+                }
+                _ => Err(Rejected::internal(format!(
+                    "private bridge rejected operation: {code}"
+                ))),
+            },
+            Err(error) => {
+                native.broken = true;
+                native.pool.clear();
+                Err(Rejected::internal(error.to_string()))
+            }
+        }
     }
 
     fn inspect_image(&self, reference: &str) -> Result<Value, Rejected> {
@@ -820,10 +1049,21 @@ impl Owner {
                 ));
             }
         }
-        let spec = self.process(&config)?;
         let id = hex(&random::<32>()
             .map_err(|_| Rejected::internal("cannot allocate container identity"))?);
         let name = name.unwrap_or(&id[..12]).to_owned();
+        let network = network::configured(&config, ledger.network.as_ref(), &name)?;
+        if let Some(attachment) = &network {
+            Self::check_network_alias(&ledger, &attachment.alias)?;
+        }
+        let spec = if network.is_some() {
+            let mut process = config.clone();
+            process["HostConfig"]["NetworkMode"] = json!("none");
+            process["NetworkingConfig"] = Value::Null;
+            self.process(&process)?
+        } else {
+            self.process(&config)?
+        };
         let auto_remove = config["HostConfig"]["AutoRemove"] == true;
         let item = Arc::new(Item {
             container: Container {
@@ -834,7 +1074,10 @@ impl Owner {
                 auto_remove,
                 cancel: AtomicU8::new(0),
             },
-            state: Mutex::new(Lifecycle::default()),
+            state: Mutex::new(Lifecycle {
+                network,
+                ..Lifecycle::default()
+            }),
             control: Mutex::new(()),
             changed: Condvar::new(),
         });
@@ -892,10 +1135,16 @@ impl Owner {
             state.generation
         };
         item.container.cancel.store(0, Ordering::Release);
+        let spec = state.network.as_ref().map(|attachment| {
+            let mut spec = item.container.spec.clone();
+            spec["network"] = json!("bridge");
+            spec["network_alias"] = json!(attachment.alias);
+            spec
+        });
         let owner = self.clone();
         let work = item.clone();
         let worker = thread::Builder::new()
-            .spawn(move || owner.run(work, generation))
+            .spawn(move || owner.run(work, generation, spec.as_ref()))
             .map_err(|_| Rejected::internal("native worker allocation failed"))?;
         ledger.workers.push(worker);
         if let Some(terminal) = state.terminal.take() {
@@ -908,6 +1157,7 @@ impl Owner {
         state.generation = generation;
         state.live = Default::default();
         state.native_handle = None;
+        state.network_address = None;
         state.started = true;
         if restart {
             self.event(&mut ledger, "restart", item, None);
@@ -917,7 +1167,7 @@ impl Owner {
         Ok(())
     }
 
-    fn run(&self, item: Arc<Item>, generation: u64) {
+    fn run(&self, item: Arc<Item>, generation: u64, spec: Option<&Value>) {
         let signal = item.container.cancel.load(Ordering::Acquire);
         let terminal = if signal != 0 {
             Ok(Terminal {
@@ -928,7 +1178,11 @@ impl Owner {
                 witness: json!({"cleanup":"not_admitted"}),
             })
         } else {
-            let admitted = self.native.lock().unwrap().begin(&item.container.spec);
+            let admitted = self
+                .native
+                .lock()
+                .unwrap()
+                .begin(spec.unwrap_or(&item.container.spec));
             admitted.and_then(|mut admitted| {
                 item.state().native_handle = Some(admitted.state["handle"].clone());
                 let result = wait_for_native(&mut admitted, &item, generation);
@@ -939,6 +1193,7 @@ impl Owner {
         let mut ledger = self.ledger.lock().unwrap();
         let mut state = item.state();
         state.native_handle = None;
+        state.network_address = None;
         match terminal {
             Ok(terminal) => {
                 self.event(&mut ledger, "die", &item, Some(&terminal));

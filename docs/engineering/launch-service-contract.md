@@ -412,3 +412,10 @@ upstream forwarding. State reports `network_address` while the port is
 owned. Terminal cleanup verifies link and address removal. It removes
 the DNS alias before acknowledging the workload as removed. The bridge
 and DNS listener are closed on orderly shutdown.
+
+Kind 23, Network, takes `boot_id`, `budget_ms` and a typed
+`operation`. `disconnect` takes the live `handle`. `connect` takes
+the live `handle` and `alias` and requires a previously bridged
+workload with a detached endpoint. They return `network_address`,
+which is null after detach. `remove` requires no owned peers and
+replies `{"removed":true}` after verified bridge and DNS teardown.
