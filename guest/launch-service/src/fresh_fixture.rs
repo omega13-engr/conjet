@@ -442,7 +442,7 @@ impl FreshFixture {
             return Err("fixture intent directory must be private to root".into());
         }
         let intent = Intent::open(directory);
-        if intent.read()?.is_some() {
+        if intent.read()?.is_some() || (oci && !intent.scoped_inventory()?.is_empty()) {
             return Err("unresolved fresh workload intent".into());
         }
         // Reparent orphans from an interrupted helper here, while the live
@@ -711,13 +711,20 @@ impl FreshFixture {
                 return;
             }
         }
-        let result = self.intent.record(id).and_then(|()| {
+        let scoped;
+        let intent = if oci_process.is_some() {
+            scoped = self.intent.scoped(id);
+            &scoped
+        } else {
+            &self.intent
+        };
+        let result = intent.record(id).and_then(|()| {
             let output = self.run_helper(id, limits, mode, bridge, prepared, oci_process)?;
             if oci_process.is_some() {
                 crate::kernel_fixture::assert_owned_cgroup_absent(id)?;
                 crate::sandbox_fixture::assert_owned_absent(id)?;
             }
-            self.intent.complete(id)?;
+            intent.complete(id)?;
             Ok(output)
         });
         if let Err(error) = &result {

@@ -108,7 +108,7 @@ def postflight(session, pid, digest, expected_boot, output):
         original = launch(stream, state, state['image_digest'], ['/bin/true'])
         original = terminal(stream, original['handle'])
         if original['cleanup'] != 'complete' or original['exit'] != {'code': 0}:
-            raise RuntimeError('the original boot image no longer runs')
+            raise RuntimeError(f'the original boot image no longer runs: {original}')
         scopes = []
         for _ in range(2):
             imported = launch(stream, inspect(stream), digest, ['/bin/busybox', 'sleep', '30'])

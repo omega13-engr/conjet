@@ -116,10 +116,6 @@ pub fn run_helper(
     }
     let id = args.next().ok_or("fresh workload ID required")?;
     let id = handshake::unhex(id.to_str().ok_or("invalid workload ID")?)?;
-    let intent = crate::intent::Intent::open(Path::new(crate::intent::DIRECTORY));
-    if intent.read()? != Some(id) {
-        return Err("fresh helper does not own the recorded workload".into());
-    }
     let limits = ResourceLimits {
         memory_bytes: number(&mut args)?,
         pids: number(&mut args)?,
@@ -133,6 +129,15 @@ pub fn run_helper(
     ) && !test_mode(mode)
     {
         return Err("unknown fixture helper mode".into());
+    }
+    let intent = crate::intent::Intent::open(Path::new(crate::intent::DIRECTORY));
+    let intent = if mode == "native-oci" {
+        intent.scoped(id)
+    } else {
+        intent
+    };
+    if intent.read()? != Some(id) {
+        return Err("fresh helper does not own the recorded workload".into());
     }
     let network = args.next().ok_or("fixture network mode required")?;
     let prepared = match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {

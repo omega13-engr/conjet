@@ -16,6 +16,8 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
     }
     let _proc = kernel_fixture::ProcMount::new()?;
     let intent = Intent::open(Path::new(DIRECTORY));
+    let oci = matches!(profile, crate::guest::Profile::Native)
+        && Path::new(sandbox_fixture::OCI_MARKER).try_exists()?;
     for attempt in 0..2 {
         let mut service = Command::new("/init")
             .arg(match profile {
@@ -30,14 +32,26 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
         let status = service.wait()?;
         reap_owned_children(-pgid)?;
         if status.success() {
-            if intent.read()?.is_some() {
+            if intent.read()?.is_some() || (oci && !intent.scoped_inventory()?.is_empty()) {
                 return Err("fresh supervisor stopped with an outstanding workload".into());
             }
             kernel_fixture::assert_cgroup_absent()?;
             sandbox_fixture::assert_absent()?;
             return Ok(());
         }
-        if let Some(id) = intent.read()? {
+        if oci {
+            // An older single-OCI boot could have used the legacy intent
+            // filename while allocating identity-scoped resource paths.
+            let legacy = intent.read()?;
+            for (id, record) in intent.scoped_inventory()? {
+                recover_oci(id)?;
+                record.complete(id)?;
+            }
+            if let Some(id) = legacy {
+                recover_oci(id)?;
+                intent.complete(id)?;
+            }
+        } else if let Some(id) = intent.read()? {
             kernel_fixture::recover_cgroup(id, false)?;
             sandbox_fixture::recover(id, false)?;
             kernel_fixture::assert_cgroup_absent()?;
@@ -50,6 +64,15 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
         println!("conjet-launchd supervisor attempt {attempt} exited {status}");
     }
     Err("fresh supervisor restart budget exhausted".into())
+}
+
+fn recover_oci(id: [u8; 16]) -> io::Result<()> {
+    kernel_fixture::recover_cgroup(id, true)?;
+    sandbox_fixture::recover(id, true)?;
+    kernel_fixture::assert_owned_cgroup_absent(id)?;
+    sandbox_fixture::assert_owned_absent(id)?;
+    println!("conjet-launchd reconciled OCI workload {}", hex(&id));
+    Ok(())
 }
 
 fn kill_owned_group(pgid: libc::pid_t) -> io::Result<()> {

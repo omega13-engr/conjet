@@ -500,8 +500,53 @@ recovery paths address the exact workload ID. The launcher verified unchanged
 production and removed its guest and socket. The owner still admits one
 workload. Independent PR review is separate.
 
-Next Action: Bound independent intent and terminal records, scope recovery
-to the owning helper, and qualify simultaneous admission in SPEED-033.
+Next Action: Bound independent intent records in SPEED-033B.
+
+### SPEED-033B
+
+Title: Persist an independent OCI intent for each workload ID
+
+Description: Bind the OCI helper's startup and restart recovery to
+its own durable intent record.
+
+Is blocked by task: SPEED-033A (DONE).
+
+Acceptance Criteria:
+
+- Retain two independent intents in a bounded inventory and remove
+  exactly the one whose owner has confirmed cleanup.
+- Fail closed on corrupt or mismatched intent data. Verify the helper
+  opens the scoped intent before allocating resources.
+- Pass the isolated OCI cancellation, failed-exec and cleanup canaries
+  with the scoped intents.
+
+Problem and Evidence: The guest's original one-file intent serialized
+all workloads, even after resource paths became independent.
+
+Approach: Qualify OCI intent paths by workload ID, then have the guest
+supervisor reconcile the validated inventory after losing its child service.
+
+Evidence: DONE. Ran guest `cargo test --locked`, formatting and ARM64 Clippy.
+The inventory test verifies two simultaneous intents and corrupt-record
+rejection. Built the release guest on `bc2c1f8` and ran
+`python3 build-support/run-conjet-speedup.py --diagnostics oci-import`.
+An initial live failure exposed a stale helper lookup of the legacy filename.
+The corrected pilot passed launch, cancellation, failed-exec cleanup and
+overlay checks. Logs, artifact hashes, and both launcher outcomes are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-033B`.
+
+Source: [Launch service contract](launch-service-contract.md),
+[`intent.rs`](../../guest/launch-service/src/intent.rs),
+[`recovery_fixture.rs`](../../guest/launch-service/src/recovery_fixture.rs).
+
+Review: Local diff and runtime checks passed. Intent reservation precedes
+helper allocation and intent deletion follows owned-resource verification.
+Restart inventory reconciliation was reviewed. The OCI live checks did not
+kill the supervisor. Production snapshots matched and sessions were removed.
+Independent PR review is separate.
+
+Next Action: Route guest lifecycle transitions to a bounded record table
+and scope helper reaping before allowing simultaneous work in SPEED-033.
 
 ### SPEED-033
 
@@ -509,7 +554,7 @@ Title: Replace the single workload slot with bounded lifecycle records
 
 Description: Implement native create/start/wait/stop/kill/restart/remove for up to eight admitted containers.
 
-Is blocked by task: SPEED-033A (DONE).
+Is blocked by task: SPEED-033B (DONE).
 
 Acceptance Criteria:
 

@@ -12,13 +12,48 @@ pub(crate) const DIRECTORY: &str = "/run/conjet/fresh-intent";
 // process losing memory, but disappears with the disposable guest.
 pub(crate) struct Intent {
     directory: PathBuf,
+    name: String,
 }
 
 impl Intent {
     pub(crate) fn open(directory: &Path) -> Self {
         Self {
             directory: directory.into(),
+            name: "active".into(),
         }
+    }
+
+    pub(crate) fn scoped(&self, id: [u8; 16]) -> Self {
+        Self {
+            directory: self.directory.clone(),
+            name: format!("oci-{}", hex(&id)),
+        }
+    }
+
+    pub(crate) fn scoped_inventory(&self) -> io::Result<Vec<([u8; 16], Self)>> {
+        let mut intents = Vec::new();
+        let entries = match self.directory.read_dir() {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(intents),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let raw = entry.file_name();
+            let Some(name) = raw.to_str().and_then(|name| name.strip_prefix("oci-")) else {
+                continue;
+            };
+            let id = unhex::<16>(name).map_err(io::Error::other)?;
+            let intent = self.scoped(id);
+            if intent.read()? != Some(id) || intents.len() >= 8 {
+                return Err(io::Error::other(
+                    "invalid or excessive OCI workload intents",
+                ));
+            }
+            intents.push((id, intent));
+        }
+        intents.sort_unstable_by_key(|(id, _)| *id);
+        Ok(intents)
     }
 
     pub(crate) fn record(&self, id: [u8; 16]) -> io::Result<()> {
@@ -26,7 +61,7 @@ impl Intent {
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(self.directory.join("active"))?;
+            .open(self.directory.join(&self.name))?;
         // A truncated record after interruption is retained and fails closed.
         // Exclusive creation also prevents a second owner overwriting it.
         file.write_all(hex(&id).as_bytes())?;
@@ -38,7 +73,7 @@ impl Intent {
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.directory.join("active"))
+            .open(self.directory.join(&self.name))
         {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -64,7 +99,7 @@ impl Intent {
                 "workload intent changed during cleanup",
             ));
         }
-        fs::remove_file(self.directory.join("active"))?;
+        fs::remove_file(self.directory.join(&self.name))?;
         File::open(&self.directory)?.sync_all()
     }
 }
@@ -100,5 +135,41 @@ mod tests {
         fs::write(private.join("active"), b"truncated").unwrap();
         assert!(reopened.complete([7; 16]).is_err());
         assert!(private.join("active").is_file());
+    }
+
+    #[test]
+    fn scans_scoped_intents_and_only_releases_the_named_owner() {
+        let suffix: [u8; 16] = crate::handshake::random().unwrap();
+        let directory = std::env::temp_dir().join(format!("conjet-scoped-intent-{}", hex(&suffix)));
+        fs::create_dir(&directory).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(directory.clone());
+        let base = Intent::open(&directory);
+        let first = [1; 16];
+        let second = [2; 16];
+        base.scoped(first).record(first).unwrap();
+        base.scoped(second).record(second).unwrap();
+        assert_eq!(
+            base.scoped_inventory()
+                .unwrap()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            [first, second]
+        );
+        assert!(base.scoped(first).complete(second).is_err());
+        base.scoped(first).complete(first).unwrap();
+        assert_eq!(base.scoped_inventory().unwrap()[0].0, second);
+        fs::write(
+            directory.join(format!("oci-{}", hex(&second))),
+            "mismatched",
+        )
+        .unwrap();
+        assert!(base.scoped_inventory().is_err());
     }
 }
