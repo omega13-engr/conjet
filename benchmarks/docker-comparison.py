@@ -173,6 +173,7 @@ def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None, group
                 matrix['run_matrix'](mode, manifest, report, output, docker, env, build_bases, connection)
         finally:
             connection.close()
+        report['vm_backing_after'] = observed_disks(engine, peer, disks)
         report['host_after'] = TOOLS['sample_host'](peer_args, output / 'footprint-after.json')
         report['passed'] = True
     except BaseException as error:

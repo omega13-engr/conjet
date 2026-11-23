@@ -43,8 +43,12 @@ def summarize(path):
     result = {key: data.get(key) for key in ('engine', 'backend', 'mode', 'passed', 'error',
                                             'selected_group', 'harness_revision', 'guest',
                                             'host_before', 'host_after', 'engine_sha256',
-                                            'manifest_sha256', 'vm_backing', 'clients')}
+                                            'manifest_sha256', 'vm_backing', 'vm_backing_after', 'clients')}
     result['source'] = str(path)
+    if result['vm_backing'] is not None and result['vm_backing_after'] is not None:
+        before, after = result['vm_backing'], result['vm_backing_after']
+        result['vm_allocated_delta_bytes'] = {
+            disk: after[disk]['allocated_bytes'] - before[disk]['allocated_bytes'] for disk in before.keys() & after.keys()}
     groups = {}
     for group in data.get('groups', []):
         label = '/'.join(group[key] for key in ('workload', 'network', 'lane'))

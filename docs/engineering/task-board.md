@@ -739,7 +739,8 @@ safety tests and the five existing adapter tests passed. Evidence is under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-016`.
 The coordinator can run all five frozen pairs under a single foreground
 lock. New session reports record `/info` after VM readiness and probe the
-container view of guest memory outside timing.
+container view of guest memory outside timing. A second verified backing
+snapshot exposes allocated disk changes across the complete suite.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),
