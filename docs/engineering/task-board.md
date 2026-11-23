@@ -2,28 +2,21 @@
 
 Architecture: [speed engineering plan](speed-engineering-plan.md).
 
-Current iteration: [native-default Docker speed plan](native-docker-speed-plan.md).
+Current iteration: [retained Docker performance plan](native-docker-speed-plan.md).
 
-## Current native-default priority
+## Current Docker performance priority
 
-The user directs the next iteration to improve the overall Docker experience on
-the new native architecture. SPEED-027 through SPEED-045 are the active sequential
-implementation and qualification path. SPEED-027 starts from completed SPEED-018;
-the following new tasks depend on their preceding task. Candidate measurements
-must use release-optimized native Conjet selected by default in conjet-speedup.
-There is no experimental opt-in requirement for this isolated candidate and no
-silent legacy backend fallback. The installed production runtime stays untouched.
+Retain dockerd, containerd, runc, BuildKit and Compose. SPEED-046 profiles
+their release-optimized Conjet path and selects one runtime boundary
+for further evaluation. The isolated custom Docker adapter is research.
+Verified SPEED-027 through SPEED-036 tasks are retained in DONE.
+SPEED-037A remains unfinished research. SPEED-037 through SPEED-045
+are superseded and are outside the retained Docker work sequence.
 
-SPEED-019 through SPEED-026 retain their existing status and historical evidence.
-Their old Next Action lines do not authorize resuming legacy repetitions:
-new native measurement work is assigned to SPEED-040 through SPEED-044 and the
-report audit to SPEED-045. SPEED-020's completed legacy image evidence remains
-under review as historical evidence, not proof of native image support. Do not
-mark superseded or deferred work DONE merely because the new sequence exists.
-SPEED-008 remains deferred research. SPEED-013/014 review and release requirements
-remain intact; promoting the expanded native default additionally requires the
-new compatibility and qualification audit. Preserve the exact recent detailed
-report table formats, percentile units, paired intervals and failure evidence.
+SPEED-019 through SPEED-026 keep their historical evidence and status.
+SPEED-008 remains deferred research. Preserve raw failures and existing
+latency, throughput and paired-interval tables. Required independent
+review, CI, signing and publication gates remain in effect.
 
 ## Working rules
 
@@ -83,17 +76,1142 @@ report table formats, percentile units, paired intervals and failure evidence.
 
 ## Docker and native benchmark extension
 
-SPEED-015 through SPEED-026 form a new sequential benchmark program requested
-by the user. They do not mark SPEED-008 passed or change the previously authorized
-experimental release gate. SPEED-015 can start without waiting for release/signing;
-each following task depends on the preceding task. A valid slower result or an
-explicitly unsupported operation is evidence, not a reason to fabricate a pass.
-Do not call the native API Docker-compatible until actual Docker client operations
-and their semantics are verified. SPEED-018 defaults to native routing inside
-the isolated `conjet-speedup` launcher. Wider promotion requires separate
-compatibility evidence.
+SPEED-015 through SPEED-026 retain the original Docker comparison and
+experimental native-launch evidence. Their report verdicts apply to
+their recorded binaries and workloads. SPEED-037 through SPEED-045
+retain their old acceptance criteria for research provenance.
 
 ## BACKLOG
+
+### SPEED-047
+
+Title: Trace retained Docker start and wait across Jetstream and the guest
+
+Description: Attribute a single pinned no-network API workload to
+host transport and guest lifecycle spans before choosing a native
+integration boundary.
+
+Is blocked by task: SPEED-046 (DONE).
+
+Acceptance Criteria:
+
+- Capture bounded native Jetstream request/response wakeup spans on
+  the host and guest-local dockerd/containerd start and exit events.
+- Correlate by owned container identity and keep monotonic clock
+  domains separate. Record trace overhead in separate control runs.
+- Recommend one controllable optimization only if the trace
+  demonstrates a bottleneck and preserves lifecycle ownership.
+
+Problem and Evidence: Start and wait consume most observed API
+elapsed time. SPEED-046 establishes the outer boundaries only.
+
+Approach: Reuse host VSOCK observations and guest-local lifecycle
+events. Keep the existing engine and the 25 ms VMM tick while
+collecting this diagnostic.
+
+Evidence: Pending. No implementation or qualification results.
+
+Source: [SPEED-046 results](docker-benchmark-results.md),
+[retained Docker plan](native-docker-speed-plan.md).
+
+Review: Pending evidence for the selected integration boundary.
+
+Next Action: Prepare a separate scoped instrumentation change for
+the retained engine.
+
+### SPEED-014
+
+Title: Validate and release the next Conjet version
+
+Description: Release the merged speed enhancement through the existing app and,
+if required, guest Core release lanes.
+
+Is blocked by task: SPEED-013.
+
+Acceptance Criteria:
+
+- Select semantic versions from final scope and current releases; version metadata
+  and release notes identify only verified behavior and performance claims.
+- Merged revision passes applicable final checks and isolated app/DMG installation,
+  launch, signing, notarization, stapling, and Homebrew validation.
+- Required guest Core assets are released and verified compatible before the app
+  release depends on them; release tags match their respective version metadata.
+- Release workflows succeed, published assets and final checksums are verified,
+  and temporary QA processes, mounts, disks, and files are cleaned up.
+
+Problem and Evidence: Runtime performance qualification does not validate packaged
+artifacts or app/Core compatibility; the existing project has separate release lanes.
+
+Approach:
+
+1. Inspect current release workflows and versions, select the next versions, and
+   land reviewed release metadata through the repository's normal process.
+2. Run isolated release simulations and verify the final artifact and guest-asset
+   compatibility; resolve all failures before tagging.
+3. Publish the appropriate tags from qualified revisions, monitor workflows, and
+   verify release assets, Homebrew output, and cleanup.
+
+Evidence: Local rehearsal and Homebrew rendering are recorded under
+SPEED-012. The static guest is distributed in the app; the verified Core
+v1.3.1 kernel remains compatible, so a separate Core release is unnecessary.
+The production workflow fails closed on missing signing and notarization
+credentials. Its keychain setup was exercised with the system Bash,
+including a retained keychain path containing spaces. The repository
+Actions secrets endpoint reports zero
+repository secrets and the environments endpoint reports no environments.
+Developer ID certificate and Apple notarization credentials must be
+configured or their organization-level availability verified before
+production publication. Tags, workflow evidence and published assets are pending.
+The remote already publishes `conjet-v3.0.0` at `f1df932`, while this branch
+still has `VERSION=3.0.0`. An additive release that includes a qualifying
+experimental feature would use the next available minor version. The source
+Docker adapter does not add a kernel or Core image dependency. The final
+package scope and version remain pending independent review and qualification.
+
+Source: [Release process](../release.md), [Homebrew](../homebrew.md),
+[repository instructions](../../AGENTS.md).
+
+Review: Pending; verify production artifact readiness, version/tag consistency,
+asset compatibility, and evidence supporting every release claim.
+
+Next Action: Set matching version metadata and release notes for the reviewed package scope before tagging an independently approved, qualified revision. Confirm Developer ID and notarization credential availability through the release environment.
+
+## INPROGRESS
+
+### SPEED-025
+
+Title: Qualify concurrency, pressure, recovery and efficiency
+
+Description: Run the cross-workload stress matrix and quantify whether speed gains persist under realistic contention.
+
+Is blocked by task: SPEED-024.
+
+Acceptance Criteria:
+
+- Sweep declared concurrency levels for launches and representative builds/services; bound queues and report rejected, failed and timed-out work as well as successful latency.
+- Exercise CPU and guest-memory pressure, prepared-slot exhaustion/refill and active-data preservation without inducing unsafe host-wide pressure or stopping production.
+- Test request cancellation, client disconnect and task-owned runtime crash/restart with leak inventories and explicit recovery outcomes; use only disposable test state.
+- Collect host plus attributed guest CPU/memory, idle footprint, disk growth and reclamation with measurement limitations. Run energy sampling separately only when authorized and available; otherwise mark it unavailable.
+- Observe cleanup lag and steady-state resource growth independently from API acknowledgement. Unknown Kiri guest teardown remains unknown.
+
+Problem and Evidence: The matrix implements a bounded Docker launch concurrency sweep and a distinct per-container OOM canary. It requires exit 137, an OOM flag, an unchanged active-data canary in a sibling container and a fresh recovery launch. A unit test injects a native backend disconnect after submission and proves the adapter refuses replay, unverifiable removal and new admission. Guest-wide reclamation, actual runtime process loss and restart, and prepared-slot tests remain separate requirements for this program.
+
+Raw evidence: Fast sequential medians can hide queueing, memory reservation, deferred cleanup and recovery costs.
+
+Approach:
+
+1. Freeze safe resource ceilings and deterministic fault points.
+2. Run bounded stress and recovery sessions with canaries and before/after inventories.
+3. Analyze scaling, tails, failure rates, resource reclamation and optional energy without discarding adverse sessions.
+
+Evidence: `SPEED-025/pair-1` on `187e1ab` completed all 400 measured launches per engine with zero launch failures. Both observed active data after the pressure attempt and passed isolated recovery and production-preservation checks. `native-product-full-1` on `4da6d3b` passed the injected native pressure/recovery, bounded output, overload, cancellation, active shutdown and stale prior-boot handle canaries. Both native session directories were removed. It recorded 2,000 measured samples per fresh and prepared CLI/API lane. Docker pressure attribution and the remaining independent pairs are open. The [interim results](docker-benchmark-results.md#concurrency-and-recovery) retain both failures and successful rows.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Repeat remaining concurrency pairs and keep the Kiri pressure boundary unresolved. `SPEED-025/pair-2` demonstrated Conjet exit 137 and `OOMKilled=true` with verified 64 MiB memory and disabled swap. The sibling and recovery canaries passed. Kiri reported `MemorySwap=0` instead of the requested 64 MiB, so the guard stopped its pressure workload before allocation. Both engines ran the bounded launch sweep. Preserve pair 1's timeout and OOM attribution failure.
+`kiri-effective-swap.log` later observed the requested 64 MiB memory
+ceiling and zero swap directly in Kiri's guest despite the inspect
+metadata discrepancy. The pressure test still enforces those effective
+limits before allocating. `SPEED-025/pair-3` verified both effective limits
+for both engines. Conjet attributed exit 137 to OOM and recovered. Kiri's
+wait timed out and its OOM flag stayed false despite the matched effective
+limits. Both passed survivor, recovery and owner cleanup. Further Kiri
+qualification needs a verified termination or OOM witness for this load.
+
+The release-build native static run at `cabbea9` passed 8,000 timings
+and the active-data, one-use, expiry, pressure, output, backpressure,
+disconnect and shutdown canaries. Both VM directories were removed and
+production observations matched. Fresh and prepared API p99 were 4.100
+and 3.201 ms, with 3.394 ms refill p99. See raw samples and summary under
+`SPEED-025/native-product-release-cabbea9`. The Docker stress matrix
+coverage remains open.
+
+
+### SPEED-024
+
+Title: Benchmark filesystem, networking and sustained workloads
+
+Description: Measure storage and network performance plus realistic long-running service throughput.
+
+Is blocked by task: SPEED-023.
+
+Acceptance Criteria:
+
+- Test named volumes, supported host bind mounts and container writable layers separately: metadata/small files, sequential/random I/O, and fsync durability. Keep datasets and backing files on ExternalSSD.
+- Measure container-to-container DNS/TCP, published host ports, connection churn, request latency and throughput with identical topology/payload; record unsupported native networking.
+- Validate checksums, acknowledged durable writes and application responses. Use task-owned services and ports; record filesystem/cache settings and client placement.
+- Run at least one sustained application workload with latency under load and active-data canaries. Capture CPU, memory and disk growth with a declared steady-state interval.
+- Keep raw transport throughput, application readiness and launch latency as separate metrics.
+
+Problem and Evidence: The matrix implements writable-layer, volume and bind integrity workloads and a sustained Node/Redis service. It times guest DNS, Redis TCP handshake and Redis round-trip separately from the host HTTP transaction window. The storage check exercises sequential and random writes with fsync and verifies the resulting named-volume checksum in a different container. It captures effective service cgroup limits and an owned-service resource snapshot. Paired runtime timing and bulk transport coverage remain open.
+
+Raw evidence: Bridge creation timings do not measure packet performance, and static no-network execution does not establish Docker workload compatibility.
+
+Approach:
+
+1. Reuse existing filesystem/network benchmark utilities with the pinned datasets.
+2. Run storage and networking cases independently, then the application load fixture.
+3. Verify data integrity and publish topology, throughput, latency and resource observations.
+
+Evidence: `SPEED-024/pair-1` on harness `187e1ab` passed named volume, writable layer, guest transport and sustained transaction checks on both engines. Conjet refused the ExternalSSD host bind before work in all six attempts. Kiri passed it. Both reported matching service cgroup limits and clean session teardown; Conjet completed 2,648 and Kiri 4,776 verified transactions in their respective 60 s windows.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Repeat supported workloads at the remaining pair indices and add standalone bulk transport evidence. Keep the failed Conjet host-bind samples.
+
+### SPEED-023
+
+Title: Benchmark exec, streams and control-plane operations
+
+Description: Measure Docker exec, attach/logs, inspect/list/events and file copy for supported workloads.
+
+Is blocked by task: SPEED-022.
+
+Acceptance Criteria:
+
+- Separate persistent-container docker exec from fresh docker run; measure API and CLI overhead where supported.
+- Validate stdout/stderr separation, bounded large output, exit codes, stdin/TTY behavior where supported, and cancellation without deadlocks.
+- Measure inspect/list latency with fixed owned-container counts and event delivery/order under churn; do not query or manipulate production containers.
+- Measure docker cp in/out with checksummed small-file and large-file sets. Record unsupported native or Kiri behavior without substituting another operation.
+
+Problem and Evidence: The matrix implements persistent CLI exec streams and exit code, bounded output, inspect/list and checksummed file copies. The control fixture adds stdin-driven attach, logs, ordered Docker lifecycle events, TTY and idle attach disconnect recovery. Direct API exec creation, stream demultiplexing, exit inspection and container inspection have executable canaries. Paired runtime evidence remains open.
+
+Raw evidence: Interactive development and tooling depend on control-plane and stream behavior beyond launch latency.
+
+Approach:
+
+1. Add long-lived fixture containers and deterministic stream/file workloads.
+2. Run operation-specific latency and throughput cases with correctness assertions.
+3. Inspect backpressure, cancellation and cleanup evidence before publishing results.
+
+Evidence: The canceled Conjet half of `SPEED-023/pair-1` retains 274 attempted operations. It confirmed working persistent API and CLI exec, attach, TTY, disconnect/recovery and controlled file copies in the observed repetitions. All 17 observed historical event queries produced empty streams and failed the lifecycle canary. Candidate shutdown removed the private root and production matched its starting snapshot. The bounded stream observer now waits for a complete ordered witness and closes its own client. The corrected `SPEED-023/pair-2` on `7be17a3` completed 100 measured operations per row on each engine, with no operation failures and exact production snapshots. It validated every event lifecycle, both persistent exec boundaries, attach and copy. Four independent pairs remain.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Repeat the corrected control workload at the remaining pair indices.
+
+### SPEED-021
+
+Title: Benchmark Docker build and BuildKit
+
+Description: Measure real docker build/buildx build workflows and verify resulting images.
+
+Is blocked by task: SPEED-020.
+
+Acceptance Criteria:
+
+- Pin Dockerfiles, source trees, build arguments, BuildKit versions/driver where controllable, CPU/RAM and package dependencies. Record engine-managed differences.
+- Measure empty builder cache with base preloaded, unchanged rebuild, source-only change, dependency change and multi-stage build. Separate image pull, build execution and image export/load.
+- Use representative small Rust, Go and Node projects with correctness checks and consistent dependency availability. Verify produced binaries or service responses.
+- Report build wall time, cache hits, CPU, memory peak, disk I/O and resulting image size. Record whether BuildKit uses the native runtime, Docker/containerd, or another backend.
+- No native build speed claim is allowed merely because a native launch microbenchmark is fast; unsupported Kiri build configurations remain explicit.
+
+Problem and Evidence: The first Conjet half of `SPEED-021/pair-1` completed all Rust and Go build/export, load and execution canaries. Node failed its first exported image canary in all three repetitions with `MODULE_NOT_FOUND`. npm linked the local package outside the exported dependency directory. The fixture now uses `--install-links` to install the package contents, and build/load rows explicitly fail when the exported image fails its canary. Kiri bootstrapped BuildKit but its worker timed out on Docker Hub HTTPS for all three base preloads. Stage the verified registry manifests and blobs once on ExternalSSD and provide the same offline OCI named contexts to both workers. Preserve pair 1 and rerun the corrected workload with both engines.
+
+Raw evidence: Build performance depends on BuildKit, filesystem behavior and caching; the new native launch service is not itself a build engine.
+
+Approach:
+
+1. Reuse the polyglot fixtures and define private builders with explicit endpoints.
+2. Execute the cache matrix serially and validate each output image.
+3. Publish per-project and per-cache-state comparisons with builder provenance.
+
+Evidence: `SPEED-021/pair-2` records harness `1253da3`. Both existing engines completed all 36 pinned Buildx build/export and load rows and 36 artifact canaries each. Pair 3 on `b3f0ffc` repeated those results and verified removal of 36 per-case image tags and nine private builders per engine. Raw reports, builder endpoint/driver/version and cleanup witnesses are retained with failed `pair-1`. Compatible independent pairs and the new worker resource observations remain open.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Repeat the verified offline Buildx workload at the remaining pair indices with effective builder resource attribution. Distinct temporary tags identify every case's exported image. The harness now samples cgroup CPU time, current and cumulative peak memory, and block I/O from the verified worker before and after application work, outside the timing window.
+`SPEED-021/pair-4` on `25ce7d7` verified all 72 timed operations per engine,
+with both BuildKit cgroup views reporting CPU, peak/current memory and
+I/O. `builder-counters.json` retains the raw-derived deltas. The report
+keeps intervals open until the compatible independent pairs are present.
+
+### SPEED-022
+
+Title: Benchmark Docker Compose application workflows
+
+Description: Measure a real multi-service Compose application from up through readiness and down.
+
+Is blocked by task: SPEED-021.
+
+Acceptance Criteria:
+
+- Pin the same Compose plugin/file/images and use unique project names, isolated networks, volumes and host ports for each engine.
+- Measure pre-pulled up --wait, no-change up, one-service recreate, scale, restart and down; separate build/pull cost from startup. Record unsupported commands.
+- Use an app plus database/cache fixture with health checks and a functional transaction; readiness requires working dependencies, not only running containers.
+- Validate logs, service DNS, published ports and expected data persistence across restart; separately measure down --volumes using only owned volumes.
+- Report critical-path readiness, per-service latency, resources and verified cleanup. Attribute mixed native/legacy execution per service.
+
+Problem and Evidence: The full fixture uses pinned Node and Redis, real dependency readiness, transactions, scaling, published loopback ports and project cleanup. End-to-end timings are pending.
+
+Raw evidence: Compose includes orchestration, network dependencies and storage behavior absent from the single-container native fixture.
+
+Approach:
+
+1. Create the deterministic application fixture and readiness/data canaries.
+2. Run the workflow matrix in alternating engine sessions.
+3. Verify application correctness and project-scoped cleanup after every cycle.
+
+Evidence: `SPEED-022/pair-1` contains raw reports from harness `4a6de79`. Both existing engines passed five measured repetitions of each Compose operation and all functional and cleanup canaries. Pair 2 on `b31afde` repeated those results and verified effective memory, PIDs and CPU limits on both engines outside the startup timing window. Pair 1 predates that check and is descriptive. The [interim report](docker-benchmark-results.md#compose-first-pair) records the timings.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Repeat the workload with effective cgroup verification in the other four pair slots.
+
+### SPEED-026
+
+Title: Publish the Docker and native comparison verdict
+
+Description: Create docs/engineering/docker-benchmark-results.md with reproducible results and a reviewed claim for each workload.
+
+Is blocked by task: SPEED-025.
+
+Acceptance Criteria:
+
+- Publish exact revisions, hashes, commands, effective resources, cache states, timing boundaries, raw evidence links and per-session results for every planned row.
+- Report Kiri versus Conjet Docker API, Docker CLI/build/Compose, and native API as separate comparisons. Distinguish accelerated, legacy, mixed and unsupported paths.
+- Compute predeclared confidence intervals from independent sessions; avoid treating repeated operations as independent hardware/session evidence. Report failures and missing coverage alongside speed.
+- Use per-workload pass/fail/inconclusive/unsupported verdicts. Task completion means valid measurements and an honest report, not a mandatory Conjet win.
+- Scope claims to observed M1 Pro conditions; retain deferred cross-host, energy and guest-teardown requirements. Do not use this report to silently expand the earlier release scope or declare all Docker operations accelerated.
+- Review findings, create concrete follow-up tasks for regressions/gaps, verify production and cleanup, and commit/push the report without automatically merging or publishing a release.
+
+Problem and Evidence: [Interim outcome and coverage audit](docker-benchmark-results.md).
+The report separates the first complete lifecycle pair, existing-engine
+pilots and native OCI/static timing. The summary tool verifies per-session
+counts and refuses a lifecycle paired interval before five complete pairs
+or across mixed executable, harness or manifest revisions. It retains setup,
+warmup and artifact-verification failures alongside measured rows.
+Controlled-registry intervals additionally require complete witnessed config
+and layer transfer for every first-pull sample in each accepted pair.
+The report generator derives archived bytes per second from the exact saved
+artifact size and exposes guest I/O stages independently of Docker CLI time.
+The remaining modes and claim review are still in progress.
+The local full check retained the default SwiftPM Metal failure and passed
+all 440 Swift tests on the documented native build system with two skips.
+ARM64 musl strict Clippy exposed two redundant kernel filesystem casts.
+The portable comparison passes Clippy and produced the same SHA-256 as
+the measured release guest supervisor. Rust workspace tests and formatting
+also passed. Logs and the rebuilt hash are in `SPEED-026/final-local`.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Keep the published coverage and claim audit current. Complete the
+remaining broad-program scenario repetitions only when that scope resumes.
+The revised native-first lane has a reviewed local measurement row in
+`SPEED-019/native-kiri-release-cabbea9`; independent PR review remains open.
+
+### SPEED-019
+
+Title: Benchmark Docker run and container lifecycle
+
+Description: Measure fresh Docker API and docker run end-to-end against Kiri, retaining native API measurements as a distinct comparison.
+
+Is blocked by task: None for the declared subset. SPEED-018 validated the isolated native route.
+
+Acceptance Criteria:
+
+- Measure create/start/wait/removal through HTTP and docker run --rm through the same pinned CLI separately. Validate nonzero exits and output; include true and a small observable application.
+- Cover warm-image no-network and supported bridge cases; separate first-use/image acquisition from cached runs. Keep VM cold boot outside warm lifecycle timing.
+- Report p50/p95/p99, raw failures, wall time, throughput and per-session distributions. Record API removal and verified guest cleanup separately; do not infer one from the other.
+- Compare native fresh/prepared only where workload semantics match; include preparation/refill, missed claims and actual dispatch backend. Do not label a native RPC measurement docker run.
+- Exercise create/start of pre-created containers, stop/kill/restart and remove; mark unsupported lifecycle operations explicitly.
+
+Problem and Evidence: The orchestrator exposes the frozen lifecycle counts and allows
+one complete network/workload/adapter group per paired session. The
+launchers keep API removal acknowledgement separate from cleanup. The
+pilot measured 121.6 s for 240 Conjet operations. At that rate the
+full frozen 12-group, five-session Conjet matrix alone requires about
+17 hours of measured windows. Start with an independently booted,
+complete group and keep partial coverage explicit. Pair 2 collected all
+2,000 no-network Alpine API samples per existing Docker engine without
+failures. Median/p95/p99 were 594.953/819.515/871.010 ms on Conjet and
+3.944/4.742/6.988 ms on Kiri. Timing ends at API removal acknowledgement.
+Only one of five pairs is complete for this row; source revision and raw
+data are in `SPEED-019/alpine-true-none-api-pair-2`.
+`SPEED-019/native-oci-full-1` used `4da6d3b` and recorded 2,000 CLI and
+2,000 API samples with no failures. Every operation had a distinct native
+workload ID and verified guest cleanup. The API p50/p95/p99 was
+28.381/33.940/34.537 ms and CLI p50/p95/p99 was 47.900/54.525/59.707 ms.
+The opt-in environment rejected excess admission and preserved production.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Preserve the final native-first row and the historical baseline.
+Legacy repetitions stopped on the user's direction at pair 3, leaving its
+partial report and verified cleanup.
+The earlier source adapter runner verifies one-use guest
+cleanup on every operation and uses UID/GID 65532. The baseline uses the
+image-default user, so their measurements remain distinct.
+The full-sample runner handles cancellation through its Docker adapter and
+VM ownership cleanup and retains partial rows.
+The no-network Alpine `true` CLI series at `eb31229` completed pair 1 with
+2,000 samples per engine and no failures. It retained a canceled next boot
+with verified cleanup to allow local validation of the hosted CI fix without
+overlapping compilation and timing.
+Repetition resumed at pair 2 on that same harness under the series'
+`remaining` directory. Pair 3 was canceled. Pairs 4 and 5 are outstanding.
+The canceled preliminary boot is preserved outside the counted pair set.
+Pair 2 retained two exit-127 errors on the existing Conjet path
+and zero on Kiri. Both Conjet errors reported Go thread creation failure
+under the declared four-PID cap and cleaned up successfully. Investigate
+the guest runc startup path using a separate diagnostic and keep the
+predeclared limits and failure records in the benchmark.
+
+The serial release pilot from source `98d4148` is retained in
+`SPEED-019/{native-default-pilot-3,kiri-native-default-pilot-3}`. Both
+engines completed 100 API and 100 CLI samples under matched UID/GID and
+limits with zero failures. Native p50/p95/p99 were 34.201/39.674/43.706 ms
+(API) and 47.845/52.008/52.984 ms (CLI). Kiri recorded
+4.116/4.776/5.204 ms (API) and 21.341/22.796/23.813 ms (CLI).
+The native API's median observed adapter sleep was 27.393 ms.
+Kiri guest cleanup is unknown.
+
+The adapter now waits for the terminal guest revision in cancellable
+100 ms slices. The release pilot in `SPEED-019/native-default-wait-pilot`
+completed 100 samples per lane with zero failures. It recorded one Wait
+request per operation. Native p50/p95/p99 were 3.185/3.727/4.363 ms
+(API) and 22.792/24.618/27.912 ms (CLI). A dedicated timeout test
+verified cancellation without resubmitting Launch. The real OCI suite
+in `SPEED-018/native-default-wait-live` and the Kiri-first serial
+orchestrator pilot in `SPEED-019/native-default-orchestrated-pilot` passed.
+The 25 ms host tick remains enabled.
+
+The final five alternating, independent pairs used measurement revision
+`cabbea9` and matching release binaries. All 40,000 measurements and 200
+warmups passed. The native API p50 ratio to Kiri was 0.841 (95% interval
+0.818–0.855); p99 was inconclusive at the practical threshold. Native
+CLI p50/p99 ratios were 1.076 and 1.099 and slower at that threshold.
+The native witness verified each workload and its cleanup. Production
+and owned session cleanup checks passed for all ten boots. See the
+[release-build lifecycle results](docker-benchmark-results.md#release-build-native-docker-lifecycle)
+and `SPEED-019/native-kiri-release-cabbea9/summary.json`. The matched warm
+no-network `true` row is complete. Broader lifecycle coverage remains open.
+
+
+### SPEED-008
+
+Title: Run the fresh-runtime comparison and record the gate decision
+
+Description: Create docs/engineering/fresh-runtime-gate.md linking the baseline and candidate reports and a proceed/revise/stop verdict.
+
+Is blocked by task: SPEED-007.
+
+Acceptance Criteria:
+
+- Measure equivalent no-network and bridge lifecycle scenarios, including cleanup.
+- Report latency distributions, sustainable churn, CPU, memory, failures, and uncertainty.
+- Attribute observed bottlenecks with traces; do not infer that all savings belong to Jetstream.
+- Record a proceed/revise/stop decision and preserve any regression evidence.
+
+Problem and Evidence: The architecture plausibly removes launch overhead, but
+neither its performance nor superiority has been measured.
+
+Approach:
+
+1. Run the SPEED-002 scenarios against original Conjet, the candidate, and pinned Kiri with matching cache and network modes.
+2. Compare API-visible and cleanup-complete latency, throughput, CPU, memory, and failures; profile the dominant stages.
+3. Record which gains are demonstrated, any regressions, and whether prepared-launch work is justified; block it on a revise/stop verdict.
+
+Evidence: The signed native VSOCK diagnostic with 25 ms host ticks
+showed a 17.062 ms idle ping p50 and 27.426 ms p99. Without ticks eight
+pings returned before the session stopped. The Darwin native socket
+watcher now waits on kqueue and wakes the VMM on accept or incoming data.
+With the same tick setting, idle ping p50/p99 became 1.610/7.361 ms.
+The tick-disabled variant completed 200 pings in both trials, but the
+first stalled on a bridge lifecycle. Preserve that failure and keep the
+tick-enabled fixture for comparative work. Raw RPCs, commands, hashes,
+and matching production snapshots are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/transport`.
+
+The workspace passed 156 Rust tests with three existing opt-in tests
+ignored. The focused VSOCK suite passed 29 tests. The branch-built
+candidate's separate Docker smoke passed. The [fresh runtime gate](fresh-runtime-gate.md)
+records the comparison method and the limited diagnostic results.
+The matched image probe used a single pinned static ARM64 executable
+and the same requested workload resource limits on original Conjet at
+`bbe8019`, the official Kiri 0.2.2 app, and the native candidate. All 240
+measurements passed their adapter checks. Native no-network API p50 was
+2.156 ms and p99 was 6.997 ms, versus Kiri's 4.074 and 5.025 ms. Native
+bridge API p50 was 76.018 ms versus Kiri's 37.155 ms. Native terminal
+responses require verified cleanup. The Docker API observations stop at
+removal acknowledgement and do not establish equivalent cleanup. This
+M1 Pro run remained under production background load and yields no
+competitive qualification decision. The reports, hashes, host snapshots,
+and launcher verification are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/common-image`.
+The Kiri smoke and mid-benchmark cancellation checks verified the official
+peer, matching production observations, removed socket, and no residual
+VM disk holder. Python compilation, 17 focused Rust tests and strict
+macOS and ARM64 Linux Clippy passed.
+
+Six further isolated native boots measured optional guest-local phase
+timestamps. Two traced default-kernel runs attributed about 19 ms median
+to bridge preparation before child authorization and 40–41 ms median to
+verified network teardown after exit. The on/off trials overlapped and do
+not resolve trace overhead. Expedited RCU increased bridge latency and
+remains a diagnostic flag. All 1,200 measured operations passed fixture
+checks. Evidence and passing production comparisons are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/phase-analysis`.
+
+Grouped synchronous removal halved the measured bridge teardown median
+from roughly 40 ms to 19 ms. Bridge API p50 fell from 64–68 ms to
+42–44 ms. The complete kernel bridge and previous recovery matrices,
+800 follow-up measurements, focused Rust tests, and strict ARM64 Clippy
+passed. Retained evidence is in `SPEED-008/grouped-teardown`.
+
+Direct peer registration reduced measured bridge preparation from about
+19 ms to under 0.4 ms. Two boots measured native bridge API p50 about
+20.2 ms and p99 about 44 ms. All 800 operations and the bridge, private
+scope, teardown, fault and cancellation regressions passed. The runner
+records the timed measurement window in addition to individual operations
+and tracks the native VMM and owned networking helper. Reports are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/direct-peer`.
+
+The serial common-image run on `64fe823` captured 4,000 native operations
+with verified cleanup, 4,000 Kiri Docker API operations, and 200 original
+Conjet Docker API operations. All completed at their adapter's boundary.
+The native bridge recorded 20.196 ms p50 and 32.315 ms p99 across 42.352
+seconds, while Kiri's API acknowledgement was 33.608 ms p50 and 63.461 ms
+p99. Kiri's read-only guest visibility probe saw its own container as
+PID 1 and could not verify guest cleanup. Raw timings, launcher
+observations, physical footprint, CPU and balloon evidence are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/api-churn`.
+The reviewed gate decision is **revise**. Qualification is still pending.
+
+Source: [Delivery gates](speed-engineering-plan.md#incremental-delivery-and-decision-gates),
+[verification policy](speed-engineering-plan.md#verification-and-claim-policy).
+
+Review: Reviewed the kqueue callback and queue ownership, guest phase
+attribution, grouped link teardown, and direct peer registration. The
+revised native path passed the scoped correctness and recovery matrix.
+The gate remains unmet because the Docker competitor cleanup endpoint,
+second physical host configuration, equivalent network scope, energy,
+and full qualification matrix are unverified.
+
+Next Action: Deferred for comparative research. Obtain a second ARM64 host,
+a way to observe official Kiri guest teardown, and authorized energy sampling,
+then rerun the original matrix. Experimental release proceeds under local
+acceptance without changing the SPEED-008 verdict.
+
+## UNDERREVIEW
+
+### SPEED-020
+
+Title: Benchmark Docker image and registry operations
+
+Description: Measure pull, local load/save, image inspection and removal with controlled registry and cache conditions.
+
+Is blocked by task: SPEED-019.
+
+Acceptance Criteria:
+
+- Use identical immutable images and architecture; separate manifest lookup, transfer, decompression/unpack and ready-to-run where observable.
+- Measure cold and cached pulls using a task-owned local registry when supported; report public-network pulls separately without attributing network variation to the runtime.
+- Verify digest and runnable contents after pull/load; measure save/load throughput and disk expansion. Delete only task-owned images and artifacts.
+- Record unsupported image-management operations for native-only endpoints; image preparation is included in native readiness cost where relevant.
+
+Problem and Evidence: The first serial image pair completed and verified cleanup.
+It produced pinned Node save/load and runnable proofs on both engines
+and loopback registry reimports. Kiri's reused Alpine config advertised
+the historical index digest while returning the exact pinned ARM64 config
+digest. The runner now checks that pinned config digest independently
+and retains advertised-manifest status. Registry reimports separately
+record observed blob transfers and keep pristine layer cache unknown.
+Four fixture tests passed. Retained raw data under ExternalSSD
+`SPEED-020/pair-1`; repeat the affected Alpine row and the remaining pairs.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Verified immutable identities, complete transfers, archive/load and execution canaries, pinned participants, five independent pairs, exact cleanup and production snapshots. Pending program review with the SPEED-019 dependency.
+
+Evidence: `SPEED-020/pair-2` passed both image pins, warm save/load and run. Its host timestamp filter missed Conjet registry witnesses. `SPEED-020/pair-3` on `b31afde` observed all expected config and layer bytes for all ten measured first pulls per engine. Both engines passed archive, run and labeled-registry cleanup checks with zero scenario failures. Keep the prior unknown transfer records.
+The subsequent private Kiri inventory found 24 owned digest-only registry
+images omitted by the earlier repository-filtered listing. Removed their
+exact config IDs and verified absence without pruning. The harness now
+validates those IDs against the full private image inventory and verifies
+their removal. See `SPEED-026/final-local/kiri-image-inventory*.log`.
+`SPEED-020/cleanup-qualified` then completed five independent matched pairs
+at `20e3a2b` with zero recorded operation failures. It verified 12 digest-only
+removals per engine per boot and complete transfers for the first pulls.
+`summary.json` records per-session distributions and the paired CIs. Kiri
+met the frozen faster threshold for the four controlled pull rows. The supplemental `SPEED-020/backing-observation` captured before/after backing allocations. Per-session archive throughput and inspection distributions are retained.
+
+Next Action: Review the full image evidence with the remaining program results once SPEED-019 is ready.
+
+### SPEED-013
+
+Title: Open and qualify the speed enhancement PR to main
+
+Description: Submit the completed enhancement with its final benchmark and
+correctness evidence, then resolve review and CI findings before merging.
+
+Is blocked by task: SPEED-012 and SPEED-011 required experimental checks.
+
+Acceptance Criteria:
+
+- Prior development and required local gates are audited with passing evidence
+  and verified pushed commits. SPEED-008 continues to record its revise verdict.
+- Final qualification reports identify the tested revision and exact claim scope;
+  no required check is skipped or unresolved.
+- PR targets main from enhancement/speed-up and links the plan, board, reports,
+  compatibility limitations, and rollback procedure.
+- Required CI and review pass; changes during review receive applicable validation
+  and are pushed as additional increments before merge.
+
+Problem and Evidence: A pushed implementation branch alone does not establish
+reviewed integration or release readiness.
+
+Approach:
+
+1. Audit every task and final gate against the remote branch revision.
+2. Open the PR with concrete behavior, benchmark results, and validation evidence.
+3. Resolve findings, rerun affected checks, push increments, and merge only when
+   repository review and CI requirements are satisfied.
+
+Evidence: The final local gate was audited against `cb1f80f` and the
+remote enhancement branch matched. [PR #33](https://github.com/omega13-engr/conjet/pull/33)
+targets main and discloses the experimental scope, local measurements,
+rollback procedure and deferred comparative work. On `d613c87`,
+[hosted CI](https://github.com/omega13-engr/conjet/actions/runs/45083820209)
+passed the build and host tests, then failed the existing overflow-pulse
+app test. Its fixed 220 ms sleep could end before asynchronous inventory
+loading recorded any invocations. The test now awaits the scheduled
+refresh and retains all five Docker inventory assertions. The application
+change only exposes the existing task on its test hook. The 50-test
+focused suite and the 440-test full Swift suite passed locally, with two
+configuration skips in the full suite. Failure and regression logs are retained under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-013`.
+Independent review, passing hosted CI and merge remain pending.
+
+New hosted runs `45101948820` and `45102608771` reproduced separate
+image-pulse timing failures. The tests now await the scheduled refresh.
+The queued case uses an explicit command gate so the initial container
+refresh stays in flight until the deferred event queues. Assertions are
+unchanged or stronger. Seven pulse tests passed three consecutive local
+runs. The full native SwiftPM suite executed 440 with two skips and zero
+failures. The logs and the two hosted failures are kept in
+`SPEED-026/final-local`. On `63e9147`, [hosted CI](https://github.com/omega13-engr/conjet/actions/runs/45104363466)
+passed Swift, networking, app staging and benchmark checks. Later branch
+revisions still require current CI and independent review before merging.
+
+Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-policy),
+[release process](../release.md).
+
+Review: Pending; verify all development gates before opening the PR and all CI
+and review requirements before merge.
+
+Next Action: Collect required CI and independent review before merging.
+
+## SUPERSEDED
+
+### SPEED-037
+
+Title: Mount a named volume and an allowlisted ExternalSSD bind
+
+Description: Implement the two storage modes required by the existing storage and Compose fixtures.
+
+Is blocked by task: SPEED-036 (DONE).
+
+Acceptance Criteria:
+
+- Preserve a checksummed named-volume file across container restart; remove it only on explicit owned-volume deletion.
+- Support a read/write and read-only bind beneath the designated ExternalSSD fixture root; verify guest writes on the host and enforced read-only behavior.
+- Reject path traversal, symlink escape and unapproved host roots. Test mount failure rollback, busy-volume removal and permission mapping.
+- Expose the fixture-required Docker volume/mount metadata without legacy Docker storage; verify no residual mounts after teardown.
+
+Problem and Evidence: Native workloads currently lack persistent volumes and host binds; this blocks realistic Compose and storage comparisons.
+
+Approach:
+
+1. Implement one named-volume fixture, then the allowlisted bind with negative path tests.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-037`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Preserve this entry as research history. The retained
+Docker path has no dependency on this task.
+
+### SPEED-038
+
+Title: Run a pinned BuildKit worker on the native engine
+
+Description: Enable the exact BuildKit worker configuration required by the existing Buildx fixture and verify one Rust build/export/run.
+
+Is blocked by task: SPEED-037.
+
+Acceptance Criteria:
+
+- Start the worker with the unmodified Buildx client through the native endpoint; no hidden Docker/containerd daemon or host build fallback.
+- Identify its actual build executor and required mount/namespace/security capabilities. Implement narrowly scoped requirements with escape-denial tests; unsupported privileged mode is not a workaround.
+- Supply identical verified offline OCI bases to both engines, export/load the result through native image handling, and run its output canary.
+- Capture effective worker CPU/memory/I/O limits and verify worker, cache and exported-image cleanup. Leave this task open if native execution of the worker is not proven.
+
+Problem and Evidence: Native launch speed does not imply build acceleration; the current builds use the old engine.
+
+Approach:
+
+1. Probe the pinned worker's exact prerequisites and add individual capability subtasks for any missing native operation.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-038`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Preserve this entry as research history. The retained
+Docker path has no dependency on this task.
+
+### SPEED-039
+
+Title: Run Node and Redis Compose entirely on native
+
+Description: Implement the remaining API semantics required by the existing pinned Compose fixture.
+
+Is blocked by task: SPEED-038.
+
+Acceptance Criteria:
+
+- Run unmodified docker compose up --wait with native-owned Node and Redis; prove backend and effective cgroup limits for each service.
+- Pass HTTP transaction, service DNS, health check, log retrieval and persisted Redis-data canaries.
+- Pass no-change up, app recreate, scale to two replicas, restart and down --volumes with correct event/state semantics and cleanup.
+- Explicitly reject unsupported Compose features and preserve the production context; no legacy fallback for any service.
+
+Problem and Evidence: Prior Compose measurements used Docker/containerd; default-native promotion requires actual multi-service compatibility.
+
+Approach:
+
+1. Replay the frozen Compose client's request transcript against native and implement each missing operation with a regression test.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-039`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Preserve this entry as research history. The retained
+Docker path has no dependency on this task.
+
+### SPEED-040
+
+Title: Qualify release native Docker launch parity
+
+Description: Run the frozen matched API and Docker CLI launch matrix using the completed native owner.
+
+Is blocked by task: SPEED-039.
+
+Acceptance Criteria:
+
+- Build all candidate components in release mode from one source revision; record hashes/settings and validate actual native dispatch for every sample.
+- Collect five alternating independent pairs, 2,000 samples per engine/lane/boot and ten warmups for the frozen lifecycle rows; include supported bridge and output/exit scenarios.
+- Preserve API acknowledgement versus verified cleanup distinctions, raw failures and per-session distributions. Compare native to Kiri and the frozen prior native baseline.
+- Evaluate CLI p50 and p99 parity with paired 95% ratio upper bound <=1.05; report API median advantage and regressions separately. A failed target creates a concrete profiling follow-up, not a fabricated pass.
+
+Problem and Evidence: The new native host and compatibility changes require fresh measurements; old legacy samples cannot qualify them.
+
+Approach:
+
+1. Freeze the release artifact manifest and run diagnostic-free matched launch pairs.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-040`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Preserve this entry as research history. The retained
+Docker path has no dependency on this task.
+
+### SPEED-041
+
+Title: Measure the native-backed Rust Go and Node build matrix
+
+Description: Execute the existing empty/unchanged/source/dependency build cases using the qualified native BuildKit setup.
+
+Is blocked by task: SPEED-040.
+
+Acceptance Criteria:
+
+- Retain the same Dockerfiles, offline bases, clients, cache-state definitions and export/load boundaries used by the recent report.
+- Complete five independent pairs with the frozen per-case repetitions and verified artifact execution; record failed artifacts as failed operations.
+- Publish the same build latency and worker CPU/peak-memory/read/write tables; identify worker/executor and export/load time separately.
+- Attribute every worker container to native and compare cache behavior/effective limits before making a speed claim.
+
+Problem and Evidence: Prior build timings were legacy-host results and cannot establish native build performance.
+
+Approach:
+
+1. Run the Rust cache-state group first, then Go and Node without overlapping timed suites.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-041`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Preserve this entry as research history. The retained
+Docker path has no dependency on this task.
+
+### SPEED-042
+
+Title: Measure native Compose and exec/control workflows
+
+Description: Run the unchanged Compose and persistent exec/control cases against the native candidate and Kiri.
+
+Is blocked by task: SPEED-041.
+
+Acceptance Criteria:
+
+- Complete five independent pairs for the existing readiness/recreate/scale/restart/down and exec/inspect/list/attach/log/event/copy rows at their frozen counts.
+- Validate transactions, stdout/stderr, exit statuses, file checksums and effective service limits outside timing as specified; preserve failure records.
+- Use the existing per-operation p50/p95/p99 table format and declare unsupported rows explicitly; a required unsupported row blocks native compatibility completion.
+- Record all service and exec backend identities and project-scoped cleanup; do not mix old-engine rows into the native series.
+
+Problem and Evidence: Launch parity alone does not establish an improved interactive or multi-service Docker experience.
+
+Approach:
+
+1. Freeze one native Compose/exec series manifest and run its first paired session with canaries.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-042`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Preserve this entry as research history. The retained
+Docker path has no dependency on this task.
+
+### SPEED-043
+
+Title: Measure native storage network and service performance
+
+Description: Execute the frozen named-volume, host-bind, writable-layer and network/service workloads on native.
+
+Is blocked by task: SPEED-042.
+
+Acceptance Criteria:
+
+- Verify dataset hashes, durability and mount permissions; report Docker CLI elapsed time separately from guest I/O stages.
+- Measure matching DNS/TCP, host published-port transactions and standalone bulk transport with explicit client placement and topology.
+- Complete five independent pairs at frozen repetitions and steady-state durations; retain CPU/memory, disk growth, failures and application correctness.
+- Preserve the recent storage/network table format and units; record unsupported semantics without substituting host operations.
+
+Problem and Evidence: Native filesystem and network implementations may change performance in either direction and need workload-specific validation.
+
+Approach:
+
+1. Run storage canaries before timed I/O, then the isolated transport and application groups.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-043`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Preserve this entry as research history. The retained
+Docker path has no dependency on this task.
+
+### SPEED-044
+
+Title: Qualify native concurrency pressure and recovery
+
+Description: Run the existing 1/2/4/8 launch sweep and bounded pressure/recovery matrix on the expanded native owner.
+
+Is blocked by task: SPEED-043.
+
+Acceptance Criteria:
+
+- Verify effective guest memory/swap/CPU controls before allocation; preserve active checksummed data while evicting optional prepared state.
+- Test queue saturation, cancellation, OOM attribution, client/guest disconnect and task-owned VM termination; reject duplicate starts and verify cleanup inventories.
+- Complete five independent matched sweeps where competitor behavior permits. Preserve Kiri timeouts/unknown boundaries and report incomparable pressure cases explicitly.
+- Publish the same concurrency/throughput and resource tables. Prepared claim/refill stays separate and cannot hide reserve cost.
+- No persistent services, production interruption or unsafe host-wide pressure. Optional energy collection remains separately authorized.
+
+Problem and Evidence: Additional concurrent services and worker capabilities introduce ownership, pressure and recovery risks absent from the single-slot fixture.
+
+Approach:
+
+1. Run native lifecycle fault injection and active-data canaries before the timed concurrency series.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-044`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Preserve this entry as research history. The retained
+Docker path has no dependency on this task.
+
+### SPEED-045
+
+Title: Publish the native-default Docker verdict and promotion audit
+
+Description: Extend the existing detailed report with the complete native-default series and exact compatibility scope.
+
+Is blocked by task: SPEED-044.
+
+Acceptance Criteria:
+
+- Preserve the report's environment/hash, per-pair API/CLI, per-operation, build-resource, concurrency, ratio/95% interval, coverage and evidence tables.
+- Audit raw measurements, failures, revisions, effective limits and native backend attribution; retain historical legacy/development tables with their original labels.
+- Use per-workload parity/faster/slower/inconclusive/unsupported verdicts. Publish no overall win unless every declared workload supports it; unknown cleanup or energy remains unknown.
+- Create narrow follow-up tasks for demonstrated bottlenecks and missing compatibility. Update the release scope to actual supported behavior without marking deferred SPEED-008 passed.
+- Review packaged native-default startup, rollback, CI and cleanup evidence before proposing promotion. Independent PR approval and production signing remain required; this task does not itself publish a release.
+
+Problem and Evidence: The current report mixes historical and native evidence by design; the next verdict must make actual native coverage explicit without rewriting history.
+
+Approach:
+
+1. Generate the native-only coverage matrix from SPEED-040 through SPEED-044 raw evidence.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-045`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Preserve this entry as research history. The retained
+Docker path has no dependency on this task.
+
+## PAUSED RESEARCH
+
+### SPEED-037A
+
+Title: Back the native named-volume registry with a private ext4 disk
+
+Description: Allow one explicitly configured isolated VM disk under
+ExternalSSD and prove that the guest's named-volume registry survives
+orderly boot replacement.
+
+Is blocked by task: SPEED-036 (DONE).
+
+Acceptance Criteria:
+
+- Verify an exclusive host lease, canonical backing path, and an
+  ext4 volume identity before boot. Reject a symlink and a busy disk.
+- Create eight scoped volumes with the fixture credentials. Reject
+  traversal, a stale generation and a ninth volume.
+- Recover the registry after a second boot, explicitly delete its
+  volumes, and verify a clean filesystem after unmount.
+
+Problem and Evidence: The native candidate used a disposable blank
+virtio disk. Its OCI guest had no durable named-volume registry.
+
+Approach: Pass the private disk through the existing second virtio
+block device. Identify it in the guest by verified ext4 UUID. Retain
+volume directories under a root-owned registry and unmount on
+orderly guest shutdown.
+
+Evidence: Unfinished research checkpoint. Built release Jetstream and
+ARM64 guest on `de8773b` plus this change. Eight volumes survived a
+private reboot with UID/GID 65532 and mode 0700. Stale boot, traversal,
+capacity, symlink and host lease negatives passed. `e2fsck -fn` found
+zero deletion timestamps on the original disk. A fresh boot with a
+guest wall-clock initialization attempt failed readiness and required
+forced cleanup of the owned VMM. The session directory was removed and
+production snapshots matched. Raw evidence, hashes and commands are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-037A`.
+
+Source: [Volume backing](../../guest/launch-service/src/volume_disk.rs),
+[volume disk fixture](../../benchmarks/native-volume-disk.py).
+
+Review: Guest and Jetstream tests and ARM64 Clippy passed before the final
+pilot. Its readiness and filesystem acceptance remain unverified.
+Container mounts and busy deletion were never implemented. This
+checkpoint is research after the retained Docker path decision. The local archive is
+`research/native-volume-checkpoint` at `c60304f`. The evidence folder
+also contains `research-checkpoint.patch`.
+
+Next Action: Preserve the source and diagnostics. The retained Docker
+path has no dependency on this experiment.
+
+## DONE
+
+### SPEED-046
+
+Title: Attribute latency in the retained release Docker path
+
+Description: Profile one isolated release boot using the normal Docker,
+containerd and runc path. Evaluate the smallest runtime boundary that
+preserves the existing Docker, BuildKit and Compose owners.
+
+Is blocked by task: None.
+
+Acceptance Criteria:
+
+- Verify release CLI, daemon, Jetstream and helper hashes, pinned Core
+  identity and an explicit private Docker endpoint.
+- Collect host monotonic stage timings or the exact startup blocker.
+  Verify production preservation and clean up task-owned resources.
+- Select a narrow integration candidate only when the evidence attributes
+  a significant cost to a controllable boundary.
+
+Problem and Evidence: The previous retained Docker profile reported long
+start and wait stages. Native OCI adapter timings describe a separate
+execution path.
+
+Approach: Use the foreground retained-engine launcher and approved
+pinned fixture. Measure host API stages and whole CLI elapsed time,
+then identify the narrow trace needed to attribute start and wait.
+
+Evidence: DONE. At `de8773b`, ran the foreground launcher with
+`--legacy-baseline --benchmark-samples 12` and the pinned ARM64
+scenario and archive. Docker Engine 29.1.3, containerd 2.2.1 and
+runc 1.3.4 executed 48 measured operations and 40 warmups with zero
+failures. Start and wait accounted for 85.6% of no-network and
+87.8% of bridge API time by median sample share. The profile,
+commands, release hashes and reclamation record are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-046`.
+
+Source: [Retained Docker plan](native-docker-speed-plan.md),
+[historical timings](docker-benchmark-results.md).
+
+Review: The release diagnostic verified the private endpoint and
+unchanged production. All owned processes, sockets, handles, and
+disposable VM files were removed. Guest teardown for each
+operation remains unobservable. Host stage timing is insufficient
+to attribute delay to Jetstream or select a runtime change.
+There is no new Kiri parity verdict. Independent PR review is separate.
+
+Next Action: Use SPEED-047 to resolve transport and guest timing
+within the retained stack before proposing any runtime change.
 
 ### SPEED-027
 
@@ -1082,989 +2200,6 @@ and socket removal. Independent PR review remains required.
 
 Next Action: Add the private ExternalSSD block backing required by the
 named-volume fixture in SPEED-037A.
-
-### SPEED-037
-
-Title: Mount a named volume and an allowlisted ExternalSSD bind
-
-Description: Implement the two storage modes required by the existing storage and Compose fixtures.
-
-Is blocked by task: SPEED-036 (DONE).
-
-Acceptance Criteria:
-
-- Preserve a checksummed named-volume file across container restart; remove it only on explicit owned-volume deletion.
-- Support a read/write and read-only bind beneath the designated ExternalSSD fixture root; verify guest writes on the host and enforced read-only behavior.
-- Reject path traversal, symlink escape and unapproved host roots. Test mount failure rollback, busy-volume removal and permission mapping.
-- Expose the fixture-required Docker volume/mount metadata without legacy Docker storage; verify no residual mounts after teardown.
-
-Problem and Evidence: Native workloads currently lack persistent volumes and host binds; this blocks realistic Compose and storage comparisons.
-
-Approach:
-
-1. Implement one named-volume fixture, then the allowlisted bind with negative path tests.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-037`.
-
-Source: [Native Docker speed plan](native-docker-speed-plan.md),
-[adapter contract](docker-native-adapter.md),
-[benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
-[environment runbook](speedup-environment.md).
-
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
-
-Next Action: Implement one named-volume fixture, then the allowlisted bind with negative path tests.
-
-### SPEED-038
-
-Title: Run a pinned BuildKit worker on the native engine
-
-Description: Enable the exact BuildKit worker configuration required by the existing Buildx fixture and verify one Rust build/export/run.
-
-Is blocked by task: SPEED-037.
-
-Acceptance Criteria:
-
-- Start the worker with the unmodified Buildx client through the native endpoint; no hidden Docker/containerd daemon or host build fallback.
-- Identify its actual build executor and required mount/namespace/security capabilities. Implement narrowly scoped requirements with escape-denial tests; unsupported privileged mode is not a workaround.
-- Supply identical verified offline OCI bases to both engines, export/load the result through native image handling, and run its output canary.
-- Capture effective worker CPU/memory/I/O limits and verify worker, cache and exported-image cleanup. Leave this task open if native execution of the worker is not proven.
-
-Problem and Evidence: Native launch speed does not imply build acceleration; the current builds use the old engine.
-
-Approach:
-
-1. Probe the pinned worker's exact prerequisites and add individual capability subtasks for any missing native operation.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-038`.
-
-Source: [Native Docker speed plan](native-docker-speed-plan.md),
-[adapter contract](docker-native-adapter.md),
-[benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
-[environment runbook](speedup-environment.md).
-
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
-
-Next Action: Probe the pinned worker's exact prerequisites and add individual capability subtasks for any missing native operation.
-
-### SPEED-039
-
-Title: Run Node and Redis Compose entirely on native
-
-Description: Implement the remaining API semantics required by the existing pinned Compose fixture.
-
-Is blocked by task: SPEED-038.
-
-Acceptance Criteria:
-
-- Run unmodified docker compose up --wait with native-owned Node and Redis; prove backend and effective cgroup limits for each service.
-- Pass HTTP transaction, service DNS, health check, log retrieval and persisted Redis-data canaries.
-- Pass no-change up, app recreate, scale to two replicas, restart and down --volumes with correct event/state semantics and cleanup.
-- Explicitly reject unsupported Compose features and preserve the production context; no legacy fallback for any service.
-
-Problem and Evidence: Prior Compose measurements used Docker/containerd; default-native promotion requires actual multi-service compatibility.
-
-Approach:
-
-1. Replay the frozen Compose client's request transcript against native and implement each missing operation with a regression test.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-039`.
-
-Source: [Native Docker speed plan](native-docker-speed-plan.md),
-[adapter contract](docker-native-adapter.md),
-[benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
-[environment runbook](speedup-environment.md).
-
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
-
-Next Action: Replay the frozen Compose client's request transcript against native and implement each missing operation with a regression test.
-
-### SPEED-040
-
-Title: Qualify release native Docker launch parity
-
-Description: Run the frozen matched API and Docker CLI launch matrix using the completed native owner.
-
-Is blocked by task: SPEED-039.
-
-Acceptance Criteria:
-
-- Build all candidate components in release mode from one source revision; record hashes/settings and validate actual native dispatch for every sample.
-- Collect five alternating independent pairs, 2,000 samples per engine/lane/boot and ten warmups for the frozen lifecycle rows; include supported bridge and output/exit scenarios.
-- Preserve API acknowledgement versus verified cleanup distinctions, raw failures and per-session distributions. Compare native to Kiri and the frozen prior native baseline.
-- Evaluate CLI p50 and p99 parity with paired 95% ratio upper bound <=1.05; report API median advantage and regressions separately. A failed target creates a concrete profiling follow-up, not a fabricated pass.
-
-Problem and Evidence: The new native host and compatibility changes require fresh measurements; old legacy samples cannot qualify them.
-
-Approach:
-
-1. Freeze the release artifact manifest and run diagnostic-free matched launch pairs.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-040`.
-
-Source: [Native Docker speed plan](native-docker-speed-plan.md),
-[adapter contract](docker-native-adapter.md),
-[benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
-[environment runbook](speedup-environment.md).
-
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
-
-Next Action: Freeze the release artifact manifest and run diagnostic-free matched launch pairs.
-
-### SPEED-041
-
-Title: Measure the native-backed Rust Go and Node build matrix
-
-Description: Execute the existing empty/unchanged/source/dependency build cases using the qualified native BuildKit setup.
-
-Is blocked by task: SPEED-040.
-
-Acceptance Criteria:
-
-- Retain the same Dockerfiles, offline bases, clients, cache-state definitions and export/load boundaries used by the recent report.
-- Complete five independent pairs with the frozen per-case repetitions and verified artifact execution; record failed artifacts as failed operations.
-- Publish the same build latency and worker CPU/peak-memory/read/write tables; identify worker/executor and export/load time separately.
-- Attribute every worker container to native and compare cache behavior/effective limits before making a speed claim.
-
-Problem and Evidence: Prior build timings were legacy-host results and cannot establish native build performance.
-
-Approach:
-
-1. Run the Rust cache-state group first, then Go and Node without overlapping timed suites.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-041`.
-
-Source: [Native Docker speed plan](native-docker-speed-plan.md),
-[adapter contract](docker-native-adapter.md),
-[benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
-[environment runbook](speedup-environment.md).
-
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
-
-Next Action: Run the Rust cache-state group first, then Go and Node without overlapping timed suites.
-
-### SPEED-042
-
-Title: Measure native Compose and exec/control workflows
-
-Description: Run the unchanged Compose and persistent exec/control cases against the native candidate and Kiri.
-
-Is blocked by task: SPEED-041.
-
-Acceptance Criteria:
-
-- Complete five independent pairs for the existing readiness/recreate/scale/restart/down and exec/inspect/list/attach/log/event/copy rows at their frozen counts.
-- Validate transactions, stdout/stderr, exit statuses, file checksums and effective service limits outside timing as specified; preserve failure records.
-- Use the existing per-operation p50/p95/p99 table format and declare unsupported rows explicitly; a required unsupported row blocks native compatibility completion.
-- Record all service and exec backend identities and project-scoped cleanup; do not mix old-engine rows into the native series.
-
-Problem and Evidence: Launch parity alone does not establish an improved interactive or multi-service Docker experience.
-
-Approach:
-
-1. Freeze one native Compose/exec series manifest and run its first paired session with canaries.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-042`.
-
-Source: [Native Docker speed plan](native-docker-speed-plan.md),
-[adapter contract](docker-native-adapter.md),
-[benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
-[environment runbook](speedup-environment.md).
-
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
-
-Next Action: Freeze one native Compose/exec series manifest and run its first paired session with canaries.
-
-### SPEED-043
-
-Title: Measure native storage network and service performance
-
-Description: Execute the frozen named-volume, host-bind, writable-layer and network/service workloads on native.
-
-Is blocked by task: SPEED-042.
-
-Acceptance Criteria:
-
-- Verify dataset hashes, durability and mount permissions; report Docker CLI elapsed time separately from guest I/O stages.
-- Measure matching DNS/TCP, host published-port transactions and standalone bulk transport with explicit client placement and topology.
-- Complete five independent pairs at frozen repetitions and steady-state durations; retain CPU/memory, disk growth, failures and application correctness.
-- Preserve the recent storage/network table format and units; record unsupported semantics without substituting host operations.
-
-Problem and Evidence: Native filesystem and network implementations may change performance in either direction and need workload-specific validation.
-
-Approach:
-
-1. Run storage canaries before timed I/O, then the isolated transport and application groups.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-043`.
-
-Source: [Native Docker speed plan](native-docker-speed-plan.md),
-[adapter contract](docker-native-adapter.md),
-[benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
-[environment runbook](speedup-environment.md).
-
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
-
-Next Action: Run storage canaries before timed I/O, then the isolated transport and application groups.
-
-### SPEED-044
-
-Title: Qualify native concurrency pressure and recovery
-
-Description: Run the existing 1/2/4/8 launch sweep and bounded pressure/recovery matrix on the expanded native owner.
-
-Is blocked by task: SPEED-043.
-
-Acceptance Criteria:
-
-- Verify effective guest memory/swap/CPU controls before allocation; preserve active checksummed data while evicting optional prepared state.
-- Test queue saturation, cancellation, OOM attribution, client/guest disconnect and task-owned VM termination; reject duplicate starts and verify cleanup inventories.
-- Complete five independent matched sweeps where competitor behavior permits. Preserve Kiri timeouts/unknown boundaries and report incomparable pressure cases explicitly.
-- Publish the same concurrency/throughput and resource tables. Prepared claim/refill stays separate and cannot hide reserve cost.
-- No persistent services, production interruption or unsafe host-wide pressure. Optional energy collection remains separately authorized.
-
-Problem and Evidence: Additional concurrent services and worker capabilities introduce ownership, pressure and recovery risks absent from the single-slot fixture.
-
-Approach:
-
-1. Run native lifecycle fault injection and active-data canaries before the timed concurrency series.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-044`.
-
-Source: [Native Docker speed plan](native-docker-speed-plan.md),
-[adapter contract](docker-native-adapter.md),
-[benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
-[environment runbook](speedup-environment.md).
-
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
-
-Next Action: Run native lifecycle fault injection and active-data canaries before the timed concurrency series.
-
-### SPEED-045
-
-Title: Publish the native-default Docker verdict and promotion audit
-
-Description: Extend the existing detailed report with the complete native-default series and exact compatibility scope.
-
-Is blocked by task: SPEED-044.
-
-Acceptance Criteria:
-
-- Preserve the report's environment/hash, per-pair API/CLI, per-operation, build-resource, concurrency, ratio/95% interval, coverage and evidence tables.
-- Audit raw measurements, failures, revisions, effective limits and native backend attribution; retain historical legacy/development tables with their original labels.
-- Use per-workload parity/faster/slower/inconclusive/unsupported verdicts. Publish no overall win unless every declared workload supports it; unknown cleanup or energy remains unknown.
-- Create narrow follow-up tasks for demonstrated bottlenecks and missing compatibility. Update the release scope to actual supported behavior without marking deferred SPEED-008 passed.
-- Review packaged native-default startup, rollback, CI and cleanup evidence before proposing promotion. Independent PR approval and production signing remain required; this task does not itself publish a release.
-
-Problem and Evidence: The current report mixes historical and native evidence by design; the next verdict must make actual native coverage explicit without rewriting history.
-
-Approach:
-
-1. Generate the native-only coverage matrix from SPEED-040 through SPEED-044 raw evidence.
-2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
-3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
-
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-045`.
-
-Source: [Native Docker speed plan](native-docker-speed-plan.md),
-[adapter contract](docker-native-adapter.md),
-[benchmark contract](docker-benchmark-plan.md),
-[detailed result format](docker-benchmark-results.md),
-[environment runbook](speedup-environment.md).
-
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
-
-Next Action: Generate the native-only coverage matrix from SPEED-040 through SPEED-044 raw evidence.
-
-
-### SPEED-014
-
-Title: Validate and release the next Conjet version
-
-Description: Release the merged speed enhancement through the existing app and,
-if required, guest Core release lanes.
-
-Is blocked by task: SPEED-013.
-
-Acceptance Criteria:
-
-- Select semantic versions from final scope and current releases; version metadata
-  and release notes identify only verified behavior and performance claims.
-- Merged revision passes applicable final checks and isolated app/DMG installation,
-  launch, signing, notarization, stapling, and Homebrew validation.
-- Required guest Core assets are released and verified compatible before the app
-  release depends on them; release tags match their respective version metadata.
-- Release workflows succeed, published assets and final checksums are verified,
-  and temporary QA processes, mounts, disks, and files are cleaned up.
-
-Problem and Evidence: Runtime performance qualification does not validate packaged
-artifacts or app/Core compatibility; the existing project has separate release lanes.
-
-Approach:
-
-1. Inspect current release workflows and versions, select the next versions, and
-   land reviewed release metadata through the repository's normal process.
-2. Run isolated release simulations and verify the final artifact and guest-asset
-   compatibility; resolve all failures before tagging.
-3. Publish the appropriate tags from qualified revisions, monitor workflows, and
-   verify release assets, Homebrew output, and cleanup.
-
-Evidence: Local rehearsal and Homebrew rendering are recorded under
-SPEED-012. The static guest is distributed in the app; the verified Core
-v1.3.1 kernel remains compatible, so a separate Core release is unnecessary.
-The production workflow fails closed on missing signing and notarization
-credentials. Its keychain setup was exercised with the system Bash,
-including a retained keychain path containing spaces. The repository
-Actions secrets endpoint reports zero
-repository secrets and the environments endpoint reports no environments.
-Developer ID certificate and Apple notarization credentials must be
-configured or their organization-level availability verified before
-production publication. Tags, workflow evidence and published assets are pending.
-The remote already publishes `conjet-v3.0.0` at `f1df932`, while this branch
-still has `VERSION=3.0.0`. An additive release that includes a qualifying
-experimental feature would use the next available minor version. The source
-Docker adapter does not add a kernel or Core image dependency. The final
-package scope and version remain pending independent review and qualification.
-
-Source: [Release process](../release.md), [Homebrew](../homebrew.md),
-[repository instructions](../../AGENTS.md).
-
-Review: Pending; verify production artifact readiness, version/tag consistency,
-asset compatibility, and evidence supporting every release claim.
-
-Next Action: Set matching version metadata and release notes for the reviewed package scope before tagging an independently approved, qualified revision. Confirm Developer ID and notarization credential availability through the release environment.
-
-## INPROGRESS
-
-### SPEED-025
-
-Title: Qualify concurrency, pressure, recovery and efficiency
-
-Description: Run the cross-workload stress matrix and quantify whether speed gains persist under realistic contention.
-
-Is blocked by task: SPEED-024.
-
-Acceptance Criteria:
-
-- Sweep declared concurrency levels for launches and representative builds/services; bound queues and report rejected, failed and timed-out work as well as successful latency.
-- Exercise CPU and guest-memory pressure, prepared-slot exhaustion/refill and active-data preservation without inducing unsafe host-wide pressure or stopping production.
-- Test request cancellation, client disconnect and task-owned runtime crash/restart with leak inventories and explicit recovery outcomes; use only disposable test state.
-- Collect host plus attributed guest CPU/memory, idle footprint, disk growth and reclamation with measurement limitations. Run energy sampling separately only when authorized and available; otherwise mark it unavailable.
-- Observe cleanup lag and steady-state resource growth independently from API acknowledgement. Unknown Kiri guest teardown remains unknown.
-
-Problem and Evidence: The matrix implements a bounded Docker launch concurrency sweep and a distinct per-container OOM canary. It requires exit 137, an OOM flag, an unchanged active-data canary in a sibling container and a fresh recovery launch. A unit test injects a native backend disconnect after submission and proves the adapter refuses replay, unverifiable removal and new admission. Guest-wide reclamation, actual runtime process loss and restart, and prepared-slot tests remain separate requirements for this program.
-
-Raw evidence: Fast sequential medians can hide queueing, memory reservation, deferred cleanup and recovery costs.
-
-Approach:
-
-1. Freeze safe resource ceilings and deterministic fault points.
-2. Run bounded stress and recovery sessions with canaries and before/after inventories.
-3. Analyze scaling, tails, failure rates, resource reclamation and optional energy without discarding adverse sessions.
-
-Evidence: `SPEED-025/pair-1` on `187e1ab` completed all 400 measured launches per engine with zero launch failures. Both observed active data after the pressure attempt and passed isolated recovery and production-preservation checks. `native-product-full-1` on `4da6d3b` passed the injected native pressure/recovery, bounded output, overload, cancellation, active shutdown and stale prior-boot handle canaries. Both native session directories were removed. It recorded 2,000 measured samples per fresh and prepared CLI/API lane. Docker pressure attribution and the remaining independent pairs are open. The [interim results](docker-benchmark-results.md#concurrency-and-recovery) retain both failures and successful rows.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Repeat remaining concurrency pairs and keep the Kiri pressure boundary unresolved. `SPEED-025/pair-2` demonstrated Conjet exit 137 and `OOMKilled=true` with verified 64 MiB memory and disabled swap. The sibling and recovery canaries passed. Kiri reported `MemorySwap=0` instead of the requested 64 MiB, so the guard stopped its pressure workload before allocation. Both engines ran the bounded launch sweep. Preserve pair 1's timeout and OOM attribution failure.
-`kiri-effective-swap.log` later observed the requested 64 MiB memory
-ceiling and zero swap directly in Kiri's guest despite the inspect
-metadata discrepancy. The pressure test still enforces those effective
-limits before allocating. `SPEED-025/pair-3` verified both effective limits
-for both engines. Conjet attributed exit 137 to OOM and recovered. Kiri's
-wait timed out and its OOM flag stayed false despite the matched effective
-limits. Both passed survivor, recovery and owner cleanup. Further Kiri
-qualification needs a verified termination or OOM witness for this load.
-
-The release-build native static run at `cabbea9` passed 8,000 timings
-and the active-data, one-use, expiry, pressure, output, backpressure,
-disconnect and shutdown canaries. Both VM directories were removed and
-production observations matched. Fresh and prepared API p99 were 4.100
-and 3.201 ms, with 3.394 ms refill p99. See raw samples and summary under
-`SPEED-025/native-product-release-cabbea9`. The Docker stress matrix
-coverage remains open.
-
-
-### SPEED-024
-
-Title: Benchmark filesystem, networking and sustained workloads
-
-Description: Measure storage and network performance plus realistic long-running service throughput.
-
-Is blocked by task: SPEED-023.
-
-Acceptance Criteria:
-
-- Test named volumes, supported host bind mounts and container writable layers separately: metadata/small files, sequential/random I/O, and fsync durability. Keep datasets and backing files on ExternalSSD.
-- Measure container-to-container DNS/TCP, published host ports, connection churn, request latency and throughput with identical topology/payload; record unsupported native networking.
-- Validate checksums, acknowledged durable writes and application responses. Use task-owned services and ports; record filesystem/cache settings and client placement.
-- Run at least one sustained application workload with latency under load and active-data canaries. Capture CPU, memory and disk growth with a declared steady-state interval.
-- Keep raw transport throughput, application readiness and launch latency as separate metrics.
-
-Problem and Evidence: The matrix implements writable-layer, volume and bind integrity workloads and a sustained Node/Redis service. It times guest DNS, Redis TCP handshake and Redis round-trip separately from the host HTTP transaction window. The storage check exercises sequential and random writes with fsync and verifies the resulting named-volume checksum in a different container. It captures effective service cgroup limits and an owned-service resource snapshot. Paired runtime timing and bulk transport coverage remain open.
-
-Raw evidence: Bridge creation timings do not measure packet performance, and static no-network execution does not establish Docker workload compatibility.
-
-Approach:
-
-1. Reuse existing filesystem/network benchmark utilities with the pinned datasets.
-2. Run storage and networking cases independently, then the application load fixture.
-3. Verify data integrity and publish topology, throughput, latency and resource observations.
-
-Evidence: `SPEED-024/pair-1` on harness `187e1ab` passed named volume, writable layer, guest transport and sustained transaction checks on both engines. Conjet refused the ExternalSSD host bind before work in all six attempts. Kiri passed it. Both reported matching service cgroup limits and clean session teardown; Conjet completed 2,648 and Kiri 4,776 verified transactions in their respective 60 s windows.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Repeat supported workloads at the remaining pair indices and add standalone bulk transport evidence. Keep the failed Conjet host-bind samples.
-
-### SPEED-023
-
-Title: Benchmark exec, streams and control-plane operations
-
-Description: Measure Docker exec, attach/logs, inspect/list/events and file copy for supported workloads.
-
-Is blocked by task: SPEED-022.
-
-Acceptance Criteria:
-
-- Separate persistent-container docker exec from fresh docker run; measure API and CLI overhead where supported.
-- Validate stdout/stderr separation, bounded large output, exit codes, stdin/TTY behavior where supported, and cancellation without deadlocks.
-- Measure inspect/list latency with fixed owned-container counts and event delivery/order under churn; do not query or manipulate production containers.
-- Measure docker cp in/out with checksummed small-file and large-file sets. Record unsupported native or Kiri behavior without substituting another operation.
-
-Problem and Evidence: The matrix implements persistent CLI exec streams and exit code, bounded output, inspect/list and checksummed file copies. The control fixture adds stdin-driven attach, logs, ordered Docker lifecycle events, TTY and idle attach disconnect recovery. Direct API exec creation, stream demultiplexing, exit inspection and container inspection have executable canaries. Paired runtime evidence remains open.
-
-Raw evidence: Interactive development and tooling depend on control-plane and stream behavior beyond launch latency.
-
-Approach:
-
-1. Add long-lived fixture containers and deterministic stream/file workloads.
-2. Run operation-specific latency and throughput cases with correctness assertions.
-3. Inspect backpressure, cancellation and cleanup evidence before publishing results.
-
-Evidence: The canceled Conjet half of `SPEED-023/pair-1` retains 274 attempted operations. It confirmed working persistent API and CLI exec, attach, TTY, disconnect/recovery and controlled file copies in the observed repetitions. All 17 observed historical event queries produced empty streams and failed the lifecycle canary. Candidate shutdown removed the private root and production matched its starting snapshot. The bounded stream observer now waits for a complete ordered witness and closes its own client. The corrected `SPEED-023/pair-2` on `7be17a3` completed 100 measured operations per row on each engine, with no operation failures and exact production snapshots. It validated every event lifecycle, both persistent exec boundaries, attach and copy. Four independent pairs remain.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Repeat the corrected control workload at the remaining pair indices.
-
-### SPEED-021
-
-Title: Benchmark Docker build and BuildKit
-
-Description: Measure real docker build/buildx build workflows and verify resulting images.
-
-Is blocked by task: SPEED-020.
-
-Acceptance Criteria:
-
-- Pin Dockerfiles, source trees, build arguments, BuildKit versions/driver where controllable, CPU/RAM and package dependencies. Record engine-managed differences.
-- Measure empty builder cache with base preloaded, unchanged rebuild, source-only change, dependency change and multi-stage build. Separate image pull, build execution and image export/load.
-- Use representative small Rust, Go and Node projects with correctness checks and consistent dependency availability. Verify produced binaries or service responses.
-- Report build wall time, cache hits, CPU, memory peak, disk I/O and resulting image size. Record whether BuildKit uses the native runtime, Docker/containerd, or another backend.
-- No native build speed claim is allowed merely because a native launch microbenchmark is fast; unsupported Kiri build configurations remain explicit.
-
-Problem and Evidence: The first Conjet half of `SPEED-021/pair-1` completed all Rust and Go build/export, load and execution canaries. Node failed its first exported image canary in all three repetitions with `MODULE_NOT_FOUND`. npm linked the local package outside the exported dependency directory. The fixture now uses `--install-links` to install the package contents, and build/load rows explicitly fail when the exported image fails its canary. Kiri bootstrapped BuildKit but its worker timed out on Docker Hub HTTPS for all three base preloads. Stage the verified registry manifests and blobs once on ExternalSSD and provide the same offline OCI named contexts to both workers. Preserve pair 1 and rerun the corrected workload with both engines.
-
-Raw evidence: Build performance depends on BuildKit, filesystem behavior and caching; the new native launch service is not itself a build engine.
-
-Approach:
-
-1. Reuse the polyglot fixtures and define private builders with explicit endpoints.
-2. Execute the cache matrix serially and validate each output image.
-3. Publish per-project and per-cache-state comparisons with builder provenance.
-
-Evidence: `SPEED-021/pair-2` records harness `1253da3`. Both existing engines completed all 36 pinned Buildx build/export and load rows and 36 artifact canaries each. Pair 3 on `b3f0ffc` repeated those results and verified removal of 36 per-case image tags and nine private builders per engine. Raw reports, builder endpoint/driver/version and cleanup witnesses are retained with failed `pair-1`. Compatible independent pairs and the new worker resource observations remain open.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Repeat the verified offline Buildx workload at the remaining pair indices with effective builder resource attribution. Distinct temporary tags identify every case's exported image. The harness now samples cgroup CPU time, current and cumulative peak memory, and block I/O from the verified worker before and after application work, outside the timing window.
-`SPEED-021/pair-4` on `25ce7d7` verified all 72 timed operations per engine,
-with both BuildKit cgroup views reporting CPU, peak/current memory and
-I/O. `builder-counters.json` retains the raw-derived deltas. The report
-keeps intervals open until the compatible independent pairs are present.
-
-### SPEED-022
-
-Title: Benchmark Docker Compose application workflows
-
-Description: Measure a real multi-service Compose application from up through readiness and down.
-
-Is blocked by task: SPEED-021.
-
-Acceptance Criteria:
-
-- Pin the same Compose plugin/file/images and use unique project names, isolated networks, volumes and host ports for each engine.
-- Measure pre-pulled up --wait, no-change up, one-service recreate, scale, restart and down; separate build/pull cost from startup. Record unsupported commands.
-- Use an app plus database/cache fixture with health checks and a functional transaction; readiness requires working dependencies, not only running containers.
-- Validate logs, service DNS, published ports and expected data persistence across restart; separately measure down --volumes using only owned volumes.
-- Report critical-path readiness, per-service latency, resources and verified cleanup. Attribute mixed native/legacy execution per service.
-
-Problem and Evidence: The full fixture uses pinned Node and Redis, real dependency readiness, transactions, scaling, published loopback ports and project cleanup. End-to-end timings are pending.
-
-Raw evidence: Compose includes orchestration, network dependencies and storage behavior absent from the single-container native fixture.
-
-Approach:
-
-1. Create the deterministic application fixture and readiness/data canaries.
-2. Run the workflow matrix in alternating engine sessions.
-3. Verify application correctness and project-scoped cleanup after every cycle.
-
-Evidence: `SPEED-022/pair-1` contains raw reports from harness `4a6de79`. Both existing engines passed five measured repetitions of each Compose operation and all functional and cleanup canaries. Pair 2 on `b31afde` repeated those results and verified effective memory, PIDs and CPU limits on both engines outside the startup timing window. Pair 1 predates that check and is descriptive. The [interim report](docker-benchmark-results.md#compose-first-pair) records the timings.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Repeat the workload with effective cgroup verification in the other four pair slots.
-
-### SPEED-026
-
-Title: Publish the Docker and native comparison verdict
-
-Description: Create docs/engineering/docker-benchmark-results.md with reproducible results and a reviewed claim for each workload.
-
-Is blocked by task: SPEED-025.
-
-Acceptance Criteria:
-
-- Publish exact revisions, hashes, commands, effective resources, cache states, timing boundaries, raw evidence links and per-session results for every planned row.
-- Report Kiri versus Conjet Docker API, Docker CLI/build/Compose, and native API as separate comparisons. Distinguish accelerated, legacy, mixed and unsupported paths.
-- Compute predeclared confidence intervals from independent sessions; avoid treating repeated operations as independent hardware/session evidence. Report failures and missing coverage alongside speed.
-- Use per-workload pass/fail/inconclusive/unsupported verdicts. Task completion means valid measurements and an honest report, not a mandatory Conjet win.
-- Scope claims to observed M1 Pro conditions; retain deferred cross-host, energy and guest-teardown requirements. Do not use this report to silently expand the earlier release scope or declare all Docker operations accelerated.
-- Review findings, create concrete follow-up tasks for regressions/gaps, verify production and cleanup, and commit/push the report without automatically merging or publishing a release.
-
-Problem and Evidence: [Interim outcome and coverage audit](docker-benchmark-results.md).
-The report separates the first complete lifecycle pair, existing-engine
-pilots and native OCI/static timing. The summary tool verifies per-session
-counts and refuses a lifecycle paired interval before five complete pairs
-or across mixed executable, harness or manifest revisions. It retains setup,
-warmup and artifact-verification failures alongside measured rows.
-Controlled-registry intervals additionally require complete witnessed config
-and layer transfer for every first-pull sample in each accepted pair.
-The report generator derives archived bytes per second from the exact saved
-artifact size and exposes guest I/O stages independently of Docker CLI time.
-The remaining modes and claim review are still in progress.
-The local full check retained the default SwiftPM Metal failure and passed
-all 440 Swift tests on the documented native build system with two skips.
-ARM64 musl strict Clippy exposed two redundant kernel filesystem casts.
-The portable comparison passes Clippy and produced the same SHA-256 as
-the measured release guest supervisor. Rust workspace tests and formatting
-also passed. Logs and the rebuilt hash are in `SPEED-026/final-local`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Keep the published coverage and claim audit current. Complete the
-remaining broad-program scenario repetitions only when that scope resumes.
-The revised native-first lane has a reviewed local measurement row in
-`SPEED-019/native-kiri-release-cabbea9`; independent PR review remains open.
-
-### SPEED-019
-
-Title: Benchmark Docker run and container lifecycle
-
-Description: Measure fresh Docker API and docker run end-to-end against Kiri, retaining native API measurements as a distinct comparison.
-
-Is blocked by task: None for the declared subset. SPEED-018 validated the isolated native route.
-
-Acceptance Criteria:
-
-- Measure create/start/wait/removal through HTTP and docker run --rm through the same pinned CLI separately. Validate nonzero exits and output; include true and a small observable application.
-- Cover warm-image no-network and supported bridge cases; separate first-use/image acquisition from cached runs. Keep VM cold boot outside warm lifecycle timing.
-- Report p50/p95/p99, raw failures, wall time, throughput and per-session distributions. Record API removal and verified guest cleanup separately; do not infer one from the other.
-- Compare native fresh/prepared only where workload semantics match; include preparation/refill, missed claims and actual dispatch backend. Do not label a native RPC measurement docker run.
-- Exercise create/start of pre-created containers, stop/kill/restart and remove; mark unsupported lifecycle operations explicitly.
-
-Problem and Evidence: The orchestrator exposes the frozen lifecycle counts and allows
-one complete network/workload/adapter group per paired session. The
-launchers keep API removal acknowledgement separate from cleanup. The
-pilot measured 121.6 s for 240 Conjet operations. At that rate the
-full frozen 12-group, five-session Conjet matrix alone requires about
-17 hours of measured windows. Start with an independently booted,
-complete group and keep partial coverage explicit. Pair 2 collected all
-2,000 no-network Alpine API samples per existing Docker engine without
-failures. Median/p95/p99 were 594.953/819.515/871.010 ms on Conjet and
-3.944/4.742/6.988 ms on Kiri. Timing ends at API removal acknowledgement.
-Only one of five pairs is complete for this row; source revision and raw
-data are in `SPEED-019/alpine-true-none-api-pair-2`.
-`SPEED-019/native-oci-full-1` used `4da6d3b` and recorded 2,000 CLI and
-2,000 API samples with no failures. Every operation had a distinct native
-workload ID and verified guest cleanup. The API p50/p95/p99 was
-28.381/33.940/34.537 ms and CLI p50/p95/p99 was 47.900/54.525/59.707 ms.
-The opt-in environment rejected excess admission and preserved production.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Preserve the final native-first row and the historical baseline.
-Legacy repetitions stopped on the user's direction at pair 3, leaving its
-partial report and verified cleanup.
-The earlier source adapter runner verifies one-use guest
-cleanup on every operation and uses UID/GID 65532. The baseline uses the
-image-default user, so their measurements remain distinct.
-The full-sample runner handles cancellation through its Docker adapter and
-VM ownership cleanup and retains partial rows.
-The no-network Alpine `true` CLI series at `eb31229` completed pair 1 with
-2,000 samples per engine and no failures. It retained a canceled next boot
-with verified cleanup to allow local validation of the hosted CI fix without
-overlapping compilation and timing.
-Repetition resumed at pair 2 on that same harness under the series'
-`remaining` directory. Pair 3 was canceled. Pairs 4 and 5 are outstanding.
-The canceled preliminary boot is preserved outside the counted pair set.
-Pair 2 retained two exit-127 errors on the existing Conjet path
-and zero on Kiri. Both Conjet errors reported Go thread creation failure
-under the declared four-PID cap and cleaned up successfully. Investigate
-the guest runc startup path using a separate diagnostic and keep the
-predeclared limits and failure records in the benchmark.
-
-The serial release pilot from source `98d4148` is retained in
-`SPEED-019/{native-default-pilot-3,kiri-native-default-pilot-3}`. Both
-engines completed 100 API and 100 CLI samples under matched UID/GID and
-limits with zero failures. Native p50/p95/p99 were 34.201/39.674/43.706 ms
-(API) and 47.845/52.008/52.984 ms (CLI). Kiri recorded
-4.116/4.776/5.204 ms (API) and 21.341/22.796/23.813 ms (CLI).
-The native API's median observed adapter sleep was 27.393 ms.
-Kiri guest cleanup is unknown.
-
-The adapter now waits for the terminal guest revision in cancellable
-100 ms slices. The release pilot in `SPEED-019/native-default-wait-pilot`
-completed 100 samples per lane with zero failures. It recorded one Wait
-request per operation. Native p50/p95/p99 were 3.185/3.727/4.363 ms
-(API) and 22.792/24.618/27.912 ms (CLI). A dedicated timeout test
-verified cancellation without resubmitting Launch. The real OCI suite
-in `SPEED-018/native-default-wait-live` and the Kiri-first serial
-orchestrator pilot in `SPEED-019/native-default-orchestrated-pilot` passed.
-The 25 ms host tick remains enabled.
-
-The final five alternating, independent pairs used measurement revision
-`cabbea9` and matching release binaries. All 40,000 measurements and 200
-warmups passed. The native API p50 ratio to Kiri was 0.841 (95% interval
-0.818–0.855); p99 was inconclusive at the practical threshold. Native
-CLI p50/p99 ratios were 1.076 and 1.099 and slower at that threshold.
-The native witness verified each workload and its cleanup. Production
-and owned session cleanup checks passed for all ten boots. See the
-[release-build lifecycle results](docker-benchmark-results.md#release-build-native-docker-lifecycle)
-and `SPEED-019/native-kiri-release-cabbea9/summary.json`. The matched warm
-no-network `true` row is complete. Broader lifecycle coverage remains open.
-
-
-### SPEED-008
-
-Title: Run the fresh-runtime comparison and record the gate decision
-
-Description: Create docs/engineering/fresh-runtime-gate.md linking the baseline and candidate reports and a proceed/revise/stop verdict.
-
-Is blocked by task: SPEED-007.
-
-Acceptance Criteria:
-
-- Measure equivalent no-network and bridge lifecycle scenarios, including cleanup.
-- Report latency distributions, sustainable churn, CPU, memory, failures, and uncertainty.
-- Attribute observed bottlenecks with traces; do not infer that all savings belong to Jetstream.
-- Record a proceed/revise/stop decision and preserve any regression evidence.
-
-Problem and Evidence: The architecture plausibly removes launch overhead, but
-neither its performance nor superiority has been measured.
-
-Approach:
-
-1. Run the SPEED-002 scenarios against original Conjet, the candidate, and pinned Kiri with matching cache and network modes.
-2. Compare API-visible and cleanup-complete latency, throughput, CPU, memory, and failures; profile the dominant stages.
-3. Record which gains are demonstrated, any regressions, and whether prepared-launch work is justified; block it on a revise/stop verdict.
-
-Evidence: The signed native VSOCK diagnostic with 25 ms host ticks
-showed a 17.062 ms idle ping p50 and 27.426 ms p99. Without ticks eight
-pings returned before the session stopped. The Darwin native socket
-watcher now waits on kqueue and wakes the VMM on accept or incoming data.
-With the same tick setting, idle ping p50/p99 became 1.610/7.361 ms.
-The tick-disabled variant completed 200 pings in both trials, but the
-first stalled on a bridge lifecycle. Preserve that failure and keep the
-tick-enabled fixture for comparative work. Raw RPCs, commands, hashes,
-and matching production snapshots are in
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/transport`.
-
-The workspace passed 156 Rust tests with three existing opt-in tests
-ignored. The focused VSOCK suite passed 29 tests. The branch-built
-candidate's separate Docker smoke passed. The [fresh runtime gate](fresh-runtime-gate.md)
-records the comparison method and the limited diagnostic results.
-The matched image probe used a single pinned static ARM64 executable
-and the same requested workload resource limits on original Conjet at
-`bbe8019`, the official Kiri 0.2.2 app, and the native candidate. All 240
-measurements passed their adapter checks. Native no-network API p50 was
-2.156 ms and p99 was 6.997 ms, versus Kiri's 4.074 and 5.025 ms. Native
-bridge API p50 was 76.018 ms versus Kiri's 37.155 ms. Native terminal
-responses require verified cleanup. The Docker API observations stop at
-removal acknowledgement and do not establish equivalent cleanup. This
-M1 Pro run remained under production background load and yields no
-competitive qualification decision. The reports, hashes, host snapshots,
-and launcher verification are in
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/common-image`.
-The Kiri smoke and mid-benchmark cancellation checks verified the official
-peer, matching production observations, removed socket, and no residual
-VM disk holder. Python compilation, 17 focused Rust tests and strict
-macOS and ARM64 Linux Clippy passed.
-
-Six further isolated native boots measured optional guest-local phase
-timestamps. Two traced default-kernel runs attributed about 19 ms median
-to bridge preparation before child authorization and 40–41 ms median to
-verified network teardown after exit. The on/off trials overlapped and do
-not resolve trace overhead. Expedited RCU increased bridge latency and
-remains a diagnostic flag. All 1,200 measured operations passed fixture
-checks. Evidence and passing production comparisons are under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/phase-analysis`.
-
-Grouped synchronous removal halved the measured bridge teardown median
-from roughly 40 ms to 19 ms. Bridge API p50 fell from 64–68 ms to
-42–44 ms. The complete kernel bridge and previous recovery matrices,
-800 follow-up measurements, focused Rust tests, and strict ARM64 Clippy
-passed. Retained evidence is in `SPEED-008/grouped-teardown`.
-
-Direct peer registration reduced measured bridge preparation from about
-19 ms to under 0.4 ms. Two boots measured native bridge API p50 about
-20.2 ms and p99 about 44 ms. All 800 operations and the bridge, private
-scope, teardown, fault and cancellation regressions passed. The runner
-records the timed measurement window in addition to individual operations
-and tracks the native VMM and owned networking helper. Reports are under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/direct-peer`.
-
-The serial common-image run on `64fe823` captured 4,000 native operations
-with verified cleanup, 4,000 Kiri Docker API operations, and 200 original
-Conjet Docker API operations. All completed at their adapter's boundary.
-The native bridge recorded 20.196 ms p50 and 32.315 ms p99 across 42.352
-seconds, while Kiri's API acknowledgement was 33.608 ms p50 and 63.461 ms
-p99. Kiri's read-only guest visibility probe saw its own container as
-PID 1 and could not verify guest cleanup. Raw timings, launcher
-observations, physical footprint, CPU and balloon evidence are under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/api-churn`.
-The reviewed gate decision is **revise**. Qualification is still pending.
-
-Source: [Delivery gates](speed-engineering-plan.md#incremental-delivery-and-decision-gates),
-[verification policy](speed-engineering-plan.md#verification-and-claim-policy).
-
-Review: Reviewed the kqueue callback and queue ownership, guest phase
-attribution, grouped link teardown, and direct peer registration. The
-revised native path passed the scoped correctness and recovery matrix.
-The gate remains unmet because the Docker competitor cleanup endpoint,
-second physical host configuration, equivalent network scope, energy,
-and full qualification matrix are unverified.
-
-Next Action: Deferred for comparative research. Obtain a second ARM64 host,
-a way to observe official Kiri guest teardown, and authorized energy sampling,
-then rerun the original matrix. Experimental release proceeds under local
-acceptance without changing the SPEED-008 verdict.
-
-## UNDERREVIEW
-
-### SPEED-020
-
-Title: Benchmark Docker image and registry operations
-
-Description: Measure pull, local load/save, image inspection and removal with controlled registry and cache conditions.
-
-Is blocked by task: SPEED-019.
-
-Acceptance Criteria:
-
-- Use identical immutable images and architecture; separate manifest lookup, transfer, decompression/unpack and ready-to-run where observable.
-- Measure cold and cached pulls using a task-owned local registry when supported; report public-network pulls separately without attributing network variation to the runtime.
-- Verify digest and runnable contents after pull/load; measure save/load throughput and disk expansion. Delete only task-owned images and artifacts.
-- Record unsupported image-management operations for native-only endpoints; image preparation is included in native readiness cost where relevant.
-
-Problem and Evidence: The first serial image pair completed and verified cleanup.
-It produced pinned Node save/load and runnable proofs on both engines
-and loopback registry reimports. Kiri's reused Alpine config advertised
-the historical index digest while returning the exact pinned ARM64 config
-digest. The runner now checks that pinned config digest independently
-and retains advertised-manifest status. Registry reimports separately
-record observed blob transfers and keep pristine layer cache unknown.
-Four fixture tests passed. Retained raw data under ExternalSSD
-`SPEED-020/pair-1`; repeat the affected Alpine row and the remaining pairs.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Verified immutable identities, complete transfers, archive/load and execution canaries, pinned participants, five independent pairs, exact cleanup and production snapshots. Pending program review with the SPEED-019 dependency.
-
-Evidence: `SPEED-020/pair-2` passed both image pins, warm save/load and run. Its host timestamp filter missed Conjet registry witnesses. `SPEED-020/pair-3` on `b31afde` observed all expected config and layer bytes for all ten measured first pulls per engine. Both engines passed archive, run and labeled-registry cleanup checks with zero scenario failures. Keep the prior unknown transfer records.
-The subsequent private Kiri inventory found 24 owned digest-only registry
-images omitted by the earlier repository-filtered listing. Removed their
-exact config IDs and verified absence without pruning. The harness now
-validates those IDs against the full private image inventory and verifies
-their removal. See `SPEED-026/final-local/kiri-image-inventory*.log`.
-`SPEED-020/cleanup-qualified` then completed five independent matched pairs
-at `20e3a2b` with zero recorded operation failures. It verified 12 digest-only
-removals per engine per boot and complete transfers for the first pulls.
-`summary.json` records per-session distributions and the paired CIs. Kiri
-met the frozen faster threshold for the four controlled pull rows. The supplemental `SPEED-020/backing-observation` captured before/after backing allocations. Per-session archive throughput and inspection distributions are retained.
-
-Next Action: Review the full image evidence with the remaining program results once SPEED-019 is ready.
-
-### SPEED-013
-
-Title: Open and qualify the speed enhancement PR to main
-
-Description: Submit the completed enhancement with its final benchmark and
-correctness evidence, then resolve review and CI findings before merging.
-
-Is blocked by task: SPEED-012 and SPEED-011 required experimental checks.
-
-Acceptance Criteria:
-
-- Prior development and required local gates are audited with passing evidence
-  and verified pushed commits. SPEED-008 continues to record its revise verdict.
-- Final qualification reports identify the tested revision and exact claim scope;
-  no required check is skipped or unresolved.
-- PR targets main from enhancement/speed-up and links the plan, board, reports,
-  compatibility limitations, and rollback procedure.
-- Required CI and review pass; changes during review receive applicable validation
-  and are pushed as additional increments before merge.
-
-Problem and Evidence: A pushed implementation branch alone does not establish
-reviewed integration or release readiness.
-
-Approach:
-
-1. Audit every task and final gate against the remote branch revision.
-2. Open the PR with concrete behavior, benchmark results, and validation evidence.
-3. Resolve findings, rerun affected checks, push increments, and merge only when
-   repository review and CI requirements are satisfied.
-
-Evidence: The final local gate was audited against `cb1f80f` and the
-remote enhancement branch matched. [PR #33](https://github.com/omega13-engr/conjet/pull/33)
-targets main and discloses the experimental scope, local measurements,
-rollback procedure and deferred comparative work. On `d613c87`,
-[hosted CI](https://github.com/omega13-engr/conjet/actions/runs/45083820209)
-passed the build and host tests, then failed the existing overflow-pulse
-app test. Its fixed 220 ms sleep could end before asynchronous inventory
-loading recorded any invocations. The test now awaits the scheduled
-refresh and retains all five Docker inventory assertions. The application
-change only exposes the existing task on its test hook. The 50-test
-focused suite and the 440-test full Swift suite passed locally, with two
-configuration skips in the full suite. Failure and regression logs are retained under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-013`.
-Independent review, passing hosted CI and merge remain pending.
-
-New hosted runs `45101948820` and `45102608771` reproduced separate
-image-pulse timing failures. The tests now await the scheduled refresh.
-The queued case uses an explicit command gate so the initial container
-refresh stays in flight until the deferred event queues. Assertions are
-unchanged or stronger. Seven pulse tests passed three consecutive local
-runs. The full native SwiftPM suite executed 440 with two skips and zero
-failures. The logs and the two hosted failures are kept in
-`SPEED-026/final-local`. On `63e9147`, [hosted CI](https://github.com/omega13-engr/conjet/actions/runs/45104363466)
-passed Swift, networking, app staging and benchmark checks. Later branch
-revisions still require current CI and independent review before merging.
-
-Source: [Qualification policy](speed-engineering-plan.md#verification-and-claim-policy),
-[release process](../release.md).
-
-Review: Pending; verify all development gates before opening the PR and all CI
-and review requirements before merge.
-
-Next Action: Collect required CI and independent review before merging.
-
-## DONE
 
 ### SPEED-018
 

@@ -61,13 +61,16 @@ start after its response is lost. The test verifies real Jetstream workload
 handles and guest cleanup in terminal event attributes. On an unresolved
 backend disposition the session rejects new admission.
 
-## Supported isolated candidate
+## Verified isolated research scope
 
 Use the foreground launcher in the [environment runbook](speedup-environment.md).
-The launcher defaults to the Rust Docker owner in the release Jetstream
-binary and uses the OCI-specific boot and stop commands. The candidate
-requires no experimental switch and has no containerd fallback. Use
+In the native research mode, the launcher defaults to the Rust Docker
+owner in the release Jetstream binary and uses the OCI-specific boot
+and stop commands. This mode uses the native OCI guest for every
+admitted workload. Use
 `--docker-owner python` to run the reference against the same guest.
+The retained Docker path uses dockerd and containerd.
+[Current performance plan](native-docker-speed-plan.md)
 The workload uses the staged immutable image reference, `--pull never`,
 `--network none`, `--user 65532:65532`, `--memory 16m`, `--pids-limit 4`,
 and `--cpus 0.5`. It accepts the enforced constraints

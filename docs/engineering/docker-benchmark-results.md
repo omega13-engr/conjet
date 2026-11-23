@@ -7,7 +7,55 @@ requires five independent pairs. The retained local data support
 descriptive results at the stated boundaries. SPEED-008 remains unresolved.
 
 [Protocol and workload manifest](docker-benchmark-plan.md)
-[Supported optimized Docker route](docker-native-adapter.md)
+[Native OCI research scope](docker-native-adapter.md)
+
+## SPEED-046 retained Docker path diagnostic
+
+One isolated release boot at `de8773b` used Docker Engine 29.1.3,
+containerd 2.2.1, runc 1.3.4, Core 1.3.1 and Linux
+`6.12.86-conjet` on the M1 Pro. The guest had two vCPUs and
+2,048 MiB configured. The pinned ARM64 `/bin/probe` fixture
+used 16 MiB, four PIDs and 500 millicores. Each group completed
+ten warmups and 12 measured requests. All 88 operations passed.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Release Conjet CLI | `e55959513e8a35673b9078c53b32f730cddcca0ae51697be65e6db70bf6b3370` |
+| Release conjetd | `ea594282c33b4f77e7059db529be2929b2590a1283e6cbccb36c40f07278e8c3` |
+| Release Jetstream | `4948acbbf65e18387d3938e5be46f9dee956e7a8d4cee9757423fdc341608be4` |
+| Release network helper | `20ac4c6bf6d5312f07363f96fbc79539d8080c70eda58ebebe597e40905a3732` |
+| Docker client | `cd9e0b149e447af504421ac7117044d8e17d695d66846a5c4df1312c417c22a3` |
+| Staged workload manifest | `dc9fe4ca74bd748082fa9e1b8328f9545c911116fd4e336a5691a9e9c10b39be` |
+| Pinned image archive | `7c634cde03b42a156ac14729ceaa54d3a0f3d5aa590b644f4bfa435048578473` |
+
+| Network | Lane | p50/p95/p99 (ms) | Successes/s |
+| --- | --- | ---: | ---: |
+| none | API | 281.473 / 357.646 / 357.646 | 3.453 |
+| none | CLI | 380.650 / 451.168 / 451.168 | 2.546 |
+| bridge | API | 385.612 / 628.732 / 628.732 | 2.447 |
+| bridge | CLI | 696.161 / 826.469 / 826.469 | 1.410 |
+
+| Network | Create median (ms) | Start | Wait | Remove | Median start+wait share |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| none | 20.823 | 97.313 | 149.116 | 18.152 | 85.6% |
+| bridge | 28.315 | 123.773 | 216.620 | 19.917 | 87.8% |
+
+The API window ends at removal acknowledgement. CLI time ends at
+client exit. Guest cleanup for an individual operation remains
+unobservable on these routes. The host timings show where requests
+wait and cannot divide the delay among VMM transport, dockerd,
+containerd, runc and execution. The reported tail percentiles are
+descriptive for 12 samples. This run has no matched Kiri pair or
+parity verdict. The historical series below retain their prior
+results and boundaries.
+
+The launcher verified the production identities, context and endpoint
+before and after the diagnostic. The staged daemon, VMM and network
+helper exited. Reclamation verified closure of their sockets and
+file handles and removed the exact owned scratch root. Raw timings,
+backing paths, host CPU and RSS observations, startup and cleanup
+evidence are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-046`.
 
 ## Measured environment
 

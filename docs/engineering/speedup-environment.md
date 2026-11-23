@@ -5,15 +5,36 @@
 Official Kiri 0.2.2 is runnable for session-scoped tests. Live smoke and
 cancellation checks passed on 2026-11-22. No Kiri process is left running.
 Production Conjet remains running with its existing Docker context selected.
-The branch-built `conjet-speedup` candidate defaults to Jetstream native OCI.
-The existing Docker/containerd path is available only as an explicit baseline
-in this launcher. See the [benchmark report](docker-benchmark-results.md).
+The retained Docker path uses dockerd, containerd and runc. The
+foreground launcher selects it with `--legacy-baseline`. The launcher's
+Rust native OCI endpoint is an isolated research fixture.
+[Benchmark report](docker-benchmark-results.md)
 
 The user accepted keeping test data on ExternalSSD while allowing the official
 app's normal settings location. This replaces the earlier requirement for full
 filesystem isolation. It does not require a patched competitor or a new account.
 
-## Build and run the Conjet candidate
+## Profile the retained Docker path
+
+Build release `conjet`, `conjetd`, Jetstream and `conjet-network`
+under ExternalSSD scratch. After the builds finish, run the profile
+against the pinned Core release in the private `conjet-speedup`
+context:
+
+```sh
+python3 build-support/run-conjet-speedup.py --legacy-baseline \
+  --swift-bin "$speed_build/swift/release" --core "$speed_build/cargo/release/jetstream" \
+  --network-helper "$speed_build/conjet-network" --core-assets "$core_assets" \
+  --image "$pinned_image" --benchmark-output "$evidence/profile" --benchmark-samples 12 \
+  --benchmark-scenario "$fixture/scenario.json" --benchmark-archive "$fixture/image.tar"
+```
+
+Capture the retained-engine launcher's `session.json`, VM startup log,
+and profile evidence before deleting the exact task-owned scratch.
+The launcher verifies the endpoint and production identities before
+the profile and after cleanup.
+
+## Build and run the native research fixture
 
 Run from the checked-out `enhancement/speed-up` branch:
 
@@ -54,12 +75,12 @@ SIGTERM enter cleanup. Use `--hold-seconds 60` to
 exercise cancellation after the smoke fixture prints its success marker.
 Production and the competitor must stay outside the candidate session.
 
-For a historical Docker/containerd baseline, pass `--legacy-baseline` and
+For the retained Docker/containerd lane, pass `--legacy-baseline` and
 `--network-helper`, and omit the native arguments. To reuse the release downloads,
 pass `--core-assets` with the earlier
 session's `h/profiles/speedup/state/vm` directory. The launcher copies the
 compressed release artifact and kernel with their sidecars, verifies the
-checksums, and imports fresh mutable disks. The candidate uses host networking
+checksums, and imports fresh mutable disks. The retained lane uses host networking
 via its own helper over an inherited socket pair. The fixture requests no
 published ports, so it reserves no host ports.
 
