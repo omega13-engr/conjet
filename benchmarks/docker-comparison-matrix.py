@@ -386,6 +386,16 @@ def build_context_args(build_bases, manifest, language):
     return 'compiler-base', 'runtime-base', contexts
 
 
+def sample_builder(docker, worker, boundary):
+    # Read the owned worker's cgroup outside build/export timing. memory.peak
+    # is cumulative for one fresh builder; cpu.stat and io.stat carry counters.
+    probe = ('for field in cpu.stat memory.current memory.peak io.stat; do '
+             'printf "%s\\n" "$field"; if test -r "/sys/fs/cgroup/$field"; then '
+             'cat "/sys/fs/cgroup/$field"; else printf "unavailable\\n"; fi; done')
+    docker.call(f'builder.cgroup.{boundary}', ['exec', worker, '/bin/sh', '-c', probe],
+                phase='verification', timeout=15)
+
+
 def run_builds(docker, manifest, context, build_bases=None):
     budget = manifest['suites']['builds']
     for language in budget['workloads']:
@@ -400,6 +410,8 @@ def run_builds(docker, manifest, context, build_bases=None):
                 break
             directory = docker.output / builder
             results = []
+            worker = f'buildx_buildkit_{builder}0'
+            sampled = False
             try:
                 details = docker.call('builder-bootstrap', ['buildx', 'inspect', '--bootstrap', builder],
                                       timeout=180, phase='setup')
@@ -413,7 +425,7 @@ def run_builds(docker, manifest, context, build_bases=None):
                         or descriptor_fields(report, 'BuildKit version') != [manifest['images']['buildkit']['tag']]):
                     docker.rows[-1]['error'] = 'builder endpoint, driver or version did not match the manifest'
                     break
-                state = docker.call('builder-backing', ['inspect', f'buildx_buildkit_{builder}0'],
+                state = docker.call('builder-backing', ['inspect', worker],
                                     phase='verification')
                 if state is None:
                     break
@@ -434,6 +446,8 @@ def run_builds(docker, manifest, context, build_bases=None):
                 if docker.call('preload-builder-bases', [*prefix, '--output', 'type=cacheonly', directory],
                                timeout=budget['timeout_seconds'], phase='setup') is None:
                     break
+                sample_builder(docker, worker, 'after-preload')
+                sampled = True
                 for path, content in sources.items():
                     target = directory / path
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -474,6 +488,8 @@ def run_builds(docker, manifest, context, build_bases=None):
                     finally:
                         archive.unlink(missing_ok=True)
             finally:
+                if sampled:
+                    sample_builder(docker, worker, 'after-builds')
                 cleanup_failed = False
                 for tag in results:
                     existing = docker.call('fixture-cleanup-inspect', ['image', 'ls', '--quiet', tag], phase='cleanup')

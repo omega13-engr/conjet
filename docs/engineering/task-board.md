@@ -285,7 +285,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Repeat the verified offline Buildx workload at the remaining pair indices with effective builder resource attribution. Distinct temporary tags now identify every case's exported image so cleanup can remove all of them. The builder and image inventory remain separately checked.
+Next Action: Repeat the verified offline Buildx workload at the remaining pair indices with effective builder resource attribution. Distinct temporary tags identify every case's exported image. The harness now samples cgroup CPU time, current and cumulative peak memory, and block I/O from the verified worker before and after application work, outside the timing window.
 
 ### SPEED-022
 
