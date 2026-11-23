@@ -141,22 +141,28 @@ def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None, group
                     raise RuntimeError('unexpected server behind Kiri endpoint')
             elif report['server'].get('Platform', {}).get('Name') == 'Kiri':
                 raise RuntimeError('candidate endpoint unexpectedly identifies as Kiri')
-            version = '/v' + manifest['docker_api']
-            info = TOOLS['api'](connection, 'GET', version + '/info', (200,))
-            report['guest'] = {key: info.get(key) for key in
-                               ('Architecture', 'NCPU', 'MemTotal', 'KernelVersion', 'Driver',
-                                'OperatingSystem', 'CgroupVersion', 'DockerRootDir', 'DefaultRuntime')}
             disks = vm_disks(engine, config, vm_paths or {})
+            image = manifest['images']['alpine']['ref']
             if engine == 'kiri':
                 # Kiri can answer metadata from the daemon before the guest
                 # exists. Start it with pinned work outside the timing window.
-                image = manifest['images']['alpine']['ref']
                 TOOLS['run'](docker + ['pull', '--platform', manifest['platform'], image], env, timeout=180)
                 output_text = TOOLS['run'](docker + ['run', '--rm', '--network', 'none', '--pull', 'never',
                                                     image, '/bin/echo', 'comparison-ready'], env)
                 if output_text != 'comparison-ready':
                     raise RuntimeError('Kiri guest startup canary failed')
             report['vm_backing'] = observed_disks(engine, peer, disks)
+            version = '/v' + manifest['docker_api']
+            info = TOOLS['api'](connection, 'GET', version + '/info', (200,))
+            report['guest'] = {key: info.get(key) for key in
+                               ('Architecture', 'NCPU', 'MemTotal', 'KernelVersion', 'Driver',
+                                'OperatingSystem', 'CgroupVersion', 'DockerRootDir', 'DefaultRuntime')}
+            try:
+                report['guest']['proc_meminfo'] = TOOLS['run'](
+                    docker + ['run', '--rm', '--network', 'none', '--pull', 'never', image,
+                              '/bin/sh', '-c', 'head -n 3 /proc/meminfo'], env, timeout=15)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                report['guest']['proc_meminfo_error'] = str(error)
             report['host_before'] = TOOLS['sample_host'](peer_args, output / 'footprint-before.json')
             report['backend'] = ('official Kiri 0.2.2' if engine == 'kiri' else 'Conjet Core Docker/containerd')
             if mode in ('pilot', 'probes', 'lifecycle'):
@@ -268,7 +274,9 @@ def main():
     parser.add_argument('--mode', choices=('preflight', 'pilot', 'probes', 'lifecycle', 'images', 'builds', 'compose', 'control',
                                                          'storage_network', 'stress'), default='preflight')
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--pair', type=int, choices=range(1, 6), default=1)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument('--pair', type=int, choices=range(1, 6), default=1)
+    selection.add_argument('--all-pairs', action='store_true', help='run all frozen pairs in one foreground session')
     parser.add_argument('--timeout', type=int, default=900)
     parser.add_argument('--build-bases', type=Path, help='verified ExternalSSD OCI layouts for offline Buildx input')
     lifecycle = contract()['suites']['lifecycle']
@@ -299,9 +307,15 @@ def main():
     with os.fdopen(descriptor, 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         signal.signal(signal.SIGTERM, lambda *_: signal.raise_signal(signal.SIGINT))
-        order = contract()['session_order'][args.pair - 1]
-        save(output / 'pair.json', {'order': order, 'mode': args.mode, 'pair': args.pair})
-        run_pair(args, output, order)
+        orders = contract()['session_order']
+        indices = range(1, len(orders) + 1) if args.all_pairs else (args.pair,)
+        for index in indices:
+            pair_output = output / f'pair-{index}' if args.all_pairs else output
+            if args.all_pairs:
+                pair_output.mkdir(mode=0o700)
+            order = orders[index - 1]
+            save(pair_output / 'pair.json', {'order': order, 'mode': args.mode, 'pair': index})
+            run_pair(args, pair_output, order)
 
 
 if __name__ == '__main__':

@@ -203,7 +203,11 @@ python3 benchmarks/docker-comparison.py --mode lifecycle \
 Use `--mode preflight` before a new environment, `pilot` for annotated pilot
 timings, and `probes` for capability checks. A selected lifecycle group runs
 its full per-session budget. Repeat at every pair index for a qualifying
-series. The other modes are `images`, `builds`, `compose`, `control`,
+series. Use `--all-pairs` in place of `--pair` to run a mode or lifecycle
+group through all five pairs with one foreground lock. If a session fails,
+keep its evidence and resume each remaining pair into a new output directory.
+The launchers record the running VM's reported memory and the container view
+of `/proc/meminfo` before timing. The other modes are `images`, `builds`, `compose`, `control`,
 `storage_network` and `stress`. They run their own frozen per-session counts
 and retain failed operations. A successful launcher exit confirms capture and
 cleanup. Check each scenario's errors and coverage before using its timings.

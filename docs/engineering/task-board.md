@@ -718,6 +718,9 @@ launch before measuring disks. A one-second timeout stopped the owned Kiri
 daemon and removed its socket while retaining partial evidence. Three new
 safety tests and the five existing adapter tests passed. Evidence is under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-016`.
+The coordinator can run all five frozen pairs under a single foreground
+lock. New session reports record `/info` after VM readiness and probe the
+container view of guest memory outside timing.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),
 [environment runbook](speedup-environment.md),
