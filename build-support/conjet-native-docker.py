@@ -85,7 +85,7 @@ class Native:
                 return 137, b'', b'', {'cancelled_before_admission': True}
             state = self.call(channel, 8, request, 13)
             admitted = time.monotonic_ns()
-            slept = 0
+            wait_calls = 0
             bound = time.monotonic() + 32
             handle = state['handle']
             sent_cancel = False
@@ -93,15 +93,19 @@ class Native:
                 if state['cleanup'] == 'failed' or time.monotonic() >= bound:
                     raise RuntimeError('native workload cleanup is unresolved')
                 if cancellation.is_set() and not sent_cancel:
-                    self.call(channel, 11, {'handle': handle, 'budget_ms': 1000}, 13)
+                    state = self.call(channel, 11, {'handle': handle, 'budget_ms': 1000}, 13)
                     sent_cancel = True
-                # Inspect updates on a dedicated channel. Do not resubmit a
-                # launch whose response or terminal disposition is ambiguous.
-                state = self.call(channel, 9, {'handle': handle, 'budget_ms': 1000}, 13)
-                if state['cleanup'] != 'complete':
-                    before_sleep = time.monotonic_ns()
-                    time.sleep(0.02)
-                    slept += time.monotonic_ns() - before_sleep
+                    continue
+                # Wait for the terminal revision. A short budget bounds the
+                # time before we check for cancellation again.
+                wait_calls += 1
+                kind, result = WIRE['call'](channel, 10, {
+                    'handle': handle, 'after_revision': 2**64 - 1, 'budget_ms': 100})
+                if kind == 15 and result.get('code') == 'deadline_exceeded':
+                    continue
+                if kind != 13:
+                    raise RuntimeError(f'native terminal wait rejected: {result}')
+                state = result
             terminal = time.monotonic_ns()
             output = []
             for name in ('stdout', 'stderr'):
@@ -120,8 +124,9 @@ class Native:
                 output.append(bytes(data))
             state['adapter_timings_ns'] = {'authenticate': authenticated - began,
                                            'admit': admitted - authenticated,
-                                           'terminal': terminal - admitted, 'sleep': slept,
+                                           'terminal': terminal - admitted,
                                            'output': time.monotonic_ns() - terminal}
+            state['adapter_wait_calls'] = wait_calls
             if sent_cancel and state['exit'] is None and not state.get('helper_failed'):
                 return 137, *output, state
             if state['exec'] != 'confirmed' or state.get('helper_failed'):
@@ -232,6 +237,8 @@ class Owner:
                                'conjet.native_handle': item.native.get('handle', {}).get('workload_id', '')})
             attributes.update({f'conjet.timing.{key}': str(value) for key, value in
                                item.native.get('adapter_timings_ns', {}).items()})
+            if 'adapter_wait_calls' in item.native:
+                attributes['conjet.wait_calls'] = str(item.native['adapter_wait_calls'])
         self.events.append({'Type': 'container', 'Action': action,
                             'Actor': {'ID': item.id, 'Attributes': attributes},
                             'time': int(time.time()), 'timeNano': time.time_ns()})

@@ -459,6 +459,16 @@ The native API's median observed adapter sleep was 27.393 ms.
 Profiling and final independent sessions remain open. Kiri guest cleanup
 is unknown.
 
+The adapter now waits for the terminal guest revision in cancellable
+100 ms slices. The release pilot in `SPEED-019/native-default-wait-pilot`
+completed 100 samples per lane with zero failures. It recorded one Wait
+request per operation. Native p50/p95/p99 were 3.185/3.727/4.363 ms
+(API) and 22.792/24.618/27.912 ms (CLI). A dedicated timeout test
+verified cancellation without resubmitting Launch. The real OCI suite
+in `SPEED-018/native-default-wait-live` and the Kiri-first serial
+orchestrator pilot in `SPEED-019/native-default-orchestrated-pilot` passed.
+The 25 ms host tick remains enabled.
+
 
 ### SPEED-008
 

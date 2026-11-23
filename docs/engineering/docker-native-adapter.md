@@ -78,7 +78,8 @@ permissions, multiple layers and hard links during staging.
 The candidate is managed from source and general promotion requires broader
 compatibility. Live streaming, interactive input, Compose, networking, build,
 persistent exec, full event streaming, guest root credentials and prepared
-OCI are outside the tested route.
+OCI are outside the tested route. Native seccomp rejected shell command
+substitution that attempted to create a pipe during the release canary.
 
 The retained live test command is:
 
@@ -98,6 +99,8 @@ backend attribution, a unique one-use execution and guest cleanup from
 the owned event snapshot after the measured operation. Throughput windows
 include those verification requests. The ordinary Docker baseline uses
 the image-default user. Report the native adapter's UID/GID 65532 lane
-separately. The release-build matched lane uses UID/GID 65532 on both
+separately. The adapter uses the guest terminal wait protocol with a
+100 ms per-request budget so cancellation can be checked between waits.
+The release-build matched lane uses UID/GID 65532 on both
 engines and checks memory, PID, and CPU limits. Use the timing boundaries and
 evidence procedures in the [benchmark README](../../benchmarks/README.md).

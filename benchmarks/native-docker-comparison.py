@@ -1,11 +1,15 @@
-"""Release-candidate Docker API and CLI measurements with matched workload inputs."""
+"""Run serial native Docker and official Kiri lifecycle comparison sessions."""
 
+import argparse
+import fcntl
 import http.client
 import json
 import os
 from pathlib import Path
 import runpy
+import signal
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -184,3 +188,74 @@ def measure_kiri(endpoint, peer, config, output, samples):
     env['TMPDIR'] = str(config.parent / 'tmp')
     TOOLS['run'](docker + ['pull', '--platform', 'linux/arm64', IMAGE['ref']], env, timeout=180)
     measure('kiri', endpoint, peer, docker, env, output, samples)
+
+
+def run_pair(args, root, pair, participants):
+    order = ['native', 'kiri'] if pair % 2 else ['kiri', 'native']
+    root.mkdir(mode=0o700)
+    participants['save'](root / 'pair.json', {'pair': pair, 'order': order, 'samples': args.samples})
+    for engine in order:
+        name = 'conjet' if engine == 'native' else engine
+        launcher = HERE.parent / f'build-support/run-{name}-speedup.py'
+        command = [sys.executable, launcher, '--matched-output', root / engine,
+                   '--matched-samples', str(args.samples)]
+        evidence = root / 'native-launcher' / 'launcher.json'
+        if engine == 'native':
+            command += ['--image', IMAGE['ref'], '--native-evidence', evidence.parent]
+            for key in ('swift_bin', 'core', 'native_kernel', 'native_guest', 'native_package', 'native_receipt'):
+                command += ['--' + key.replace('_', '-'), getattr(args, key)]
+        else:
+            evidence = participants['KIRI_ROOT'] / 'last-session.json'
+        started = time.time()
+        record = {'command': list(map(str, command))}
+        with (root / f'{engine}.log').open('w') as log:
+            with subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                  start_new_session=True) as process:
+                try:
+                    record['exit_code'] = participants['wait_for_launcher'](process, args.timeout)
+                finally:
+                    try:
+                        if evidence.is_file() and evidence.stat().st_mtime >= started:
+                            metadata = json.loads(evidence.read_text())
+                            record['launcher'] = metadata
+                            if engine == 'kiri':
+                                participants['validate_cleanup'](engine, metadata)
+                            elif not (metadata['production_unchanged'] and metadata['native_session_removed']
+                                      and metadata['adapter_socket_removed'] and not metadata['cleanup_errors']
+                                      and metadata.get('shutdown', {}).get('guest_cleanup') == 'complete'):
+                                raise RuntimeError('native launcher did not verify cleanup or production')
+                    finally:
+                        participants['save'](root / f'{engine}-launcher.json', record)
+        if record.get('exit_code') != 0 or not record.get('launcher', {}).get('passed'):
+            raise RuntimeError(f'{engine} failed capture or cleanup; see {root}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for key in ('swift-bin', 'core', 'native-kernel', 'native-guest', 'native-package', 'native-receipt', 'output'):
+        parser.add_argument('--' + key, type=Path, required=True)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument('--pair', type=int, choices=range(1, 6), default=1)
+    selection.add_argument('--all-pairs', action='store_true')
+    parser.add_argument('--samples', type=int, choices=range(1, 2001), metavar='1..2000', default=2000)
+    parser.add_argument('--timeout', type=int, default=900)
+    args = parser.parse_args()
+    participants = runpy.run_path(str(HERE / 'docker-comparison.py'))
+    output = participants['private_path'](args.output)
+    if args.timeout <= 0 or not TOOLS['SCRATCH'].parents[1].is_mount():
+        parser.error('require a positive timeout and mounted ExternalSSD')
+    lock_path = TOOLS['SCRATCH'] / '.conjet-docker-comparison.lock'
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_NOFOLLOW | os.O_WRONLY, 0o600)
+    with os.fdopen(descriptor, 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        signal.signal(signal.SIGTERM, lambda *_: signal.raise_signal(signal.SIGINT))
+        if args.all_pairs:
+            output.mkdir(mode=0o700)
+            for pair in range(1, 6):
+                run_pair(args, output / f'pair-{pair}', pair, participants)
+        else:
+            run_pair(args, output, args.pair, participants)
+
+
+if __name__ == '__main__':
+    main()

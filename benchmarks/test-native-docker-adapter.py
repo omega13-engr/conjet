@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import runpy
@@ -5,6 +6,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 SERVER = runpy.run_path(str(HERE.parent / 'build-support/conjet-native-docker.py'))
@@ -26,6 +28,38 @@ class TransportStub:
 
 
 class NativeDockerTests(unittest.TestCase):
+    def test_terminal_wait_timeout_observes_cancellation_without_replay(self):
+        native_type = SERVER['Native']
+        native = native_type.__new__(native_type)
+        native.boot = 'boot'
+        native.sequence = 0
+        native.channel = lambda: nullcontext((None, native.boot))
+        cancellation = threading.Event()
+        operations = []
+        handle = {'boot_id': 'boot', 'workload_id': 'workload'}
+
+        def exchange(_channel, opcode, request):
+            operations.append(opcode)
+            if opcode == 8:
+                self.assertEqual(request['sequence'], 1)
+                return 13, {'handle': handle, 'cleanup': 'pending'}
+            self.assertEqual(request['handle'], handle)
+            if opcode == 10:
+                self.assertEqual(request['after_revision'], 2**64 - 1)
+                self.assertEqual(request['budget_ms'], 100)
+                cancellation.set()
+                return 15, {'code': 'deadline_exceeded'}
+            if opcode == 11:
+                return 13, {'handle': handle, 'cleanup': 'complete', 'exit': None}
+            self.assertEqual(opcode, 12)
+            return 14, {'data': '', 'dropped_bytes': 0, 'eof': True}
+
+        with patch.dict(native.execute.__globals__['WIRE'], {'call': exchange}):
+            code, stdout, stderr, state = native.execute({'argv': ['/bin/true']}, cancellation)
+        self.assertEqual((code, stdout, stderr), (137, b'', b''))
+        self.assertEqual(state['adapter_wait_calls'], 1)
+        self.assertEqual(operations, [8, 10, 11, 12, 12])
+
     def test_rejects_unsupported_ordinary_create_options(self):
         make = SERVER['make_process']
         spec = {'Image': IMAGE, 'User': '65532:65532', 'Cmd': ['/bin/sh'],

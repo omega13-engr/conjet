@@ -184,13 +184,20 @@ for the supported configuration.
 
 ## Paired Docker comparison
 
-The isolated launcher includes a matched release-build native Docker/Kiri
-lane. Use the native command in the environment runbook with
-`--matched-output "$evidence/native-pair-1" --matched-samples 2000`.
-Run Kiri separately with
-`--matched-output "$evidence/kiri-pair-1" --matched-samples 2000`.
-Alternate engine order across five independent pairs. Keep builds and other
-suites outside the measured sessions. Smaller sample counts are pilots.
+Use the release artifacts from the environment runbook for the matched
+native Docker/Kiri lane. The orchestrator holds the comparison lock,
+alternates order over five independent pairs and verifies launcher cleanup.
+Keep builds and other suites outside the measured sessions. Smaller sample
+counts are pilots.
+
+```sh
+python3 benchmarks/native-docker-comparison.py --all-pairs \
+  --swift-bin "$speed_build/swift/release" --core "$speed_build/cargo/release/jetstream" \
+  --native-kernel "$kernel" \
+  --native-guest "$speed_build/cargo/aarch64-unknown-linux-musl/release/conjet-launchd" \
+  --native-package "$native_package" --native-receipt "$oci_receipt" \
+  --output "$evidence/native-kiri-release"
+```
 
 Both lanes use pinned ARM64 Alpine, UID/GID 65532, 16 MiB, four PIDs,
 half of one CPU, no networking, dropped capabilities and no-new-privileges.
