@@ -8,17 +8,22 @@ pub(crate) struct Capture {
     pub(crate) dropped: u64,
 }
 
-pub(crate) fn capture(mut reader: impl Read) -> io::Result<Capture> {
-    let mut output = Capture::default();
+impl Capture {
+    pub(crate) fn append(&mut self, data: &[u8]) {
+        let kept = data.len().min(OUTPUT_CAPACITY - self.bytes.len());
+        self.bytes.extend_from_slice(&data[..kept]);
+        self.dropped = self.dropped.saturating_add((data.len() - kept) as u64);
+    }
+}
+
+pub(crate) fn drain(mut reader: impl Read, mut push: impl FnMut(&[u8])) -> io::Result<()> {
     let mut buffer = [0; 8192];
     loop {
         let count = reader.read(&mut buffer)?;
         if count == 0 {
-            return Ok(output);
+            return Ok(());
         }
-        let kept = count.min(OUTPUT_CAPACITY - output.bytes.len());
-        output.bytes.extend_from_slice(&buffer[..kept]);
-        output.dropped = output.dropped.saturating_add((count - kept) as u64);
+        push(&buffer[..count]);
     }
 }
 
@@ -30,7 +35,8 @@ mod tests {
     fn drains_excess_bytes_without_retaining_them() {
         let mut input = vec![b'a'; OUTPUT_CAPACITY];
         input.extend_from_slice(&[b'b'; 16_384]);
-        let captured = capture(input.as_slice()).unwrap();
+        let mut captured = Capture::default();
+        drain(input.as_slice(), |bytes| captured.append(bytes)).unwrap();
         assert_eq!(captured.bytes, vec![b'a'; OUTPUT_CAPACITY]);
         assert_eq!(captured.dropped, 16_384);
     }

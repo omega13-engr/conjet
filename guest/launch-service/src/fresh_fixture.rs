@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use crate::handshake::{hex, random};
 use crate::image_store::{self, ConnectionId};
 use crate::intent::{DIRECTORY, Intent};
-use crate::output::{Capture, capture};
+use crate::output::{Capture, drain};
 use crate::prepared::{CANCEL, ClaimError, RELEASE, SLOT_MEMORY_LIMIT, SLOT_TTL, Slot, TERMINATE};
 use crate::socket::Stream;
 use crate::spec::{LaunchRequest, LaunchSpec, ValidatedLaunch};
@@ -89,6 +89,8 @@ struct Output {
     stream: String,
     offset: usize,
     max_bytes: usize,
+    #[serde(default)]
+    follow: bool,
 }
 
 const OUTPUT_CHUNK_LIMIT: usize = 8192;
@@ -743,7 +745,7 @@ impl FreshFixture {
     }
 
     fn run_workload(
-        &self,
+        self: &Arc<Self>,
         id: [u8; 16],
         limits: crate::spec::ResourceLimits,
         mode: &str,
@@ -789,9 +791,7 @@ impl FreshFixture {
             if let Some(slot) = &mut record.slot {
                 slot.discard();
             }
-            if let Ok((stdout, stderr, recovered)) = result {
-                record.stdout = stdout;
-                record.stderr = stderr;
+            if let Ok(recovered) = result {
                 record.helper_failed = recovered;
                 if bridge {
                     record.network_cleanup = "complete";
@@ -814,14 +814,14 @@ impl FreshFixture {
     }
 
     fn run_helper(
-        &self,
+        self: &Arc<Self>,
         id: [u8; 16],
         limits: crate::spec::ResourceLimits,
         mode: &str,
         bridge: bool,
         prepared: bool,
         oci_process: Option<&str>,
-    ) -> io::Result<(Capture, Capture, bool)> {
+    ) -> io::Result<bool> {
         let (mut peer, helper) = UnixStream::pair()?;
         peer.set_read_timeout(Some(Duration::from_secs(32)))?;
         let owner = peer.try_clone()?;
@@ -873,8 +873,20 @@ impl FreshFixture {
         let process_group = -(child.id() as libc::pid_t);
         let out = child.stdout.take().expect("piped stdout");
         let err = child.stderr.take().expect("piped stderr");
-        let stdout = thread::spawn(move || capture(out));
-        let stderr = thread::spawn(move || capture(err));
+        let output_owner = Arc::clone(self);
+        let output_id = workload.clone();
+        let stdout = thread::spawn(move || {
+            drain(out, |data| {
+                output_owner.update(&output_id, |record| record.stdout.append(data));
+            })
+        });
+        let error_owner = Arc::clone(self);
+        let error_id = workload.clone();
+        let stderr = thread::spawn(move || {
+            drain(err, |data| {
+                error_owner.update(&error_id, |record| record.stderr.append(data));
+            })
+        });
         self.update(&workload, |record| {
             record.control = Some(owner);
             if record.cancelled {
@@ -1002,13 +1014,11 @@ impl FreshFixture {
             crate::sandbox_fixture::recover(id, oci_process.is_some())?;
             println!("conjet-launchd recovered helper failure for {}", hex(&id));
         }
-        let stdout = stdout
-            .join()
-            .map_err(|_| io::Error::other("stdout reader failed"))??;
-        let stderr = stderr
-            .join()
-            .map_err(|_| io::Error::other("stderr reader failed"))??;
-        Ok((stdout, stderr, recovered))
+        let stdout = stdout.join();
+        let stderr = stderr.join();
+        stdout.map_err(|_| io::Error::other("stdout reader failed"))??;
+        stderr.map_err(|_| io::Error::other("stderr reader failed"))??;
+        Ok(recovered)
     }
 
     fn operation(self: &Arc<Self>, frame: &Frame, boot: &str, connection: ConnectionId) -> Reply {
@@ -1208,30 +1218,55 @@ impl FreshFixture {
             }
             Kind::Output => {
                 let request: Output = parse(frame)?;
-                deadline(request.budget_ms)?;
-                check(&guard, &request.handle)?;
-                let record = guard
-                    .record(&request.handle.workload_id)
-                    .expect("checked record");
-                let output = match request.stream.as_str() {
-                    "stdout" => &record.stdout,
-                    "stderr" => &record.stderr,
-                    _ => return Err(("malformed", "invalid output stream")),
-                };
-                if request.offset > output.bytes.len()
+                let expires = deadline(request.budget_ms)?;
+                if !matches!(request.stream.as_str(), "stdout" | "stderr")
                     || !(1..=OUTPUT_CHUNK_LIMIT).contains(&request.max_bytes)
                 {
-                    return Err(("malformed", "invalid output cursor or reply bound"));
+                    return Err(("malformed", "invalid output stream or reply bound"));
                 }
-                Ok((
-                    Kind::OutputChunk,
-                    output_chunk(
-                        output,
-                        request.offset,
-                        request.max_bytes,
-                        record.phase.terminal(),
-                    ),
-                ))
+                loop {
+                    check(&guard, &request.handle)?;
+                    let record = guard
+                        .record(&request.handle.workload_id)
+                        .expect("checked record");
+                    let output = if request.stream == "stdout" {
+                        &record.stdout
+                    } else {
+                        &record.stderr
+                    };
+                    if request.offset > output.bytes.len() {
+                        return Err(("malformed", "invalid output cursor"));
+                    }
+                    if !request.follow
+                        || request.offset < output.bytes.len()
+                        || output.dropped != 0
+                        || record.phase.terminal()
+                    {
+                        return Ok((
+                            Kind::OutputChunk,
+                            output_chunk(
+                                output,
+                                request.offset,
+                                request.max_bytes,
+                                record.phase.terminal(),
+                            ),
+                        ));
+                    }
+                    let remaining = expires.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(("deadline_exceeded", "no further output is available"));
+                    }
+                    if guard.waiting >= crate::handshake::MAX_CONNECTIONS - 1 {
+                        return Err(("busy", "one connection is reserved for cancellation"));
+                    }
+                    guard.waiting += 1;
+                    guard = self
+                        .changed
+                        .wait_timeout(guard, remaining)
+                        .expect("fresh ledger")
+                        .0;
+                    guard.waiting -= 1;
+                }
             }
             _ => Err((
                 "unsupported_option",

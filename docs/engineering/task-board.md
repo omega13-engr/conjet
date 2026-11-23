@@ -653,13 +653,55 @@ Independent PR review is separate.
 Next Action: Implement persistent native exec and live attach/log streaming
 in SPEED-034.
 
+### SPEED-034A
+
+Title: Publish bounded native output before terminal cleanup
+
+Description: Make captured guest stdout and stderr available by cursor
+while the OCI workload is still running.
+
+Is blocked by task: SPEED-033 (DONE).
+
+Acceptance Criteria:
+
+- Observe both streams before terminal EOF on a real running OCI workload.
+- Bound idle readers and retention at 64 KiB per stream. Drain overflow
+  even when nobody reads, and preserve explicit EOF and cleanup witnesses.
+
+Problem and Evidence: The guest drained both pipes but returned the
+captured bytes to the lifecycle record only after helper exit.
+
+Approach: Publish each bounded capture chunk directly to its owning
+record and let an authenticated Output follower wait by cursor and deadline.
+
+Evidence: DONE. Ran guest formatting, tests and ARM64 Clippy, built the
+release guest on `3d645bc`, and ran the private launcher with
+`--diagnostics oci-import`. Both channels returned their expected
+bytes while the workload was live, waited for additional output with a
+short deadline, and returned EOF after verified cleanup. A separate
+unread 65 KiB stream retained 64 KiB, reported 1 KiB dropped, and
+completed cleanup. Logs, exact commands, and release hashes are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-034A`.
+
+Source: [Launch service contract](launch-service-contract.md),
+[`output.rs`](../../guest/launch-service/src/output.rs).
+
+Review: Local diff and isolated checks passed. Capture memory and
+transport wait capacity remain bounded. This verifies the guest
+protocol; Docker live attach/log delivery and exec remain open.
+Production snapshots matched, with session and endpoint removal.
+Independent PR review is separate.
+
+Next Action: Wire bounded live output into the Rust Docker owner and
+qualify native exec in SPEED-034.
+
 ### SPEED-034
 
 Title: Add native exec and bounded live attach/log streams
 
 Description: Implement Docker exec and streaming output for one running native service fixture.
 
-Is blocked by task: SPEED-033.
+Is blocked by task: SPEED-034A (DONE).
 
 Acceptance Criteria:
 

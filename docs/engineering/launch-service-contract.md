@@ -159,6 +159,12 @@ incomplete stream at its next offset using Output. The capture limit remains
 64 KiB per stream. Output delivery and overflow reporting do not move the
 guest cleanup boundary.
 
+Output with `follow: true` and a cursor at the captured end waits within
+its request budget for data, truncation or terminal EOF. The guest
+publishes bounded capture chunks while the workload runs and continues
+draining its pipes when there is no reader. Idle followers share the
+bounded wait pool with terminal waiters.
+
 The native OCI image control operation uses an authenticated, boot-bound
 transfer. One connection owns the upload with a unique transfer ID and
 strict successive offsets. The guest admits at most three extra images

@@ -216,3 +216,48 @@ def verify_guest_overlap(session, pid, digest, expected_boot, output):
             samples.append({'count': count, 'observed': observed, 'exhausted': exhausted,
                             'replay': replay, 'conflict': conflict, 'receipts': receipts})
     (output / 'guest-overlap.json').write_text(json.dumps(samples, indent=2) + '\n')
+
+
+def verify_live_output(session, pid, digest, expected_boot, output):
+    cases = {}
+    try:
+        with channel(session, pid) as (stream, boot):
+            if boot != expected_boot:
+                raise RuntimeError('live output checked the wrong guest boot')
+            command = ['/bin/sh', '-c',
+                       'printf live-out; printf live-err >&2; exec /bin/busybox sleep 10']
+            item = launch(stream, inspect(stream), digest, command)
+            handle = item['handle']
+
+            def read(name, cursor, *, budget=1000, error=None):
+                return exchange(stream, 12, {'handle': handle, 'stream': name, 'offset': cursor,
+                                             'max_bytes': 8192, 'budget_ms': budget, 'follow': True},
+                                15 if error else 14, error)
+
+            for name, payload in (('stdout', b'live-out'), ('stderr', b'live-err')):
+                event = read(name, 0)
+                if (base64.b64decode(event['data'], validate=True) != payload or event['eof']
+                        or event['dropped_bytes'] or event['next_offset'] != len(payload)):
+                    raise RuntimeError(f'wrong live output on {name}: {event}')
+                cases[name] = event
+                cases[name + '_idle'] = read(name, event['next_offset'], budget=30,
+                                             error='deadline_exceeded')
+            exchange(stream, 11, {'handle': handle, 'budget_ms': 1000}, 13)
+            live_terminal = terminal(stream, handle)
+            if live_terminal['cleanup'] != 'complete':
+                raise RuntimeError('live-output fixture did not verify guest cleanup')
+            for name in ('stdout', 'stderr'):
+                end = read(name, cases[name]['next_offset'])
+                if not end['eof'] or end['data'] or end['dropped_bytes']:
+                    raise RuntimeError(f'wrong EOF after terminal cleanup: {end}')
+                cases[name + '_eof'] = end
+            command = ['/bin/sh', '-c',
+                       'n=0; while [ "$n" -lt 65 ]; do printf "%01024d" 0; n=$((n+1)); done']
+            flood = launch(stream, inspect(stream), digest, command)
+            finished = terminal(stream, flood['handle'])
+            if (finished['cleanup'] != 'complete' or finished['exit'] != {'code': 0}
+                    or finished['terminal_output']['stdout']['dropped_bytes'] != 1024):
+                raise RuntimeError('unread bounded output did not drain or reclaim the workload')
+            cases['unread_overflow'] = finished
+    finally:
+        (output / 'guest-live-output.json').write_text(json.dumps(cases, indent=2) + '\n')
