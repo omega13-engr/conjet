@@ -118,8 +118,8 @@ timestamp filtering.
 After VM readiness, `/info` reported 2,094,825,472 guest bytes for Conjet
 and 2,088,570,880 for Kiri. `/proc/meminfo` corroborated live Kiri guest
 memory in this run. Earlier sessions that queried metadata before Kiri VM
-startup still have unknown guest memory. The image comparison remains
-inconclusive pending complete paired transfer and cache-state evidence.
+startup still have unknown guest memory. Pair 2's transfer comparison
+remains inconclusive.
 
 Pair 3 used `b31afde` with unique registry repositories per repetition.
 Both engines witnessed the complete config and layer transfer for all ten
@@ -155,6 +155,14 @@ rates in MiB/s were 14.68 save and 53.42 warm load for Alpine on Conjet,
 and 111.16 save and 61.80 warm load on Kiri. For Node they were 16.24 and
 91.70 on Conjet, and 497.70 and 267.30 on Kiri. Size derives from the
 actual saved archive. Save and load are distinct from registry transfer.
+The median per-session loaded-image inspect p50 for Alpine and Node was
+67.031 and 70.735 ms on Conjet and 16.848 and 17.009 ms on Kiri. The
+inspection distribution separates already-verified, installed image tags
+from image load and run. The supplemental backing observation on `b3f0ffc`
+showed a 2,791,784,448-byte increase in allocated Conjet `data.raw` space
+with flat `root.raw` allocation, and flat Kiri `data.img` allocation. These
+are whole-suite backing-file deltas on APFS. Per-layer decompression and
+writeback cost remain unobserved.
 
 ## Buildx first session
 
@@ -431,6 +439,7 @@ failed attempts and shutdown checks.
 | Pinned image and loopback registry results with asymmetric transfer proof | `SPEED-020/pair-2` |
 | Complete paired registry transfer and labeled-store cleanup | `SPEED-020/pair-3` |
 | Five matched image pairs, distribution summary and verified digest cleanup | `SPEED-020/cleanup-qualified`, `SPEED-020/cleanup-qualified/summary.json` |
+| Image inspect distributions and whole-suite backing allocation | `SPEED-020/cleanup-qualified/inspect-distributions.json`, `SPEED-020/backing-observation` |
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
 | Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |

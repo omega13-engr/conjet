@@ -326,53 +326,6 @@ measurement boundaries, statistical scope, and production preservation.
 
 Next Action: Repeat the workload with effective cgroup verification in the other four pair slots.
 
-### SPEED-020
-
-Title: Benchmark Docker image and registry operations
-
-Description: Measure pull, local load/save, image inspection and removal with controlled registry and cache conditions.
-
-Is blocked by task: SPEED-019.
-
-Acceptance Criteria:
-
-- Use identical immutable images and architecture; separate manifest lookup, transfer, decompression/unpack and ready-to-run where observable.
-- Measure cold and cached pulls using a task-owned local registry when supported; report public-network pulls separately without attributing network variation to the runtime.
-- Verify digest and runnable contents after pull/load; measure save/load throughput and disk expansion. Delete only task-owned images and artifacts.
-- Record unsupported image-management operations for native-only endpoints; image preparation is included in native readiness cost where relevant.
-
-Problem and Evidence: The first serial image pair completed and verified cleanup.
-It produced pinned Node save/load and runnable proofs on both engines
-and loopback registry reimports. Kiri's reused Alpine config advertised
-the historical index digest while returning the exact pinned ARM64 config
-digest. The runner now checks that pinned config digest independently
-and retains advertised-manifest status. Registry reimports separately
-record observed blob transfers and keep pristine layer cache unknown.
-Four fixture tests passed. Retained raw data under ExternalSSD
-`SPEED-020/pair-1`; repeat the affected Alpine row and the remaining pairs.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Repeat the corrected controlled-registry workload at the remaining pair indices. `SPEED-020/pair-2` passed both image pins, warm save/load and run. Its host timestamp filter missed Conjet registry witnesses. `SPEED-020/pair-3` on `b31afde` observed all expected config and layer bytes for all ten measured first pulls per engine. Both engines passed archive, run and labeled-registry cleanup checks with zero scenario failures. Keep the prior unknown transfer records.
-The subsequent private Kiri inventory found 24 owned digest-only registry
-images omitted by the earlier repository-filtered listing. Removed their
-exact config IDs and verified absence without pruning. The harness now
-validates those IDs against the full private image inventory and verifies
-their removal. See `SPEED-026/final-local/kiri-image-inventory*.log`.
-`SPEED-020/cleanup-qualified` then completed five independent matched pairs
-at `20e3a2b` with zero recorded operation failures. It verified 12 digest-only
-removals per engine per boot and complete transfers for the first pulls.
-`summary.json` records per-session distributions and the paired CIs. Kiri
-met the frozen faster threshold for the four controlled pull rows. Pending
-work includes reviewing the supplemental disk expansion evidence.
-
 ### SPEED-026
 
 Title: Publish the Docker and native comparison verdict
@@ -576,6 +529,53 @@ then rerun the original matrix. Experimental release proceeds under local
 acceptance without changing the SPEED-008 verdict.
 
 ## UNDERREVIEW
+
+### SPEED-020
+
+Title: Benchmark Docker image and registry operations
+
+Description: Measure pull, local load/save, image inspection and removal with controlled registry and cache conditions.
+
+Is blocked by task: SPEED-019.
+
+Acceptance Criteria:
+
+- Use identical immutable images and architecture; separate manifest lookup, transfer, decompression/unpack and ready-to-run where observable.
+- Measure cold and cached pulls using a task-owned local registry when supported; report public-network pulls separately without attributing network variation to the runtime.
+- Verify digest and runnable contents after pull/load; measure save/load throughput and disk expansion. Delete only task-owned images and artifacts.
+- Record unsupported image-management operations for native-only endpoints; image preparation is included in native readiness cost where relevant.
+
+Problem and Evidence: The first serial image pair completed and verified cleanup.
+It produced pinned Node save/load and runnable proofs on both engines
+and loopback registry reimports. Kiri's reused Alpine config advertised
+the historical index digest while returning the exact pinned ARM64 config
+digest. The runner now checks that pinned config digest independently
+and retains advertised-manifest status. Registry reimports separately
+record observed blob transfers and keep pristine layer cache unknown.
+Four fixture tests passed. Retained raw data under ExternalSSD
+`SPEED-020/pair-1`; repeat the affected Alpine row and the remaining pairs.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Verified immutable identities, complete transfers, archive/load and execution canaries, pinned participants, five independent pairs, exact cleanup and production snapshots. Pending program review with the SPEED-019 dependency.
+
+Evidence: `SPEED-020/pair-2` passed both image pins, warm save/load and run. Its host timestamp filter missed Conjet registry witnesses. `SPEED-020/pair-3` on `b31afde` observed all expected config and layer bytes for all ten measured first pulls per engine. Both engines passed archive, run and labeled-registry cleanup checks with zero scenario failures. Keep the prior unknown transfer records.
+The subsequent private Kiri inventory found 24 owned digest-only registry
+images omitted by the earlier repository-filtered listing. Removed their
+exact config IDs and verified absence without pruning. The harness now
+validates those IDs against the full private image inventory and verifies
+their removal. See `SPEED-026/final-local/kiri-image-inventory*.log`.
+`SPEED-020/cleanup-qualified` then completed five independent matched pairs
+at `20e3a2b` with zero recorded operation failures. It verified 12 digest-only
+removals per engine per boot and complete transfers for the first pulls.
+`summary.json` records per-session distributions and the paired CIs. Kiri
+met the frozen faster threshold for the four controlled pull rows. The supplemental `SPEED-020/backing-observation` captured before/after backing allocations. Per-session archive throughput and inspection distributions are retained.
+
+Next Action: Review the full image evidence with the remaining program results once SPEED-019 is ready.
 
 ### SPEED-013
 
