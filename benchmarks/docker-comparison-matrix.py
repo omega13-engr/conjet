@@ -274,7 +274,7 @@ def prepare_files(language, directory):
     }
     return sources, 'main.js', 'dep/index.js', [
         'COPY package.json ./', 'COPY dep ./dep',
-        'RUN npm install --offline --no-audit --no-fund --ignore-scripts',
+        'RUN npm install --offline --no-audit --no-fund --ignore-scripts --install-links',
         'COPY main.js ./', 'RUN mkdir /out && cp -R main.js node_modules /out/',
     ]
 
@@ -351,13 +351,18 @@ def run_builds(docker, manifest, context):
                                        [*prefix, '--tag', tag, '--output', f'type=docker,dest={archive}', directory],
                                        timeout=budget['timeout_seconds'], phase='sample') is None:
                             break
-                        docker.rows[-1]['archive_bytes'] = archive.stat().st_size
+                        build = docker.rows[-1]
+                        build['archive_bytes'] = archive.stat().st_size
                         if docker.call(f'{language}.{change}.load', ['image', 'load', '--input', archive],
                                        timeout=180, phase='sample') is None:
+                            build['error'] = 'exported image failed to load'
                             break
-                        if docker.call('built-image-canary', ['run', '--rm', '--network', 'none', '--pull', 'never',
+                        load = docker.rows[-1]
+                        if docker.call(f'{language}.{change}.built-image-canary',
+                                       ['run', '--rm', '--network', 'none', '--pull', 'never',
                                               '--label', f'{LABEL}={docker.token}', tag],
                                        expected=expected, phase='verification') is None:
+                            build['error'] = load['error'] = 'exported image failed its execution canary'
                             break
                     finally:
                         archive.unlink(missing_ok=True)

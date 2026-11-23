@@ -88,7 +88,7 @@ Acceptance Criteria:
 - Report build wall time, cache hits, CPU, memory peak, disk I/O and resulting image size. Record whether BuildKit uses the native runtime, Docker/containerd, or another backend.
 - No native build speed claim is allowed merely because a native launch microbenchmark is fast; unsupported Kiri build configurations remain explicit.
 
-Problem and Evidence: The matrix implements actual pinned Buildx with private builder volumes, base preloading, four cache states and artifact export/load for Rust, Go and Node. Hosted execution evidence is pending.
+Problem and Evidence: The first Conjet half of `SPEED-021/pair-1` completed all Rust and Go build/export, load and execution canaries. Node failed its first exported image canary in all three repetitions with `MODULE_NOT_FOUND`. npm linked the local package outside the exported dependency directory. The fixture now uses `--install-links` to install the package contents, and build/load rows explicitly fail when the exported image fails its canary. Preserve pair 1 and rerun the corrected workload with both engines.
 
 Raw evidence: Build performance depends on BuildKit, filesystem behavior and caching; the new native launch service is not itself a build engine.
 
@@ -111,7 +111,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Pin the three build fixtures and builder configurations.
+Next Action: Validate the repaired Node export using both engines and complete the paired sessions.
 
 ### SPEED-022
 
