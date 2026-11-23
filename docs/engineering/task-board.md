@@ -72,44 +72,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 ## BACKLOG
 
 
-### SPEED-023
-
-Title: Benchmark exec, streams and control-plane operations
-
-Description: Measure Docker exec, attach/logs, inspect/list/events and file copy for supported workloads.
-
-Is blocked by task: SPEED-022.
-
-Acceptance Criteria:
-
-- Separate persistent-container docker exec from fresh docker run; measure API and CLI overhead where supported.
-- Validate stdout/stderr separation, bounded large output, exit codes, stdin/TTY behavior where supported, and cancellation without deadlocks.
-- Measure inspect/list latency with fixed owned-container counts and event delivery/order under churn; do not query or manipulate production containers.
-- Measure docker cp in/out with checksummed small-file and large-file sets. Record unsupported native or Kiri behavior without substituting another operation.
-
-Problem and Evidence: The matrix implements persistent CLI exec streams and exit code, bounded output, inspect/list and checksummed file copies. The control fixture adds stdin-driven attach, logs, ordered Docker lifecycle events, TTY and idle attach disconnect recovery. Direct API exec creation, stream demultiplexing, exit inspection and container inspection have executable canaries. Paired runtime evidence remains open.
-
-Raw evidence: Interactive development and tooling depend on control-plane and stream behavior beyond launch latency.
-
-Approach:
-
-1. Add long-lived fixture containers and deterministic stream/file workloads.
-2. Run operation-specific latency and throughput cases with correctness assertions.
-3. Inspect backpressure, cancellation and cleanup evidence before publishing results.
-
-Evidence: The canceled Conjet half of `SPEED-023/pair-1` retains 274 attempted operations. It confirmed working persistent API and CLI exec, attach, TTY, disconnect/recovery and controlled file copies in the observed repetitions. All 17 observed historical event queries produced empty streams and failed the lifecycle canary. Candidate shutdown removed the private root and production matched its starting snapshot. The bounded stream observer now waits for a complete ordered witness and closes its own client. The corrected pair remains pending.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Verify live event delivery using the bounded observer and complete the corrected paired control workload.
-
 ### SPEED-024
 
 Title: Benchmark filesystem, networking and sustained workloads
@@ -251,6 +213,44 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: Set matching version metadata and release notes for the reviewed package scope before tagging an independently approved, qualified revision. Confirm Developer ID and notarization credential availability through the release environment.
 
 ## INPROGRESS
+
+### SPEED-023
+
+Title: Benchmark exec, streams and control-plane operations
+
+Description: Measure Docker exec, attach/logs, inspect/list/events and file copy for supported workloads.
+
+Is blocked by task: SPEED-022.
+
+Acceptance Criteria:
+
+- Separate persistent-container docker exec from fresh docker run; measure API and CLI overhead where supported.
+- Validate stdout/stderr separation, bounded large output, exit codes, stdin/TTY behavior where supported, and cancellation without deadlocks.
+- Measure inspect/list latency with fixed owned-container counts and event delivery/order under churn; do not query or manipulate production containers.
+- Measure docker cp in/out with checksummed small-file and large-file sets. Record unsupported native or Kiri behavior without substituting another operation.
+
+Problem and Evidence: The matrix implements persistent CLI exec streams and exit code, bounded output, inspect/list and checksummed file copies. The control fixture adds stdin-driven attach, logs, ordered Docker lifecycle events, TTY and idle attach disconnect recovery. Direct API exec creation, stream demultiplexing, exit inspection and container inspection have executable canaries. Paired runtime evidence remains open.
+
+Raw evidence: Interactive development and tooling depend on control-plane and stream behavior beyond launch latency.
+
+Approach:
+
+1. Add long-lived fixture containers and deterministic stream/file workloads.
+2. Run operation-specific latency and throughput cases with correctness assertions.
+3. Inspect backpressure, cancellation and cleanup evidence before publishing results.
+
+Evidence: The canceled Conjet half of `SPEED-023/pair-1` retains 274 attempted operations. It confirmed working persistent API and CLI exec, attach, TTY, disconnect/recovery and controlled file copies in the observed repetitions. All 17 observed historical event queries produced empty streams and failed the lifecycle canary. Candidate shutdown removed the private root and production matched its starting snapshot. The bounded stream observer now waits for a complete ordered witness and closes its own client. The corrected `SPEED-023/pair-2` on `7be17a3` completed 100 measured operations per row on each engine, with no operation failures and exact production snapshots. It validated every event lifecycle, both persistent exec boundaries, attach and copy. Four independent pairs remain.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Repeat the corrected control workload at the remaining pair indices.
 
 ### SPEED-021
 

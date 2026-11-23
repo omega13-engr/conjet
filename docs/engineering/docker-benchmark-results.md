@@ -174,6 +174,38 @@ verdict remains inconclusive until the remaining four independent pairs
 and effective-resource equivalence checks are available. The native routes
 have no Compose implementation.
 
+## Persistent exec and control
+
+Pair 2 used harness `7be17a3` and separate long-lived Alpine containers.
+Both engines completed 100 measured operations per row with zero failures.
+The direct API exec boundary includes exec create, multiplexed stream read
+and exit inspection. Attach verifies stdin, separate stdout and stderr and
+exit 23. Event timing stops when the last expected event arrives. The
+runner closes the client after that witness. Both engines passed the 128
+KiB output canary, TTY check, disconnect/recovery and file-copy SHA-256s.
+
+| Operation | Conjet p50 / p95 / p99 (ms) | Kiri p50 / p95 / p99 (ms) |
+| --- | ---: | ---: |
+| CLI exec | 204.116/247.242/271.976 | 19.518/26.557/29.205 |
+| API exec | 124.726/157.679/168.346 | 1.971/2.373/2.481 |
+| CLI inspect | 66.337/90.468/98.080 | 17.495/20.864/23.422 |
+| API inspect | 26.973/43.660/48.843 | 0.167/0.226/0.285 |
+| CLI list | 67.610/93.181/99.688 | 17.417/20.615/24.271 |
+| CLI attach | 171.394/214.125/238.951 | 19.755/22.935/24.301 |
+| CLI logs | 87.161/118.353/130.899 | 17.710/20.445/24.672 |
+| CLI event witness | 73.962/88.572/92.215 | 16.955/20.978/22.252 |
+| Copy in 4 KiB | 111.730/143.656/146.853 | 18.733/22.127/24.333 |
+| Copy out 4 KiB | 91.435/107.020/112.752 | 18.237/21.435/25.175 |
+| Copy in 8 MiB | 219.933/253.505/277.380 | 50.297/59.938/66.015 |
+| Copy out 8 MiB | 382.461/416.609/462.845 | 49.377/59.972/73.634 |
+
+The canceled first Conjet half retained 17 empty historical event streams
+and passed shutdown. The corrected run verifies actual bounded event
+delivery. Kiri's medians were lower in that pair. The comparison remains
+inconclusive pending independent pairs. Native OCI supports its own bounded
+noninteractive attach and event snapshots. Persistent exec, TTY, logs and
+copy measurements use the existing Docker engines.
+
 ## Separate native timings
 
 The static workload uses the same pinned payload bytes as the
@@ -227,6 +259,7 @@ failed attempts and shutdown checks.
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
 | Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
+| Canceled historical-event run and corrected paired control matrix | `SPEED-023/pair-1`, `SPEED-023/pair-2` |
 
 Production stayed in service throughout. The records preserve unknown
 guest teardown, unmeasured energy and observed contention. The original
