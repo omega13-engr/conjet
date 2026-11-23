@@ -215,6 +215,27 @@ reuse working. The launcher verified unchanged production and owned-resource
 cleanup. Exact commands, hashes, trace and canary results are under
 `conjet-speedup-evidence/SPEED-029` on ExternalSSD.
 
+## SPEED-030 Rust and Python owner diagnostics
+
+Two release boots per owner used Rust/Python/Python/Rust order, with the
+same Docker client, release guest and VMM, pinned image and effective
+controls. Both owners completed the shared diagnostic lifecycle and output
+checks, including guest cleanup. The initial Rust pilot failed when an
+11-second idle period exceeded its HTTP keep-alive timeout. The repaired
+owner preserved idle reuse and a separate bounded request read deadline.
+
+| Diagnostic lane | Rust session medians (ms) | Python session medians (ms) |
+| --- | ---: | ---: |
+| API true | 2.464–2.493 | 2.932–2.967 |
+| API both streams, exit 23 | 2.429–2.535 | 2.933–2.960 |
+| CLI true | 21.119–21.454 | 22.205–22.349 |
+| CLI both streams, exit 23 | 21.316–22.627 | 21.919–21.922 |
+
+The CLI mixed-stream medians crossed between pairs. The diagnostic budget
+supports no practical-threshold or Kiri verdict. Raw measurements,
+exact artifact hashes, shared contract results and cleanup witnesses
+are under `conjet-speedup-evidence/SPEED-030` on ExternalSSD.
+
 ## Release-build static native API and CLI
 
 A separate release-build run used `cabbea9`, the same CLI, VMM, kernel and

@@ -28,7 +28,7 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 pub(super) struct Options {
     /// Existing directory in which to create a temporary private session.
     #[arg(long)]
-    scratch: PathBuf,
+    pub(super) scratch: PathBuf,
     /// Verified Conjet Core AArch64 Linux Image.
     #[arg(long)]
     kernel: PathBuf,
@@ -44,7 +44,7 @@ pub(super) struct Options {
     executable: Option<PathBuf>,
     /// Experimental preverified Linux ARM64 OCI staging package.
     #[arg(long, value_name = "PATH")]
-    oci_package: Option<PathBuf>,
+    pub(super) oci_package: Option<PathBuf>,
     /// Expected SHA-256 of the executable or OCI staging package.
     #[arg(long)]
     sha256: String,

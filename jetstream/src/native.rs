@@ -1,15 +1,17 @@
 use std::path::PathBuf;
 
+use anyhow::ensure;
 use clap::{Args, Subcommand};
 
 mod client;
+mod docker;
 mod oci;
 mod session;
 
 #[derive(Debug, Args)]
 pub struct Arguments {
     /// Explicitly opt in to the unsupported-by-default native runtime.
-    #[arg(long, required = true)]
+    #[arg(long, global = true)]
     experimental: bool,
     #[command(subcommand)]
     command: Action,
@@ -17,6 +19,15 @@ pub struct Arguments {
 
 #[derive(Debug, Subcommand)]
 enum Action {
+    /// Boot the isolated Docker OCI candidate.
+    DockerBoot(session::Options),
+    /// Serve the Docker API against the isolated native OCI guest.
+    DockerServe(docker::Options),
+    /// Drain the isolated native OCI guest.
+    DockerStop {
+        #[arg(long)]
+        session: PathBuf,
+    },
     /// Boot a private, no-network guest in this foreground process.
     Serve(session::Options),
     /// Execute the pinned workload with fresh isolation.
@@ -52,8 +63,18 @@ enum Action {
 }
 
 pub fn run(args: Arguments) -> anyhow::Result<()> {
-    assert!(args.experimental, "clap enforces explicit opt-in");
+    let docker_command = matches!(
+        args.command,
+        Action::DockerBoot(_) | Action::DockerServe(_) | Action::DockerStop { .. }
+    );
+    ensure!(
+        args.experimental || docker_command,
+        "native command requires --experimental"
+    );
     match args.command {
+        Action::DockerBoot(options) => docker::boot(options),
+        Action::DockerServe(options) => docker::serve(options),
+        Action::DockerStop { session } => docker::stop(&session),
         Action::Serve(options) => session::serve(options),
         Action::Run(target) => client::invoke(target, client::Operation::Run),
         Action::Prepare(target) => client::invoke(target, client::Operation::Prepare),

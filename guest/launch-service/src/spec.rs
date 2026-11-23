@@ -121,7 +121,17 @@ impl LaunchRequest {
         if !(1..=30_000).contains(&self.budget_ms) {
             return Err(SpecError::Budget);
         }
-        let spec = &self.spec;
+        let digest = self.spec.validate()?;
+        Ok(ValidatedLaunch {
+            request: self,
+            digest,
+        })
+    }
+}
+
+impl LaunchSpec {
+    pub fn validate(&self) -> Result<[u8; 32], SpecError> {
+        let spec = self;
         let digest = spec
             .image_digest
             .strip_prefix("sha256:")
@@ -163,10 +173,7 @@ impl LaunchRequest {
         {
             return Err(SpecError::Resources);
         }
-        Ok(ValidatedLaunch {
-            request: self,
-            digest,
-        })
+        Ok(digest)
     }
 }
 

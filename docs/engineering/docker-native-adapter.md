@@ -64,7 +64,10 @@ backend disposition the session rejects new admission.
 ## Supported isolated candidate
 
 Use the foreground launcher in the [environment runbook](speedup-environment.md).
-The candidate requires no experimental switch and has no containerd fallback.
+The launcher defaults to the Rust Docker owner in the release Jetstream
+binary and uses the OCI-specific boot and stop commands. The candidate
+requires no experimental switch and has no containerd fallback. Use
+`--docker-owner python` to run the reference against the same guest.
 The workload uses the staged immutable image reference, `--pull never`,
 `--network none`, `--user 65532:65532`, `--memory 16m`, `--pids-limit 4`,
 and `--cpus 0.5`. It accepts the enforced constraints

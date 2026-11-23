@@ -69,8 +69,8 @@ impl Handle {
 }
 
 pub(super) struct Connection {
-    boot: String,
-    oci: bool,
+    pub(super) boot: String,
+    pub(super) oci: bool,
     stream: Stream,
 }
 
@@ -117,7 +117,7 @@ impl Connection {
         })
     }
 
-    fn exchange(
+    pub(super) fn exchange(
         &mut self,
         kind: Kind,
         response: Kind,
@@ -130,7 +130,7 @@ impl Connection {
         Frame::read(&mut self.stream)?.expect(response, id)
     }
 
-    fn inspect(&mut self) -> anyhow::Result<Value> {
+    pub(super) fn inspect(&mut self) -> anyhow::Result<Value> {
         let status = self.exchange(
             Kind::Inspect,
             Kind::Inspect,
@@ -227,7 +227,7 @@ fn verify_state(state: &Value, expected: &Handle) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn open_private(path: &Path) -> anyhow::Result<File> {
+pub(super) fn open_private(path: &Path) -> anyhow::Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -240,7 +240,7 @@ fn open_private(path: &Path) -> anyhow::Result<File> {
     Ok(file)
 }
 
-fn load(directory: &Path) -> anyhow::Result<(Identity, Key)> {
+pub(super) fn load(directory: &Path) -> anyhow::Result<(Identity, Key)> {
     let meta = directory.symlink_metadata()?;
     ensure!(
         meta.is_dir() && meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o077 == 0,
@@ -262,7 +262,10 @@ pub(super) fn stop_with_identity(
     identity: &Identity,
     key: &Key,
 ) -> anyhow::Result<()> {
-    let mut peer = Connection::open(directory, identity, key)?;
+    stop_peer(Connection::open(directory, identity, key)?)
+}
+
+pub(super) fn stop_peer(mut peer: Connection) -> anyhow::Result<()> {
     let ack = peer.exchange(
         Kind::Shutdown,
         Kind::ShutdownAck,

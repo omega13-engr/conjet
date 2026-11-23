@@ -357,6 +357,7 @@ def native_session(args, root):
     output = args.native_evidence
     output.mkdir(mode=0o700)
     adapter = REPO / 'build-support/conjet-native-docker.py'
+    python_owner = args.docker_owner == 'python'
     cli = args.swift_bin / 'conjet'
     config = root / 'docker'
     config.mkdir(mode=0o700)
@@ -373,10 +374,12 @@ def native_session(args, root):
         if host == before['endpoint']:
             raise RuntimeError('candidate endpoint overlaps production')
         assets = [cli, args.core, args.native_kernel, args.native_guest, args.native_package,
-                  args.native_receipt, adapter, DOCKER]
+                  args.native_receipt, DOCKER]
+        if python_owner:
+            assets.append(adapter)
         report['binary_sha256'] = {str(path): fingerprint(path.resolve(strict=True))['sha256'] for path in assets}
         kernel_hash = args.native_kernel.with_name(args.native_kernel.name + '.sha512sum').read_text().split()[0]
-        vm_command = [cli, 'native', '--experimental', 'serve', '--scratch', SCRATCH,
+        vm_command = [cli, 'native', 'docker-boot', '--scratch', SCRATCH,
                       '--kernel', args.native_kernel, '--kernel-sha512', kernel_hash,
                       '--guest-init', args.native_guest, '--oci-package', args.native_package,
                       '--sha256', report['binary_sha256'][str(args.native_package)]]
@@ -397,15 +400,19 @@ def native_session(args, root):
         if run(docker + ['context', 'inspect', CONTEXT, '--format', '{{.Endpoints.docker.Host}}'], env=env) != host:
             raise RuntimeError('private native Docker context endpoint mismatch')
         docker += ['--context', CONTEXT]
-        bridge_command = [sys.executable, adapter, '--native-session', directory,
-                          '--receipt', args.native_receipt, '--image', args.image, '--socket', endpoint]
+        bridge_command = [sys.executable, adapter] if python_owner else [args.core, 'native', 'docker-serve']
+        bridge_command += ['--native-session', directory, '--receipt', args.native_receipt,
+                           '--image', args.image, '--socket', endpoint]
         if args.diagnostics == 'trace':
             bridge_command += ['--trace', output / 'adapter-trace.json']
         report['adapter_command'] = list(map(str, bridge_command))
+        report['docker_owner'] = args.docker_owner
         with (output / 'adapter.stderr').open('w') as log:
             bridge = subprocess.Popen(bridge_command, env=env, stdin=subprocess.DEVNULL,
                                       stdout=subprocess.PIPE, stderr=log, text=True)
         ready = await_ready(bridge, 10)
+        if not python_owner and processes().get(bridge.pid) != args.core:
+            raise RuntimeError('unexpected Rust Docker owner executable')
         with socket.socket(socket.AF_UNIX) as probe:
             probe.settimeout(3)
             probe.connect(str(endpoint))
@@ -452,7 +459,7 @@ def native_session(args, root):
                 continue
             try:
                 if label == 'vmm' and directory is not None and process.poll() is None:
-                    run([cli, 'native', '--experimental', 'stop', '--session', directory], env=env, timeout=12)
+                    run([cli, 'native', 'docker-stop', '--session', directory], env=env, timeout=12)
                     process.wait(timeout=12)
                     report['shutdown'] = json.loads(process.stdout.readline())
                     if report['shutdown'].get('guest_cleanup') != 'complete' or report['shutdown'].get('reclaim_failures') != 0:
@@ -493,6 +500,8 @@ def main():
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--diagnostics', choices=('trace', 'control'), help='run the native-only diagnostic canaries')
+    parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
+                        help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
@@ -525,12 +534,14 @@ def main():
     if any(key in os.environ for key in ('DOCKER_HOST', 'DOCKER_CONTEXT', 'BUILDX_BUILDER')):
         parser.error('unset inherited Docker endpoint and builder overrides before running')
     if args.legacy_baseline:
-        if not args.network_helper or args.docker_args or args.diagnostics or args.matched_output or args.native_evidence or any(
+        if not args.network_helper or args.docker_args or args.diagnostics or args.docker_owner != 'rust' or args.matched_output or args.native_evidence or any(
                 getattr(args, name) for name in native_assets):
             parser.error('legacy baseline requires its network helper and accepts no native options')
     else:
         if args.diagnostics and (args.matched_output or args.docker_args):
             parser.error('run diagnostics separately from qualification or a custom workload')
+        if args.diagnostics == 'trace' and args.docker_owner != 'python':
+            parser.error('request Python reference tracing with --docker-owner python')
         if any((args.network_helper, args.core_assets, args.benchmark_output, args.comparison_output)):
             parser.error('legacy settings require --legacy-baseline')
         if not args.native_evidence or not all(getattr(args, name) for name in native_assets):

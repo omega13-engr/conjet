@@ -267,9 +267,19 @@ Approach:
 2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
 3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
 
-Evidence: Pending commands, revision and release artifact hashes, fixture results,
-raw observations and cleanup records under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-030`.
+Evidence: DONE. Built the release VMM and guest from the SPEED-030 working
+tree on `f202be5` and reused the source-identical Swift release CLI. Ran
+`python3 build-support/run-conjet-speedup.py --diagnostics control --docker-owner {rust,python}`
+in Rust/Python/Python/Rust order with the same pinned release assets. Both
+owners passed 176 standard canaries per boot and the shared output, inspect,
+unsupported request, capacity, duplicate-start and forced removal checks.
+An ordinary launcher smoke selected Rust without diagnostics or an owner
+override. Jetstream `cargo test --locked` passed 139 tests with three existing
+ignored tests. Rust formatting and Python adapter tests passed. Full
+Jetstream Clippy stopped on existing PSCI discriminant and Hypervisor FFI
+lints. A diagnostic run allowing those two existing lints completed.
+Commands, hashes, initial keep-alive failure, repaired runs, and cleanup
+are under `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-030`.
 
 Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [adapter contract](docker-native-adapter.md),
@@ -277,10 +287,14 @@ Source: [Native Docker speed plan](native-docker-speed-plan.md),
 [detailed result format](docker-benchmark-results.md),
 [environment runbook](speedup-environment.md).
 
-Review: Pending; verify acceptance, bounded ownership, actual native execution,
-compatibility, measurement scope and unchanged production.
+Review: Local diff and runtime checks passed. The Rust owner binds one
+private endpoint, caps admission and request handlers, and holds a single
+authenticated guest connection. The launcher confirmed the actual Rust
+peer executable and native guest attribution. The default smoke path does
+not load benchmark code. All runs verified removal of owned resources
+and unchanged production. Independent PR review is separate.
 
-Next Action: Create the Rust Docker module and transfer the narrow contract tests before switching the isolated launcher.
+Next Action: Stage a verified two-layer OCI image in SPEED-031.
 
 ### SPEED-031
 

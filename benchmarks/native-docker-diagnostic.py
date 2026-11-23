@@ -76,6 +76,47 @@ def collect_output_checks(connection, docker, env, directory, handles):
     (directory / 'output-checks.json').write_text(json.dumps(checks, indent=2) + '\n')
 
 
+def collect_contract_checks(connection, directory):
+    api = MATCHED['TOOLS']['api']
+    prefix = MATCHED['PREFIX']
+    name = 'cjdiag-contract'
+    path = prefix + '/containers/' + name
+    create = prefix + '/containers/create?name=' + name
+    config = {'Image': MATCHED['IMAGE']['ref'], 'User': MATCHED['USER'],
+              'Cmd': ['/bin/busybox', 'sleep', '30'], 'HostConfig': MATCHED['HOST_CONFIG']}
+    checks = {}
+    checks['wrong_api'] = api(connection, 'GET', '/v1.50/version', (400,))
+    checks['missing_container'] = api(connection, 'GET', path + '/json', (404,))
+    checks['unsupported_bind'] = api(connection, 'POST', create, (400,), {
+        **config, 'HostConfig': {**config['HostConfig'], 'Binds': ['/invalid:/invalid']}})
+    checks['unsupported_api'] = api(connection, 'POST', prefix + '/build', (501,))
+    checks['invalid_object'] = api(connection, 'POST', create, (400,), [])
+    item = api(connection, 'POST', create, (201,), config)
+    inspect = api(connection, 'GET', path + '/json', (200,))
+    if inspect['Id'] != item['Id'] or inspect['State']['Status'] != 'created':
+        raise RuntimeError('inspect did not reflect the created container')
+    checks['inspect_created'] = inspect['State']
+    checks['capacity'] = api(connection, 'POST', create + '-other', (409,), config)
+    api(connection, 'POST', path + '/start', (204,))
+    checks['duplicate_start'] = api(connection, 'POST', path + '/start', (409,))
+    checks['running_removal_without_force'] = api(connection, 'DELETE', path, (409,))
+    time.sleep(0.15)
+    api(connection, 'DELETE', path + '?force=true', (204,))
+    checks['inspect_removed'] = api(connection, 'GET', path + '/json', (404,))
+    connection.request('GET', prefix + '/events')
+    response = connection.getresponse()
+    events = [json.loads(line) for line in response.read(65537).splitlines()]
+    owned = [event for event in events if event['Actor']['ID'] == item['Id']]
+    if [event['Action'] for event in owned] != ['create', 'start', 'die', 'destroy']:
+        raise RuntimeError('cancel did not complete exactly one lifecycle')
+    witness = owned[2]['Actor']['Attributes']
+    if (witness['conjet.backend'] != 'jetstream-native-oci' or witness['conjet.guest_cleanup'] != 'complete'
+            or not witness['conjet.native_handle'] or witness['exitCode'] == '0'):
+        raise RuntimeError('forced removal lacks a cancelled native workload witness')
+    checks['cancelled'] = witness
+    (directory / 'contract-checks.json').write_text(json.dumps(checks, indent=2) + '\n')
+
+
 def collect(endpoint, peer, docker, env, directory):
     tools = MATCHED['TOOLS']
     manifest = MATCHED['MANIFEST']
@@ -124,6 +165,7 @@ def collect(endpoint, peer, docker, env, directory):
                             samples.flush()
         if 'conjet.output_calls' in witness:
             collect_output_checks(connection, docker, env, directory, handles)
+        collect_contract_checks(connection, directory)
     finally:
         connection.close()
 
