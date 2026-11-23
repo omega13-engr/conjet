@@ -67,6 +67,13 @@ class WorkloadTests(unittest.TestCase):
         self.assertFalse(check(stream(('create', 'die', 'start', 'destroy')), 'owned'))
         self.assertFalse(check(stream(('create', 'start', 'die', 'destroy'), 'other'), 'owned'))
 
+    def test_cgroup_limits_require_numeric_cpu_quota_and_use_the_observed_period(self):
+        check = MATRIX['matches_cgroup_limits']
+        limits = MANIFEST['service_limits']
+        self.assertTrue(check(b'134217728\n64\n10000 20000\n', limits))
+        self.assertFalse(check(b'134217728\n64\nmax 100000\n', limits))
+        self.assertFalse(check(b'134217728\n64\n25000 100000\n', limits))
+
 
 if __name__ == '__main__':
     unittest.main()

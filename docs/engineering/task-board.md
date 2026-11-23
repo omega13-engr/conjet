@@ -210,7 +210,7 @@ Acceptance Criteria:
 - Run at least one sustained application workload with latency under load and active-data canaries. Capture CPU, memory and disk growth with a declared steady-state interval.
 - Keep raw transport throughput, application readiness and launch latency as separate metrics.
 
-Problem and Evidence: The matrix implements writable-layer, volume and bind integrity workloads and a sustained Node/Redis service with DNS and HTTP transaction checks. Timing and additional network coverage are pending.
+Problem and Evidence: The matrix implements writable-layer, volume and bind integrity workloads and a sustained Node/Redis service with DNS and HTTP transaction checks. It verifies the named-volume checksum again in a different container after the writing container is removed, and records effective service cgroup limits and an owned-service resource snapshot. Runtime timing and standalone network coverage are pending.
 
 Raw evidence: Bridge creation timings do not measure packet performance, and static no-network execution does not establish Docker workload compatibility.
 
@@ -233,7 +233,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Define the bind/volume/writable-layer and network topology matrix.
+Next Action: Run the paired storage and service fixture and inspect durability, cgroup and teardown evidence.
 
 ### SPEED-025
 

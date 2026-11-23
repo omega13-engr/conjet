@@ -745,6 +745,15 @@ def run_storage(docker, manifest):
                             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
                         if digest != data['trace']:
                             docker.rows[-1]['error'] = 'host bind proof differs from guest proof'
+                    if store == 'volume':
+                        verify = ('const fs=require("fs"), crypto=require("crypto");'
+                                  'const data=fs.readFileSync("/dataset/test");'
+                                  'console.log(crypto.createHash("sha256").update(data).digest("hex"));')
+                        if docker.call('storage.volume.readback', ['run', '--rm', '--pull', 'never',
+                                       '--network', 'none', '--label', f'{LABEL}={docker.token}', *mount,
+                                       image, 'node', '-e', verify], phase='verification',
+                                       expected=(data['trace'] + '\n').encode()) is None:
+                            docker.rows[-2]['error'] = 'new container did not recover the fsynced volume data'
             finally:
                 if store == 'volume':
                     if docker.call('volume-remove', ['volume', 'rm', name], phase='cleanup') is None:
@@ -778,6 +787,12 @@ def run_service(docker, manifest):
                     "require('dns').lookup('redis', e=>{if(e)process.exit(1);"
                     "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)})"
                     ".catch(()=>process.exit(1));})"], phase='verification')
+        for service in ('app', 'redis'):
+            observed = docker.call(f'service.{service}.cgroup', [*prefix, 'exec', '-T', service, 'cat',
+                                   '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/pids.max',
+                                   '/sys/fs/cgroup/cpu.max'], phase='verification')
+            if observed is not None and not matches_cgroup_limits(observed, manifest['service_limits']):
+                docker.rows[-1]['error'] = 'effective cgroup limits differ from the requested service resources'
         reader = build_opener(ProxyHandler({}))
         if read_response(reader, endpoint + '/health') != proof + ' +PONG':
             raise RuntimeError('service readiness response differs')
@@ -796,10 +811,25 @@ def run_service(docker, manifest):
             next_tick += 10_000_000
             time.sleep(max(0, (next_tick - time.monotonic_ns()) / 1e9))
         docker.report.setdefault('windows_ns', {})['service.transaction'] = time.monotonic_ns() - begin
+        ids = docker.call('service-container-ids', [*prefix, 'ps', '--quiet'], phase='verification')
+        if ids:
+            owned = ids.decode().splitlines()
+            if len(owned) == 2 and all(re.fullmatch(r'[0-9a-f]{12,64}', item) for item in owned):
+                docker.call('service-snapshot-stats', ['stats', '--no-stream', '--format', '{{json .}}',
+                            *owned], phase='verification')
     finally:
         if docker.call('service-remove', [*prefix, 'down', '--volumes', '--timeout', '2'],
                        phase='cleanup', timeout=120) is None:
             raise RuntimeError('could not remove owned sustained service')
+
+
+def matches_cgroup_limits(observed, limits):
+    try:
+        memory, pids, quota, period = map(int, observed.split())
+    except ValueError:
+        return False
+    return (memory == limits['memory_bytes'] and pids == limits['pids']
+            and period > 0 and quota * 1000 == limits['cpu_millicores'] * period)
 
 
 def run_stress(docker, manifest):
