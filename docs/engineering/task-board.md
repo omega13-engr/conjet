@@ -2,13 +2,19 @@
 
 Architecture: [speed engineering plan](speed-engineering-plan.md).
 
-Current iteration: [retained Docker performance plan](native-docker-speed-plan.md).
+Current iteration: [retained Docker latency architecture](retained-docker-latency-architecture.md).
+Retain dynamic memory as a mandatory acceptance requirement, including
+pressure response, idle convergence and backing-page ownership.
+The retained-stack overview remains in the [performance plan](native-docker-speed-plan.md).
 
 ## Current Docker performance priority
 
-Retain dockerd, containerd, runc, BuildKit and Compose. SPEED-046 profiles
-their release-optimized Conjet path and selects one runtime boundary
-for further evaluation. The isolated custom Docker adapter is research.
+Retain dockerd, containerd, runc, BuildKit and Compose. SPEED-046–048 are
+complete; SPEED-049 failed API parity and exposed a CLI correctness blocker.
+Next execute SPEED-051, SPEED-050, then the conditional experiments
+SPEED-052–054 and qualification SPEED-055. A documented rejected experiment
+is a completed investigation, not a delivered speed improvement.
+The isolated custom Docker adapter is research.
 Verified SPEED-027 through SPEED-036 tasks are retained in DONE.
 SPEED-037A remains unfinished research. SPEED-037 through SPEED-045
 are superseded and are outside the retained Docker work sequence.
@@ -142,6 +148,12 @@ Acceptance Criteria:
 - Record guest monotonic receipt and response spans for start and
   wait and host monotonic guest-ring publication and response
   spans. Pair operations by ID and preserve their separate clocks.
+- Run the same lifecycle directly against guest `/var/run/docker.sock`
+  and through the host endpoint serially; preserve limits, image, operation
+  order and removal boundary. Include `_ping` transport controls.
+- Capture request delivery, first-byte and complete-response durations on
+  each clock independently. Record reclaim activity, memory targets and
+  runtime cgroup CPU/PID counter deltas. Do not subtract unrelated medians.
 - Identify whether the residual lies inside or outside the guest
   Docker request handler. Retain inconclusive runs and record host
   and guest cleanup evidence. Require attribution before selecting
@@ -163,8 +175,117 @@ Source: [SPEED-047](#speed-047), [SPEED-048](#speed-048), [SPEED-049](#speed-049
 
 Review: Pending live attribution.
 
-Next Action: Add tagged start and wait spans at the relay socket
-boundary and run the four isolated boots.
+Next Action: Add the guest-local control lane and tagged relay spans; run
+the four isolated boots using the [architecture protocol](retained-docker-latency-architecture.md#1-establish-the-floor-before-optimizing).
+
+### SPEED-052
+
+Title: Test quiet-dwell scheduling for routine stream-triggered reclaim
+
+Description: Implement an isolated A/B candidate that coalesces stream-completion reclaim hints until the existing quiet dwell and guest safety checks.
+
+Is blocked by task: SPEED-050 attribution; SPEED-051 before qualification.
+
+Acceptance Criteria:
+
+- Record current versus candidate reclaim counts and launch timings in two alternating release A/B boot pairs, 200 timed launches and ten warmups per leg.
+- Preserve pressure reclaim, balloon growth/shrink, ownership checks and active-data canaries. Demonstrate pressure response during churn and idle convergence within the existing configured deadline.
+- Add deterministic tests for generation invalidation, repeated stream completions, pressure bypass, idle submission and cancellation races. No new persistent worker or fixed-RAM mode.
+- Accept only with measured improvement and passing dynamic-memory gates; otherwise record rejection and retain current scheduling.
+
+Problem and Evidence: The boot loop requests routine reclaim for completed stream phases and workloads. Source proves scheduling coupling, not that reclaim causes SPEED-049 latency.
+
+Approach: Change only routine hint scheduling in CoreMemoryController/schedule_guest_memory_reclaim; retain one pending hint, existing pressure policy and current quiet dwell. Measure observer-free performance separately from diagnostics.
+
+Evidence: Pending. Architecture/source review only; no candidate benchmark has run.
+
+Source: jetstream/src/hvf/boot.rs; guest/image/conjet-core/src/conjet-memd.c; architecture section 2. See [architecture](retained-docker-latency-architecture.md).
+
+Review: Pending implementation or documented experiment rejection and evidence review.
+
+Next Action: Inspect SPEED-050 reclaim overlap and freeze the single-variable A/B configuration.
+
+### SPEED-053
+
+Title: Resolve a measured response write-readiness stall
+
+Description: Test conditional writable notification for queued VSOCK response bytes after WouldBlock.
+
+Is blocked by task: SPEED-050 response spans; SPEED-052 accepted or rejected decision.
+
+Acceptance Criteria:
+
+- First show whether final response writes stall after WouldBlock. If absent, document the negative result and make no watcher change.
+- If present, arm write readiness only while bytes remain; wake the existing queue owner, disarm after drain and remove stale registrations before descriptor reuse.
+- Pass slow-reader, partial-write, EOF/half-close, credit-exhaustion, cancellation and descriptor-reuse tests; retain the 25 ms fallback tick.
+- Run two alternating 200-launch release A/B pairs with ten warmups per leg, zero failures, cleanup and unchanged dynamic-memory behavior. Record reject/accept without a parity claim.
+
+Problem and Evidence: NativeEventQueue::watch registers EVFILT_READ; flush_host_output stops on WouldBlock. The frequency and cost in SPEED-049 are unknown.
+
+Approach: Add a bounded writable subscription only if traces establish the stall; preserve single-owner byte movement and existing shutdown framing.
+
+Evidence: Pending. Architecture/source review only; no candidate benchmark has run.
+
+Source: jetstream/src/devices/vsock.rs: NativeEventQueue::watch, flush_host_output, finish_guest_shutdown_if_drained. See [architecture](retained-docker-latency-architecture.md).
+
+Review: Pending implementation or documented experiment rejection and evidence review.
+
+Next Action: Check response traces before modifying readiness registrations.
+
+### SPEED-054
+
+Title: Evaluate persistent ordinary Docker HTTP relay connections
+
+Description: Measure connection churn, then conditionally support sequential HTTP requests on one downstream/upstream connection.
+
+Is blocked by task: SPEED-052 and SPEED-053 decisions; SPEED-050 local/forwarded comparison.
+
+Acceptance Criteria:
+
+- Measure fresh and reused connections separately with guest-local and forwarded controls. If churn is immaterial, record rejection without modifying the relay.
+- For an accepted implementation, parse and apply existing create/build cgroup policy on every request. Preserve framing, close semantics and bounded buffering; never multiplex clients onto one upstream connection.
+- Pass multiple-request, chunked/trailer, HEAD/no-body, informational response, malformed input, disconnect, attach/upgrade and build-stream tests. Ensure events/idle keep-alive do not pin peak memory.
+- Use the unchanged frozen lifecycle harness for two alternating 200-launch release A/B pairs with ten warmups per leg; report reusable-client diagnostics separately. Preserve pressure and idle-memory gates.
+
+Problem and Evidence: handle_docker_proxy creates a dockerd connection per accepted stream and ordinary-response handling forces Connection: close. Removing headers alone would break its one-transaction state model.
+
+Approach: Implement sequential framed ordinary transactions only after measured benefit. Keep streaming/upgraded connections dedicated and update transport phase accounting independently of container lifetime.
+
+Evidence: Pending. Architecture/source review only; no candidate benchmark has run.
+
+Source: guest/image/conjet-core/src/conjet-netd.c; guest/image/conjet-core/tests/conjet-netd-chunked-decoder-regression.c; jetstream/src/devices/vsock.rs. See [architecture](retained-docker-latency-architecture.md).
+
+Review: Pending implementation or documented experiment rejection and evidence review.
+
+Next Action: Measure connection setup contribution before selecting implementation.
+
+### SPEED-055
+
+Title: Requalify retained Docker lifecycle with dynamic memory enabled
+
+Description: Freeze accepted changes and repeat the existing API and CLI comparison against official pinned Kiri.
+
+Is blocked by task: SPEED-051 fixed; SPEED-050 complete; SPEED-052–054 accepted or rejected with evidence.
+
+Acceptance Criteria:
+
+- Run five independent alternating boot pairs per lane, 2,000 timed operations and ten warmups per engine/boot. Preserve frozen fixture limits and all failures.
+- Run normal dynamic memory; pass pressure, active-data, idle-convergence and backing-release gates before timing. No benchmark-only fixed-memory configuration.
+- Publish the existing detailed report tables: hashes/resources, per-boot p50/p95/p99, throughput, stage timings, paired 95% intervals, correctness, coverage and cleanup.
+- Apply existing CLI parity and API advantage criteria; explicitly report API parity using the declared 1.05 upper-bound rule for both percentiles. Report the below-5-ms median target separately; do not claim a p99 or CLI 5-ms result.
+- Leave SPEED-049 historical failure intact. Mark build, Compose and other lanes unqualified for this candidate until their existing matrix tasks are rerun; no release or global superiority claim from this task alone.
+
+Problem and Evidence: SPEED-049 API ratio was 102.9228; one CLI failure prevented formal CLI qualification. Small A/B improvements cannot establish parity.
+
+Approach: Use existing docker-comparison.py and report renderer with explicit private endpoints, frozen release hashes and tracing disabled. Keep production guards and owned-process cleanup for every leg.
+
+Evidence: Pending. Architecture/source review only; no candidate benchmark has run.
+
+Source: benchmarks/docker-comparison.py; docs/engineering/docker-benchmark-plan.md; docs/engineering/docker-benchmark-results.md. See [architecture](retained-docker-latency-architecture.md).
+
+Review: Pending qualification and independent evidence review.
+
+Next Action: Freeze only accepted candidate changes after correctness and memory review.
 
 ### SPEED-014
 

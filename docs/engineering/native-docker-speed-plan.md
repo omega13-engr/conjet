@@ -1,5 +1,9 @@
 # Conjet Docker performance plan
 
+Current next iteration: [retained Docker latency architecture](retained-docker-latency-architecture.md).
+It preserves dynamic memory and defines the SPEED-050–055 diagnostic and
+optimization sequence. All gains remain unqualified until measured.
+
 ## Retained Docker architecture
 
 Conjet keeps the unmodified Docker, Buildx and Compose clients and the
