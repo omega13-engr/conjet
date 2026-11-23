@@ -385,6 +385,8 @@ pilots and native OCI/static timing. The summary tool verifies per-session
 counts and refuses a lifecycle paired interval before five complete pairs
 or across mixed executable, harness or manifest revisions. It retains setup,
 warmup and artifact-verification failures alongside measured rows.
+Controlled-registry intervals additionally require complete witnessed config
+and layer transfer for every first-pull sample in each accepted pair.
 The remaining modes and claim review are still in progress.
 
 Source: [Benchmark harnesses](../../benchmarks/README.md),

@@ -33,6 +33,23 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(summary['groups']['build']['warmup_failures'], 1)
         self.assertEqual(summary['operation_failures'][0]['scenario'], 'builder-bootstrap')
 
+    def test_registry_cold_pair_requires_a_transfer_witness_for_every_sample(self):
+        with tempfile.TemporaryDirectory(dir='/Volumes/ExternalSSD/dev_workspace/tmp') as work:
+            root = Path(work)
+            (root / 'pair.json').write_text(json.dumps({'pair': 1, 'mode': 'images', 'order': ['conjet', 'kiri']}))
+            paths = []
+            for engine in ('conjet', 'kiri'):
+                path = root / engine / 'session.json'
+                path.parent.mkdir()
+                rows = [{'scenario': 'registry.small.first-pull', 'phase': 'sample', 'elapsed_ns': 100,
+                         'cache_state': 'complete config and layer transfer observed'} for _ in range(5)]
+                if engine == 'kiri':
+                    rows[0]['cache_state'] = 'transfer unknown'
+                path.write_text(json.dumps({'mode': 'images', 'engine': engine, 'passed': True, 'operations': rows}))
+                paths.append(path)
+            results = SUMMARY['paired_intervals'](paths, 'images')
+        self.assertEqual(results['registry.small.first-pull']['complete_pairs'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

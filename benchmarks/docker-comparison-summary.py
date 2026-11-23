@@ -59,6 +59,9 @@ def summarize(path):
             groups[name] = summarized_samples(samples, data.get('windows_ns', {}).get(name))
             groups[name]['warmup_failures'] = sum(row.get('phase') == 'warmup' and
                                                    row.get('error') is not None for row in operations)
+            if name.endswith('.first-pull'):
+                groups[name]['verified_registry_transfers'] = sum(
+                    row.get('cache_state') == 'complete config and layer transfer observed' for row in samples)
     result['groups'] = groups
     result['operation_failures'] = [
         {'scenario': row['scenario'], 'phase': row.get('phase'), 'error': row['error']}
@@ -66,21 +69,26 @@ def summarize(path):
     return result
 
 
-def lifecycle_intervals(paths):
+def paired_intervals(paths, mode):
+    contract = json.loads((Path(__file__).parent / 'scenarios/docker-comparison-v1.json').read_bytes())
+    budget = contract['suites'][mode]['samples_per_session']
     case = defaultdict(dict)
     for path in paths:
         result = summarize(path)
         parent = path.parent.parent
-        if result['mode'] != 'lifecycle' or not (parent / 'pair.json').is_file():
+        if result['mode'] != mode or not (parent / 'pair.json').is_file():
             continue
         pairing = json.loads((parent / 'pair.json').read_text())
         pair = pairing['pair']
         expected = ['conjet', 'kiri'] if pair % 2 else ['kiri', 'conjet']
-        if pair not in range(1, 6) or pairing['mode'] != 'lifecycle' or pairing['order'] != expected:
-            raise ValueError('lifecycle report has inconsistent pairing metadata')
+        if pair not in range(1, 6) or pairing['mode'] != mode or pairing['order'] != expected:
+            raise ValueError('report has inconsistent pairing metadata')
         for label, details in result['groups'].items():
-            if (not result['passed'] or details['samples'] != 2000 or details['failures']
-                    or details['warmup_failures'] or result['engine'] not in expected):
+            if mode == 'images' and not label.startswith('registry.'):
+                continue
+            if (not result['passed'] or details['samples'] != budget or details['failures']
+                    or details['warmup_failures'] or result['engine'] not in expected or result['operation_failures']
+                    or (label.endswith('.first-pull') and details.get('verified_registry_transfers') != budget)):
                 continue
             key = (pair, result['engine'])
             if key in case[label]:
@@ -115,6 +123,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--paired-lifecycle', action='store_true',
                         help='compute ratios only for complete paired lifecycle rows')
+    parser.add_argument('--paired-images', action='store_true',
+                        help='compute ratios for controlled registry rows with verified transfer evidence')
     parser.add_argument('sessions', nargs='+', type=Path)
     args = parser.parse_args()
     for path in args.sessions:
@@ -122,7 +132,9 @@ def main():
             parser.error('sessions must reside on ExternalSSD')
     result = {'sessions': [summarize(path) for path in args.sessions]}
     if args.paired_lifecycle:
-        result['paired_lifecycle'] = lifecycle_intervals(args.sessions)
+        result['paired_lifecycle'] = paired_intervals(args.sessions, 'lifecycle')
+    if args.paired_images:
+        result['paired_images'] = paired_intervals(args.sessions, 'images')
     print(json.dumps(result, indent=2))
 
 

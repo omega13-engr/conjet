@@ -236,4 +236,6 @@ rewrites the installed Docker context or prunes a shared store.
 
 `docker-comparison-summary.py` emits per-session percentiles and failure
 counts from retained reports. Use the paired estimator only with five
-complete, independent, semantically matched pairs.
+complete, independent, semantically matched pairs. `--paired-lifecycle`
+applies to the lifecycle rows. `--paired-images` applies to controlled
+registry rows and requires complete transfer witnesses for first pulls.
