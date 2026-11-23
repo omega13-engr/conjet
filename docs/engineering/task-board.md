@@ -2,6 +2,29 @@
 
 Architecture: [speed engineering plan](speed-engineering-plan.md).
 
+Current iteration: [native-default Docker speed plan](native-docker-speed-plan.md).
+
+## Current native-default priority
+
+The user directs the next iteration to improve the overall Docker experience on
+the new native architecture. SPEED-027 through SPEED-045 are the active sequential
+implementation and qualification path. SPEED-027 starts from completed SPEED-018;
+the following new tasks depend on their preceding task. Candidate measurements
+must use release-optimized native Conjet selected by default in conjet-speedup.
+There is no experimental opt-in requirement for this isolated candidate and no
+silent legacy backend fallback. The installed production runtime stays untouched.
+
+SPEED-019 through SPEED-026 retain their existing status and historical evidence.
+Their old Next Action lines do not authorize resuming legacy repetitions:
+new native measurement work is assigned to SPEED-040 through SPEED-044 and the
+report audit to SPEED-045. SPEED-020's completed legacy image evidence remains
+under review as historical evidence, not proof of native image support. Do not
+mark superseded or deferred work DONE merely because the new sequence exists.
+SPEED-008 remains deferred research. SPEED-013/014 review and release requirements
+remain intact; promoting the expanded native default additionally requires the
+new compatibility and qualification audit. Preserve the exact recent detailed
+report table formats, percentile units, paired intervals and failure evidence.
+
 ## Working rules
 
 - Each task must deliver the artifact or behavior named in Description. Complete
@@ -71,6 +94,724 @@ the isolated `conjet-speedup` launcher. Wider promotion requires separate
 compatibility evidence.
 
 ## BACKLOG
+
+### SPEED-027
+
+Title: Trace the release native Docker CLI critical path
+
+Description: Add diagnostic timing to the current adapter and a single-run transcript collector.
+
+Is blocked by task: SPEED-018 (DONE); uses the frozen release comparison at cabbea9. Does not wait for legacy benchmark completion.
+
+Acceptance Criteria:
+
+- Capture negotiation, create, attach headers, start, native admission, terminal state, output EOF, wait response and client exit for pinned Alpine true and a stdout/stderr exit-23 canary.
+- Record request counts, connections, thread handoffs and monotonic host spans; keep guest clocks separate. Compare direct API and CLI traces and quantify tracing overhead.
+- Publish a ranked latency attribution with measured spans and unresolved gaps; do not attribute the whole CLI deficit to Python without evidence.
+
+Problem and Evidence: Release API median already leads Kiri, while CLI median trails by 7.6%; the remaining ~1–2 ms is not yet attributed.
+
+Approach:
+
+1. Instrument the existing native Docker handler and collect one diagnostic pair plus untraced controls.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-027`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Instrument the existing native Docker handler and collect one diagnostic pair plus untraced controls.
+
+### SPEED-028
+
+Title: Reuse a boot-bound authenticated native channel
+
+Description: Change the adapter connection owner to reuse its native channel across sequential Docker launches.
+
+Is blocked by task: SPEED-027.
+
+Acceptance Criteria:
+
+- Authenticate once per verified boot generation; retain operation identity and sequence checks and explicit channel ownership.
+- Test idle reuse, guest reboot, disconnect before and after admission, cancellation and timeout. Never resubmit an ambiguous Launch; reconcile or fail closed.
+- Compare handshake count and authentication span against SPEED-027 using the same canaries; reject a latency improvement that weakens isolation or increases unbounded resource use.
+
+Problem and Evidence: Native.execute currently connects and authenticates for each launch; the measured authentication span is about 0.45–0.48 ms.
+
+Approach:
+
+1. Implement a bounded connection lease and boot-generation invalidation tests.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-028`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Implement a bounded connection lease and boot-generation invalidation tests.
+
+### SPEED-029
+
+Title: Deliver terminal output without redundant round trips
+
+Description: Add one bounded terminal/output delivery contract between the native guest client and Docker owner.
+
+Is blocked by task: SPEED-028.
+
+Acceptance Criteria:
+
+- Reduce separate stdout/stderr fetch requests where terminal metadata or streaming can deliver them safely; include explicit EOF, exit and cleanup fields.
+- Verify zero output, mixed streams, 64 KiB boundaries, overflow, slow reader, disconnected attach and nonzero exit.
+- Removal remains after verified cleanup; cancellation and capacity reuse do not depend on an attach client consuming bytes. Record request-count and latency changes.
+
+Problem and Evidence: The adapter fetches stdout and stderr after terminal cleanup and only then completes attach; extra requests are confirmed but their cost must be measured.
+
+Approach:
+
+1. Specify bounded terminal/output framing and implement its codec and lifecycle tests.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-029`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Specify bounded terminal/output framing and implement its codec and lifecycle tests.
+
+### SPEED-030
+
+Title: Port the supported Docker owner into the Rust host
+
+Description: Implement the existing supported Docker API contract as a Rust host component, retaining Python as the comparison reference.
+
+Is blocked by task: SPEED-029.
+
+Acceptance Criteria:
+
+- Pass the same request/response fixtures for negotiation, create/start/attach/wait/inspect/remove, errors and duplicate-start prevention.
+- Use the persistent channel and terminal contract, bounded connection/admission counts, one lifecycle owner and explicit backend identity; do not add a second VM or legacy fallback.
+- Package and launch the Rust owner by default for conjet-speedup without experimental opt-in; verify it needs no Python benchmark modules at runtime.
+- Run matched release A/B against the Python reference; preserve timings even if the Rust port is not faster.
+
+Problem and Evidence: The candidate Docker endpoint currently imports Python benchmark code and spawns connection/execution threads; it is not yet a packaged Rust runtime component.
+
+Approach:
+
+1. Create the Rust Docker module and transfer the narrow contract tests before switching the isolated launcher.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-030`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Create the Rust Docker module and transfer the narrow contract tests before switching the isolated launcher.
+
+### SPEED-031
+
+Title: Stage a two-layer OCI image with whiteouts
+
+Description: Extend native image admission from one layer to a pinned two-layer test image.
+
+Is blocked by task: SPEED-030.
+
+Acceptance Criteria:
+
+- Verify manifest/config/compressed and uncompressed layer identities and deterministic layer ordering.
+- Test file replacement, deletion whiteouts, opaque directories, symlinks and required hard links; reject traversal, escaping links, malformed archives and unsafe special entries.
+- Run a dynamic ARM64 canary from the final immutable root and prove separate writable overlays do not mutate lower layers; failed staging removes owned partial state.
+
+Problem and Evidence: The current single-layer package excludes ordinary multilayer application images needed by builds and Compose.
+
+Approach:
+
+1. Add a deterministic two-layer fixture and negative archive tests, then extend staging.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-031`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Add a deterministic two-layer fixture and negative archive tests, then extend staging.
+
+### SPEED-032
+
+Title: Implement native image pull, inspect and removal
+
+Description: Connect the native Docker image endpoints to a bounded content-addressed store on ExternalSSD.
+
+Is blocked by task: SPEED-031.
+
+Acceptance Criteria:
+
+- Pull the pinned small and multilayer fixtures from a task-owned registry; expose verified identity through Docker inspect and launch the pulled image.
+- Test cached pull without duplicate extraction, digest mismatch, interrupted download and retry, shared-layer reference counts, and deletion while an image is in use.
+- Track image/VM backing paths and remove only unreferenced task-owned content; do not shell out to the existing Docker engine to prepare the candidate image.
+
+Problem and Evidence: Pre-admitted images bypass acquisition; native pull cannot be represented by the historical legacy image timings.
+
+Approach:
+
+1. Implement digest-addressed download/admission and Docker image inspect using the SPEED-031 fixtures.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-032`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Implement digest-addressed download/admission and Docker image inspect using the SPEED-031 fixtures.
+
+### SPEED-033
+
+Title: Replace the single workload slot with bounded lifecycle records
+
+Description: Implement native create/start/wait/stop/kill/restart/remove for up to eight admitted containers.
+
+Is blocked by task: SPEED-032.
+
+Acceptance Criteria:
+
+- Give each workload independent rootfs, cgroup, handle, output and cleanup state; bound metadata retention and return explicit capacity errors.
+- Test concurrency 1/2/4/8, name conflicts, create without execution, start replay, stop timeout, kill, restart with a new execution generation and forced removal.
+- Reconstruct or safely invalidate records after VM/channel loss without duplicate execution; no mount/cgroup/process leaks and no cross-workload data access.
+- Support only fixture-required credential and syscall extensions, with negative privilege tests; never enable unrestricted guest-root execution as a shortcut.
+
+Problem and Evidence: One active workload cannot run Compose dependencies, persistent services or a BuildKit worker with application checks.
+
+Approach:
+
+1. Implement the bounded record table and per-record lifecycle transition tests.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-033`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Implement the bounded record table and per-record lifecycle transition tests.
+
+### SPEED-034
+
+Title: Add native exec and bounded live attach/log streams
+
+Description: Implement Docker exec and streaming output for one running native service fixture.
+
+Is blocked by task: SPEED-033.
+
+Acceptance Criteria:
+
+- Use the existing exec/control fixture with matching argv, environment, cwd and supported credentials; preserve stdout/stderr and actual exit status.
+- Deliver output before process completion with bounded buffers and backpressure; test slow/disconnected readers, cancellation and overflow reporting.
+- Verify container survival after exec failure, multiple bounded exec requests, and cleanup of exec children on container removal.
+- Implement only the noninteractive stdin/TTY behavior declared in the fixture contract; reject unsupported options rather than returning synthetic success.
+
+Problem and Evidence: Persistent exec and live output are absent from the native Docker subset and are part of everyday Docker use.
+
+Approach:
+
+1. Add a long-lived native fixture and exec protocol tests before wiring Docker exec endpoints.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-034`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Add a long-lived native fixture and exec protocol tests before wiring Docker exec endpoints.
+
+### SPEED-035
+
+Title: Connect native containers to one private bridge and DNS
+
+Description: Wire the verified guest bridge implementation to native Docker network ownership.
+
+Is blocked by task: SPEED-034.
+
+Acceptance Criteria:
+
+- Run two pinned native containers on a task-owned bridge and resolve one service name to the other; verify DNS and a TCP transaction.
+- Expose the required create/connect/disconnect/inspect/remove network operations and aliases; reject unsupported network options.
+- Test allocation rollback, address reuse, concurrent cleanup and namespace isolation. Confirm removal of owned veth, routes, addresses and DNS records.
+- No legacy networking owner or production interface may satisfy the fixture.
+
+Problem and Evidence: The source bridge research does not yet implement Docker or Compose network ownership on the native endpoint.
+
+Approach:
+
+1. Add a two-container DNS/TCP integration fixture and attach it to the native lifecycle state machine.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-035`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Add a two-container DNS/TCP integration fixture and attach it to the native lifecycle state machine.
+
+### SPEED-036
+
+Title: Publish one native container port on host loopback
+
+Description: Implement a scoped loopback port mapping for the Node/Redis application fixture.
+
+Is blocked by task: SPEED-035.
+
+Acceptance Criteria:
+
+- Map an allocated 127.0.0.1 host TCP port to the native application; verify HTTP response contents and Docker inspect metadata.
+- Test bind conflict, refused destination, client disconnect, half-close and container restart/removal; bound connections and buffered bytes.
+- After removal, verify listener closure and immediate port reuse. Do not use wildcard binds or change production port mappings.
+
+Problem and Evidence: Compose readiness and host-facing application performance require a real native published-port path.
+
+Approach:
+
+1. Implement the task-owned loopback TCP mapping and teardown fixture.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-036`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Implement the task-owned loopback TCP mapping and teardown fixture.
+
+### SPEED-037
+
+Title: Mount a named volume and an allowlisted ExternalSSD bind
+
+Description: Implement the two storage modes required by the existing storage and Compose fixtures.
+
+Is blocked by task: SPEED-036.
+
+Acceptance Criteria:
+
+- Preserve a checksummed named-volume file across container restart; remove it only on explicit owned-volume deletion.
+- Support a read/write and read-only bind beneath the designated ExternalSSD fixture root; verify guest writes on the host and enforced read-only behavior.
+- Reject path traversal, symlink escape and unapproved host roots. Test mount failure rollback, busy-volume removal and permission mapping.
+- Expose the fixture-required Docker volume/mount metadata without legacy Docker storage; verify no residual mounts after teardown.
+
+Problem and Evidence: Native workloads currently lack persistent volumes and host binds; this blocks realistic Compose and storage comparisons.
+
+Approach:
+
+1. Implement one named-volume fixture, then the allowlisted bind with negative path tests.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-037`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Implement one named-volume fixture, then the allowlisted bind with negative path tests.
+
+### SPEED-038
+
+Title: Run a pinned BuildKit worker on the native engine
+
+Description: Enable the exact BuildKit worker configuration required by the existing Buildx fixture and verify one Rust build/export/run.
+
+Is blocked by task: SPEED-037.
+
+Acceptance Criteria:
+
+- Start the worker with the unmodified Buildx client through the native endpoint; no hidden Docker/containerd daemon or host build fallback.
+- Identify its actual build executor and required mount/namespace/security capabilities. Implement narrowly scoped requirements with escape-denial tests; unsupported privileged mode is not a workaround.
+- Supply identical verified offline OCI bases to both engines, export/load the result through native image handling, and run its output canary.
+- Capture effective worker CPU/memory/I/O limits and verify worker, cache and exported-image cleanup. Leave this task open if native execution of the worker is not proven.
+
+Problem and Evidence: Native launch speed does not imply build acceleration; the current builds use the old engine.
+
+Approach:
+
+1. Probe the pinned worker's exact prerequisites and add individual capability subtasks for any missing native operation.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-038`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Probe the pinned worker's exact prerequisites and add individual capability subtasks for any missing native operation.
+
+### SPEED-039
+
+Title: Run Node and Redis Compose entirely on native
+
+Description: Implement the remaining API semantics required by the existing pinned Compose fixture.
+
+Is blocked by task: SPEED-038.
+
+Acceptance Criteria:
+
+- Run unmodified docker compose up --wait with native-owned Node and Redis; prove backend and effective cgroup limits for each service.
+- Pass HTTP transaction, service DNS, health check, log retrieval and persisted Redis-data canaries.
+- Pass no-change up, app recreate, scale to two replicas, restart and down --volumes with correct event/state semantics and cleanup.
+- Explicitly reject unsupported Compose features and preserve the production context; no legacy fallback for any service.
+
+Problem and Evidence: Prior Compose measurements used Docker/containerd; default-native promotion requires actual multi-service compatibility.
+
+Approach:
+
+1. Replay the frozen Compose client's request transcript against native and implement each missing operation with a regression test.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-039`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Replay the frozen Compose client's request transcript against native and implement each missing operation with a regression test.
+
+### SPEED-040
+
+Title: Qualify release native Docker launch parity
+
+Description: Run the frozen matched API and Docker CLI launch matrix using the completed native owner.
+
+Is blocked by task: SPEED-039.
+
+Acceptance Criteria:
+
+- Build all candidate components in release mode from one source revision; record hashes/settings and validate actual native dispatch for every sample.
+- Collect five alternating independent pairs, 2,000 samples per engine/lane/boot and ten warmups for the frozen lifecycle rows; include supported bridge and output/exit scenarios.
+- Preserve API acknowledgement versus verified cleanup distinctions, raw failures and per-session distributions. Compare native to Kiri and the frozen prior native baseline.
+- Evaluate CLI p50 and p99 parity with paired 95% ratio upper bound <=1.05; report API median advantage and regressions separately. A failed target creates a concrete profiling follow-up, not a fabricated pass.
+
+Problem and Evidence: The new native host and compatibility changes require fresh measurements; old legacy samples cannot qualify them.
+
+Approach:
+
+1. Freeze the release artifact manifest and run diagnostic-free matched launch pairs.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-040`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Freeze the release artifact manifest and run diagnostic-free matched launch pairs.
+
+### SPEED-041
+
+Title: Measure the native-backed Rust Go and Node build matrix
+
+Description: Execute the existing empty/unchanged/source/dependency build cases using the qualified native BuildKit setup.
+
+Is blocked by task: SPEED-040.
+
+Acceptance Criteria:
+
+- Retain the same Dockerfiles, offline bases, clients, cache-state definitions and export/load boundaries used by the recent report.
+- Complete five independent pairs with the frozen per-case repetitions and verified artifact execution; record failed artifacts as failed operations.
+- Publish the same build latency and worker CPU/peak-memory/read/write tables; identify worker/executor and export/load time separately.
+- Attribute every worker container to native and compare cache behavior/effective limits before making a speed claim.
+
+Problem and Evidence: Prior build timings were legacy-host results and cannot establish native build performance.
+
+Approach:
+
+1. Run the Rust cache-state group first, then Go and Node without overlapping timed suites.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-041`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Run the Rust cache-state group first, then Go and Node without overlapping timed suites.
+
+### SPEED-042
+
+Title: Measure native Compose and exec/control workflows
+
+Description: Run the unchanged Compose and persistent exec/control cases against the native candidate and Kiri.
+
+Is blocked by task: SPEED-041.
+
+Acceptance Criteria:
+
+- Complete five independent pairs for the existing readiness/recreate/scale/restart/down and exec/inspect/list/attach/log/event/copy rows at their frozen counts.
+- Validate transactions, stdout/stderr, exit statuses, file checksums and effective service limits outside timing as specified; preserve failure records.
+- Use the existing per-operation p50/p95/p99 table format and declare unsupported rows explicitly; a required unsupported row blocks native compatibility completion.
+- Record all service and exec backend identities and project-scoped cleanup; do not mix old-engine rows into the native series.
+
+Problem and Evidence: Launch parity alone does not establish an improved interactive or multi-service Docker experience.
+
+Approach:
+
+1. Freeze one native Compose/exec series manifest and run its first paired session with canaries.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-042`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Freeze one native Compose/exec series manifest and run its first paired session with canaries.
+
+### SPEED-043
+
+Title: Measure native storage network and service performance
+
+Description: Execute the frozen named-volume, host-bind, writable-layer and network/service workloads on native.
+
+Is blocked by task: SPEED-042.
+
+Acceptance Criteria:
+
+- Verify dataset hashes, durability and mount permissions; report Docker CLI elapsed time separately from guest I/O stages.
+- Measure matching DNS/TCP, host published-port transactions and standalone bulk transport with explicit client placement and topology.
+- Complete five independent pairs at frozen repetitions and steady-state durations; retain CPU/memory, disk growth, failures and application correctness.
+- Preserve the recent storage/network table format and units; record unsupported semantics without substituting host operations.
+
+Problem and Evidence: Native filesystem and network implementations may change performance in either direction and need workload-specific validation.
+
+Approach:
+
+1. Run storage canaries before timed I/O, then the isolated transport and application groups.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-043`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Run storage canaries before timed I/O, then the isolated transport and application groups.
+
+### SPEED-044
+
+Title: Qualify native concurrency pressure and recovery
+
+Description: Run the existing 1/2/4/8 launch sweep and bounded pressure/recovery matrix on the expanded native owner.
+
+Is blocked by task: SPEED-043.
+
+Acceptance Criteria:
+
+- Verify effective guest memory/swap/CPU controls before allocation; preserve active checksummed data while evicting optional prepared state.
+- Test queue saturation, cancellation, OOM attribution, client/guest disconnect and task-owned VM termination; reject duplicate starts and verify cleanup inventories.
+- Complete five independent matched sweeps where competitor behavior permits. Preserve Kiri timeouts/unknown boundaries and report incomparable pressure cases explicitly.
+- Publish the same concurrency/throughput and resource tables. Prepared claim/refill stays separate and cannot hide reserve cost.
+- No persistent services, production interruption or unsafe host-wide pressure. Optional energy collection remains separately authorized.
+
+Problem and Evidence: Additional concurrent services and worker capabilities introduce ownership, pressure and recovery risks absent from the single-slot fixture.
+
+Approach:
+
+1. Run native lifecycle fault injection and active-data canaries before the timed concurrency series.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-044`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Run native lifecycle fault injection and active-data canaries before the timed concurrency series.
+
+### SPEED-045
+
+Title: Publish the native-default Docker verdict and promotion audit
+
+Description: Extend the existing detailed report with the complete native-default series and exact compatibility scope.
+
+Is blocked by task: SPEED-044.
+
+Acceptance Criteria:
+
+- Preserve the report's environment/hash, per-pair API/CLI, per-operation, build-resource, concurrency, ratio/95% interval, coverage and evidence tables.
+- Audit raw measurements, failures, revisions, effective limits and native backend attribution; retain historical legacy/development tables with their original labels.
+- Use per-workload parity/faster/slower/inconclusive/unsupported verdicts. Publish no overall win unless every declared workload supports it; unknown cleanup or energy remains unknown.
+- Create narrow follow-up tasks for demonstrated bottlenecks and missing compatibility. Update the release scope to actual supported behavior without marking deferred SPEED-008 passed.
+- Review packaged native-default startup, rollback, CI and cleanup evidence before proposing promotion. Independent PR approval and production signing remain required; this task does not itself publish a release.
+
+Problem and Evidence: The current report mixes historical and native evidence by design; the next verdict must make actual native coverage explicit without rewriting history.
+
+Approach:
+
+1. Generate the native-only coverage matrix from SPEED-040 through SPEED-044 raw evidence.
+2. Implement only the named capability or measurement group; validate failure paths and native backend attribution.
+3. Review the diff and raw evidence, verify owned-resource cleanup and production preservation, then commit and push the validated increment.
+
+Evidence: Pending commands, revision and release artifact hashes, fixture results,
+raw observations and cleanup records under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-045`.
+
+Source: [Native Docker speed plan](native-docker-speed-plan.md),
+[adapter contract](docker-native-adapter.md),
+[benchmark contract](docker-benchmark-plan.md),
+[detailed result format](docker-benchmark-results.md),
+[environment runbook](speedup-environment.md).
+
+Review: Pending; verify acceptance, bounded ownership, actual native execution,
+compatibility, measurement scope and unchanged production.
+
+Next Action: Generate the native-only coverage matrix from SPEED-040 through SPEED-044 raw evidence.
 
 
 ### SPEED-014
