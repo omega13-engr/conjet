@@ -235,6 +235,29 @@ observations. The raw files separately retain measured guest fsync and I/O
 stages, snapshots, throughput windows and teardown. The comparison remains
 inconclusive with one pair and no matching host bind.
 
+## Concurrency and recovery
+
+Pair 1 on harness `187e1ab` completed 100 short Docker launches per
+engine at each concurrency level. Each launch requested 16 MiB, four
+PIDs, 500 millicores and no network, and validated its output. Both
+engines had zero launch failures. These are completed CLI operations per
+measured window, including the client's process start and output.
+
+| Concurrency | Conjet p50 / p95 / p99 (ms) | Conjet launches/s | Kiri p50 / p95 / p99 (ms) | Kiri launches/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 466.385/523.093/531.705 | 2.133 | 20.702/23.656/25.189 | 47.149 |
+| 2 | 555.237/641.757/699.436 | 3.477 | 23.770/26.541/29.023 | 79.698 |
+| 4 | 716.283/808.878/952.190 | 5.242 | 30.721/37.383/40.443 | 111.789 |
+| 8 | 1028.573/1130.959/1148.347 | 7.166 | 50.520/63.729/68.385 | 123.590 |
+
+The separate memory-limit canary did not establish equivalent OOM
+attribution. Conjet returned exit 137 while `State.OOMKilled` was false.
+Kiri's `docker wait` timed out. Both preserved the running sibling's
+data, passed a fresh recovery launch and cleaned up owned resources.
+The follow-up fixture verifies the actual guest memory ceiling and
+disables swap before imposing pressure. The raw counts above cover launch
+concurrency. They do not qualify memory-pressure behavior.
+
 ## Separate native timings
 
 The static workload uses the same pinned payload bytes as the
@@ -290,6 +313,7 @@ failed attempts and shutdown checks.
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
 | Canceled historical-event run and corrected paired control matrix | `SPEED-023/pair-1`, `SPEED-023/pair-2` |
 | Storage, guest transport and the sustained services | `SPEED-024/pair-1` |
+| Launch concurrency, memory attribution and recovery attempts | `SPEED-025/pair-1` |
 
 Production stayed in service throughout. The records preserve unknown
 guest teardown, unmeasured energy and observed contention. The original

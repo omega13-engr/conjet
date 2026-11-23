@@ -72,48 +72,6 @@ and opt-in; broader support gaps become explicit implementation tasks.
 ## BACKLOG
 
 
-### SPEED-025
-
-Title: Qualify concurrency, pressure, recovery and efficiency
-
-Description: Run the cross-workload stress matrix and quantify whether speed gains persist under realistic contention.
-
-Is blocked by task: SPEED-024.
-
-Acceptance Criteria:
-
-- Sweep declared concurrency levels for launches and representative builds/services; bound queues and report rejected, failed and timed-out work as well as successful latency.
-- Exercise CPU and guest-memory pressure, prepared-slot exhaustion/refill and active-data preservation without inducing unsafe host-wide pressure or stopping production.
-- Test request cancellation, client disconnect and task-owned runtime crash/restart with leak inventories and explicit recovery outcomes; use only disposable test state.
-- Collect host plus attributed guest CPU/memory, idle footprint, disk growth and reclamation with measurement limitations. Run energy sampling separately only when authorized and available; otherwise mark it unavailable.
-- Observe cleanup lag and steady-state resource growth independently from API acknowledgement. Unknown Kiri guest teardown remains unknown.
-
-Problem and Evidence: The matrix implements a bounded Docker launch concurrency sweep and a distinct per-container OOM canary. It requires exit 137, an OOM flag, an unchanged active-data canary in a sibling container and a fresh recovery launch. A unit test injects a native backend disconnect after submission and proves the adapter refuses replay, unverifiable removal and new admission. Guest-wide reclamation, actual runtime process loss and restart, and prepared-slot tests remain separate requirements for this program.
-
-Raw evidence: Fast sequential medians can hide queueing, memory reservation, deferred cleanup and recovery costs.
-
-Approach:
-
-1. Freeze safe resource ceilings and deterministic fault points.
-2. Run bounded stress and recovery sessions with canaries and before/after inventories.
-3. Analyze scaling, tails, failure rates, resource reclamation and optional energy without discarding adverse sessions.
-
-Evidence: Pending implementation where applicable, commands, pinned revisions,
-raw measurements, validation results, and cleanup verification under
-`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-025`.
-
-Source: [Benchmark harnesses](../../benchmarks/README.md),
-[environment runbook](speedup-environment.md),
-[architecture and claim policy](speed-engineering-plan.md),
-[experimental scope](speed-release-scope.md),
-[prior qualification](speed-qualification.md).
-
-Review: Pending; verify workload equivalence, backend attribution, correctness,
-measurement boundaries, statistical scope, and production preservation.
-
-Next Action: Rerun the pressure probe with swap disabled and verify the effective guest cgroup before allocating. In `SPEED-025/pair-1`, all 400 launches per engine passed. Conjet exit 137 lacked Docker OOM attribution. Kiri's wait timed out. Both survivor and recovery canaries passed. The native runner now verifies cleanup after a task-owned SIGTERM with an admitted workload and tests that its old handle cannot be claimed after reboot.
-
-
 ### SPEED-014
 
 Title: Validate and release the next Conjet version
@@ -172,6 +130,46 @@ asset compatibility, and evidence supporting every release claim.
 Next Action: Set matching version metadata and release notes for the reviewed package scope before tagging an independently approved, qualified revision. Confirm Developer ID and notarization credential availability through the release environment.
 
 ## INPROGRESS
+
+### SPEED-025
+
+Title: Qualify concurrency, pressure, recovery and efficiency
+
+Description: Run the cross-workload stress matrix and quantify whether speed gains persist under realistic contention.
+
+Is blocked by task: SPEED-024.
+
+Acceptance Criteria:
+
+- Sweep declared concurrency levels for launches and representative builds/services; bound queues and report rejected, failed and timed-out work as well as successful latency.
+- Exercise CPU and guest-memory pressure, prepared-slot exhaustion/refill and active-data preservation without inducing unsafe host-wide pressure or stopping production.
+- Test request cancellation, client disconnect and task-owned runtime crash/restart with leak inventories and explicit recovery outcomes; use only disposable test state.
+- Collect host plus attributed guest CPU/memory, idle footprint, disk growth and reclamation with measurement limitations. Run energy sampling separately only when authorized and available; otherwise mark it unavailable.
+- Observe cleanup lag and steady-state resource growth independently from API acknowledgement. Unknown Kiri guest teardown remains unknown.
+
+Problem and Evidence: The matrix implements a bounded Docker launch concurrency sweep and a distinct per-container OOM canary. It requires exit 137, an OOM flag, an unchanged active-data canary in a sibling container and a fresh recovery launch. A unit test injects a native backend disconnect after submission and proves the adapter refuses replay, unverifiable removal and new admission. Guest-wide reclamation, actual runtime process loss and restart, and prepared-slot tests remain separate requirements for this program.
+
+Raw evidence: Fast sequential medians can hide queueing, memory reservation, deferred cleanup and recovery costs.
+
+Approach:
+
+1. Freeze safe resource ceilings and deterministic fault points.
+2. Run bounded stress and recovery sessions with canaries and before/after inventories.
+3. Analyze scaling, tails, failure rates, resource reclamation and optional energy without discarding adverse sessions.
+
+Evidence: `SPEED-025/pair-1` on `187e1ab` completed all 400 measured launches per engine with zero launch failures. Both observed active data after the pressure attempt and passed isolated recovery and production-preservation checks. Pressure attribution and remaining independent pairs are open. The [interim results](docker-benchmark-results.md#concurrency-and-recovery) retain both failures and successful rows.
+
+Source: [Benchmark harnesses](../../benchmarks/README.md),
+[environment runbook](speedup-environment.md),
+[architecture and claim policy](speed-engineering-plan.md),
+[experimental scope](speed-release-scope.md),
+[prior qualification](speed-qualification.md).
+
+Review: Pending; verify workload equivalence, backend attribution, correctness,
+measurement boundaries, statistical scope, and production preservation.
+
+Next Action: Rerun the pressure probe with swap disabled and verify the effective guest cgroup before allocating. In `SPEED-025/pair-1`, all 400 launches per engine passed. Conjet exit 137 lacked Docker OOM attribution. Kiri's wait timed out. Both survivor and recovery canaries passed. The native runner now verifies cleanup after a task-owned SIGTERM with an admitted workload and tests that its old handle cannot be claimed after reboot.
+
 
 ### SPEED-024
 
