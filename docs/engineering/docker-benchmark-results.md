@@ -77,6 +77,32 @@ Conjet. Kiri started a task-owned pinned BuildKit separately. That
 bootstrap alone does not measure a build. Both failures of the initial
 Compose applet choice and the successful Redis correction were retained.
 
+## Image acquisition and readiness
+
+Pair 2 used harness `8e10fd0` and passed both pinned Alpine and Node config
+checks, five timed warm save/load and execution repetitions per image and
+owned-registry cleanup. Pinned public pulls have external registry effects.
+The private loopback fixture uses digest-bound images uploaded directly via
+HTTP before either engine's first pull. Complete config and layer transfer
+was observed in all ten measured Kiri first pulls. Conjet's client reported
+downloads, while the host timestamp filter produced no registry-side witness
+for its first pulls. That transfer boundary remains unknown in this pair.
+The next run keys the witness by a unique repository and avoids cross-clock
+timestamp filtering.
+
+| Loopback operation | Conjet p50 / p95 / p99 (ms) | Kiri p50 / p95 / p99 (ms) |
+| --- | ---: | ---: |
+| Small first pull | 175.896/212.253/212.253 | 58.676/74.316/74.316 |
+| Small cached pull | 102.292/113.368/113.368 | 34.187/42.566/42.566 |
+| Multilayer first pull | 184.644/190.982/190.982 | 68.765/81.037/81.037 |
+| Multilayer cached pull | 97.623/107.218/107.218 | 33.614/34.553/34.553 |
+
+After VM readiness, `/info` reported 2,094,825,472 guest bytes for Conjet
+and 2,088,570,880 for Kiri. `/proc/meminfo` corroborated live Kiri guest
+memory in this run. Earlier sessions that queried metadata before Kiri VM
+startup still have unknown guest memory. The image comparison remains
+inconclusive pending complete paired transfer and cache-state evidence.
+
 ## Buildx first session
 
 The first Buildx pair used the pinned BuildKit v0.23.2 `docker-container`
@@ -197,6 +223,7 @@ failed attempts and shutdown checks.
 | Rootfs receipts, backend audit and Docker-to-native pilot | `SPEED-018` |
 | Full paired no-network API row | `SPEED-019/alpine-true-none-api-pair-2` |
 | First observed image operations and manifest reporting discrepancy | `SPEED-020/pair-1` |
+| Pinned image and loopback registry results with asymmetric transfer proof | `SPEED-020/pair-2` |
 | First Buildx results and retained artifact/egress failures | `SPEED-021/pair-1` |
 | Corrected Buildx cache-state matrix and artifact validation | `SPEED-021/pair-2` |
 | First Compose pair and transaction/teardown canaries | `SPEED-022/pair-1` |
