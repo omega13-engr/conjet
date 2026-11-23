@@ -111,7 +111,7 @@ Source: [Benchmark harnesses](../../benchmarks/README.md),
 Review: Pending; verify workload equivalence, backend attribution, correctness,
 measurement boundaries, statistical scope, and production preservation.
 
-Next Action: Inspect the paired concurrency and bounded OOM results, then run the native product's pressure, exhaustion, cancellation and active-work shutdown checks. The native runner now verifies cleanup after a task-owned SIGTERM with an admitted workload and tests that its old handle cannot be claimed after reboot.
+Next Action: Rerun the pressure probe with swap disabled and verify the effective guest cgroup before allocating. In `SPEED-025/pair-1`, all 400 launches per engine passed. Conjet exit 137 lacked Docker OOM attribution. Kiri's wait timed out. Both survivor and recovery canaries passed. The native runner now verifies cleanup after a task-owned SIGTERM with an admitted workload and tests that its old handle cannot be claimed after reboot.
 
 
 ### SPEED-014

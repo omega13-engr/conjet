@@ -1075,6 +1075,18 @@ def matches_cgroup_limits(observed, limits):
             and period > 0 and quota * 1000 == limits['cpu_millicores'] * period)
 
 
+MEMORY_PRESSURE = r"""
+const fs = require('fs');
+const sys = '/sys/fs/cgroup/';
+const limits = ['memory.max', 'memory.swap.max'].map(key => fs.readFileSync(sys + key, 'utf8').trim());
+fs.writeSync(1, limits.join(' ') + '\n');
+if (limits[0] !== '67108864' || limits[1] !== '0') process.exit(92);
+const retained = [];
+for (let i = 0; i < 256; i++) retained.push(Buffer.alloc(1024 * 1024, 0x6d));
+process.exit(42);
+"""
+
+
 def memory_limit_probe(docker, manifest):
     alpine = manifest['images']['alpine']['ref']
     node = manifest['images']['node']['ref']
@@ -1097,21 +1109,29 @@ def memory_limit_probe(docker, manifest):
                        expected=b'active-before-oom') is None:
             return
         created = docker.call('pressure-create', ['create', '--name', target, *session,
-                              '--memory', '64m', '--pids-limit', '32', node, 'node', '-e',
-                              'const retained=[]; for(let i=0;i<256;i++) '
-                              'retained.push(Buffer.alloc(1024*1024, 0x6d)); process.exit(42)'], phase='setup')
+                              '--memory', '64m', '--memory-swap', '64m', '--pids-limit', '32', node, 'node', '-e',
+                              MEMORY_PRESSURE], phase='setup')
         if created is None:
             return
         try:
             memory = docker.call('pressure-limit-inspect', ['inspect', '--format',
-                                 '{{.HostConfig.Memory}}', target], phase='verification',
-                                 expected=b'67108864\n')
+                                 '{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}', target],
+                                 phase='verification', expected=b'67108864 67108864\n')
             if memory is None or docker.call('pressure-start', ['start', target], phase='verification') is None:
                 return
             docker.call('pressure-oom-exit', ['wait', target], timeout=20,
                         expected=b'137\n', phase='verification')
-            docker.call('pressure-oom-inspect', ['inspect', '--format', '{{.State.OOMKilled}}', target],
-                        expected=b'true\n', phase='verification')
+            docker.call('pressure-guest-limits', ['logs', target], expected=b'67108864 0\n', phase='verification')
+            until = time.monotonic() + 2
+            while True:
+                flag = docker.call('pressure-oom-inspect', ['inspect', '--format', '{{.State.OOMKilled}}', target],
+                                   timeout=5, phase='verification')
+                if flag is None or flag == b'true\n':
+                    break
+                if time.monotonic() >= until:
+                    docker.rows[-1]['error'] = 'Docker did not attribute the exit to cgroup OOM'
+                    break
+                time.sleep(0.2)
             docker.call('pressure-survivor-after', marker, phase='verification', expected=b'active-before-oom')
         finally:
             if docker.call('pressure-target-remove', ['rm', '-f', target], phase='cleanup') is None:
