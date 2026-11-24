@@ -293,6 +293,14 @@ fn unpack(context: File, directory: &Path) -> anyhow::Result<()> {
             kind.is_file() || kind.is_dir(),
             "Docker build context entry must be a file or directory"
         );
+        if kind.is_dir() {
+            // The launcher must be able to remove the context even when a
+            // later archive entry or the build itself fails.
+            ensure!(
+                entry.header().mode()? & 0o700 == 0o700,
+                "Docker build context directories require owner access"
+            );
+        }
         ensure!(
             paths.insert(clean),
             "Docker build context contains a duplicate path"
@@ -380,5 +388,24 @@ mod tests {
         let rejected = tempfile::tempdir().unwrap();
         assert!(unpack(make_archive(true), rejected.path()).is_err());
         assert!(!rejected.path().join("link").exists());
+    }
+
+    #[test]
+    fn build_upload_rejects_a_directory_that_would_prevent_cleanup() {
+        use std::io::Seek;
+
+        let mut archive = tar::Builder::new(tempfile::tempfile().unwrap());
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_mode(0o500);
+        header.set_size(0);
+        archive
+            .append_data(&mut header, "locked", io::empty())
+            .unwrap();
+        let mut file = archive.into_inner().unwrap();
+        file.rewind().unwrap();
+        let cleanup = tempfile::tempdir().unwrap();
+        assert!(unpack(file, cleanup.path()).is_err());
+        assert!(!cleanup.path().join("locked").exists());
     }
 }
