@@ -59,7 +59,32 @@ def alpine_cases(workload, manifest, connection, docker, env):
     return rows
 
 
-def collect(endpoint, peer, docker, env, output, suite):
+def qualified_lifecycle(workload, manifest, report, fixture, connection, docker, env, group):
+    matched = runpy.run_path(str(HERE / 'native-docker-comparison.py'))
+    run = workload['run_workloads']
+    sample = run.__globals__['sample']
+    handles = set()
+
+    def with_cleanup(connection, docker, env, spec, network, lane, token, index):
+        row = sample(connection, docker, env, spec, network, lane, token, index)
+        if row['error'] is None:
+            try:
+                row['guest_witness'] = matched['native_terminal'](connection, row['name'], handles, spec[3])
+            except (RuntimeError, OSError, http.client.HTTPException) as error:
+                row['error'] = str(error)
+                connection.close()
+        return row
+
+    # This canary is untimed qualification. Leave the frozen comparison
+    # runner and its timing boundary intact.
+    run.__globals__['sample'] = with_cleanup
+    try:
+        run('lifecycle', manifest, report, fixture, connection, docker, env, selected_group=group)
+    finally:
+        run.__globals__['sample'] = sample
+
+
+def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None):
     contract()
     comparison = runpy.run_path(str(HERE / 'docker-comparison.py'))
     tools = comparison['TOOLS']
@@ -80,7 +105,8 @@ def collect(endpoint, peer, docker, env, output, suite):
             if suite == 'lifecycle':
                 workload = runpy.run_path(str(HERE / 'docker-comparison-workloads.py'))
                 try:
-                    workload['run_workloads'](suite, manifest, report, fixture, connection, docker, env)
+                    qualified_lifecycle(workload, manifest, report, fixture, connection,
+                                        docker, env, lifecycle_group)
                 except (OSError, RuntimeError, ValueError, http.client.HTTPException,
                         subprocess.SubprocessError) as error:
                     report['error'] = str(error)

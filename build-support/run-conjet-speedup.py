@@ -630,7 +630,8 @@ def native_session(args, root):
                                       disk_store=store if args.native_disk_images else None)
             elif args.diagnostics == 'compatibility-preflight':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-compatibility-preflight.py'))
-                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite)
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite,
+                                      lifecycle_group=args.compatibility_lifecycle_group)
             elif args.diagnostics == 'guest-bridge':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-bridge.py'))
                 diagnostic['collect'](directory, vm.pid, output)
@@ -800,6 +801,8 @@ def main():
     parser.add_argument('--compatibility-suite',
                         choices=('lifecycle', 'images', 'builds', 'compose', 'control',
                                  'storage_network', 'stress'))
+    parser.add_argument('--compatibility-lifecycle-group',
+                        help='run one complete frozen lifecycle group in its own Core boot')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--volume-phase', choices=('create', 'inspect', 'remove'))
@@ -831,6 +834,13 @@ def main():
     args = parser.parse_args()
     if bool(args.compatibility_suite) != (args.diagnostics == 'compatibility-preflight'):
         parser.error('select one frozen suite for the native compatibility preflight')
+    if args.compatibility_lifecycle_group:
+        scenarios = json.loads((REPO / 'benchmarks/scenarios/native-compatibility-v1.json').read_text())
+        groups = {case['id'].removeprefix('lifecycle/') for group in scenarios['groups']
+                  if group['suite'] == 'lifecycle' for case in group['cases']}
+        if (args.compatibility_suite != 'lifecycle'
+                or args.compatibility_lifecycle_group not in groups):
+            parser.error('select a frozen lifecycle group with the lifecycle compatibility suite')
     if args.docker_args[:1] == ['--']:
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')

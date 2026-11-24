@@ -236,6 +236,18 @@ moved to epoll initialization. The pinned Node program reached a
 libuv initialization assertion in a separate baseline. Evidence is
 under `SPEED-103/` on ExternalSSD.
 
+## SPEED-117 complete lifecycle evidence
+
+The preflight can qualify each frozen lifecycle group on an independent
+Core boot. It checks every warmup and sample for the original exit,
+output and a unique native teardown witness. Incomplete diagnostic
+groups remain failed in the release evaluator.
+
+The original common-static built-in-bridge API group passed 2,000
+samples and ten warmups. Evaluating that partial evidence attributed
+one passing case and left the 71-case release gate failed. Evidence is
+under `SPEED-117/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

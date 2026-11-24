@@ -19,6 +19,29 @@ def read(directory, name):
     return json.loads(path.read_text()) if path.is_file() else {}
 
 
+def lifecycle_failure(series, report, budget):
+    if report.get('error'):
+        return report['error']
+    if report.get('recovered_containers') != []:
+        return 'the frozen lifecycle runner did not verify its owned inventory'
+    warmups, samples = series.get('warmups', []), series.get('samples', [])
+    if len(warmups) != budget['warmups'] or len(samples) != budget['samples_per_session']:
+        return 'the complete frozen lifecycle sample counts did not run'
+    handles = set()
+    for row in warmups + samples:
+        if row.get('error') or row.get('cleanup_error'):
+            return row.get('error') or row['cleanup_error']
+        witness = row.get('guest_witness', {})
+        handle = witness.get('conjet.native_handle')
+        if (witness.get('conjet.backend') != 'jetstream-native-oci'
+                or witness.get('conjet.guest_cleanup') != 'complete'
+                or witness.get('exitCode') != str(row.get('exit_code'))
+                or not handle or handle in handles):
+            return 'a frozen lifecycle row lacks a unique native teardown witness'
+        handles.add(handle)
+    return None
+
+
 def evaluate(root, revision, release):
     manifest = PREFLIGHT['contract']()
     required = {case['id']: {
@@ -29,6 +52,7 @@ def evaluate(root, revision, release):
     if sum(len(group['cases']) for group in manifest['groups']) != len(required):
         raise ValueError('duplicate case in the frozen manifest')
     launch_artifacts = {name: digest for name, digest in release.items() if name != 'conjetd'}
+    scenarios = json.loads((HERE / 'scenarios/docker-comparison-v1.json').read_text())
     lanes = {}
 
     def lane(name):
@@ -55,8 +79,13 @@ def evaluate(root, revision, release):
             required[case].update(status='PASS', reason=reason,
                                   evidence=[str(lane(name)[0]) for name in names])
 
-    for suite in MATRIX:
-        folder, verified = lane(suite)
+    lifecycle_groups = {case: 'lifecycle-' + case.removeprefix('lifecycle/').replace('/', '-')
+                        for case in required if case.startswith('lifecycle/')}
+    sessions = [(suite, suite, None) for suite in MATRIX]
+    sessions += [('lifecycle', name, case) for case, name in lifecycle_groups.items()]
+    lifecycle_evidence = set()
+    for suite, name, subgroup in sessions:
+        folder, verified = lane(name)
         path = 'matrix/session.json'
         report = read(folder, path)
         failed = [row for row in report.get('operations', []) if row.get('error')]
@@ -68,21 +97,34 @@ def evaluate(root, revision, release):
         if not verified:
             reason = 'release artifact or launcher cleanup could not be verified'
         for case, result in required.items():
-            if case.startswith(suite + '/'):
+            if case == subgroup or subgroup is None and case.startswith(suite + '/'):
                 result.update(reason=reason, evidence=[str(folder / path)])
         if suite == 'lifecycle' and verified:
+            for series in report.get('groups', []):
+                case = 'lifecycle/{workload}/{network}/{lane}'.format(**series)
+                if case not in lifecycle_groups or (subgroup is not None and case != subgroup):
+                    raise ValueError(f'unexpected frozen lifecycle group: {case}')
+                if case in lifecycle_evidence:
+                    raise ValueError(f'duplicate frozen lifecycle evidence: {case}')
+                lifecycle_evidence.add(case)
+                failure = lifecycle_failure(series, report, scenarios['suites']['lifecycle'])
+                if failure:
+                    required[case].update(reason=failure, evidence=[str(folder / path)])
+                else:
+                    pass_case(case, 'all original lifecycle samples passed with native cleanup', name)
             for fixture, row in report.get('independent_alpine', {}).items():
                 case = 'lifecycle/' + fixture
                 if case not in required:
                     raise ValueError(f'unknown lifecycle fixture: {fixture}')
                 witness = row.get('guest_witness', {})
-                if (row.get('error') is None and witness.get('conjet.guest_cleanup') == 'complete'
-                        and witness.get('conjet.native_handle')):
-                    pass_case(case, 'original Alpine fixture passed with verified guest cleanup', suite)
-                else:
-                    required[case].update(reason=row.get('error') or 'missing guest cleanup witness')
+                if subgroup in (None, case) and case not in lifecycle_evidence:
+                    reason = 'the complete frozen lifecycle sample counts did not run'
+                    if (witness.get('conjet.guest_cleanup') != 'complete'
+                            or not witness.get('conjet.native_handle')):
+                        reason = 'missing guest cleanup witness'
+                    required[case].update(reason=row.get('error') or reason)
         if suite == 'stress' and verified:
-            manifest_budget = json.loads((HERE / 'scenarios/docker-comparison-v1.json').read_text())['suites']['stress']
+            manifest_budget = scenarios['suites']['stress']
             count = manifest_budget['samples_per_session']
             warmups = manifest_budget['warmups']
             for concurrency in (1, 2, 4, 8):

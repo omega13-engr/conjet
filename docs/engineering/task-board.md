@@ -1101,6 +1101,12 @@ exit and output asserts and a unique guest cleanup witness on every row.
 Allow independent private boots per group without accepting shortened,
 duplicate, recovered or missing group evidence.
 
+Evidence: The original common-static built-in-bridge API group passed
+2,000 measured cases and ten warmups with unique native teardown. The
+evaluator counted only that provided group and kept the 71-case result
+failed. The frozen source hashes still match. Logs are under
+`SPEED-117/` on ExternalSSD.
+
 ### SPEED-118
 
 Title: Support descriptor-owned native event polling for pinned applications
@@ -1109,6 +1115,16 @@ Acceptance: Run the original pinned Node command and Registry binary
 through their event-loop initialization. Admit the required event
 descriptor and poll operations for ordinary OCI only. Preserve existing
 resource limits, I/O ownership, seccomp and cleanup.
+
+### SPEED-119
+
+Title: Retain and transfer the full frozen exec output
+
+Acceptance: Deliver both exec streams up to a bounded retention limit
+through authenticated chunks. Preserve ordering, exit status,
+connection and workload ownership, overflow handling and cleanup.
+Exercise the original 128 KiB output case once the approved workload
+devices are available.
 
 ### SPEED-091
 
