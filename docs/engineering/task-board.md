@@ -1176,6 +1176,10 @@ Acceptance: Return a 200 multiplexed response for a plain exec API
 request and preserve HTTP 101 for an explicit TCP upgrade. Verify
 original stdout, stderr, exit status and follow-up inspect semantics.
 
+Evidence: The frozen control matrix passed all 110 plain HTTP exec
+runs. The same release passed the explicit upgrade, CLI, TTY, stream
+and replay checks. Logs are under `SPEED-122/` on ExternalSSD.
+
 ### SPEED-123
 
 Title: Read bounded Docker copy archives from an owned running workload

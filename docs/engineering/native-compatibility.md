@@ -287,6 +287,16 @@ disconnect recovery. Plain HTTP exec received HTTP 101, archive uploads
 were rejected at framing and interactive attach failed at create.
 Evidence is under `SPEED-121/` on ExternalSSD.
 
+## SPEED-122 Docker exec transport negotiation
+
+The exec endpoint sends HTTP 200 for an ordinary request and upgrades
+to TCP only when the request supplies both upgrade headers. All 110
+plain HTTP exec warmups and samples in the frozen control run passed
+their output, exit and inspect checks. CLI upgrades and TTY remained
+functional. The first workspace test run hit an unrelated macOS VMM
+page-accounting assertion. The isolated workspace rerun passed.
+Evidence is under `SPEED-122/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

@@ -26,6 +26,7 @@ struct Request {
     body: Vec<u8>,
     archive: Option<File>,
     close: bool,
+    tcp_upgrade: bool,
 }
 
 type Result<T> = std::result::Result<T, Rejected>;
@@ -256,6 +257,8 @@ fn parse(
     let mut chunked = false;
     let mut expect = false;
     let mut close = false;
+    let mut connection_upgrade = false;
+    let mut tcp_upgrade = false;
     loop {
         let header = line(reader, &mut left, deadline)?
             .ok_or_else(|| Rejected::bad("incomplete HTTP headers"))?;
@@ -310,6 +313,12 @@ fn parse(
             close |= value
                 .split(',')
                 .any(|token| token.trim().eq_ignore_ascii_case("close"));
+            connection_upgrade |= value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"));
+        }
+        if key.eq_ignore_ascii_case("upgrade") {
+            tcp_upgrade |= value.eq_ignore_ascii_case("tcp");
         }
     }
     let mut query = BTreeMap::new();
@@ -361,6 +370,7 @@ fn parse(
         body,
         archive,
         close,
+        tcp_upgrade: connection_upgrade && tcp_upgrade,
     }))
 }
 
@@ -1162,14 +1172,25 @@ pub(super) fn serve(
             }
             Ok(Action::Exec(entry, handle)) => {
                 let result = entry.run(owner, handle);
+                let (status, connection) = if request.tcp_upgrade {
+                    (101, "Connection: Upgrade\r\nUpgrade: tcp\r\n")
+                } else {
+                    (200, "Connection: close\r\n")
+                };
+                let stream_type = if entry.tty() { "raw" } else { "multiplexed" };
+                header(
+                    &mut stream,
+                    status,
+                    &format!(
+                        "{connection}Content-Type: application/vnd.docker.{stream_type}-stream\r\n"
+                    ),
+                )?;
                 if entry.tty() {
-                    header(&mut stream, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.raw-stream\r\n")?;
                     stream.write_all(&result.output[0])?;
                     if let Some(error) = result.error {
                         stream.write_all(error.as_bytes())?;
                     }
                 } else {
-                    header(&mut stream, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
                     for (index, data) in result.output.into_iter().enumerate() {
                         if !data.is_empty() {
                             send_frame(&mut stream, index as u8 + 1, &data)?;

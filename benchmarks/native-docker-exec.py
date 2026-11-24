@@ -11,6 +11,7 @@ import time
 HERE = Path(__file__).resolve().parent
 MATCHED = runpy.run_path(str(HERE / 'native-docker-comparison.py'))
 INSTALL = runpy.run_path(str(HERE / 'native-oci-live-install.py'))
+FROZEN = runpy.run_path(str(HERE / 'docker-comparison-workloads.py'))
 
 
 def collect(endpoint, peer, docker, env, output, session, vmm_pid):
@@ -69,7 +70,8 @@ def collect(endpoint, peer, docker, env, output, session, vmm_pid):
             exec_path = prefix + '/exec/' + exec_id
             with closing(tools['UnixHTTP'](endpoint, peer)) as submit:
                 submit.request('POST', exec_path + '/start', body=b'{"Detach":false,"Tty":false}',
-                               headers={'Content-Type': 'application/json'})
+                               headers={'Content-Type': 'application/json',
+                                        'Connection': 'Upgrade', 'Upgrade': 'tcp'})
                 response = submit.getresponse()
                 if response.status != 101:
                     raise RuntimeError('exec start replay fixture did not upgrade')
@@ -79,6 +81,14 @@ def collect(endpoint, peer, docker, env, output, session, vmm_pid):
                 raise RuntimeError('exec inspect lost the completed exit status')
             cases['duplicate_exec_start'] = tools['api'](api, 'POST', exec_path + '/start', (409,),
                                                         {'Detach': False, 'Tty': False})
+            body['Cmd'] = ['sh', '-c', 'printf exec-out; printf exec-err >&2; exit 23']
+            plain = prefix + '/exec/' + tools['api'](api, 'POST', path + '/exec', (201,), body)['Id']
+            if FROZEN['docker_streams'](api, 'POST', plain + '/start', {'Detach': False, 'Tty': False}) != (
+                    b'exec-out', b'exec-err'):
+                raise RuntimeError('plain exec API changed the separated output streams')
+            cases['plain_exec'] = tools['api'](api, 'GET', plain + '/json', (200,))
+            if cases['plain_exec']['ExitCode'] != 23 or cases['plain_exec']['Running']:
+                raise RuntimeError('plain exec inspect lost the original exit status')
             call('exec_ran_once', ['exec', name, '/bin/busybox', 'cat', '/tmp/cj-exec-once'], stdout=b'a')
             call('exec_large_streams', ['exec', name, '/bin/sh', '-c',
                  'printf "%0131072d" 0; printf "%08200d" 1 >&2; exit 23'],
