@@ -14,6 +14,16 @@ pub const MAPPED_IDS_CAPABILITY: &str = "native_oci_mapped_ids_v1";
 pub const VOLUME_TARGET: &str = "/data";
 pub const REDIS_CONFIG: &str =
     "sha256:eab78b9649d5ca8b91192621c91136c9c1465a81338fb686fbc02bac4dd851ae";
+pub const REGISTRY_CONFIG: &str =
+    "sha256:33eeff39e0aaabe61ca826fd7502396183462451be0783133e1a8fa944fc7350";
+
+pub fn workload_output_limit(image: &str) -> usize {
+    if image == REGISTRY_CONFIG {
+        256 * 1024
+    } else {
+        64 * 1024
+    }
+}
 pub const MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIDS: u32 = 64;

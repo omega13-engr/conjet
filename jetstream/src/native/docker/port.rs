@@ -99,6 +99,11 @@ pub(super) struct PublishedPort {
 }
 
 impl PublishedPort {
+    pub(super) fn live_address(&self, guest: u16) -> Option<std::net::SocketAddr> {
+        (self.guest == guest && self.target.lock().unwrap().is_some())
+            .then(|| (Ipv4Addr::LOCALHOST, self.port).into())
+    }
+
     pub(super) fn bind(request: RequestedPort, endpoint: Endpoint) -> Result<Self, Rejected> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, request.host)).map_err(|error| {
             if error.kind() == io::ErrorKind::AddrInUse {

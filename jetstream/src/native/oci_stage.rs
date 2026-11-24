@@ -489,7 +489,11 @@ pub(super) fn read_manifest(layout: &Path, manifest_digest: &str) -> anyhow::Res
     ensure!(
         manifest.schema_version == 2
             && (1..=LAYERS_LIMIT).contains(&manifest.layers.len())
-            && manifest.config.media_type == "application/vnd.oci.image.config.v1+json",
+            && matches!(
+                manifest.config.media_type.as_str(),
+                "application/vnd.oci.image.config.v1+json"
+                    | "application/vnd.docker.container.image.v1+json"
+            ),
         "expected a bounded OCI image manifest"
     );
     Ok(manifest)
@@ -529,7 +533,8 @@ fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)>
         compressed_budget -= content.len();
         let layer = match descriptor.media_type.as_str() {
             "application/vnd.oci.image.layer.v1.tar" => content,
-            "application/vnd.oci.image.layer.v1.tar+gzip" => {
+            "application/vnd.oci.image.layer.v1.tar+gzip"
+            | "application/vnd.docker.image.rootfs.diff.tar.gzip" => {
                 let mut bytes = Vec::new();
                 MultiGzDecoder::new(content.as_slice())
                     .take(budget as u64 + 1)
@@ -610,7 +615,8 @@ fn disk_layer(
         "application/vnd.oci.image.layer.v1.tar" => {
             io::copy(&mut source.take(budget + 1), &mut output)?
         }
-        "application/vnd.oci.image.layer.v1.tar+gzip" => {
+        "application/vnd.oci.image.layer.v1.tar+gzip"
+        | "application/vnd.docker.image.rootfs.diff.tar.gzip" => {
             let decoder = MultiGzDecoder::new(BufReader::new(source));
             io::copy(&mut decoder.take(budget + 1), &mut output)?
         }

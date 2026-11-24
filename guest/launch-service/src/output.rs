@@ -1,7 +1,5 @@
 use std::io::{self, Read};
 
-const OUTPUT_CAPACITY: usize = 64 * 1024;
-
 #[derive(Default)]
 pub(crate) struct Capture {
     pub(crate) bytes: Vec<u8>,
@@ -9,10 +7,6 @@ pub(crate) struct Capture {
 }
 
 impl Capture {
-    pub(crate) fn append(&mut self, data: &[u8]) {
-        self.append_bounded(data, OUTPUT_CAPACITY);
-    }
-
     pub(crate) fn append_bounded(&mut self, data: &[u8], capacity: usize) {
         let kept = data.len().min(capacity.saturating_sub(self.bytes.len()));
         self.bytes.extend_from_slice(&data[..kept]);
@@ -37,11 +31,15 @@ mod tests {
 
     #[test]
     fn drains_excess_bytes_without_retaining_them() {
-        let mut input = vec![b'a'; OUTPUT_CAPACITY];
+        let capacity = crate::spec::workload_output_limit("");
+        let mut input = vec![b'a'; capacity];
         input.extend_from_slice(&[b'b'; 16_384]);
         let mut captured = Capture::default();
-        drain(input.as_slice(), |bytes| captured.append(bytes)).unwrap();
-        assert_eq!(captured.bytes, vec![b'a'; OUTPUT_CAPACITY]);
+        drain(input.as_slice(), |bytes| {
+            captured.append_bounded(bytes, capacity)
+        })
+        .unwrap();
+        assert_eq!(captured.bytes, vec![b'a'; capacity]);
         assert_eq!(captured.dropped, 16_384);
     }
 }

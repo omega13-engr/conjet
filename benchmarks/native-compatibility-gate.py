@@ -308,6 +308,72 @@ def stress_oom(report):
     return True
 
 
+def image_cases(report, budget):
+    rows = report.get('operations', [])
+    samples = budget['samples_per_session']
+    warmups = budget['warmups']
+
+    def completed(name, count, phases=False):
+        items = [row for row in rows if row['scenario'] == name]
+        return (len(items) == count and all(row.get('error') is None and row.get('exit_code') == 0
+                                           for row in items)
+                and (not phases or sum(row['phase'] == 'warmup' for row in items) == warmups))
+
+    archive = ['alpine', 'node']
+    public_pulls = all(completed(f'{image}.public-pull', 1)
+                       and completed(f'{image}.cached-public-pull', samples + warmups, True)
+                       for image in archive) and completed('registry-prepull', 1)
+    cases = []
+    if public_pulls:
+        cases.append('public-pull')
+    if completed('fixture-tag', 2 * (samples + warmups)):
+        cases.append('tag')
+    if all(completed(f'{image}.{step}', samples + warmups, True)
+           for image in archive for step in ('save', 'remove-tag', 'warm-load', 'ready-to-run')):
+        archives = [row for row in rows if row['scenario'].endswith('.save')]
+        if all(row.get('bytes', 0) > 0 and re.fullmatch(r'[0-9a-f]{64}', row.get('sha256', ''))
+               for row in archives):
+            cases.append('save-load')
+    return cases
+
+
+def controlled_registry_cases(report, budget):
+    operations = report.get('operations', [])
+    rows = [row for row in operations if row['scenario'].startswith('registry')]
+    if report.get('error') or any(row.get('error') is not None for row in rows):
+        return []
+    counts = budget['samples_per_session'] + budget['warmups']
+    for name in ('registry-fixture-remove', 'registry-run-proof'):
+        witnesses = [row for row in rows if row['scenario'] == name]
+        if len(witnesses) != 2 * counts or any(row.get('exit_code') != 0 for row in witnesses):
+            return []
+    executions = [row.get('guest_witness', {}) for row in rows if row['scenario'] == 'registry-run-proof']
+    handles = [witness.get('conjet.native_handle', '') for witness in executions]
+    if (len(set(handles)) != len(handles)
+            or any(not re.fullmatch(r'[0-9a-f]{32}', handle) for handle in handles)
+            or any(witness.get('conjet.guest_cleanup') != 'complete'
+                   or witness.get('conjet.backend') != 'jetstream-native-oci'
+                   or witness.get('exitCode') != '0' for witness in executions)):
+        return []
+    cleanup = [row for row in rows if row['scenario'] == 'registry-container-inventory']
+    if (len(cleanup) != 1 or cleanup[0].get('stdout') != ''
+            or sum(row['scenario'] == 'registry-volume-remove' for row in rows) != 1):
+        return []
+    results = []
+    for case, operation, witness in (
+        ('registry-cold', 'first-pull', lambda row: row.get('cache_state') == 'complete config and layer transfer observed'),
+        ('registry-warm', 'cached', lambda row: row.get('no_registry_get') is True),
+    ):
+        groups = [[row for row in rows if row['scenario'] == f'registry.{name}.{operation}']
+                  for name in ('small', 'multilayer')]
+        if all(len(group) == counts
+               and sum(row['phase'] == 'warmup' for row in group) == budget['warmups']
+               and all(row.get('exit_code') == 0 and witness(row) for row in group)
+               for group in groups):
+            results.append(case)
+    return results
+
+
 def evaluate(root, revision, release):
     manifest = PREFLIGHT['contract']()
     required = {case['id']: {
@@ -412,6 +478,18 @@ def evaluate(root, revision, release):
         if suite == 'storage_network' and verified:
             for case in storage_cases(report, scenarios['suites']['storage_network']):
                 pass_case(f'storage_network/{case}', 'original storage cases verified data and teardown', suite)
+        if suite == 'images' and verified:
+            if not read(folder, 'launcher.json').get('offline_oci_layouts'):
+                for case in image_cases(report, scenarios['suites']['images']):
+                    pass_case(f'images/{case}', 'original image acquisition or archive canaries passed', name)
+            for case in controlled_registry_cases(report, scenarios['suites']['images']):
+                pass_case(f'images/{case}', 'original registry transfers, execution and removal verified', name)
+
+    folder, verified = lane('registry-service')
+    if verified:
+        report = read(folder, 'matrix/session.json')
+        for case in controlled_registry_cases(report, scenarios['suites']['images']):
+            pass_case(f'images/{case}', 'original controlled registry transfer and cleanup verified', 'registry-service')
 
     folder, verified = lane('credentials')
     credentials = read(folder, 'native-credentials.json')
@@ -451,6 +529,11 @@ def evaluate(root, revision, release):
     registry = read(folder, 'registry-checks.json').get('cases', {})
     if verified and {'hash', 'interrupt', 'tag_run', 'in_use_delete', 'remove_small'} <= registry.keys():
         pass_case('regression/registry-local', 'loopback registry fault, ownership and image runs passed', 'registry')
+        if all(registry[case].get('code') == 1 for case in ('hash', 'interrupt')):
+            pass_case('images/registry-faults', 'digest and interrupted transfers rejected with no partial store', 'registry')
+        if (registry.get('shared_layer_run', {}).get('conjet.guest_cleanup') == 'complete'
+                and registry['remove_small'].get('code') == 0):
+            pass_case('images/shared-layer', 'shared content survived sibling removal and was reclaimed after final removal', 'registry')
     pass_case('regression/network', 'private bridge DNS and loopback publication canaries passed',
               'docker-network', 'published-port')
     pass_case('regression/controls', 'native concurrency, exec and streaming canaries passed',

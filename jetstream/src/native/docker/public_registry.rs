@@ -3,8 +3,8 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
 use serde_json::Value;
@@ -60,6 +60,13 @@ impl Pins {
             .filter(|(_, pinned)| *pinned == digest)
             .map(|(canonical, _)| canonical.as_str())
     }
+
+    pub(super) fn reference_for(&self, manifest: &str) -> Option<String> {
+        self.0
+            .iter()
+            .find(|(_, digest)| digest.as_str() == manifest)
+            .map(|(name, _)| format!("docker.io/{name}@{manifest}"))
+    }
 }
 
 pub(super) struct Token(String);
@@ -112,6 +119,33 @@ fn get(
     deadline: Instant,
     target: &mut impl Write,
 ) -> anyhow::Result<u64> {
+    ensure!(
+        bound != 0,
+        "public registry response has no remaining byte budget"
+    );
+    for retry in 0..=2 {
+        let (bytes, status) = attempt(url, token, bound, deadline, target)?;
+        if status.success() {
+            return Ok(bytes);
+        }
+        if retry == 2 || bytes != 0 || status.code() != Some(28) {
+            anyhow::bail!("public Docker Hub request failed ({status})");
+        }
+        // The request is a digest-pinned GET. Retry a timeout only when
+        // the previous attempt could not have written any response bytes.
+        let pause = Duration::from_millis(150 * (retry + 1));
+        std::thread::sleep(super::registry::remaining(deadline)?.min(pause));
+    }
+    unreachable!("bounded public registry retry must return")
+}
+
+fn attempt(
+    url: &str,
+    token: Option<&str>,
+    bound: usize,
+    deadline: Instant,
+    target: &mut impl Write,
+) -> anyhow::Result<(u64, ExitStatus)> {
     let remaining = super::registry::remaining(deadline)?;
     let time = if bound > super::super::oci_stage::LAYER_BUDGET {
         deadline
@@ -121,10 +155,6 @@ fn get(
         remaining
     }
     .as_secs_f64();
-    ensure!(
-        bound != 0,
-        "public registry response has no remaining byte budget"
-    );
     let mut command = Command::new("/usr/bin/curl");
     command.env_clear().args([
         "--disable", "--fail", "--silent", "--location", "--max-redirs", "4",
@@ -160,12 +190,7 @@ fn get(
             bytes <= bound as u64,
             "public registry response exceeds its byte bound"
         );
-        let status = child.wait()?;
-        ensure!(
-            status.success(),
-            "public Docker Hub request failed ({status})"
-        );
-        Ok(bytes)
+        Ok((bytes, child.wait()?))
     })();
     if result.is_err() {
         let _ = child.kill();

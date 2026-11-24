@@ -242,6 +242,80 @@ def qualified_compose(matrix, manifest, report, fixture, connection, docker, env
         run.__globals__['Docker'] = driver
 
 
+def qualified_registry(matrix, manifest, report, fixture, connection, docker, env, suite):
+    run = matrix['run_matrix']
+    driver = run.__globals__['Docker']
+    handles = set()
+
+    class RegistryWitness(driver):
+        registry_name = None
+
+        def call(self, scenario, args, **options):
+            cached = scenario in ('registry.small.cached', 'registry.multilayer.cached')
+            if cached:
+                repository = args[-1].split('/', 1)[1].split('@', 1)[0]
+                before = self.registry_reads(repository)
+            result = super().call(scenario, args, **options)
+            row = self.rows[-1]
+            if result is None:
+                return result
+            if scenario == 'registry-start':
+                self.registry_name = args[args.index('--name') + 1]
+            if cached:
+                after = self.registry_reads(repository)
+                if before is None or after is None or not before:
+                    row['error'] = 'registry cache transfer could not be observed'
+                elif after != before:
+                    row['error'] = 'cached image triggered another registry GET'
+                else:
+                    row['no_registry_get'] = True
+                row['registry_gets_before'] = before
+                row['registry_gets_after'] = after
+            if scenario == 'registry-run-proof':
+                try:
+                    events = [
+                        event for event in event_snapshot(connection, manifest['docker_api'])
+                        if event['Actor']['Attributes'].get(matrix['LABEL']) == self.token
+                        and event['Actor']['Attributes'].get('image') == args[-1]
+                    ]
+                    if [event['Action'] for event in events[-2:]] != ['die', 'destroy']:
+                        raise RuntimeError('registry workload did not reach native teardown')
+                    witness = events[-2]['Actor']['Attributes']
+                    handle = witness.get('conjet.native_handle')
+                    if (events[-1]['Actor']['ID'] != events[-2]['Actor']['ID']
+                            or witness.get('conjet.backend') != 'jetstream-native-oci'
+                            or witness.get('conjet.guest_cleanup') != 'complete'
+                            or witness.get('exitCode') != '0' or not handle or handle in handles):
+                        raise RuntimeError('registry workload cleanup identity was invalid')
+                    handles.add(handle)
+                    row['guest_witness'] = witness
+                except (OSError, RuntimeError, ValueError, KeyError, http.client.HTTPException) as error:
+                    row['error'] = str(error)
+                    connection.close()
+            return result
+
+        def registry_reads(self, repository):
+            result = super().call('registry-cache-observation',
+                                  ['logs', '--tail', '24', self.registry_name],
+                                  phase='verification', output_limit=32768)
+            if result is None:
+                return None
+            row = self.rows[-1]
+            lines = (row.get('stdout', '') + row.get('stderr', '')).splitlines()
+            return sorted(line for line in lines if 'http.request.method=GET ' in line
+                          and f'http.request.uri="/v2/{repository}/' in line)
+
+    if suite == 'registry-service':
+        runner = RegistryWitness(docker, env, fixture, report)
+        matrix['run_registry'](runner, manifest)
+    else:
+        run.__globals__['Docker'] = RegistryWitness
+        try:
+            run('images', manifest, report, fixture, docker, env, connection=connection)
+        finally:
+            run.__globals__['Docker'] = driver
+
+
 def qualified_stress(matrix, manifest, report, fixture, connection, docker, env):
     run = matrix['run_matrix']
     driver = run.__globals__['Docker']
@@ -331,6 +405,8 @@ def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None)
                 matrix = runpy.run_path(str(HERE / 'docker-comparison-matrix.py'))
                 if suite == 'control':
                     qualified_control(matrix, manifest, report, fixture, connection, docker, env)
+                elif suite in ('images', 'registry-service'):
+                    qualified_registry(matrix, manifest, report, fixture, connection, docker, env, suite)
                 elif suite == 'storage_network':
                     qualified_storage(matrix, manifest, report, fixture, connection, docker, env)
                 elif suite == 'compose':

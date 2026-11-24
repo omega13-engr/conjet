@@ -1488,14 +1488,20 @@ impl FreshFixture {
         let output_id = workload.clone();
         let stdout = thread::spawn(move || {
             drain(out, |data| {
-                output_owner.update(&output_id, |record| record.stdout.append(data));
+                output_owner.update(&output_id, |record| {
+                    let capacity = crate::spec::workload_output_limit(&record.image_digest);
+                    record.stdout.append_bounded(data, capacity);
+                });
             })
         });
         let error_owner = Arc::clone(self);
         let error_id = workload.clone();
         let stderr = thread::spawn(move || {
             drain(err, |data| {
-                error_owner.update(&error_id, |record| record.stderr.append(data));
+                error_owner.update(&error_id, |record| {
+                    let capacity = crate::spec::workload_output_limit(&record.image_digest);
+                    record.stderr.append_bounded(data, capacity);
+                });
             })
         });
         self.update(&workload, |record| {

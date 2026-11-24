@@ -329,6 +329,8 @@ impl WorkloadFilter {
                 libc::SYS_unlinkat,
                 libc::SYS_mkdirat,
                 libc::SYS_renameat,
+                libc::SYS_truncate,
+                libc::SYS_ftruncate,
                 libc::SYS_pread64,
                 libc::SYS_pwrite64,
                 libc::SYS_fsync,

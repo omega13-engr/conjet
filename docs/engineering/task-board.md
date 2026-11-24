@@ -1609,6 +1609,15 @@ resource request. Scope pulls to its live internal loopback publication,
 verify digest and inventory identity, and remove imported fixtures and
 the Registry store after each original run.
 
+Evidence: The original pinned service started with the unchanged
+default resource request. The optimized diagnostic verified 12
+cold config and layer transfers, 12 cache hits with no additional
+registry GET, 12 workload launches with distinct complete native
+cleanup receipts, and removal of each image and the Registry volume.
+See `SPEED-152/registry-full-witness/`. The service image came from the
+verified private seed in this run. Separate public runs captured an
+initial successful service pull and later Docker Hub timeout failures.
+
 ### SPEED-153
 
 Title: Stream the pinned Buildx dial-stdio exec transport
@@ -1617,6 +1626,15 @@ Acceptance: Keep the authenticated native worker exec attached in both
 directions while the pinned Buildx client exchanges frames. Preserve
 EOF, backpressure, stderr, terminal status, disconnect and cancellation.
 Finish guest cleanup before releasing the exact exec owner.
+
+### SPEED-154
+
+Title: Mount a leased native BuildKit workspace beside the disk image store
+
+Acceptance: Keep the private image and volume stores available to the
+Docker adapter while the native build runtime borrows an executable
+snapshot. Validate both isolated stores, preserve ordinary mount
+restrictions and release the lease after both mounts are closed.
 
 ### SPEED-091
 

@@ -814,7 +814,7 @@ def main():
                                                   'build-snapshot', 'build-bundle', 'pending-watch', 'compatibility-preflight'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--compatibility-suite',
-                        choices=('lifecycle', 'images', 'builds', 'compose', 'control',
+                        choices=('lifecycle', 'images', 'registry-service', 'builds', 'compose', 'control',
                                  'storage_network', 'stress'))
     parser.add_argument('--compatibility-lifecycle-group',
                         help='run one complete frozen lifecycle group in its own Core boot')
@@ -859,7 +859,7 @@ def main():
     if args.native_routed_bridge and args.diagnostics != 'docker-network':
         parser.error('select the routed bridge only for the network diagnostic')
     if args.offline_oci_layout and (
-            args.compatibility_suite not in ('builds', 'compose', 'storage_network', 'stress')
+            args.compatibility_suite not in ('registry-service', 'builds', 'compose', 'storage_network', 'stress')
             or not args.native_public_images or not args.native_disk_images
             or any(layout.resolve(strict=True) != layout or not layout.is_relative_to(SCRATCH)
                    for layout in args.offline_oci_layout)):

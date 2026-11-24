@@ -36,7 +36,7 @@ use anyhow::{ensure, Context};
 use base64::Engine;
 use clap::Args;
 use conjet_launch_service::handshake::{hex, random, Key};
-use conjet_launch_service::spec::BridgeScope;
+use conjet_launch_service::spec::{workload_output_limit, BridgeScope, REGISTRY_CONFIG};
 use conjet_launch_service::wire::{Kind, WireError};
 use serde_json::{json, Value};
 
@@ -50,7 +50,6 @@ const CONTAINERS: usize = 8;
 const KILL: u8 = 9;
 const TERM: u8 = 15;
 const CHUNK: usize = 8192;
-const STREAM_LIMIT: usize = 65536;
 static STOP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Args)]
@@ -339,6 +338,7 @@ fn read_stream(
     inline: Option<Value>,
     mut data: Vec<u8>,
     calls: &mut u32,
+    capacity: usize,
 ) -> anyhow::Result<(Vec<u8>, bool)> {
     let mut initial = inline;
     let mut truncated = false;
@@ -364,7 +364,7 @@ fn read_stream(
             chunk["offset"].as_u64() == Some(data.len() as u64)
                 && chunk["next_offset"].as_u64() == Some(next as u64)
                 && piece.len() <= CHUNK
-                && next <= STREAM_LIMIT,
+                && next <= capacity,
             "invalid native output cursor or chunk bound"
         );
         truncated |= chunk["dropped_bytes"]
@@ -536,6 +536,7 @@ fn wait_for_native(
                     if let Some(port) = item.published.lock().unwrap().as_ref() {
                         port.set_target(Some(handle.clone()));
                     }
+                    item.changed.notify_all();
                 }
             }
             awaiting_address = false;
@@ -585,6 +586,7 @@ fn wait_for_native(
         .transpose()?
         .unwrap_or_default();
     let [live_stdout, live_stderr] = item.state().live.clone();
+    let capacity = item.container.output_capacity();
     let (stdout, stdout_dropped) = read_stream(
         peer,
         &handle,
@@ -592,6 +594,7 @@ fn wait_for_native(
         streams.remove("stdout"),
         live_stdout,
         &mut calls,
+        capacity,
     )?;
     let (stderr, stderr_dropped) = read_stream(
         peer,
@@ -600,6 +603,7 @@ fn wait_for_native(
         streams.remove("stderr"),
         live_stderr,
         &mut calls,
+        capacity,
     )?;
     let delivery_error = (stdout_dropped || stderr_dropped)
         .then(|| "OCI output exceeds the Docker adapter limit".into());
@@ -648,12 +652,27 @@ impl Container {
         self.name.lock().unwrap()
     }
 
+    fn output_capacity(&self) -> usize {
+        workload_output_limit(self.spec["image_digest"].as_str().unwrap_or_default())
+    }
+
     fn mounts(&self) -> Vec<Value> {
         self.volume
             .iter()
             .map(volume::mount_metadata)
             .chain(self.bind.iter().map(bind::Binding::metadata))
             .collect()
+    }
+
+    fn owns_registry(&self) -> bool {
+        self.spec["image_digest"] == REGISTRY_CONFIG
+            && self.spec["argv"] == json!(["/entrypoint.sh", "/etc/docker/registry/config.yml"])
+            && self.spec["env"]
+                == json!(["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"])
+            && self
+                .volume
+                .as_ref()
+                .is_some_and(|mount| !mount.read_only && mount.target == "/var/lib/registry")
     }
 }
 
@@ -736,7 +755,7 @@ impl Item {
                 chunk["offset"].as_u64() == Some(stream.len() as u64)
                     && chunk["next_offset"].as_u64() == Some(next as u64)
                     && chunk["eof"] == false
-                    && next <= STREAM_LIMIT
+                    && next <= self.container.output_capacity()
                     && total <= CHUNK,
                 "invalid live output cursor or bounds"
             );
@@ -770,6 +789,7 @@ impl Item {
 struct Ledger {
     active: Vec<Arc<Item>>,
     tags: image::Tags,
+    registry_images: BTreeMap<String, String>,
     history: VecDeque<Arc<Item>>,
     events: VecDeque<Value>,
     discarded_events: usize,
@@ -827,11 +847,25 @@ impl Owner {
         reference == self.image.reference || reference == self.image.config_digest
     }
 
-    fn image_store(&self) -> Result<MutexGuard<'_, registry::Store>, Rejected> {
-        self.store
+    fn owned_registry(ledger: &Ledger) -> Option<std::net::SocketAddr> {
+        let mut addresses = ledger.active.iter().filter_map(|item| {
+            if !item.container.owns_registry() {
+                return None;
+            }
+            item.published.lock().unwrap().as_ref()?.live_address(5000)
+        });
+        let address = addresses.next()?;
+        addresses.next().is_none().then_some(address)
+    }
+
+    fn image_store(&self, ledger: &Ledger) -> Result<MutexGuard<'_, registry::Store>, Rejected> {
+        let mut store = self
+            .store
             .as_ref()
             .map(|store| store.lock().unwrap())
-            .ok_or_else(|| Rejected(501, "native registry store is not configured".into()))
+            .ok_or_else(|| Rejected(501, "native registry store is not configured".into()))?;
+        store.use_owned_registry(Self::owned_registry(ledger));
+        Ok(store)
     }
 
     fn with_guest<T>(
@@ -876,11 +910,11 @@ impl Owner {
         Ok(peer)
     }
 
-    fn process(&self, tags: &image::Tags, config: &Value) -> Result<Value, Rejected> {
+    fn process(&self, ledger: &Ledger, config: &Value) -> Result<Value, Rejected> {
         let requested = config["Image"]
             .as_str()
             .ok_or_else(|| Rejected::bad("missing Docker image reference"))?;
-        let reference = tags.resolve(requested);
+        let reference = ledger.tags.resolve(requested);
         let process = |image: &request::Image| {
             if requested == image.reference {
                 image.process(config, self.mapped_ids)
@@ -897,7 +931,7 @@ impl Owner {
             // Preserve the existing request validation on the boot-only route.
             return self.resolve_account(self.image.process(config, self.mapped_ids)?);
         }
-        let mut store = self.image_store()?;
+        let mut store = self.image_store(ledger)?;
         let image = store
             .get(reference)
             .map_err(|error| Rejected::bad(error.to_string()))?
@@ -1276,24 +1310,43 @@ impl Owner {
     fn inspect_image(&self, reference: &str) -> Result<Value, Rejected> {
         let ledger = self.ledger.lock().unwrap();
         let reference = ledger.tags.resolve(reference);
-        let info = |image: &request::Image| {
-            json!({
-                "Id":image.config_digest,"Os":"linux","Architecture":"arm64",
-                "Config":image.defaults,"RepoDigests":[image.reference],
-                "RepoTags":ledger.tags.names_for(&image.reference).collect::<Vec<_>>(),
-            })
-        };
         if self.boot_reference(reference) {
-            return Ok(info(&self.image));
+            return Ok(Self::image_info(&ledger, &self.image));
         }
         let missing = || Rejected(404, "image is not staged".into());
-        let store = self.store.as_ref().ok_or_else(missing)?.lock().unwrap();
+        let store = self.image_store(&ledger).map_err(|_| missing())?;
         store
             .get(reference)
             .map_err(|_| missing())?
             .as_ref()
-            .map(|image| info(&image.metadata))
+            .map(|image| Self::image_info(&ledger, &image.metadata))
             .ok_or_else(missing)
+    }
+
+    fn image_info(ledger: &Ledger, image: &request::Image) -> Value {
+        json!({
+            "Id":image.config_digest,"Os":"linux","Architecture":"arm64",
+            "Config":image.defaults,"RepoDigests":[image.reference],
+            "RepoTags":ledger.tags.names_for(&image.reference).collect::<Vec<_>>(),
+        })
+    }
+
+    fn list_images(&self) -> Result<Value, Rejected> {
+        let ledger = self.ledger.lock().unwrap();
+        let mut images = vec![Self::image_info(&ledger, &self.image)];
+        if self.store.is_some() {
+            let staged = self
+                .image_store(&ledger)?
+                .list(&ledger.registry_images)
+                .map_err(|error| Rejected::internal(error.to_string()))?;
+            images.extend(
+                staged
+                    .iter()
+                    .filter(|image| image.metadata.reference != self.image.reference)
+                    .map(|image| Self::image_info(&ledger, &image.metadata)),
+            );
+        }
+        Ok(json!(images))
     }
 
     fn tag_image(&self, source: &str, repository: &str, tag: &str) -> Result<(), Rejected> {
@@ -1305,11 +1358,8 @@ impl Owner {
         let target = if self.boot_reference(reference) {
             self.image.reference.clone()
         } else {
-            self.store
-                .as_ref()
-                .ok_or_else(|| Rejected(404, "image is not staged".into()))?
-                .lock()
-                .unwrap()
+            self.image_store(&ledger)
+                .map_err(|_| Rejected(404, "image is not staged".into()))?
                 .get(reference)
                 .map_err(|_| Rejected(404, "image is not staged".into()))?
                 .ok_or_else(|| Rejected(404, "image is not staged".into()))?
@@ -1320,8 +1370,13 @@ impl Owner {
     }
 
     fn pull_image(&self, reference: &str) -> Result<Value, Rejected> {
-        let ledger = self.ledger.lock().unwrap();
-        if !ledger.active.is_empty() || ledger.poisoned || ledger.closing {
+        let mut ledger = self.ledger.lock().unwrap();
+        let owned = Self::owned_registry(&ledger).is_some_and(|address| {
+            reference
+                .split_once('/')
+                .is_some_and(|(authority, _)| authority == address.to_string())
+        });
+        if (!ledger.active.is_empty() && !owned) || ledger.poisoned || ledger.closing {
             return Err(Rejected(
                 409,
                 "native guest must be idle to pull an image".into(),
@@ -1330,14 +1385,26 @@ impl Owner {
         if self.boot_reference(reference) {
             return Ok(json!({"status":"Image is already staged","id":reference}));
         }
-        let mut store = self.image_store()?;
+        let mut store = self.image_store(&ledger)?;
         store
             .validate_reference(reference)
             .map_err(|error| Rejected::bad(error.to_string()))?;
         let image = store
             .prepare(reference)
             .map_err(|error| Rejected::internal(format!("{error:#}")))?;
-        self.with_guest(|peer| store.ensure_guest(peer, &image))?;
+        if owned {
+            // Keep the verified host image addressable if guest
+            // installation fails and the caller needs to remove it.
+            ledger
+                .registry_images
+                .insert(reference.into(), image.metadata.config_digest.clone());
+            let mut peer = self.scoped_peer()?;
+            store
+                .ensure_guest(&mut peer, &image)
+                .map_err(|error| Rejected::internal(format!("{error:#}")))?;
+        } else {
+            self.with_guest(|peer| store.ensure_guest(peer, &image))?;
+        }
         Ok(json!({"status":"Image is staged","id":reference}))
     }
 
@@ -1349,7 +1416,7 @@ impl Owner {
                 "native guest must be idle to load an archive".into(),
             ));
         }
-        let store = self.image_store()?;
+        let store = self.image_store(&ledger)?;
         let archive = archive::read(file, store.archive_layer_limit())
             .map_err(|error| Rejected::bad(format!("{error:#}")))?;
         let reference = archive.reference();
@@ -1385,7 +1452,7 @@ impl Owner {
     fn save_archive(&self, name: &str) -> Result<fs::File, Rejected> {
         let ledger = self.ledger.lock().unwrap();
         let reference = ledger.tags.resolve(name);
-        let store = self.image_store()?;
+        let store = self.image_store(&ledger)?;
         let canonical = if self.boot_reference(reference) {
             &self.image.reference
         } else if store.get(reference).ok().flatten().is_some() {
@@ -1418,22 +1485,48 @@ impl Owner {
         if let Some(tag) = ledger.tags.remove(reference) {
             return Ok(json!([{"Untagged":tag}]));
         }
-        if !ledger.active.is_empty() || self.boot_reference(reference) {
+        let mut registered = ledger
+            .registry_images
+            .iter()
+            .filter(|(name, config)| reference == name.as_str() || reference == config.as_str());
+        let owned = registered.next().map(|(name, _)| name.clone());
+        if registered.next().is_some() {
+            return Err(Rejected(
+                409,
+                "image config belongs to several registry references".into(),
+            ));
+        }
+        if (owned.is_none() && !ledger.active.is_empty()) || self.boot_reference(reference) {
             return Err(Rejected(
                 409,
                 "image is referenced by the boot or a container".into(),
             ));
         }
-        let mut store = self.image_store()?;
+        let mut store = self.image_store(&ledger)?;
         let image = store
-            .get(reference)
+            .get(owned.as_deref().unwrap_or(reference))
             .map_err(|error| Rejected::bad(error.to_string()))?
             .ok_or_else(|| Rejected(404, "image is not staged".into()))?;
-        if ledger.tags.references_manifest(&image.metadata.reference) {
+        if ledger.tags.references_manifest(&image.metadata.reference)
+            || ledger
+                .active
+                .iter()
+                .any(|item| item.container.spec["image_digest"] == image.metadata.config_digest)
+        {
             return Err(Rejected(409, "image has local tags".into()));
         }
         let config = image.metadata.config_digest.clone();
-        self.with_guest(|peer| store.remove(peer, image))?;
+        if owned.is_some() {
+            let mut peer = self.scoped_peer()?;
+            store
+                .remove(&mut peer, image)
+                .map_err(|error| Rejected::internal(format!("{error:#}")))?;
+        } else {
+            self.with_guest(|peer| store.remove(peer, image))?;
+        }
+        if let Some(owned) = owned {
+            ledger.registry_images.remove(&owned);
+        }
         Ok(json!([{"Untagged":reference},{"Deleted":config}]))
     }
 
@@ -1585,9 +1678,9 @@ impl Owner {
                     .expect("Docker config")
                     .remove("ExposedPorts");
             }
-            self.process(&ledger.tags, &process)?
+            self.process(&ledger, &process)?
         } else {
-            self.process(&ledger.tags, &config)?
+            self.process(&ledger, &config)?
         };
         if let Some(volume) = &volume {
             spec["volume"] = json!(volume);
@@ -1683,7 +1776,30 @@ impl Owner {
 
     fn start(self: &Arc<Self>, item: &Arc<Item>) -> Result<(), Rejected> {
         let _control = item.control.lock().unwrap();
-        self.submit(item, false)
+        self.submit(item, false)?;
+        Self::wait_for_publication(item)
+    }
+
+    fn wait_for_publication(item: &Item) -> Result<(), Rejected> {
+        if item.published.lock().unwrap().is_none() {
+            return Ok(());
+        }
+        let state = item.wait_for(
+            |state| {
+                state.network_address.is_some()
+                    || state.terminal.is_some()
+                    || state.error.is_some()
+                    || state.removed
+            },
+            3,
+        )?;
+        if state.network_address.is_none() {
+            return Err(Rejected(
+                409,
+                "workload exited before loopback publication".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn stats(&self, item: &Item, one_shot: bool) -> Result<Value, Rejected> {
@@ -1986,7 +2102,8 @@ impl Owner {
             return Err(Rejected::bad("restart requires a retained container"));
         }
         self.stop_generation(item, TERM, grace)?;
-        self.submit(item, true)
+        self.submit(item, true)?;
+        Self::wait_for_publication(item)
     }
 
     fn remove(&self, item: &Arc<Item>, force: bool) -> Result<(), Rejected> {

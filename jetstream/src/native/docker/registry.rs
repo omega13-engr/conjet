@@ -28,6 +28,7 @@ const STORE_VERSION: &[u8] = b"conjet-native-image-store-1\n";
 pub(super) struct Store {
     root: PathBuf,
     registry: Option<SocketAddr>,
+    owned_registry: Option<SocketAddr>,
     public: public_registry::Pins,
     encoding: PackageEncoding,
     installed: BTreeMap<String, String>,
@@ -153,6 +154,7 @@ impl Store {
         let store = Self {
             root,
             registry,
+            owned_registry: None,
             public: if allow_public {
                 public_registry::Pins::frozen()?
             } else {
@@ -182,15 +184,16 @@ impl Store {
                 origin: Origin::Public,
             });
         }
-        let registry = self
-            .registry
-            .context("image is outside the frozen public registry pins")?;
         let (authority, repository) = name
             .split_once('/')
             .context("native pull requires the allowlisted registry")?;
+        let registry = [self.registry, self.owned_registry]
+            .into_iter()
+            .flatten()
+            .find(|address| authority == address.to_string())
+            .context("image is outside the frozen public pins and allowlisted registry")?;
         ensure!(
-            authority == registry.to_string()
-                && repository.len() <= 200
+            repository.len() <= 200
                 && repository.split('/').all(|part| {
                     !part.is_empty()
                         && part.as_bytes()[0].is_ascii_alphanumeric()
@@ -207,6 +210,10 @@ impl Store {
             manifest,
             origin: Origin::Loopback(registry),
         })
+    }
+
+    pub(super) fn use_owned_registry(&mut self, address: Option<SocketAddr>) {
+        self.owned_registry = address;
     }
 
     fn path(&self, manifest: &str) -> anyhow::Result<PathBuf> {
@@ -338,6 +345,40 @@ impl Store {
             receipt,
             manifest: manifest.to_owned(),
         }))
+    }
+
+    pub(super) fn list(
+        &self,
+        registry_images: &BTreeMap<String, String>,
+    ) -> anyhow::Result<Vec<Image>> {
+        let mut images = Vec::new();
+        for entry in self.root.join("images").read_dir()? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().context("invalid OCI store entry")?;
+            if incomplete_entry(name) {
+                continue;
+            }
+            let manifest = format!("sha256:{name}");
+            suffix(&manifest)?;
+            let reference = registry_images
+                .keys()
+                .find(|reference| {
+                    reference
+                        .rsplit_once('@')
+                        .is_some_and(|(_, digest)| digest == manifest)
+                })
+                .cloned()
+                .or_else(|| self.public.reference_for(&manifest))
+                .unwrap_or_else(|| format!("{}@{manifest}", archive::LOCAL));
+            let receipt = self.receipt(&manifest)?;
+            images.push(Image {
+                metadata: request::Image::new(reference, receipt.clone())?,
+                receipt,
+                manifest,
+            });
+        }
+        Ok(images)
     }
 
     pub(super) fn root(&self) -> &Path {
@@ -731,7 +772,7 @@ fn receive(
 ) -> anyhow::Result<u64> {
     let mut socket = TcpStream::connect_timeout(&address, remaining(deadline)?)?;
     socket.set_write_timeout(Some(remaining(deadline)?))?;
-    write!(socket, "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nAccept: application/vnd.oci.image.manifest.v1+json, application/octet-stream\r\n\r\n")?;
+    write!(socket, "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nAccept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/octet-stream\r\n\r\n")?;
     let mut reader = BufReader::new(socket);
     let mut headers = 0usize;
     let mut length = None;

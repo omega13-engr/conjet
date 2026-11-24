@@ -98,7 +98,10 @@ def collect(endpoint, peer, docker, env, output, session, pid):
         cases['refused_socket_closed'] = verify_closed(port)
         create('create_service', 'application')
         call('start_service', ['start', 'application'])
+        immediate = call('immediate_publication', ['port', 'application', '8080/tcp'])
         port = mapped('application', 'inspect_service')
+        if immediate != f'127.0.0.1:{port}\n'.encode():
+            raise RuntimeError('published port was not available after start returned')
         result = response(port)
         cases['half_close_response'] = result.decode()
         if result != RESPONSE:

@@ -166,6 +166,19 @@ mod framing_tests {
     use super::*;
 
     #[test]
+    fn tail_counts_retained_lines_and_preserves_a_partial_last_line() {
+        let streams = [&b"one\ntwo\n"[..], &b"warning\nlast"[..]];
+        assert_eq!(tail_offsets(streams, [true, true], 0), [8, 12]);
+        assert_eq!(tail_offsets(streams, [true, true], 1), [8, 8]);
+        assert_eq!(tail_offsets(streams, [true, true], 3), [4, 0]);
+        assert_eq!(tail_offsets(streams, [true, false], 1), [4, 0]);
+        assert_eq!(
+            tail_offsets([&b"one\n\n"[..], &[]], [true, true], 1),
+            [4, 0]
+        );
+    }
+
+    #[test]
     fn disconnected_stream_releases_darwin_slot_but_half_close_preserves_output() {
         let (client, server) = UnixStream::pair().unwrap();
         client.shutdown(Shutdown::Write).unwrap();
@@ -486,7 +499,7 @@ enum Action {
     WorkloadArchive(String, Option<File>),
     Wait(Arc<Item>, String, u64),
     Attach(Arc<Item>, [bool; 2], u64, bool),
-    Logs(Arc<Item>, [bool; 2], u64, bool),
+    Logs(Arc<Item>, [bool; 2], u64, bool, Option<usize>),
     Exec(Arc<super::exec::Entry>, Value),
     Events(super::events::Subscription),
 }
@@ -704,6 +717,9 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 return Err(Rejected::bad("unsupported image list option"));
             }
             let filters = super::discovery::parse_filters(query.get("filters"))?;
+            if filters.is_empty() {
+                return Ok(Action::Reply(Reply::json(200, owner.list_images()?)));
+            }
             let reference = filters
                 .get("reference")
                 .filter(|names| filters.len() == 1 && names.len() == 1)
@@ -968,20 +984,28 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
         ("GET", "logs") => {
             if !disabled(query.get("timestamps"))
                 || !disabled(query.get("details"))
-                || query.get("tail").is_some_and(|value| value != "all")
                 || ["since", "until"]
                     .iter()
                     .any(|key| query.get(*key).is_some_and(|value| value != "0"))
             {
                 return Err(Rejected::bad(
-                    "log time, duration, formatting and tail filters are unsupported",
+                    "log time, duration and formatting filters are unsupported",
                 ));
             }
+            let tail = query
+                .get("tail")
+                .filter(|value| value.as_str() != "all")
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| Rejected::bad("invalid log tail count"))
+                })
+                .transpose()?;
             let enabled = ["stdout", "stderr"]
                 .map(|name| query.get(name).is_none() || !disabled(query.get(name)));
             let follow = !disabled(query.get("follow"));
             let generation = item.state().generation;
-            return Ok(Action::Logs(item, enabled, generation, follow));
+            return Ok(Action::Logs(item, enabled, generation, follow, tail));
         }
         ("GET", "json") => {
             let state = item.state();
@@ -1112,7 +1136,34 @@ fn attach(
     writer: &mut UnixStream,
 ) -> io::Result<()> {
     header(writer, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
-    send_output(item, enabled, generation, true, writer)
+    send_output(item, enabled, generation, true, None, writer)
+}
+
+fn tail_offsets(streams: [&[u8]; 2], enabled: [bool; 2], mut lines: usize) -> [usize; 2] {
+    let mut offsets = [0; 2];
+    for index in (0..2).rev().filter(|index| enabled[*index]) {
+        let data = streams[index];
+        if lines == 0 || data.is_empty() {
+            offsets[index] = data.len();
+            continue;
+        }
+        // Ignore only the terminating delimiter. Empty lines still count.
+        let content = data.strip_suffix(b"\n").unwrap_or(data);
+        let mut starts = content
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(position, &byte)| (byte == b'\n').then_some(position + 1));
+        offsets[index] = loop {
+            lines -= 1;
+            match starts.next() {
+                Some(offset) if lines == 0 => break offset,
+                Some(_) => {}
+                None => break 0,
+            }
+        };
+    }
+    offsets
 }
 
 fn send_output(
@@ -1120,6 +1171,7 @@ fn send_output(
     enabled: [bool; 2],
     generation: u64,
     follow: bool,
+    mut tail: Option<usize>,
     writer: &mut UnixStream,
 ) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(35);
@@ -1134,6 +1186,9 @@ fn send_output(
                 _ if same_generation => [&state.live[0][..], &state.live[1][..]],
                 _ => [&[][..], &[][..]],
             };
+            if let Some(lines) = tail.take() {
+                cursors = tail_offsets(streams, enabled, lines);
+            }
             let complete =
                 !same_generation || terminal.is_some() || state.removed || state.error.is_some();
             let chunks: [Vec<u8>; 2] = std::array::from_fn(|index| {
@@ -1322,9 +1377,9 @@ pub(super) fn serve(
                 }
                 break;
             }
-            Ok(Action::Logs(item, streams, generation, follow)) => {
+            Ok(Action::Logs(item, streams, generation, follow, tail)) => {
                 header(&mut stream, 200, "Connection: close\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
-                send_output(&item, streams, generation, follow, &mut stream)?;
+                send_output(&item, streams, generation, follow, tail, &mut stream)?;
                 break;
             }
             Ok(Action::Events(subscription)) => {
