@@ -1,6 +1,7 @@
 """Evaluate frozen native coverage against matching release preflight and canary reports."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -140,8 +141,17 @@ def evaluate(root, revision, release):
     pass_case('regression/native-compose', 'existing pinned native Compose project canary passed',
               'native-compose')
 
+    folder, verified = lane('docker-build-api')
+    response_path = folder.parent / 'response.json'
+    response = read(folder.parent, response_path.name)
+    if verified and response and response['status'] != 200:
+        required['builds/docker-build-api'].update(
+            reason=f"POST /v1.44/build returned HTTP {response['status']}: {response['body'].get('message', '')}",
+            evidence=[str(response_path), str(folder)])
+
     passed = sum(item['status'] == 'PASS' for item in required.values())
     return {'scope': 'native-release-compatibility', 'revision': revision,
+            'compatibility_manifest_sha256': hashlib.sha256(PREFLIGHT['MANIFEST'].read_bytes()).hexdigest(),
             'frozen_sources_sha256': manifest['sources'],
             'release_sha256': release, 'required': len(required), 'passed_cases': passed,
             'failed_cases': len(required) - passed, 'passed': passed == len(required),

@@ -891,6 +891,12 @@ isolated preflight canaries and record binary identities and cleanup.
 The gate enumerates every case and fails missing or mismatched release
 evidence. [Compatibility procedure](native-compatibility.md#speed-098-fail-closed-preflight)
 
+The exact release gate returned 19 PASS and 52 FAIL. The original
+Buildx bootstrap, Docker archives, default bridge, frozen Node/Redis
+workloads, and broader control and OOM coverage remain open. Core
+memory and supported regressions passed. A new full SPEED-065
+comparison remains blocked. [Exact release results](native-compatibility.md#exact-release-gate-result)
+
 
 ### SPEED-025
 

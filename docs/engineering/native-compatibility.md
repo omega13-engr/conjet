@@ -137,3 +137,35 @@ definitions. Bootstrap failed during pinned worker image provisioning.
 Separate negative API checks verified that regular workloads cannot
 request privilege or add capabilities. Worker provisioning and
 `dial-stdio` remain open.
+
+## Exact release gate result
+
+Revision `fa1cbad84f30482d08862aee051914a0bd4a8c9b` ran the native
+preflights and regressions against a single optimized release artifact
+set. Evaluating the 71 requirements produced **19 PASS and 52 FAIL**.
+The manifest's 12 Rust, Go and Node variant records were assigned to
+the BuildKit task before regenerating the summary. This corrected the
+owning task and suite prefix. The operations, pinned workload code,
+required count and overall verdict were preserved.
+
+| Surface | Exact release evidence |
+| --- | --- |
+| Lifecycle | Four Alpine API/CLI no-network cases passed with guest teardown. Default bridge requests returned HTTP 400. Loading the pinned common archive failed at HTTP body framing. |
+| Images | The pinned Alpine tag and cleanup inventory worked. Save returned unsupported. Node and registry fixture pulls reached an unconfigured registry store. The exact layouts also reproduced the ingest bounds recorded above. |
+| Buildx and Docker build | All three builder bootstraps failed at worker image provisioning, with builder definitions removed. The direct `POST /v1.44/build` canary used a tar context and returned HTTP 501. The earlier guest-local BuildKit RUN is historical for this release gate. |
+| Compose, storage and control | Node prepull blocked the original service and storage fixtures. The original control container is created without the resource fields required by the current bounded profile. The pinned small native Compose and volume regressions passed. |
+| Stress and Core | The original stress command passed 400 runs and 40 warmups at concurrency 1/2/4/8. Node provisioning blocked the OOM case. Core grew from 448 to 2,048 MiB under workload demand and independent pressure with zero containers. It returned to 448 MiB, preserved the active-data checksum, and reconciled backing ownership with zero reclaim failures. |
+
+Production fingerprints and launch teardown passed. Named-volume and
+Compose disk checks passed. Rust workspace tests reported 189 passed
+and three ignored. ARM64 guest Clippy passed with warnings denied.
+Swift reported 440 tests, two skipped and zero failures, and the Go
+network-helper tests passed. This change affects the headless engine
+and its fixtures, so logs and structured runtime witnesses are the
+acceptance evidence.
+
+The raw artifacts, launch commands, per-case evidence and gate verdict
+are under `SPEED-098/exact-release/` in the ExternalSSD evidence root.
+The new full Kiri comparison remains blocked by the required failures.
+There is no current Kiri parity result. The historical p99 upper bounds
+remain 1.0586 for API and 1.0553 for CLI.
