@@ -137,6 +137,18 @@ The large-image run left no image entries in the private host store,
 released the lease, passed offline ext4 checks and preserved production.
 Evidence is under `SPEED-109/` on ExternalSSD.
 
+## SPEED-110 built-in bridge
+
+The private Docker endpoint provisions the built-in bridge with a separate
+guest network namespace, address range and resolver from the custom bridge.
+The kernel acknowledged the built-in default route. The isolated candidate
+boot has no external uplink. CLI checks verified implicit and explicit
+selection, simultaneous endpoint ownership, DNS isolation and cleanup.
+All twelve original Alpine and common-static lifecycle combinations passed
+one run apiece with their original output and exit assertions and unique
+native cleanup witnesses. This lane does not establish full release counts
+or performance. Evidence is under `SPEED-110/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

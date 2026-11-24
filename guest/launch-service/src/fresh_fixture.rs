@@ -22,7 +22,7 @@ use crate::intent::{DIRECTORY, Intent};
 use crate::output::{Capture, drain};
 use crate::prepared::{CANCEL, ClaimError, RELEASE, SLOT_MEMORY_LIMIT, SLOT_TTL, Slot, TERMINATE};
 use crate::socket::Stream;
-use crate::spec::{LaunchRequest, LaunchSpec, ValidatedLaunch};
+use crate::spec::{BridgeScope, LaunchRequest, LaunchSpec, ValidatedLaunch};
 use crate::wire::{Frame, Kind, WireError, write_error};
 
 #[derive(Deserialize)]
@@ -125,8 +125,15 @@ struct NetworkRequest {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum NetworkOperation {
-    Connect { handle: Handle, alias: String },
-    Disconnect { handle: Handle },
+    Connect {
+        handle: Handle,
+        alias: String,
+        #[serde(default)]
+        scope: Option<BridgeScope>,
+    },
+    Disconnect {
+        handle: Handle,
+    },
     Remove,
 }
 
@@ -285,6 +292,7 @@ struct Record {
     exit: Option<Value>,
     helper_failed: bool,
     network_cleanup: &'static str,
+    network_scope: Option<BridgeScope>,
     network_aliases: Vec<String>,
     network_address: Option<std::net::Ipv4Addr>,
     trace: Option<Trace>,
@@ -588,7 +596,7 @@ pub(crate) struct FreshFixture {
     intent: Intent,
     ledger: Mutex<Ledger>,
     build_runtime: Mutex<BuildRuntime>,
-    private_network: Mutex<Option<crate::bridge_fixture::NetworkOwner>>,
+    private_networks: Mutex<[Option<crate::bridge_fixture::NetworkOwner>; 2]>,
     changed: Condvar,
 }
 
@@ -759,7 +767,7 @@ impl FreshFixture {
             intent,
             ledger: Mutex::new(Ledger::default()),
             build_runtime: Mutex::default(),
-            private_network: Mutex::new(None),
+            private_networks: Mutex::new(Default::default()),
             changed: Condvar::new(),
         }))
     }
@@ -871,7 +879,8 @@ impl FreshFixture {
                 "request does not match the pinned ARM64 executable profile",
             ));
         }
-        let bridge = spec.network == "bridge";
+        let scope = spec.bridge_scope();
+        let bridge = scope.is_some();
         if prepared
             && (bridge
                 || spec.limits.memory_bytes > SLOT_MEMORY_LIMIT
@@ -882,7 +891,7 @@ impl FreshFixture {
                 "preparation requires no network and at most 32 MiB",
             ));
         }
-        if bridge && !self.oci && !self.bridge_available {
+        if bridge && !self.oci && (!self.bridge_available || scope == Some(BridgeScope::BuiltIn)) {
             return Err((
                 "unsupported_option",
                 "private bridge unavailable in this guest",
@@ -980,10 +989,11 @@ impl FreshFixture {
         if spec.aliases().any(|alias| {
             !self.oci
                 || ledger.active().any(|record| {
-                    record
-                        .network_aliases
-                        .iter()
-                        .any(|active| active.eq_ignore_ascii_case(alias))
+                    record.network_scope == scope
+                        && record
+                            .network_aliases
+                            .iter()
+                            .any(|active| active.eq_ignore_ascii_case(alias))
                 })
         }) {
             return Err(("unsupported_option", "private network alias is unavailable"));
@@ -1025,6 +1035,7 @@ impl FreshFixture {
             exit: None,
             helper_failed: false,
             network_cleanup: if bridge { "pending" } else { "not_applicable" },
+            network_scope: scope,
             network_aliases: spec.aliases().cloned().collect(),
             network_address: None,
             trace: ((benchmark && self.trace_benchmark) || self.trace_core_latency).then(|| {
@@ -1322,17 +1333,18 @@ impl FreshFixture {
                         let mut response =
                             UnixStream::from(descriptors.pop().expect("bridge response"));
                         let target = fs::File::from(descriptors.pop().expect("bridge target"));
-                        let aliases = self
-                            .ledger
-                            .lock()
-                            .expect("fresh ledger")
-                            .record(&workload)
-                            .expect("owned workload")
-                            .network_aliases
-                            .clone();
-                        let mut private = self.private_network.lock().expect("private bridge");
+                        let (scope, aliases) = {
+                            let ledger = self.ledger.lock().expect("fresh ledger");
+                            let record = ledger.record(&workload).expect("owned workload");
+                            (
+                                record.network_scope.expect("leased bridge scope"),
+                                record.network_aliases.clone(),
+                            )
+                        };
+                        let mut networks = self.private_networks.lock().expect("private bridges");
+                        let private = &mut networks[scope.subnet() as usize];
                         if private.is_none() {
-                            *private = Some(crate::bridge_fixture::NetworkOwner::new()?);
+                            *private = Some(crate::bridge_fixture::NetworkOwner::new(scope)?);
                         }
                         let address = private
                             .as_mut()
@@ -1441,11 +1453,12 @@ impl FreshFixture {
     }
 
     fn release_private_network(&self, id: [u8; 16]) -> io::Result<()> {
-        if let Some(network) = self
-            .private_network
+        for network in self
+            .private_networks
             .lock()
-            .expect("private bridge")
-            .as_mut()
+            .expect("private bridges")
+            .iter_mut()
+            .flatten()
         {
             network.detach(id)?;
         }
@@ -1453,39 +1466,45 @@ impl FreshFixture {
     }
 
     fn network(&self, operation: NetworkOperation, boot: &str, deadline: Instant) -> Reply {
-        let mut network = self.private_network.lock().expect("private bridge");
+        let mut networks = self.private_networks.lock().expect("private bridges");
         let mut ledger = self.ledger.lock().expect("fresh ledger");
         if ledger.closing || deadline <= Instant::now() {
             return Err(("busy", "private bridge is draining"));
         }
-        let (handle, alias) = match operation {
+        let (handle, requested) = match operation {
             NetworkOperation::Remove => {
-                if ledger
-                    .active()
-                    .any(|record| !record.network_aliases.is_empty())
-                {
+                if ledger.active().any(|record| {
+                    record.network_scope == Some(BridgeScope::Custom)
+                        && !record.network_aliases.is_empty()
+                }) {
                     return Err(("busy", "private bridge still owns workloads"));
                 }
-                if let Some(owned) = network.take() {
+                if let Some(owned) = networks[BridgeScope::Custom.subnet() as usize].take() {
                     owned
                         .close()
                         .map_err(|_| ("cleanup_failed", "cannot verify bridge removal"))?;
                 }
                 return Ok((Kind::Network, json!({"removed":true})));
             }
-            NetworkOperation::Connect { handle, alias } => {
+            NetworkOperation::Connect {
+                handle,
+                alias,
+                scope,
+            } => {
+                let scope = scope.unwrap_or(BridgeScope::Custom);
                 if !crate::bridge_dns::valid_name(&alias) {
                     return Err(("unsupported_option", "invalid private network alias"));
                 }
                 if ledger.active().any(|record| {
-                    record
-                        .network_aliases
-                        .iter()
-                        .any(|name| name.eq_ignore_ascii_case(&alias))
+                    record.network_scope == Some(scope)
+                        && record
+                            .network_aliases
+                            .iter()
+                            .any(|name| name.eq_ignore_ascii_case(&alias))
                 }) {
                     return Err(("busy", "private network alias is already owned"));
                 }
-                (handle, Some(alias))
+                (handle, Some((scope, alias)))
             }
             NetworkOperation::Disconnect { handle } => (handle, None),
         };
@@ -1499,17 +1518,24 @@ impl FreshFixture {
                 "not_running",
                 "native network requires the current running workload",
             ))?;
-        let (_, pidfd) = record
-            .exec_context
-            .as_ref()
-            .filter(|(spec, _)| spec.network == "bridge")
-            .ok_or((
-                "unsupported_option",
-                "workload was not admitted with bridge permissions",
-            ))?;
+        let (_, pidfd) = record.exec_context.as_ref().ok_or((
+            "unsupported_option",
+            "workload was not admitted with bridge permissions",
+        ))?;
+        let scope = record.network_scope.ok_or((
+            "unsupported_option",
+            "workload was not admitted with bridge permissions",
+        ))?;
+        let network = &mut networks[scope.subnet() as usize];
         let id = crate::handshake::unhex::<16>(&handle.workload_id)
             .map_err(|_| ("malformed", "invalid workload ID"))?;
-        if let Some(alias) = alias {
+        if let Some((desired_scope, alias)) = requested {
+            if desired_scope != scope {
+                return Err((
+                    "unsupported_option",
+                    "cannot change a running workload's bridge scope",
+                ));
+            }
             if record.network_address.is_some() {
                 return Err(("busy", "workload already owns a bridge port"));
             }
@@ -1517,7 +1543,7 @@ impl FreshFixture {
                 .map_err(|_| ("not_running", "cannot retain its live network namespace"))?;
             if network.is_none() {
                 *network = Some(
-                    crate::bridge_fixture::NetworkOwner::new()
+                    crate::bridge_fixture::NetworkOwner::new(scope)
                         .map_err(|_| ("network_failed", "cannot create the private bridge"))?,
                 );
             }
@@ -1559,21 +1585,21 @@ impl FreshFixture {
         }
         // Acquire bridge ownership before observing the workload, the same
         // order used by peer admission and live network operations.
-        let network = self.private_network.lock().expect("private bridge");
+        let networks = self.private_networks.lock().expect("private bridges");
         let ledger = self.ledger.lock().expect("fresh ledger");
-        let active = ledger
+        let scope = ledger
             .record(&request.handle.workload_id)
-            .is_some_and(|record| {
+            .filter(|record| {
                 record.handle == request.handle
                     && record.phase == Phase::Running
                     && record.network_address.is_some()
-            });
-        if ledger.closing || !active {
-            return Err((
+                    && !ledger.closing
+            })
+            .and_then(|record| record.network_scope)
+            .ok_or((
                 "not_running",
                 "native TCP target has no active bridge lease",
-            ));
-        }
+            ))?;
         drop(ledger);
         let budget = Duration::from_millis(request.budget_ms).saturating_sub(arrival.elapsed());
         if budget.is_zero() {
@@ -1581,7 +1607,7 @@ impl FreshFixture {
         }
         let id = crate::handshake::unhex::<16>(&request.handle.workload_id)
             .map_err(|_| ("malformed", "invalid native workload ID"))?;
-        network
+        networks[scope.subnet() as usize]
             .as_ref()
             .ok_or(("not_running", "private bridge is absent"))?
             .dial(id, request.port, budget)
@@ -2167,8 +2193,11 @@ impl FreshFixture {
                     .active()
                     .any(|record| record.phase == Phase::CleanupFailed);
                 drop(ledger);
-                let mut network = self.private_network.lock().expect("private bridge");
-                return cleaned && network.take().is_none_or(|network| network.close().is_ok());
+                let mut networks = self.private_networks.lock().expect("private bridges");
+                return networks
+                    .iter_mut()
+                    .filter_map(Option::take)
+                    .fold(cleaned, |clean, network| network.close().is_ok() && clean);
             }
             for record in &mut ledger.records {
                 record.cancel();

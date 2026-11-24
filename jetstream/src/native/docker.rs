@@ -32,6 +32,7 @@ use anyhow::{ensure, Context};
 use base64::Engine;
 use clap::Args;
 use conjet_launch_service::handshake::{hex, random, Key};
+use conjet_launch_service::spec::BridgeScope;
 use conjet_launch_service::wire::{Kind, WireError};
 use serde_json::{json, Value};
 
@@ -484,10 +485,13 @@ fn wait_for_native(
             state["network_address"].as_str(),
         ) {
             let mut lifecycle = item.state();
-            if lifecycle.network.is_some() && lifecycle.network_address.is_none() {
-                lifecycle.network_address = Some(checked_network_address(address)?);
-                if let Some(port) = item.published.lock().unwrap().as_ref() {
-                    port.set_target(Some(handle.clone()));
+            if lifecycle.network_address.is_none() {
+                if let Some(attachment) = &lifecycle.network {
+                    lifecycle.network_address =
+                        Some(checked_network_address(address, attachment.network.scope)?);
+                    if let Some(port) = item.published.lock().unwrap().as_ref() {
+                        port.set_target(Some(handle.clone()));
+                    }
                 }
             }
             awaiting_address = false;
@@ -715,10 +719,10 @@ struct Ledger {
     network: Option<network::Network>,
 }
 
-fn checked_network_address(address: &str) -> anyhow::Result<String> {
+fn checked_network_address(address: &str, scope: BridgeScope) -> anyhow::Result<String> {
     let octets = address.parse::<std::net::Ipv4Addr>()?.octets();
     ensure!(
-        matches!(octets, [198, 18, 0, 2..=9]),
+        matches!(octets, [198, 18, subnet, 2..=9] if subnet == scope.subnet()),
         "invalid private bridge address"
     );
     Ok(address.to_owned())
@@ -731,6 +735,7 @@ struct Owner {
     ledger: Mutex<Ledger>,
     store: Option<Mutex<registry::Store>>,
     archive_root: Option<PathBuf>,
+    built_in_bridge: network::Network,
     exec_peer: Mutex<Option<client::Connection>>,
     event_changed: Condvar,
 }
@@ -741,6 +746,7 @@ impl Owner {
             image,
             mapped_ids: native.mapped_ids,
             archive_root: store.as_ref().map(|store| store.root().to_owned()),
+            built_in_bridge: network::Network::built_in(&native.boot),
             native: Mutex::new(native),
             ledger: Mutex::new(Ledger::default()),
             store: store.map(Mutex::new),
@@ -826,13 +832,19 @@ impl Owner {
         Ok(spec)
     }
 
-    fn check_network_aliases(ledger: &Ledger, aliases: &[String]) -> Result<(), Rejected> {
+    fn check_network_aliases(
+        ledger: &Ledger,
+        attachment: &network::Attachment,
+    ) -> Result<(), Rejected> {
         if ledger.active.iter().any(|item| {
             item.state().network.as_ref().is_some_and(|entry| {
-                entry
-                    .aliases
-                    .iter()
-                    .any(|old| aliases.iter().any(|alias| old.eq_ignore_ascii_case(alias)))
+                entry.network.id == attachment.network.id
+                    && entry.aliases.iter().any(|old| {
+                        attachment
+                            .aliases
+                            .iter()
+                            .any(|alias| old.eq_ignore_ascii_case(alias))
+                    })
             })
         }) {
             return Err(Rejected(409, "private DNS alias is already owned".into()));
@@ -857,9 +869,8 @@ impl Owner {
 
     fn list_networks(&self, filters: &discovery::Filters) -> Value {
         let ledger = self.ledger.lock().unwrap();
-        json!(ledger
-            .network
-            .iter()
+        json!(std::iter::once(&self.built_in_bridge)
+            .chain(ledger.network.iter())
             .filter(|network| filters.matches(&network.name, &network.labels))
             .map(|network| network.inspect(json!({})))
             .collect::<Vec<_>>())
@@ -892,19 +903,33 @@ impl Owner {
         json!(selected)
     }
 
+    fn find_network<'a>(
+        &'a self,
+        ledger: &'a Ledger,
+        reference: &str,
+    ) -> Option<&'a network::Network> {
+        std::iter::once(&self.built_in_bridge)
+            .chain(ledger.network.iter())
+            .find(|entry| entry.matches(reference))
+    }
+
     fn inspect_network(&self, reference: &str) -> Result<Value, Rejected> {
         let ledger = self.ledger.lock().unwrap();
-        let network = ledger
-            .network
-            .as_ref()
-            .filter(|entry| entry.matches(reference))
+        let network = self
+            .find_network(&ledger, reference)
             .ok_or_else(|| Rejected(404, "private bridge was not found".into()))?;
         let mut endpoints = serde_json::Map::new();
         for item in &ledger.active {
             let state = item.state();
             if let Some(ip) = &state.network_address {
-                endpoints.insert(item.container.id.clone(),
-                    json!({"Name":item.container.name,"IPv4Address":format!("{ip}/28"),"IPv6Address":""}));
+                if state
+                    .network
+                    .as_ref()
+                    .is_some_and(|entry| entry.network.id == network.id)
+                {
+                    endpoints.insert(item.container.id.clone(),
+                        json!({"Name":item.container.name,"IPv4Address":format!("{ip}/28"),"IPv6Address":""}));
+                }
             }
         }
         Ok(network.inspect(Value::Object(endpoints)))
@@ -912,6 +937,12 @@ impl Owner {
 
     fn remove_network(&self, reference: &str) -> Result<(), Rejected> {
         let mut ledger = self.ledger.lock().unwrap();
+        if self.built_in_bridge.matches(reference) {
+            return Err(Rejected(
+                403,
+                "the built-in bridge cannot be removed".into(),
+            ));
+        }
         if !ledger
             .network
             .as_ref()
@@ -919,11 +950,12 @@ impl Owner {
         {
             return Err(Rejected(404, "private bridge was not found".into()));
         }
-        if ledger
-            .active
-            .iter()
-            .any(|item| item.state().network.is_some())
-        {
+        if ledger.active.iter().any(|item| {
+            item.state()
+                .network
+                .as_ref()
+                .is_some_and(|entry| entry.network.scope == BridgeScope::Custom)
+        }) {
             return Err(Rejected(
                 409,
                 "private bridge still has attached containers".into(),
@@ -954,16 +986,14 @@ impl Owner {
                 "private bridge is draining or unresolved".into(),
             ));
         }
-        let network = ledger
-            .network
-            .as_ref()
-            .filter(|entry| entry.matches(reference))
+        let network = self
+            .find_network(&ledger, reference)
             .ok_or_else(|| Rejected(404, "private bridge was not found".into()))?;
         let attachment = endpoint
             .map(|endpoint| network::Attachment::new(network, endpoint, &item.container.name))
             .transpose()?;
         if let Some(entry) = &attachment {
-            Self::check_network_aliases(&ledger, &entry.aliases)?;
+            Self::check_network_aliases(&ledger, entry)?;
         }
         let mut state = item.state();
         if state.removed || state.error.is_some() {
@@ -976,6 +1006,17 @@ impl Owner {
             return Err(Rejected(
                 409,
                 "container already has that network disposition".into(),
+            ));
+        }
+        if attachment.is_none()
+            && state
+                .network
+                .as_ref()
+                .is_some_and(|entry| entry.network.id != network.id)
+        {
+            return Err(Rejected(
+                404,
+                "container is not attached to that bridge".into(),
             ));
         }
         if state.started && state.terminal.is_none() {
@@ -993,12 +1034,15 @@ impl Owner {
                 .ok_or_else(|| Rejected(409, "container launch is still pending".into()))?;
             let operation = attachment.as_ref().map_or_else(
                 || json!({"action":"disconnect","handle":handle}),
-                |entry| json!({"action":"connect","handle":handle,"alias":entry.aliases[0]}),
+                |entry| {
+                    json!({"action":"connect","handle":handle,"alias":entry.aliases[0],
+                    "scope":entry.network.scope})
+                },
             );
             let reply = self.exchange_network(operation)?;
             let address = reply["network_address"]
                 .as_str()
-                .map(checked_network_address)
+                .map(|address| checked_network_address(address, network.scope))
                 .transpose();
             match address {
                 Ok(address) if address.is_some() == attachment.is_some() => {
@@ -1329,9 +1373,14 @@ impl Owner {
                 })
             })
             .transpose()?;
-        let network = network::configured(&config, ledger.network.as_ref(), &name)?;
+        let network = network::configured(
+            &config,
+            &self.built_in_bridge,
+            ledger.network.as_ref(),
+            &name,
+        )?;
         if let Some(attachment) = &network {
-            Self::check_network_aliases(&ledger, &attachment.aliases)?;
+            Self::check_network_aliases(&ledger, attachment)?;
         }
         let publication = port::RequestedPort::parse(&config)?;
         if publication.is_some() {
@@ -1492,7 +1541,7 @@ impl Owner {
         item.container.cancel.store(0, Ordering::Release);
         let spec = state.network.as_ref().map(|attachment| {
             let mut spec = item.container.spec.clone();
-            spec["network"] = json!("bridge");
+            spec["network"] = json!(attachment.network.scope.wire_mode());
             spec["network_alias"] = json!(attachment.aliases[0]);
             if let Some(alias) = attachment.aliases.get(1) {
                 spec["secondary_network_alias"] = json!(alias);

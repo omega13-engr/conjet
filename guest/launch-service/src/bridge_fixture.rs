@@ -178,6 +178,30 @@ impl Route {
         )
     }
 
+    fn default_route(&mut self, index: u32, gateway: Ipv4Addr) -> io::Result<()> {
+        let mut message = vec![
+            libc::AF_INET as u8,
+            0,
+            0,
+            0,
+            libc::RT_TABLE_MAIN,
+            libc::RTPROT_STATIC,
+            libc::RT_SCOPE_UNIVERSE,
+            libc::RTN_UNICAST,
+            0,
+            0,
+            0,
+            0,
+        ];
+        attribute(&mut message, libc::RTA_OIF, &index.to_ne_bytes());
+        attribute(&mut message, libc::RTA_GATEWAY, &gateway.octets());
+        self.request(
+            libc::RTM_NEWROUTE,
+            (libc::NLM_F_CREATE | libc::NLM_F_EXCL) as u16,
+            &message,
+        )
+    }
+
     fn remove(&mut self, index: u32) -> io::Result<()> {
         self.request(libc::RTM_DELLINK, 0, &link_message(index, 0))
     }
@@ -431,11 +455,12 @@ struct SharedLinks {
     route: Route,
     bridge: u32,
     namespace: File,
+    scope: crate::spec::BridgeScope,
     ports: [Option<BridgePort>; 8],
 }
 
 impl SharedLinks {
-    fn create() -> io::Result<Self> {
+    fn create(scope: crate::spec::BridgeScope) -> io::Result<Self> {
         checked(unsafe { libc::unshare(libc::CLONE_NEWNET) })?;
         let mut route = Route::open()?;
         let namespace = File::open("/proc/thread-self/ns/net")?;
@@ -444,12 +469,13 @@ impl SharedLinks {
             route,
             bridge,
             namespace,
+            scope,
             ports: Default::default(),
         };
         links.route.configure_link(bridge, true, &[])?;
         links
             .route
-            .address_with_prefix(bridge, BRIDGE_IP, SHARED_PREFIX)?;
+            .address_with_prefix(bridge, scope.gateway(), SHARED_PREFIX)?;
         Ok(links)
     }
 
@@ -490,7 +516,7 @@ impl SharedLinks {
             ));
         }
         let name = CString::new(format!("cjport{slot}")).expect("numeric link name");
-        let address = Ipv4Addr::new(198, 18, 0, 2 + slot as u8);
+        let address = Ipv4Addr::new(198, 18, self.scope.subnet(), 2 + slot as u8);
         let index = self.route.attach_peer(&name, &target)?;
         *owner = Some(BridgePort {
             index,
@@ -512,7 +538,11 @@ impl SharedLinks {
                 let peer = interface_index(PEER)?;
                 route.configure_link(peer, true, &[])?;
                 route.configure_link(interface_index(c"lo")?, true, &[])?;
-                route.address_with_prefix(peer, address, SHARED_PREFIX)
+                route.address_with_prefix(peer, address, SHARED_PREFIX)?;
+                if self.scope == crate::spec::BridgeScope::BuiltIn {
+                    route.default_route(peer, self.scope.gateway())?;
+                }
+                Ok(())
             });
             enter_namespace(&self.namespace)?;
             configured
@@ -610,11 +640,11 @@ pub(crate) struct NetworkOwner {
 }
 
 impl NetworkOwner {
-    pub(crate) fn new() -> io::Result<Self> {
+    pub(crate) fn new(scope: crate::spec::BridgeScope) -> io::Result<Self> {
         let original = File::open("/proc/thread-self/ns/net")?;
         let setup = (|| {
-            let links = SharedLinks::create()?;
-            let dns = UdpSocket::bind((BRIDGE_IP, DNS_PORT))?;
+            let links = SharedLinks::create(scope)?;
+            let dns = UdpSocket::bind((scope.gateway(), DNS_PORT))?;
             dns.set_nonblocking(true)?;
             Ok::<_, io::Error>((links, dns))
         })();
@@ -898,7 +928,7 @@ pub fn check_shared() -> io::Result<()> {
     }
     let _proc = crate::kernel_fixture::ProcMount::new()?;
     let untouched = File::open("/proc/self/ns/net")?;
-    let mut bridge = SharedLinks::create()?;
+    let mut bridge = SharedLinks::create(crate::spec::BridgeScope::Custom)?;
     let dns = UdpSocket::bind((BRIDGE_IP, DNS_PORT))?;
     dns.set_read_timeout(Some(TIMEOUT))?;
     let target =

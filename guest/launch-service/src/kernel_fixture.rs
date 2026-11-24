@@ -155,7 +155,12 @@ pub fn run_helper(
         let spec = args.next().ok_or("missing OCI process spec")?;
         let spec: crate::spec::LaunchSpec =
             serde_json::from_str(spec.to_str().ok_or("invalid OCI process spec")?)?;
-        if spec.network != network.to_string_lossy() || spec.limits != limits || prepared {
+        let expected_network = if spec.bridge_scope().is_some() {
+            "bridge"
+        } else {
+            "none"
+        };
+        if network != expected_network || spec.limits != limits || prepared {
             return Err("invalid OCI helper limits or mode".into());
         }
         Some(spec)
@@ -484,7 +489,7 @@ fn clone_and_reap(
                 bridge.attach(pid)?;
                 inject(mode, "fault-bridge-child");
             }
-            if process.is_some_and(|spec| spec.network == "bridge") {
+            if process.is_some_and(|spec| spec.bridge_scope().is_some()) {
                 attach_private_peer(pid)?;
             }
             if controlled {

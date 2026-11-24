@@ -975,6 +975,33 @@ alongside the existing custom internal bridge, default-route metadata
 and cleanup. Run the original no-network and bridge lifecycle fixtures
 with their existing resources, commands and outputs.
 
+Evidence: Both bridges owned live endpoints simultaneously, with distinct
+subnets, resolver addresses and endpoint inventories. The built-in
+resolver returned NXDOMAIN for a custom alias. A corrective release
+normalized the OCI scope at the helper boundary. All twelve original
+API/CLI and network canaries passed once, including exact output,
+exit status and unique teardown witnesses. This is a correctness canary.
+The private boot has no external uplink. Logs are under `SPEED-110/`.
+
+### SPEED-111
+
+Title: Apply explicit native OCI resources and Docker control defaults
+
+Acceptance: Apply the existing frozen explicit memory, PID and CPU
+settings to the workload cgroup. Accept omitted resource options with
+the native engine's documented effective policy, and report and verify
+the resulting bounds. Preserve static fixture restrictions and Core
+admission, pressure recovery and idle shrink.
+
+### SPEED-112
+
+Title: Keep admitted Docker services alive through bounded control waits
+
+Acceptance: Verify a detached native service remains available beyond
+the current setup tracking deadline. Separate startup, running and
+teardown waits. Preserve service cancellation, output draining,
+generation ownership and release cleanup.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

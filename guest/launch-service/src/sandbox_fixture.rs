@@ -27,7 +27,7 @@ pub(crate) struct Sandbox {
     root: RootMode,
     cwd: CString,
     filter: WorkloadFilter,
-    configure_resolver: bool,
+    resolver: Option<std::net::Ipv4Addr>,
     stdin: File,
     volume: Option<VolumeBinding>,
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
@@ -201,7 +201,9 @@ impl Sandbox {
                     ))?),
                 },
                 filter: WorkloadFilter::new(bridge),
-                configure_resolver: bridge && oci.is_some(),
+                resolver: oci
+                    .and_then(|spec| spec.bridge_scope())
+                    .map(|scope| scope.gateway()),
                 stdin: File::open("/dev/null")?,
                 volume: oci
                     .and_then(|spec| spec.volume.as_ref())
@@ -343,11 +345,12 @@ impl Sandbox {
             "working directory",
             security::checked(unsafe { libc::chdir(self.cwd.as_ptr()) }),
         )?;
-        if self.configure_resolver {
-            if !std::fs::symlink_metadata("/etc")?.is_dir() {
-                return Err(io::Error::other(
-                    "networked image requires an /etc directory",
-                ));
+        if let Some(gateway) = self.resolver {
+            match fs::symlink_metadata("/etc") {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Err(io::Error::other("invalid networked image /etc directory")),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir("/etc")?,
+                Err(error) => return Err(error),
             }
             match std::fs::remove_file("/etc/resolv.conf") {
                 Ok(()) => {}
@@ -355,8 +358,10 @@ impl Sandbox {
                 Err(error) => return Err(error),
             }
             use std::io::Write;
-            File::create_new("/etc/resolv.conf")?
-                .write_all(crate::bridge_fixture::RESOLVER_CONFIG.as_bytes())?;
+            writeln!(
+                File::create_new("/etc/resolv.conf")?,
+                "nameserver {gateway}"
+            )?;
         }
         // Only stdio may survive. The fixture's syscall code needs no inherited directory handle.
         if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } != 0 {

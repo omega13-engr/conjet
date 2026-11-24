@@ -1,4 +1,7 @@
+use conjet_launch_service::handshake::hex;
+use conjet_launch_service::spec::BridgeScope;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::request::{falsey, name, object, options};
 use super::{Owner, Rejected};
@@ -7,6 +10,7 @@ use super::{Owner, Rejected};
 pub(super) struct Network {
     pub id: String,
     pub name: String,
+    pub scope: BridgeScope,
     pub(super) labels: Value,
 }
 
@@ -17,6 +21,15 @@ pub(super) struct Attachment {
 }
 
 impl Network {
+    pub(super) fn built_in(boot: &str) -> Self {
+        Self {
+            id: hex(&Sha256::digest(format!("conjet-docker-bridge/{boot}"))),
+            name: "bridge".into(),
+            scope: BridgeScope::BuiltIn,
+            labels: json!({}),
+        }
+    }
+
     pub(super) fn new(data: &Value, id: String) -> Result<Self, Rejected> {
         let fields = object(data, "network creation body")?
             .ok_or_else(|| Rejected::bad("expected network creation body"))?;
@@ -60,6 +73,7 @@ impl Network {
         Ok(Self {
             id,
             name: name.to_owned(),
+            scope: BridgeScope::Custom,
             labels,
         })
     }
@@ -72,7 +86,8 @@ impl Network {
         json!({
             "Name": self.name, "Id": self.id, "Scope":"local", "Driver":"bridge",
             "EnableIPv4":true, "EnableIPv6":false, "Internal":true, "Attachable":false,
-            "IPAM":{"Driver":"default","Config":[{"Subnet":"198.18.0.0/28","Gateway":"198.18.0.1"}]},
+            "IPAM":{"Driver":"default","Config":[
+                {"Subnet":format!("198.18.{}.0/28", self.scope.subnet()),"Gateway":self.scope.gateway().to_string()}]},
             "Labels":self.labels, "Containers":endpoints
         })
     }
@@ -123,24 +138,30 @@ impl Attachment {
 
     pub(super) fn inspect(&self, address: Option<&str>) -> Value {
         json!({"NetworkID":self.network.id, "Aliases":self.aliases,
-               "Gateway":address.map_or("", |_| "198.18.0.1"), "IPAddress":address.unwrap_or(""),
+               "Gateway":address.map(|_| self.network.scope.gateway().to_string()).unwrap_or_default(),
+               "IPAddress":address.unwrap_or(""),
                "IPPrefixLen":address.map_or(0, |_| 28)})
     }
 }
 
 pub(super) fn configured(
     data: &Value,
-    network: Option<&Network>,
+    built_in: &Network,
+    custom: Option<&Network>,
     name: &str,
 ) -> Result<Option<Attachment>, Rejected> {
-    let mode = data["HostConfig"]["NetworkMode"]
-        .as_str()
-        .ok_or_else(|| Rejected::bad("require an explicit network mode"))?;
+    let mode = match &data["HostConfig"]["NetworkMode"] {
+        Value::Null => "bridge",
+        Value::String(mode) if matches!(mode.as_str(), "" | "default") => "bridge",
+        Value::String(mode) => mode,
+        _ => return Err(Rejected::bad("invalid Docker network mode")),
+    };
     if mode == "none" {
         return Ok(None);
     }
-    let network = network
-        .filter(|network| network.matches(mode))
+    let network = std::iter::once(built_in)
+        .chain(custom)
+        .find(|network| network.matches(mode))
         .ok_or_else(|| Rejected::bad("unknown private bridge or unsupported network mode"))?;
     let config = &data["NetworkingConfig"];
     if let Some(fields) = object(config, "networking configuration")? {
@@ -155,7 +176,9 @@ pub(super) fn configured(
             ));
         }
         for (reference, data) in endpoints {
-            if !network.matches(reference) {
+            if !network.matches(reference)
+                && !(network.scope == BridgeScope::BuiltIn && reference == "default")
+            {
                 return Err(Rejected::bad(
                     "only one private bridge endpoint is supported",
                 ));
@@ -220,13 +243,14 @@ mod tests {
             "HostConfig":{"NetworkMode":"isolated"},
             "NetworkingConfig":{"EndpointsConfig":{"isolated":{"Aliases":["service"]}}}
         });
-        let entry = configured(&request, Some(&network), "default")
+        let built_in = Network::built_in("test");
+        let entry = configured(&request, &built_in, Some(&network), "default")
             .unwrap()
             .unwrap();
         assert_eq!(entry.aliases, ["service"]);
-        assert!(configured(&request, None, "default").is_err());
+        assert!(configured(&request, &built_in, None, "default").is_err());
         request["NetworkingConfig"]["EndpointsConfig"][&id] = json!({});
-        assert!(configured(&request, Some(&network), "default").is_err());
+        assert!(configured(&request, &built_in, Some(&network), "default").is_err());
         let two =
             Attachment::new(&network, &json!({"Aliases":["first","second"]}), "default").unwrap();
         assert_eq!(two.aliases, ["first", "second"]);
@@ -237,5 +261,28 @@ mod tests {
             assert!(Attachment::new(&network, &json!({"Aliases":names}), "default").is_err());
         }
         assert!(Attachment::new(&network, &json!({"Aliases":["../outside"]}), "default").is_err());
+    }
+
+    #[test]
+    fn resolves_default_modes_only_to_the_built_in_bridge() {
+        let built_in = Network::built_in("test");
+        let custom =
+            Network::new(&json!({"Name":"private","Internal":true}), "a".repeat(64)).unwrap();
+        for mode in [
+            Value::Null,
+            json!(""),
+            json!("default"),
+            json!("bridge"),
+            json!(built_in.id),
+        ] {
+            let data = json!({"HostConfig":{"NetworkMode":mode}});
+            let attached = configured(&data, &built_in, Some(&custom), "workload")
+                .unwrap()
+                .unwrap();
+            assert_eq!(attached.network.scope, BridgeScope::BuiltIn);
+        }
+        let data = json!({"HostConfig":{"NetworkMode":"bridge"},
+            "NetworkingConfig":{"EndpointsConfig":{"private":{}}}});
+        assert!(configured(&data, &built_in, Some(&custom), "workload").is_err());
     }
 }

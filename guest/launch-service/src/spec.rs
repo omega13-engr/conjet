@@ -74,6 +74,33 @@ pub struct ResourceLimits {
     pub cpu_millicores: u32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeScope {
+    Custom,
+    BuiltIn,
+}
+
+impl BridgeScope {
+    pub const fn subnet(self) -> u8 {
+        match self {
+            Self::Custom => 0,
+            Self::BuiltIn => 1,
+        }
+    }
+
+    pub const fn gateway(self) -> std::net::Ipv4Addr {
+        std::net::Ipv4Addr::new(198, 18, self.subnet(), 1)
+    }
+
+    pub const fn wire_mode(self) -> &'static str {
+        match self {
+            Self::Custom => "bridge",
+            Self::BuiltIn => "default_bridge",
+        }
+    }
+}
+
 pub fn valid_network_alias(alias: &str) -> bool {
     crate::bridge_dns::valid_name(alias)
 }
@@ -159,6 +186,14 @@ impl LaunchRequest {
 }
 
 impl LaunchSpec {
+    pub fn bridge_scope(&self) -> Option<BridgeScope> {
+        match self.network.as_str() {
+            "bridge" => Some(BridgeScope::Custom),
+            "default_bridge" => Some(BridgeScope::BuiltIn),
+            _ => None,
+        }
+    }
+
     pub(crate) fn fixture_identity(&self) -> bool {
         self.uid == WORKLOAD_UID && self.gid == WORKLOAD_GID
     }
@@ -234,10 +269,11 @@ impl LaunchSpec {
         {
             return Err(SpecError::Identity);
         }
-        if !matches!(spec.network.as_str(), "none" | "bridge")
+        let bridge = spec.bridge_scope().is_some();
+        if (spec.network != "none" && !bridge)
             || spec
                 .aliases()
-                .any(|alias| spec.network != "bridge" || !valid_network_alias(alias))
+                .any(|alias| !bridge || !valid_network_alias(alias))
             || spec.secondary_network_alias.as_ref().is_some_and(|second| {
                 spec.network_alias
                     .as_ref()
