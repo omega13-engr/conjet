@@ -89,86 +89,8 @@ retain their old acceptance criteria for research provenance.
 
 ## BACKLOG
 
-### SPEED-052
 
-Title: Test quiet-dwell scheduling for routine stream-triggered reclaim
 
-Description: Implement an isolated A/B candidate that coalesces stream-completion reclaim hints until the existing quiet dwell and guest safety checks.
-
-Is blocked by task: SPEED-050 attribution; SPEED-051 before qualification.
-
-Acceptance Criteria:
-
-- Record current versus candidate reclaim counts and launch timings in two alternating release A/B boot pairs, 200 timed launches and ten warmups per leg.
-- Preserve pressure reclaim, balloon growth/shrink, ownership checks and active-data canaries. Demonstrate pressure response during churn and idle convergence within the existing configured deadline.
-- Add deterministic tests for generation invalidation, repeated stream completions, pressure bypass, idle submission and cancellation races. No new persistent worker or fixed-RAM mode.
-- Accept only with measured improvement and passing dynamic-memory gates; otherwise record rejection and retain current scheduling.
-
-Problem and Evidence: The boot loop requests routine reclaim for completed stream phases and workloads. Source proves scheduling coupling, not that reclaim causes SPEED-049 latency.
-
-Approach: Change only routine hint scheduling in CoreMemoryController/schedule_guest_memory_reclaim; retain one pending hint, existing pressure policy and current quiet dwell. Measure observer-free performance separately from diagnostics.
-
-Evidence: Pending. Architecture/source review only; no candidate benchmark has run.
-
-Source: jetstream/src/hvf/boot.rs; guest/image/conjet-core/src/conjet-memd.c; architecture section 2. See [architecture](retained-docker-latency-architecture.md).
-
-Review: Pending implementation or documented experiment rejection and evidence review.
-
-Next Action: Inspect SPEED-050 reclaim overlap and freeze the single-variable A/B configuration.
-
-### SPEED-053
-
-Title: Resolve a measured response write-readiness stall
-
-Description: Test conditional writable notification for queued VSOCK response bytes after WouldBlock.
-
-Is blocked by task: SPEED-050 response spans; SPEED-052 accepted or rejected decision.
-
-Acceptance Criteria:
-
-- First show whether final response writes stall after WouldBlock. If absent, document the negative result and make no watcher change.
-- If present, arm write readiness only while bytes remain; wake the existing queue owner, disarm after drain and remove stale registrations before descriptor reuse.
-- Pass slow-reader, partial-write, EOF/half-close, credit-exhaustion, cancellation and descriptor-reuse tests; retain the 25 ms fallback tick.
-- Run two alternating 200-launch release A/B pairs with ten warmups per leg, zero failures, cleanup and unchanged dynamic-memory behavior. Record reject/accept without a parity claim.
-
-Problem and Evidence: NativeEventQueue::watch registers EVFILT_READ; flush_host_output stops on WouldBlock. The frequency and cost in SPEED-049 are unknown.
-
-Approach: Add a bounded writable subscription only if traces establish the stall; preserve single-owner byte movement and existing shutdown framing.
-
-Evidence: Pending. Architecture/source review only; no candidate benchmark has run.
-
-Source: jetstream/src/devices/vsock.rs: NativeEventQueue::watch, flush_host_output, finish_guest_shutdown_if_drained. See [architecture](retained-docker-latency-architecture.md).
-
-Review: Pending implementation or documented experiment rejection and evidence review.
-
-Next Action: Check response traces before modifying readiness registrations.
-
-### SPEED-054
-
-Title: Evaluate persistent ordinary Docker HTTP relay connections
-
-Description: Measure connection churn, then conditionally support sequential HTTP requests on one downstream/upstream connection.
-
-Is blocked by task: SPEED-052 and SPEED-053 decisions; SPEED-050 local/forwarded comparison.
-
-Acceptance Criteria:
-
-- Measure fresh and reused connections separately with guest-local and forwarded controls. If churn is immaterial, record rejection without modifying the relay.
-- For an accepted implementation, parse and apply existing create/build cgroup policy on every request. Preserve framing, close semantics and bounded buffering; never multiplex clients onto one upstream connection.
-- Pass multiple-request, chunked/trailer, HEAD/no-body, informational response, malformed input, disconnect, attach/upgrade and build-stream tests. Ensure events/idle keep-alive do not pin peak memory.
-- Use the unchanged frozen lifecycle harness for two alternating 200-launch release A/B pairs with ten warmups per leg; report reusable-client diagnostics separately. Preserve pressure and idle-memory gates.
-
-Problem and Evidence: handle_docker_proxy creates a dockerd connection per accepted stream and ordinary-response handling forces Connection: close. Removing headers alone would break its one-transaction state model.
-
-Approach: Implement sequential framed ordinary transactions only after measured benefit. Keep streaming/upgraded connections dedicated and update transport phase accounting independently of container lifetime.
-
-Evidence: Pending. Architecture/source review only; no candidate benchmark has run.
-
-Source: guest/image/conjet-core/src/conjet-netd.c; guest/image/conjet-core/tests/conjet-netd-chunked-decoder-regression.c; jetstream/src/devices/vsock.rs. See [architecture](retained-docker-latency-architecture.md).
-
-Review: Pending implementation or documented experiment rejection and evidence review.
-
-Next Action: Measure connection setup contribution before selecting implementation.
 
 ### SPEED-055
 
@@ -758,6 +680,101 @@ then rerun the original matrix. Experimental release proceeds under local
 acceptance without changing the SPEED-008 verdict.
 
 ## UNDERREVIEW
+
+### SPEED-054
+
+Title: Evaluate persistent ordinary Docker HTTP relay connections
+
+Description: Measure connection churn, then conditionally support sequential HTTP requests on one downstream/upstream connection.
+
+Is blocked by task: SPEED-052 and SPEED-053 decisions; SPEED-050 local/forwarded comparison.
+
+Acceptance Criteria:
+
+- Measure fresh and reused connections separately with guest-local and forwarded controls. If churn is immaterial, record rejection without modifying the relay.
+- For an accepted implementation, parse and apply existing create/build cgroup policy on every request. Preserve framing, close semantics and bounded buffering; never multiplex clients onto one upstream connection.
+- Pass multiple-request, chunked/trailer, HEAD/no-body, informational response, malformed input, disconnect, attach/upgrade and build-stream tests. Ensure events/idle keep-alive do not pin peak memory.
+- Use the unchanged frozen lifecycle harness for two alternating 200-launch release A/B pairs with ten warmups per leg; report reusable-client diagnostics separately. Preserve pressure and idle-memory gates.
+
+Problem and Evidence: handle_docker_proxy creates a dockerd connection per accepted stream and ordinary-response handling forces Connection: close. Removing headers alone would break its one-transaction state model.
+
+Approach: Implement sequential framed ordinary transactions only after measured benefit. Keep streaming/upgraded connections dedicated and update transport phase accounting independently of container lifetime.
+
+Evidence: [Fresh and reuse-intent ping controls](docker-benchmark-results.md#speed-054-http-connection-churn).
+Guest-local reuse eliminated timed dials and reduced the untraced
+ping medians by roughly 0.03–0.04 ms. The forwarded path reconnected
+with both client settings. It has no persistent trial. The observed
+connection cost did not justify implementing ordinary HTTP persistence.
+
+Source: `guest/image/conjet-core/src/conjet-netd.c` and the SPEED-050 ping records.
+
+Review: Declined an implementation after the controls. The
+frozen qualification client remains the same.
+
+Next Action: Review the bounded decision.
+
+### SPEED-053
+
+Title: Resolve a measured response write-readiness stall
+
+Description: Test conditional writable notification for queued VSOCK response bytes after WouldBlock.
+
+Is blocked by task: SPEED-050 response spans; SPEED-052 accepted or rejected decision.
+
+Acceptance Criteria:
+
+- First show whether final response writes stall after WouldBlock. If absent, document the negative result and make no watcher change.
+- If present, arm write readiness only while bytes remain; wake the existing queue owner, disarm after drain and remove stale registrations before descriptor reuse.
+- Pass slow-reader, partial-write, EOF/half-close, credit-exhaustion, cancellation and descriptor-reuse tests; retain the 25 ms fallback tick.
+- Run two alternating 200-launch release A/B pairs with ten warmups per leg, zero failures, cleanup and unchanged dynamic-memory behavior. Record reject/accept without a parity claim.
+
+Problem and Evidence: NativeEventQueue::watch registers EVFILT_READ; flush_host_output stops on WouldBlock. The frequency and cost in SPEED-049 are unknown.
+
+Approach: Add a bounded writable subscription only if traces establish the stall; preserve single-owner byte movement and existing shutdown framing.
+
+Evidence: [Tagged response write investigation](docker-benchmark-results.md#speed-053-response-write-readiness).
+Two traced boots observed all 96 timed tagged lifecycle writes and
+48 timed ping writes. Neither boot recorded a client WouldBlock.
+
+Source: `jetstream/src/devices/vsock.rs` and the SPEED-050 tag logs.
+
+Review: Negative finding for these short responses. A writable
+watcher was not warranted.
+
+Next Action: Review the bounded negative finding.
+
+### SPEED-052
+
+Title: Test quiet-dwell scheduling for routine stream-triggered reclaim
+
+Description: Implement an isolated A/B candidate that coalesces stream-completion reclaim hints until the existing quiet dwell and guest safety checks.
+
+Is blocked by task: SPEED-050 attribution; SPEED-051 before qualification.
+
+Acceptance Criteria:
+
+- Record current versus candidate reclaim counts and launch timings in two alternating release A/B boot pairs, 200 timed launches and ten warmups per leg.
+- Preserve pressure reclaim, balloon growth/shrink, ownership checks and active-data canaries. Demonstrate pressure response during churn and idle convergence within the existing configured deadline.
+- Add deterministic tests for generation invalidation, repeated stream completions, pressure bypass, idle submission and cancellation races. No new persistent worker or fixed-RAM mode.
+- Accept only with measured improvement and passing dynamic-memory gates; otherwise record rejection and retain current scheduling.
+
+Problem and Evidence: The boot loop requests routine reclaim for completed stream phases and workloads. Source proves scheduling coupling, not that reclaim causes SPEED-049 latency.
+
+Approach: Change only routine hint scheduling in CoreMemoryController/schedule_guest_memory_reclaim; retain one pending hint, existing pressure policy and current quiet dwell. Measure observer-free performance separately from diagnostics.
+
+Evidence: [Two alternating release A/B pairs](docker-benchmark-results.md#speed-052-routine-reclaim-ab).
+The variant reduced 26 routine submissions to zero in each timed
+window. It failed to improve latency or throughput consistently.
+All four runs passed live-data and backing checks and converged to
+512 MiB. The allocation held a 512 MiB buffer at full VM capacity.
+Independent pressure-driven growth was outside this check.
+
+Source: Temporary patch and raw artifacts in `conjet-speedup-evidence/SPEED-052`.
+
+Review: Rejected after measurement. The production scheduling code
+remains at the retained baseline.
+
+Next Action: Review the rejected decision and retain the A/B artifacts.
 
 ### SPEED-050
 

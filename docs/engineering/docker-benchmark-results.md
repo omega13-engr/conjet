@@ -9,6 +9,81 @@ boundary. SPEED-008 remains unresolved.
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Native OCI research scope](docker-native-adapter.md)
 
+## SPEED-053 response write readiness
+
+The two SPEED-050 traced boots recorded 96 tagged measured lifecycle
+responses and 48 measured ping responses. The bridge completed every
+tagged write and emitted no `client_write_blocked` observation. Start
+was dominated by time before the first dockerd response. Wait's longer
+first-to-last span also appeared on the guest relay clock. This workload
+did not justify a writable watcher. The existing readiness and 25 ms
+recovery tick are retained. This decision covers the measured short
+responses. [Tagged timings and evidence](#speed-050-guest-local-retained-docker-lifecycle)
+
+## SPEED-054 HTTP connection churn
+
+The SPEED-050 diagnostic client sent 12 timed `_ping` requests per
+fresh/reuse-intent variant in each boot after four warmups. Within the
+guest, the persistent client dialed zero times during the measured
+window, compared with 12 dials for the fresh client. The untraced
+guest-local latency medians were 0.150 versus 0.118 ms and 0.123 versus
+0.085 ms. Forwarded requests reopened the connection on every operation
+with either client setting. The forwarded fresh medians were 1.187 and
+2.500 ms, and reuse-intent medians were 1.886 and 1.301 ms. The relay's
+ordinary response closes the connection, so none of the forwarded
+results measures a genuinely persistent relay. The small local
+connection effect and dominant guest start stage did not justify adding
+an ordinary HTTP keep-alive state machine. No relay persistence
+candidate was selected. [Tagged timings and evidence](#speed-050-guest-local-retained-docker-lifecycle)
+
+## SPEED-052 routine reclaim A/B
+
+Two independent alternating boot pairs compared the SPEED-049
+event-wake VMM with a disposable release VMM built from `62c7cde`
+plus the preserved experimental patch. The variant coalesces
+ordinary stream-triggered reclaim into the existing idle transition.
+New classified workload activity invalidates the hint. A
+generation-matched guest safety probe must allow the idle target.
+The independent pressure and balloon ownership paths remain in the
+variant. Tracing was disabled for these boots.
+
+Each leg timed 200 serial API launches after ten warmups on the
+pinned four-PID Alpine fixture. Two 64 MiB live-data canaries ran
+through the churn. A separate check held the existing 512 MiB
+fixture allocation for 20 more launches. All 800 timed launches,
+40 warmups and 80 allocation-held launches succeeded.
+
+| Pair and order | VMM | p50 / p95 / p99 (ms) | Launches/s | Reclaim submissions during timed window | Runtime CPU delta (s) | Highest footprint snapshot (MiB) | Idle convergence (s) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 first | Baseline | 124.672 / 158.641 / 182.047 | 7.783 | 26 | 41.70 | 1623.86 | 6.074 |
+| 1 second | Variant | 127.559 / 165.586 / 185.936 | 7.687 | 0 | 42.50 | 1637.43 | 6.080 |
+| 2 first | Variant | 129.887 / 161.107 / 173.129 | 7.605 | 0 | 41.22 | 1620.96 | 6.100 |
+| 2 second | Baseline | 130.251 / 158.651 / 173.173 | 7.613 | 26 | 42.04 | 1622.83 | 6.117 |
+
+Runtime CPU deltas include setup, the allocation fixture and idle
+observation. Footprints are discrete samples. All measured windows
+started at 2,048 MiB. The canaries verified every retained byte,
+verified and released the 512 MiB allocation, and verified demand-zero
+reuse. All fixtures exited cleanly. The balloon converged at the
+existing 512 MiB idle target in all four boots. Sampled ledgers
+reported zero unauthorized backing releases. The entitled partial
+and immediate backing-release tests passed. Capacity was already
+2,048 MiB during the live allocation. This check did not exercise
+an independent low-capacity pressure expansion.
+
+The variant eliminated timed reclaim submissions but produced no
+repeatable latency benefit. Both p95 values were higher and
+throughput fell in both pairs. The variant was rejected. The sampled
+memory checks do not establish full pressure-response qualification.
+
+The baseline VMM SHA-256 was
+`518c6f84ce30124e7d79cc69fe191df20c82be070ee568191c4e026e52d9642a`.
+The variant VMM SHA-256 was
+`4c512a7ff8fa44d44800a2d4b635ed2b46238e6ed76064ec10246888081b14d1`.
+Raw samples, results, the patch, memory snapshots and cleanup
+witnesses are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-052`.
+
 ## SPEED-051 four-PID CLI failure capture
 
 Two bounded diagnostics ran the pinned SPEED-049 CLI fixture against
