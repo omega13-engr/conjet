@@ -24,7 +24,7 @@ SCRATCH = SSD / 'dev_workspace/tmp'
 REPO = Path(__file__).resolve().parents[1]
 CONTEXT = 'conjet-speedup'
 DOCKER = Path('/opt/homebrew/bin/docker')
-VOLUME_DIAGNOSTICS = ('volume-disk', 'mounted-volume', 'compose')
+VOLUME_DIAGNOSTICS = ('volume-disk', 'mounted-volume', 'compose', 'build-snapshot')
 CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'admission-trace', *VOLUME_DIAGNOSTICS)
 
 
@@ -488,6 +488,9 @@ def native_session(args, root):
             markers.append('etc/conjet/native-volume')
             info = volume_disk.stat()
             report['volume_disk'] = {'path': str(volume_disk), 'device': info.st_dev, 'inode': info.st_ino}
+        if args.diagnostics == 'build-snapshot':
+            vm_command.append('--build-snapshot-disk')
+            markers.append('etc/conjet/native-build-snapshot')
         report['vm_command'] = list(map(str, vm_command))
         with (output / 'vmm.stderr').open('w') as log:
             vm = subprocess.Popen(vm_command, env=env, stdin=subprocess.DEVNULL,
@@ -604,6 +607,9 @@ def native_session(args, root):
             elif args.diagnostics == 'compose':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-compose.py'))
                 diagnostic['collect'](endpoint, bridge.pid, output, docker, env, args.native_compose_cli)
+            elif args.diagnostics == 'build-snapshot':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-build-snapshot.py'))
+                diagnostic['collect'](directory, vm.pid, output)
             elif args.diagnostics in ('oci', 'oci-import'):
                 oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
                 oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
@@ -710,7 +716,8 @@ def main():
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
-                                                  'volume-disk', 'mounted-volume', 'admission-trace', 'compose'),
+                                                  'volume-disk', 'mounted-volume', 'admission-trace', 'compose',
+                                                  'build-snapshot'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
@@ -749,7 +756,7 @@ def main():
         if (not args.native_volume_disk
                 or args.native_volume_disk.resolve(strict=True) != args.native_volume_disk):
             parser.error('volume diagnostics require a canonical private disk path')
-        if (args.diagnostics == 'compose') == bool(args.volume_phase):
+        if (args.diagnostics in ('volume-disk', 'mounted-volume')) != bool(args.volume_phase):
             parser.error('only volume disk and mount diagnostics require a phase')
         if args.diagnostics == 'mounted-volume' and args.volume_phase == 'remove':
             parser.error('mounted volume diagnostics recover and remove in the inspect phase')

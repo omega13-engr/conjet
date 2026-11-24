@@ -176,7 +176,23 @@ pub(crate) mod guest {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             };
-            let disk = Mount::open(source, ROOT, c"ext4", base_flags | libc::MS_NODEV)?;
+            let build_root = Path::new(crate::build_snapshot::MARKER).try_exists()?;
+            let (target, flags) = if build_root {
+                (
+                    crate::build_snapshot::guest::ROOT,
+                    libc::MS_NOSUID | libc::MS_NODEV,
+                )
+            } else {
+                (ROOT, base_flags | libc::MS_NODEV)
+            };
+            let disk = Mount::open(source, target, c"ext4", flags)?;
+            if build_root {
+                let info = fs::symlink_metadata(path(target))?;
+                if !info.is_dir() || info.uid() != 0 || info.mode() & 0o022 != 0 {
+                    return Err(io::Error::other("invalid native build workspace ownership"));
+                }
+                return Ok(Some(Self { disk, devices }));
+            }
             match DirBuilder::new().mode(0o700).create(VOLUMES) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}

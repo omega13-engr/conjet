@@ -84,6 +84,9 @@ pub(super) struct Options {
         conflicts_with = "core_pressure_fixture"
     )]
     volume_disk: Option<PathBuf>,
+    /// Mount the leased disk as a private BuildKit workspace for diagnostics.
+    #[arg(long, requires = "volume_disk")]
+    build_snapshot_disk: bool,
     /// Maximum lifetime of the disposable VM.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(30..=1800))]
     lifetime_seconds: u64,
@@ -94,6 +97,11 @@ struct MemoryHelpers {
     reclaimd: Vec<u8>,
     core_admission: bool,
     core_pressure_fixture: bool,
+}
+
+struct GuestBootFiles<'a> {
+    memory: Option<&'a MemoryHelpers>,
+    disk: Option<([u8; 24], bool)>,
 }
 
 struct AdmissionControl<'a> {
@@ -211,8 +219,12 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         &descriptor,
         &key,
         oci.as_ref(),
-        memory_helpers.as_ref(),
-        volume.as_ref().map(|disk| disk.identity.encode()).as_ref(),
+        GuestBootFiles {
+            memory: memory_helpers.as_ref(),
+            disk: volume
+                .as_ref()
+                .map(|disk| (disk.identity.encode(), options.build_snapshot_disk)),
+        },
     )?;
     let machine = MachineBuilder::new(JetstreamConfig {
         memory_mib: 2048,
@@ -562,8 +574,7 @@ fn build_archive(
     descriptor: &[u8],
     key: &[u8],
     oci: Option<&super::oci::Root>,
-    memory_helpers: Option<&MemoryHelpers>,
-    volume: Option<&[u8; 24]>,
+    files: GuestBootFiles<'_>,
 ) -> anyhow::Result<()> {
     let mut archive = OpenOptions::new()
         .write(true)
@@ -609,7 +620,7 @@ fn build_archive(
     append("dev/null", 0o020666, &[], 1, 3, 0, 0)?;
     append("init", 0o100755, guest, 0, 0, 0, 0)?;
     append("etc/conjet/launch.key", 0o100600, key, 0, 0, 0, 0)?;
-    if let Some(helpers) = memory_helpers {
+    if let Some(helpers) = files.memory {
         append(
             "etc/conjet/conjet-memd",
             0o100500,
@@ -652,16 +663,27 @@ fn build_archive(
         }
     }
     if let Some(root) = oci {
-        if let Some(volume) = volume {
+        if let Some((volume, build_snapshot)) = files.disk {
             append(
                 conjet_launch_service::volume_disk::MARKER.trim_start_matches('/'),
                 0o100400,
-                volume,
+                &volume,
                 0,
                 0,
                 0,
                 0,
             )?;
+            if build_snapshot {
+                append(
+                    conjet_launch_service::build_snapshot::MARKER.trim_start_matches('/'),
+                    0o100400,
+                    &[],
+                    0,
+                    0,
+                    0,
+                    0,
+                )?;
+            }
         }
         append(
             "etc/conjet/native-oci-image",

@@ -23,12 +23,17 @@ pub(crate) const NATIVE_EXECUTABLE: &str = "/etc/conjet/native-executable";
 pub(crate) struct Sandbox {
     base: PathBuf,
     new_root: CString,
-    overlay: CString,
+    root: RootMode,
     cwd: CString,
     filter: WorkloadFilter,
     configure_resolver: bool,
     stdin: File,
     volume: Option<VolumeBinding>,
+}
+
+enum RootMode {
+    Overlay(CString),
+    BuildSnapshot(crate::build_snapshot::Snapshot),
 }
 
 struct VolumeBinding {
@@ -104,7 +109,10 @@ impl Sandbox {
             for entry in ["lower", "lower/bin", "lower/work", "upper", "work", "root"] {
                 std::fs::create_dir(base.join(entry))?;
             }
-            let lower = if let Some(spec) = oci {
+            let snapshot = oci.and_then(|spec| spec.build_snapshot.as_ref());
+            let lower = if snapshot.is_some() {
+                base.join("lower")
+            } else if let Some(spec) = oci {
                 let (lower, links) = if fs::read_to_string(OCI_MARKER)? == spec.image_digest {
                     (
                         Path::new(OCI_ROOT).to_path_buf(),
@@ -165,12 +173,15 @@ impl Sandbox {
                 base: base.clone(),
                 cwd: CString::new(oci.map_or("/work", |spec| spec.cwd.as_str()))?,
                 new_root: CString::new(base.join("root").as_os_str().as_bytes())?,
-                overlay: CString::new(format!(
-                    "lowerdir={},upperdir={}/upper,workdir={}/work,userxattr",
-                    lower.display(),
-                    base.display(),
-                    base.display()
-                ))?,
+                root: match snapshot {
+                    Some(snapshot) => RootMode::BuildSnapshot(snapshot.clone()),
+                    None => RootMode::Overlay(CString::new(format!(
+                        "lowerdir={},upperdir={}/upper,workdir={}/work,userxattr",
+                        lower.display(),
+                        base.display(),
+                        base.display()
+                    ))?),
+                },
                 filter: WorkloadFilter::new(bridge),
                 configure_resolver: bridge && oci.is_some(),
                 stdin: File::open("/dev/null")?,
@@ -215,6 +226,13 @@ impl Sandbox {
                     .map_err(|error| io::Error::other(format!("open named volume: {error}")))
             })
             .transpose()?;
+        let snapshot = match &self.root {
+            RootMode::BuildSnapshot(snapshot) => Some(
+                crate::build_snapshot::guest::source(snapshot)
+                    .map_err(|error| io::Error::other(format!("open build snapshot: {error}")))?,
+            ),
+            RootMode::Overlay(_) => None,
+        };
         // The child inherited the helper's outer guest IDs. Enter the mapped
         // namespace-root identity before accessing the owned upper/work dirs.
         step(
@@ -237,18 +255,36 @@ impl Sandbox {
                 )
             }),
         )?;
-        step(
-            "private overlay",
-            security::checked(unsafe {
-                libc::mount(
-                    c"overlay".as_ptr(),
-                    self.new_root.as_ptr(),
-                    c"overlay".as_ptr(),
-                    libc::MS_NODEV | libc::MS_NOSUID,
-                    self.overlay.as_ptr().cast(),
-                )
-            }),
-        )?;
+        match &self.root {
+            RootMode::Overlay(options) => step(
+                "private overlay",
+                security::checked(unsafe {
+                    libc::mount(
+                        c"overlay".as_ptr(),
+                        self.new_root.as_ptr(),
+                        c"overlay".as_ptr(),
+                        libc::MS_NODEV | libc::MS_NOSUID,
+                        options.as_ptr().cast(),
+                    )
+                }),
+            )?,
+            RootMode::BuildSnapshot(_) => {
+                let source = snapshot.expect("verified BuildKit snapshot");
+                let path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
+                step(
+                    "private build snapshot",
+                    security::checked(unsafe {
+                        libc::mount(
+                            path.as_ptr(),
+                            self.new_root.as_ptr(),
+                            std::ptr::null(),
+                            libc::MS_BIND,
+                            std::ptr::null(),
+                        )
+                    }),
+                )?;
+            }
+        }
         if let Some((volume, source)) = self.volume.as_ref().zip(volume_source) {
             step("private named volume", volume.mount(source))?;
         }

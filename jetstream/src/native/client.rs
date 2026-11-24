@@ -374,6 +374,7 @@ fn execute(
         network_alias: None,
         secondary_network_alias: None,
         volume: None,
+        build_snapshot: None,
         limits: NATIVE_LIMITS,
     };
     let started = Instant::now();

@@ -145,6 +145,14 @@ struct VolumeRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildSnapshotRequest {
+    boot_id: String,
+    budget_ms: u64,
+    id: String,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum VolumeOperation {
     List,
@@ -255,6 +263,7 @@ struct Record {
     slot_expired: bool,
     memory_limit_bytes: u64,
     volume: Option<crate::spec::VolumeMount>,
+    build_snapshot: Option<crate::build_snapshot::Snapshot>,
     core_admission_deadline: Option<Instant>,
     cancelled: bool,
     terminate_requested: bool,
@@ -296,6 +305,9 @@ impl Record {
         });
         if let Some(trace) = &self.trace {
             state["guest_phase_ns"] = json!(trace.events);
+        }
+        if let Some(snapshot) = &self.build_snapshot {
+            state["build_snapshot"] = json!(snapshot);
         }
         if let Some(address) = self.network_address {
             state["network_address"] = json!(address);
@@ -833,6 +845,26 @@ impl FreshFixture {
             }
             return Ok((Kind::State, record.state()));
         }
+        if let Some(snapshot) = &spec.build_snapshot {
+            if !self.oci || !self.core_admission {
+                return Err((
+                    "unsupported_option",
+                    "native build snapshot requires Core admission",
+                ));
+            }
+            let current = crate::build_snapshot::guest::inspect(&snapshot.id)
+                .map_err(|_| ("not_found", "native build snapshot is unavailable"))?;
+            if current != *snapshot {
+                return Err(("stale_generation", "native build snapshot identity changed"));
+            }
+            if ledger.active().any(|record| {
+                record.build_snapshot.as_ref().is_some_and(|owned| {
+                    owned.device == snapshot.device && owned.inode == snapshot.inode
+                })
+            }) {
+                return Err(("busy", "native build snapshot already has an owner"));
+            }
+        }
         let capacity = if self.oci { OCI_CONCURRENCY } else { 1 };
         if ledger.active().count() >= capacity
             || ledger
@@ -903,6 +935,7 @@ impl FreshFixture {
             slot_expired: false,
             memory_limit_bytes: spec.limits.memory_bytes,
             volume: spec.volume.clone(),
+            build_snapshot: spec.build_snapshot.clone(),
             core_admission_deadline: self.core_admission.then_some(deadline),
             cancelled: false,
             terminate_requested: false,
@@ -1615,6 +1648,25 @@ impl FreshFixture {
                 }
                 // Keep the request serialized with shutdown through its last fsync.
                 request.operation.execute()
+            }
+            Kind::BuildSnapshot if self.oci && self.core_admission => {
+                let request: BuildSnapshotRequest = parse(frame)?;
+                if request.boot_id != boot {
+                    return Err((
+                        "stale_generation",
+                        "unexpected native build snapshot boot ID",
+                    ));
+                }
+                let expires = deadline(request.budget_ms)?;
+                if guard.closing || Instant::now() >= expires {
+                    return Err(("busy", "native build workspace is draining"));
+                }
+                if !crate::build_snapshot::valid_id(&request.id) {
+                    return Err(("malformed", "invalid native build bundle identity"));
+                }
+                let snapshot = crate::build_snapshot::guest::inspect(&request.id)
+                    .map_err(|_| ("not_found", "native build snapshot is unavailable"))?;
+                Ok((Kind::BuildSnapshot, json!(snapshot)))
             }
             Kind::Network if self.oci => {
                 let request: NetworkRequest = parse(frame)?;

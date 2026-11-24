@@ -31,4 +31,23 @@ lease tied to the authenticated guest boot. Then prove writable output at the
 BuildKit snapshot boundary, separate stdout/stderr, cancellation with verified
 cleanup, and a cached repeat that does not create a second native workload.
 The native Docker endpoint still returns an explicit unsupported response to
-`/build`. No native BuildKit execution has been observed.
+`/build`.
+
+## SPEED-070 snapshot canary
+
+A release native guest with Core dynamic memory mounted a private 128 MiB
+ext4 disk containing a pre-staged executor bundle. The launch authority
+opened a single-component bundle ID beneath the leased mount, checked the
+root filesystem device and inode, and gave the sandbox a private writable
+bind of that exact root. The fixture wrote a proof file and stayed active
+until cancellation. A second launch was rejected while the first held the
+lease. Cancellation returned signal 9 and complete cleanup with stdout
+drained. A replacement launch with a distinct workload ID reopened the same
+snapshot and read the file with exit code 0.
+
+The guest rejected symlinks, traversal, a stale boot, a stale inode, and
+combining the snapshot with a named volume. After shutdown the launcher
+verified lease release and unchanged production state. Offline `e2fsck -fn`
+passed, and `debugfs` read the expected file from the original inode tree.
+The canary used a pre-staged BuildKit layout. The pinned worker's runtime
+invocation, uncached RUN, cancellation, and cache hit remain SPEED-071/063.

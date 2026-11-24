@@ -353,8 +353,8 @@ Title: Prove one BuildKit RUN through the native executor
 
 Description: Establish the supported BuildKit OCI-worker execution boundary and run one pinned Dockerfile with one RUN instruction.
 
-Is blocked by task: SPEED-070 writable snapshot lease and SPEED-071 native
-runtime lifecycle. SPEED-060 and SPEED-062 are complete in isolation.
+Is blocked by task: SPEED-071 native runtime lifecycle. SPEED-060,
+SPEED-062 and the SPEED-070 isolated snapshot canary are complete.
 
 Acceptance Criteria:
 
@@ -373,8 +373,8 @@ Source: [Native engine plan](native-engine-v2-plan.md) and current native host/g
 
 Review: Pending implementation, validation and independent evidence review.
 
-Next Action: Implement the authenticated writable snapshot lease and qualify
-the first runtime verbs before running the pinned worker.
+Next Action: Qualify the first runtime verbs and the pinned worker's mounted
+snapshot handoff.
 
 ### SPEED-070
 
@@ -387,11 +387,17 @@ Acceptance Criteria:
   snapshot to BuildKit, preserving data and rejecting unsupported mounts
   before launch.
 
+Evidence: The release native guest rejected an overlapping lease, then
+reopened the same writable inode after cancellation and verified cleanup.
+Offline filesystem checks and data readback passed. See [the snapshot
+canary](native-buildkit-executor.md#speed-070-snapshot-canary).
+
+Review: Isolated pre-staged snapshot validation passed. The actual BuildKit
+mounted snapshot handoff remains part of SPEED-071/063.
+
 ### SPEED-071
 
 Title: Implement the minimum pinned BuildKit runtime lifecycle
-
-Is blocked by task: SPEED-070.
 
 Acceptance Criteria:
 

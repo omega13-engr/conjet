@@ -50,6 +50,7 @@ fn launch(
             network_alias: None,
             secondary_network_alias: None,
             volume: None,
+            build_snapshot: None,
             limits: ResourceLimits {
                 memory_bytes: MIN_MEMORY_BYTES,
                 pids: 4,

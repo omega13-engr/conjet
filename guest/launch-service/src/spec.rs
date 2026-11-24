@@ -52,6 +52,8 @@ pub struct LaunchSpec {
     pub secondary_network_alias: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<VolumeMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_snapshot: Option<crate::build_snapshot::Snapshot>,
     pub limits: ResourceLimits,
 }
 
@@ -99,6 +101,8 @@ pub enum SpecError {
     Network,
     #[error("requested native volume identity is invalid")]
     Volume,
+    #[error("invalid native build snapshot identity or incompatible mounts")]
+    BuildSnapshot,
     #[error("resource limits exceed the native launch profile")]
     Resources,
 }
@@ -170,6 +174,15 @@ impl LaunchSpec {
 
     fn validate_process(&self, search_path: bool) -> Result<[u8; 32], SpecError> {
         let spec = self;
+        if spec.build_snapshot.as_ref().is_some_and(|snapshot| {
+            !crate::build_snapshot::valid_id(&snapshot.id)
+                || snapshot.inode == 0
+                || snapshot.device == 0
+                || spec.volume.is_some()
+                || spec.network != "none"
+        }) {
+            return Err(SpecError::BuildSnapshot);
+        }
         if spec.volume.as_ref().is_some_and(|volume| {
             volume.inode == 0 || !crate::volume_disk::valid_name(&volume.name)
         }) {
@@ -280,6 +293,7 @@ mod tests {
                 network_alias: None,
                 secondary_network_alias: None,
                 volume: None,
+                build_snapshot: None,
                 limits: ResourceLimits {
                     memory_bytes: MIN_MEMORY_BYTES,
                     pids: 4,
