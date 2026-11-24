@@ -267,6 +267,14 @@ exit status, bounded overflow, rejected cursors and release on
 disconnect. The frozen device-backed exec still requires its
 `/dev/zero` check. Evidence is under `SPEED-119/` on ExternalSSD.
 
+## SPEED-120 standard workload devices
+
+Ordinary OCI workloads bind individually verified null and zero
+devices. The original `dd if=/dev/zero bs=1024 count=128` exec
+returned 131,072 zero bytes. The same session verified null output,
+limited device visibility and complete exec and workload cleanup.
+Evidence is under `SPEED-120/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

@@ -83,6 +83,11 @@ def collect(endpoint, peer, docker, env, output, session, vmm_pid):
             call('exec_large_streams', ['exec', name, '/bin/sh', '-c',
                  'printf "%0131072d" 0; printf "%08200d" 1 >&2; exit 23'],
                  expected=23, stdout=b'0' * (128 * 1024), stderr=b'0' * 8199 + b'1')
+            call('frozen_zero_output', ['exec', name, 'dd', 'if=/dev/zero', 'bs=1024', 'count=128'],
+                 stdout=bytes(128 * 1024))
+            call('device_scope', ['exec', name, '/bin/sh', '-c',
+                 'printf suppressed >/dev/null; test ! -e /dev/mem && test ! -e /dev/kmsg'],
+                 stdout=b'')
             call('exec_output_bound', ['exec', name, '/bin/sh', '-c', 'printf "%0270000d" 0'],
                  expected=1, stdout=b'0' * (256 * 1024), stderr=b'native exec output exceeds the retained limit')
             request = {'handle': active, 'budget_ms': 1000,

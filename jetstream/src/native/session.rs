@@ -856,6 +856,7 @@ fn build_archive(
     }
     append("dev/console", 0o020600, &[], 5, 1, 0, 0)?;
     append("dev/null", 0o020666, &[], 1, 3, 0, 0)?;
+    append("dev/zero", 0o020666, &[], 1, 5, 0, 0)?;
     append("init", 0o100755, guest, 0, 0, 0, 0)?;
     append("etc/conjet/launch.key", 0o100600, key, 0, 0, 0, 0)?;
     if let Some(helpers) = files.memory {

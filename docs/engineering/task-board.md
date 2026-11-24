@@ -1148,6 +1148,20 @@ with individually verified device identities and no broader device tree.
 Run the frozen Docker exec case that reads 128 KiB from `/dev/zero` and
 verify output, teardown and continued workload operation.
 
+Evidence: The exact frozen `dd` command returned 131,072 zero bytes.
+Writes to `/dev/null` were discarded. The workload could not see
+`/dev/mem` or `/dev/kmsg`, and the exec and owner cleanup checks
+passed. Logs are under `SPEED-120/` on ExternalSSD.
+
+### SPEED-121
+
+Title: Allocate an owned PTY for noninteractive Docker exec
+
+Acceptance: Run the original `docker exec -t` workload with a real
+slave terminal and raw Docker output. Verify the terminal belongs to the
+isolated guest, non-TTY exec still multiplexes streams, and guest
+shutdown releases the private PTY mount.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

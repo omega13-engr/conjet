@@ -386,7 +386,7 @@ def audit_native_boot(directory, guest, helpers=(), markers=()):
     """Read the boot archive manifest without recording its private payloads."""
     root = 'etc/conjet/oci-root'
     allowed_top_level = {
-        'dev', 'dev/console', 'dev/null', 'proc', 'sys', 'run', 'run/conjet',
+        'dev', 'dev/console', 'dev/null', 'dev/zero', 'proc', 'sys', 'run', 'run/conjet',
         'etc', 'etc/conjet', 'init', 'etc/conjet/launch.key',
         'etc/conjet/native-oci-image', 'etc/conjet/native-oci-hardlinks.json',
         root,

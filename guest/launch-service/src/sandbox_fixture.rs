@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
-use std::ffi::CString;
-use std::fs::{self, File, Metadata};
+use std::ffi::{CStr, CString};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::security::{self, WorkloadFilter};
@@ -28,6 +28,7 @@ pub(crate) struct Sandbox {
     cwd: CString,
     filter: WorkloadFilter,
     resolver: Option<std::net::Ipv4Addr>,
+    standard_devices: bool,
     stdin: File,
     volume: Option<VolumeBinding>,
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
@@ -38,6 +39,62 @@ pub(crate) struct Sandbox {
 enum RootMode {
     Overlay(CString),
     BuildSnapshot(crate::build_snapshot::Snapshot),
+}
+
+fn standard_device(name: &str, minor: u32) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+        .open(Path::new("/dev").join(name))?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_char_device()
+        || libc::major(metadata.rdev()) != 1
+        || libc::minor(metadata.rdev()) != minor
+    {
+        return Err(io::Error::other("invalid native standard device identity"));
+    }
+    Ok(file)
+}
+
+fn mount_standard_devices(root: &CStr, devices: [File; 2]) -> io::Result<()> {
+    let directory = Path::new(std::ffi::OsStr::from_bytes(root.to_bytes())).join("dev");
+    match directory.symlink_metadata() {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(io::Error::other("invalid native device directory")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&directory)?,
+        Err(error) => return Err(error),
+    }
+    for (name, file) in ["null", "zero"].into_iter().zip(devices) {
+        let target_path = directory.join(name);
+        match File::create_new(&target_path) {
+            Ok(_) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && target_path.symlink_metadata()?.is_file() => {}
+            Err(error) => return Err(error),
+        }
+        let source = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+        let target = CString::new(target_path.as_os_str().as_bytes())?;
+        security::checked(unsafe {
+            libc::mount(
+                source.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        })?;
+        security::checked(unsafe {
+            libc::mount(
+                std::ptr::null(),
+                target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NOEXEC,
+                std::ptr::null(),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 struct VolumeBinding {
@@ -207,6 +264,7 @@ impl Sandbox {
                 resolver: oci
                     .and_then(|spec| spec.bridge_scope())
                     .map(|scope| scope.gateway()),
+                standard_devices: oci.is_some_and(|spec| spec.build_snapshot.is_none()),
                 stdin: File::open("/dev/null")?,
                 volume: oci
                     .and_then(|spec| spec.volume.as_ref())
@@ -273,6 +331,11 @@ impl Sandbox {
             .as_ref()
             .map(crate::build_snapshot::mounts::MountPlan::open)
             .transpose()?;
+        let devices = if self.standard_devices {
+            Some([standard_device("null", 3)?, standard_device("zero", 5)?])
+        } else {
+            None
+        };
         // The child inherited the helper's outer guest IDs. Enter the mapped
         // namespace-root identity before accessing the owned upper/work dirs.
         step(
@@ -328,6 +391,12 @@ impl Sandbox {
         }
         if let Some((volume, source)) = self.volume.as_ref().zip(volume_source) {
             step("private named volume", volume.mount(source))?;
+        }
+        if let Some(devices) = devices {
+            step(
+                "native standard devices",
+                mount_standard_devices(&self.new_root, devices),
+            )?;
         }
         if let Some(worker) = worker {
             let sysfs = sysfs.ok_or_else(|| io::Error::other("missing worker sysfs mount"))?;
