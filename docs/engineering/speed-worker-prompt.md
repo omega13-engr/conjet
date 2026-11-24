@@ -1,3 +1,18 @@
+# Active scope override: native engine
+
+The user explicitly authorizes replacing dockerd/containerd/runc. Read and
+execute `docs/engineering/native-engine-v2-plan.md` and SPEED-057–065 in the
+task board first. These supersede the retained-engine mission below.
+Reuse current Conjet native research; retain full Core dynamic memory.
+Begin with SPEED-057 immediately, then memory integration and native benchmarks.
+Continue implementation and verified incremental pushes without stopping at
+the historical SPEED-051/055 retained-engine blockers. Do not claim they were
+fixed. Split newly discovered missing capabilities into narrow tasks and
+execute them. No hidden runtime fallback or unverified superiority claims.
+The isolation, validation, cleanup and publication gates below still apply.
+
+---
+
 # Retained Docker speed worker: end-to-end instructions
 
 Work in `/Users/sly/Workspace/Personal/conjet` on `enhancement/speed-up`.

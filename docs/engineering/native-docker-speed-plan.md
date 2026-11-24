@@ -1,6 +1,8 @@
 # Conjet Docker performance plan
 
-Current next iteration: [retained Docker latency architecture](retained-docker-latency-architecture.md).
+Superseded execution scope: the user now authorizes the [native engine plan](native-engine-v2-plan.md). Retained-engine findings below remain historical evidence.
+
+Historical retained-engine iteration: [retained Docker latency architecture](retained-docker-latency-architecture.md).
 It preserves dynamic memory and defines the SPEED-050–055 diagnostic and
 optimization sequence. All gains remain unqualified until measured.
 

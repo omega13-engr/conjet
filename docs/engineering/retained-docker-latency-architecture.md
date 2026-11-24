@@ -1,5 +1,7 @@
 # Retained Docker latency architecture
 
+Superseded execution scope: the user now authorizes the [native engine plan](native-engine-v2-plan.md). Retained-engine findings below remain historical evidence.
+
 Status: proposed, not implemented or performance-qualified. Research date:
 2026-11-24. Conjet source baseline: `46f2a14` (SPEED-049 results; measured
 runtime `84e29ab`). This plan preserves dockerd, containerd, runc, BuildKit,

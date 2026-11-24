@@ -2,27 +2,17 @@
 
 Architecture: [speed engineering plan](speed-engineering-plan.md).
 
-Current iteration: [retained Docker latency architecture](retained-docker-latency-architecture.md).
-Retain dynamic memory as a mandatory acceptance requirement, including
-pressure response, idle convergence and backing-page ownership.
-The retained-stack overview remains in the [performance plan](native-docker-speed-plan.md).
+Current iteration: [native engine implementation plan](native-engine-v2-plan.md).
 
 ## Current Docker performance priority
 
-Retain dockerd, containerd, runc, BuildKit and Compose. SPEED-046–048 are
-complete; SPEED-049 failed API parity and exposed a CLI correctness blocker.
-SPEED-056 profiles the retained guest's start path independently of the
-open SPEED-051 correctness investigation. SPEED-052–054 recorded their
-experiment decisions. SPEED-055 remains behind the correctness gate.
-The isolated custom Docker adapter is research.
-Verified SPEED-027 through SPEED-036 tasks are retained in DONE.
-SPEED-037A remains unfinished research. SPEED-037 through SPEED-045
-are superseded and are outside the retained Docker work sequence.
-
-SPEED-019 through SPEED-026 keep their historical evidence and status.
-SPEED-008 remains deferred research. Preserve raw failures and existing
-latency, throughput and paired-interval tables. Required independent
-review, CI, signing and publication gates remain in effect.
+The user now authorizes replacing dockerd/containerd/runc in the candidate
+with Conjet's native Rust engine. Preserve Core dynamic memory in full.
+SPEED-057–065 are the active sequence. Reuse verified SPEED-027–036 research
+only after current-build validation. Prior retained-engine plans and the
+SPEED-051/055 blockers remain historical evidence and do not gate native
+implementation. Their failures must not be erased or reported as fixed.
+No production migration or superiority claim is authorized without evidence.
 
 ## Working rules
 
@@ -88,6 +78,223 @@ their recorded binaries and workloads. SPEED-037 through SPEED-045
 retain their old acceptance criteria for research provenance.
 
 ## BACKLOG
+
+### SPEED-057
+
+Title: Audit and boot the native engine without a retained-engine fallback
+
+Description: Produce a source-to-fixture capability table and boot current release host/guest through the private native endpoint.
+
+Is blocked by task: None.
+
+Acceptance Criteria:
+
+- Verify process/executable identities exclude dockerd, containerd and runc from candidate execution; pass create/start/wait/remove, output/exit and unsupported-feature rejection fixtures. Record current resource/security limits and gaps.
+
+Problem and Evidence: 7dd2a95 and existing SPEED-027–036 research.
+
+Approach: Inspect the existing Rust owner and guest launch authority; reuse them. Capture boot identity and actual Docker request routing.
+
+Evidence: Pending; no new candidate result.
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Pending implementation, validation and independent evidence review.
+
+Next Action: Run the native acceptance fixtures before changing launch mechanics.
+
+### SPEED-058
+
+Title: Connect native workload ownership to Core dynamic memory
+
+Description: Verify and repair the native guest telemetry/controller integration while preserving Core policy.
+
+Is blocked by task: SPEED-057.
+
+Acceptance Criteria:
+
+- Prove growth from a reduced target under pressure, active-data integrity during launch churn, idle shrink within policy deadlines and balloon-owned backing release. No fixed-memory shortcut; add regression tests for missing/stale telemetry and resource-generation reuse.
+
+Problem and Evidence: Native memory RPCs are not proof of complete Core controller integration.
+
+Approach: Map native workload/cgroup lifecycle to existing memory inputs; use actual Core policy and ownership ledger. Start the growth fixture below full capacity.
+
+Evidence: Pending; no new candidate result.
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Pending implementation, validation and independent evidence review.
+
+Next Action: Trace existing native memory integration and add only missing contract links.
+
+### SPEED-059
+
+Title: Measure the current native fresh lifecycle against pinned Kiri
+
+Description: Freeze a release native baseline at the existing API and CLI boundaries.
+
+Is blocked by task: SPEED-058.
+
+Acceptance Criteria:
+
+- Record identical image/limits/clients, stage spans and two alternating diagnostic boot pairs with 200 timed operations and ten warmups per leg. Verify exit/output/cleanup and dynamic memory. Clearly label this a pilot, not five-pair qualification.
+
+Problem and Evidence: Historical native measurements predate this candidate.
+
+Approach: Use the existing comparison harness and private native owner, with tracing disabled for timings and separate attribution runs.
+
+Evidence: Pending; no new candidate result.
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Pending implementation, validation and independent evidence review.
+
+Next Action: Freeze artifact hashes and run the matched no-network lifecycle.
+
+### SPEED-060
+
+Title: Remove one measured native lifecycle delay
+
+Description: Implement one attributed launch/event-delivery correction in the existing native path.
+
+Is blocked by task: SPEED-059.
+
+Acceptance Criteria:
+
+- Name the exact delayed transition and clock-local evidence before editing. Preserve readiness, output and cleanup boundaries; add focused failure/race coverage. Run two alternating 200-operation A/B pairs and all affected memory gates; reject a non-improving candidate.
+
+Problem and Evidence: Select the bottleneck from SPEED-059, not language preference.
+
+Approach: Prefer event completion over measured polling. Use typed ownership, bounded queues and a clone-safe launch boundary; do not perform broad cosmetic rewrites.
+
+Evidence: Pending; no new candidate result.
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Pending implementation, validation and independent evidence review.
+
+Next Action: Select and document the single confirmed bottleneck, then implement and validate it.
+
+### SPEED-061
+
+Title: Repair native volume disk shutdown and filesystem recovery
+
+Description: Recover only the useful volume checkpoint design and fix its documented shutdown/readiness defects.
+
+Is blocked by task: SPEED-058.
+
+Acceptance Criteria:
+
+- Create eight volumes on an exclusively leased private disk; reboot twice, verify identities/data and clean offline e2fsck. Pass invalid-path, stale-generation and lease-conflict tests with no leaked disk holders.
+
+Problem and Evidence: Archived c60304f failed fsck/readiness acceptance.
+
+Approach: Inspect the archived diff and raw failures; implement a minimal current-tree disk lifecycle with orderly unmount and verified readiness.
+
+Evidence: Pending; no new candidate result.
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Pending implementation, validation and independent evidence review.
+
+Next Action: Reproduce the archived failure on a disposable disk before selecting the correction.
+
+### SPEED-062
+
+Title: Attach and release native named volumes with container ownership
+
+Description: Support one named-volume mount per container through the native Docker API.
+
+Is blocked by task: SPEED-061 and SPEED-057.
+
+Acceptance Criteria:
+
+- Pass writable persistence across container replacement, read-only enforcement, busy-volume delete refusal, UID/GID behavior, cancellation and reboot recovery. Reject unsupported mount options explicitly.
+
+Problem and Evidence: Disk registry alone does not implement container mounts.
+
+Approach: Bind verified guest volume identity into the launch spec; hold ownership through verified cleanup and release it once.
+
+Evidence: Pending; no new candidate result.
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Pending implementation, validation and independent evidence review.
+
+Next Action: Add one mount fixture and typed volume lease; validate error paths.
+
+### SPEED-063
+
+Title: Prove one BuildKit RUN through the native executor
+
+Description: Establish the supported BuildKit OCI-worker execution boundary and run one pinned Dockerfile with one RUN instruction.
+
+Is blocked by task: SPEED-062 and SPEED-060 decision.
+
+Acceptance Criteria:
+
+- Document the exact BuildKit runtime interface from primary source before implementation; split missing runtime verbs into narrow tasks. Prove native execution identity, output/exit, build cancellation and cache-hit behavior. No hidden retained-runtime fallback; unsupported operations fail explicitly.
+
+Problem and Evidence: The candidate cannot claim native builds by falling back to runc/containerd.
+
+Approach: Keep BuildKit as build frontend/cache owner; implement the minimum compatible Conjet executor contract with tests, not a new Dockerfile engine.
+
+Evidence: Pending; no new candidate result.
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Pending implementation, validation and independent evidence review.
+
+Next Action: Inspect BuildKit executor requirements and create narrow verb tasks if required.
+
+### SPEED-064
+
+Title: Qualify a two-service Compose lifecycle on the native engine
+
+Description: Run a pinned two-service Compose project using private bridge DNS, health checks, a named volume and one loopback published port.
+
+Is blocked by task: SPEED-062 and SPEED-060 decision.
+
+Acceptance Criteria:
+
+- Pass up, health dependency, logs, restart, down, persistent data and resource cleanup. Capture real CLI/API transcripts; split unsupported required operations into concrete tasks before implementation.
+
+Problem and Evidence: Individual container fixtures do not establish Compose behavior.
+
+Approach: Use existing network/port research and native owner state; preserve lifecycle ordering and explicit feature errors.
+
+Evidence: Pending; no new candidate result.
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Pending implementation, validation and independent evidence review.
+
+Next Action: Freeze the project fixture and test required Docker API calls.
+
+### SPEED-065
+
+Title: Qualify native speed and memory against official Kiri
+
+Description: Run the existing full comparison matrix on frozen native release artifacts.
+
+Is blocked by task: SPEED-058, SPEED-060 decision, SPEED-063 and SPEED-064.
+
+Acceptance Criteria:
+
+- Run five alternating lifecycle pairs per API/CLI lane with 2,000 measured operations and ten warmups per engine/boot; preserve failures. Re-run image, build, Compose, networking/storage and concurrency rows using existing report formats. Pass full dynamic-memory and production-cleanup gates. Apply existing parity/advantage rules and report unsupported coverage and external limitations.
+
+Problem and Evidence: Parity and superiority remain unproven for the new candidate.
+
+Approach: Keep native API, Docker API and CLI timers separate; record hashes, p50/p95/p99, throughput, confidence intervals, resource data and exact cleanup boundaries.
+
+Evidence: Pending; no new candidate result.
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Pending implementation, validation and independent evidence review.
+
+Next Action: Freeze only reviewed candidate code; do not promote on pilot results.
+
 
 
 
