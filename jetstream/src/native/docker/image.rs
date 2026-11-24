@@ -16,7 +16,7 @@ use super::{admission_lock, client, private_scratch, Rejected, CHUNK, SCRATCH};
 
 const MAX_TAGS: usize = 64;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Tags(BTreeMap<String, String>);
 
 impl Tags {

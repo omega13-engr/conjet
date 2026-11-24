@@ -809,6 +809,28 @@ release path. The loopback registry's integrity and ownership checks
 also passed. Public provisioning, registry tag resolution and
 archive save/load remain open. [Compatibility evidence](native-compatibility.md#speed-090-local-image-tags)
 
+### SPEED-099
+
+Title: Load and save Docker image archives on the native endpoint
+
+Acceptance: Accept bounded fixed-size and chunked uploads on the image-load
+route. Verify the pinned Docker archive's original config and layer digests,
+preserve aliases and runnable output, export an equivalent Docker archive,
+and reject invalid framing or corrupt content without publishing partial state.
+
+Evidence: The frozen common archive and pinned Alpine passed load,
+save, reload, config identity and native execution. Corrupt content
+left the scoped image store unchanged. [Archive evidence](native-compatibility.md#speed-099-docker-archives)
+
+### SPEED-100
+
+Title: Provision and ingest the pinned native matrix images
+
+Acceptance: Resolve approved image references to verified ARM64 manifests,
+ingest the frozen larger layers under explicit storage and Core memory bounds,
+and exercise PAX metadata, shared blobs, interruption and cleanup without
+lowering the fixture acceptance rules.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

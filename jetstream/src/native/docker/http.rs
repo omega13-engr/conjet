@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,12 +17,14 @@ const MAX_BODY: usize = 16384;
 const READ_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(38);
+const ARCHIVE_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct Request {
     method: String,
     path: String,
     query: BTreeMap<String, String>,
     body: Vec<u8>,
+    archive: Option<File>,
     close: bool,
 }
 
@@ -95,7 +99,135 @@ fn line(
     }
 }
 
-fn parse(reader: &mut BufReader<UnixStream>) -> Result<Option<Request>> {
+fn copy_body(
+    reader: &mut BufReader<UnixStream>,
+    writer: &mut impl Write,
+    mut count: usize,
+    deadline: Instant,
+) -> Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
+    let mut buffer = [0; 32768];
+    while count != 0 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Rejected(408, "Docker request deadline elapsed".into()));
+        }
+        reader
+            .get_ref()
+            .set_read_timeout(Some(remaining))
+            .map_err(|_| Rejected::internal("cannot set read deadline"))?;
+        let next = count.min(buffer.len());
+        let read = reader.read(&mut buffer[..next]).map_err(|error| {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ) {
+                Rejected(408, "Docker request deadline elapsed".into())
+            } else {
+                Rejected::bad("incomplete Docker request body")
+            }
+        })?;
+        if read == 0 {
+            return Err(Rejected::bad("incomplete Docker request body"));
+        }
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|_| Rejected::internal("cannot write Docker request body"))?;
+        count -= read;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    fn request(bytes: &[u8]) -> (BufReader<UnixStream>, UnixStream) {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(bytes).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        (BufReader::new(server), client)
+    }
+
+    #[test]
+    fn archive_chunked_body_leaves_next_request_intact() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut reader, _client) = request(b"POST /v1.44/images/load HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n1\r\nd\r\n0\r\n\r\nGET /_ping HTTP/1.1\r\n\r\n");
+        let loaded = parse(&mut reader, Some(scratch.path())).unwrap().unwrap();
+        let mut body = String::new();
+        loaded.archive.unwrap().read_to_string(&mut body).unwrap();
+        assert_eq!(body, "abcd");
+        assert_eq!(parse(&mut reader, None).unwrap().unwrap().path, "/_ping");
+    }
+
+    #[test]
+    fn archive_framing_rejects_ambiguity_truncation_and_unbounded_chunks() {
+        let scratch = tempfile::tempdir().unwrap();
+        for (headers_and_body, status) in [
+            (
+                &b"Content-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"[..],
+                400,
+            ),
+            (&b"Transfer-Encoding: chunked\r\n\r\n4\r\nab"[..], 400),
+            (&b"Transfer-Encoding: chunked\r\n\r\n4000001\r\n"[..], 413),
+            (
+                &b"Transfer-Encoding: chunked\r\n\r\n0\r\nExtra: value\r\n\r\n"[..],
+                400,
+            ),
+        ] {
+            let mut bytes = b"POST /images/load HTTP/1.1\r\n".to_vec();
+            bytes.extend(headers_and_body);
+            let (mut reader, _client) = request(&bytes);
+            assert!(
+                matches!(parse(&mut reader, Some(scratch.path())), Err(Rejected(code, _)) if code == status)
+            );
+        }
+        let (mut reader, _client) = request(b"POST /v1.44/containers/create HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+        assert!(matches!(
+            parse(&mut reader, Some(scratch.path())),
+            Err(Rejected(400, _))
+        ));
+    }
+}
+
+fn copy_chunks(
+    reader: &mut BufReader<UnixStream>,
+    writer: &mut File,
+    deadline: Instant,
+) -> Result<()> {
+    let mut budget = super::archive::LIMIT;
+    // Bound framing overhead independently of the decoded archive.
+    let mut framing = 1024 * 1024;
+    loop {
+        let size = line(reader, &mut framing, deadline)?
+            .ok_or_else(|| Rejected::bad("missing Docker archive chunk"))?;
+        if size.is_empty() || size.len() > 16 || !size.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Rejected::bad("invalid Docker archive chunk size"));
+        }
+        let count = usize::from_str_radix(&size, 16)
+            .map_err(|_| Rejected::bad("invalid Docker archive chunk size"))?;
+        if count > budget {
+            return Err(Rejected(413, "Docker archive exceeds its bound".into()));
+        }
+        if count != 0 {
+            copy_body(reader, writer, count, deadline)?;
+            budget -= count;
+        }
+        if line(reader, &mut framing, deadline)?.as_deref() != Some("") {
+            return Err(Rejected::bad("invalid Docker archive chunk terminator"));
+        }
+        if count == 0 {
+            return Ok(());
+        }
+    }
+}
+
+fn parse(
+    reader: &mut BufReader<UnixStream>,
+    archive_root: Option<&Path>,
+) -> Result<Option<Request>> {
     let mut left = MAX_HEADERS;
     let deadline = Instant::now() + READ_TIMEOUT;
     let Some(first) = line(reader, &mut left, deadline)? else {
@@ -113,7 +245,16 @@ fn parse(reader: &mut BufReader<UnixStream>) -> Result<Option<Request>> {
     {
         return Err(Rejected::bad("expected an origin-form request target"));
     }
+    let (path, raw_query) = target.split_once('?').unwrap_or((target, ""));
+    let load = method == "POST" && matches!(path, "/v1.44/images/load" | "/images/load");
+    let body_limit = if load {
+        super::archive::LIMIT
+    } else {
+        MAX_BODY
+    };
     let mut size = None;
+    let mut chunked = false;
+    let mut expect = false;
     let mut close = false;
     loop {
         let header = line(reader, &mut left, deadline)?
@@ -135,11 +276,17 @@ fn parse(reader: &mut BufReader<UnixStream>) -> Result<Option<Request>> {
             return Err(Rejected::bad("malformed HTTP header"));
         }
         let value = value.trim();
-        if ["transfer-encoding", "expect"]
-            .iter()
-            .any(|name| key.eq_ignore_ascii_case(name))
-        {
-            return Err(Rejected::bad("unsupported Docker request body framing"));
+        if key.eq_ignore_ascii_case("transfer-encoding") {
+            if !load || chunked || !value.eq_ignore_ascii_case("chunked") {
+                return Err(Rejected::bad("unsupported Docker request body framing"));
+            }
+            chunked = true;
+        }
+        if key.eq_ignore_ascii_case("expect") {
+            if !load || expect || !value.eq_ignore_ascii_case("100-continue") {
+                return Err(Rejected::bad("unsupported Docker request expectation"));
+            }
+            expect = true;
         }
         if key.eq_ignore_ascii_case("content-length") {
             if size.is_some()
@@ -151,9 +298,12 @@ fn parse(reader: &mut BufReader<UnixStream>) -> Result<Option<Request>> {
             size = value
                 .parse::<usize>()
                 .ok()
-                .filter(|bytes| *bytes <= MAX_BODY);
+                .filter(|bytes| *bytes <= body_limit);
             if size.is_none() {
-                return Err(Rejected::bad("Docker request body exceeds its bound"));
+                return Err(Rejected(
+                    413,
+                    "Docker request body exceeds its bound".into(),
+                ));
             }
         }
         if key.eq_ignore_ascii_case("connection") {
@@ -162,26 +312,6 @@ fn parse(reader: &mut BufReader<UnixStream>) -> Result<Option<Request>> {
                 .any(|token| token.trim().eq_ignore_ascii_case("close"));
         }
     }
-    let mut body = vec![0; size.unwrap_or(0)];
-    let mut offset = 0;
-    while offset < body.len() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(Rejected(408, "Docker request deadline elapsed".into()));
-        }
-        reader
-            .get_ref()
-            .set_read_timeout(Some(remaining))
-            .map_err(|_| Rejected::internal("cannot set read deadline"))?;
-        let count = reader
-            .read(&mut body[offset..])
-            .map_err(|_| Rejected::bad("incomplete Docker request body"))?;
-        if count == 0 {
-            return Err(Rejected::bad("incomplete Docker request body"));
-        }
-        offset += count;
-    }
-    let (path, raw_query) = target.split_once('?').unwrap_or((target, ""));
     let mut query = BTreeMap::new();
     for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -192,11 +322,44 @@ fn parse(reader: &mut BufReader<UnixStream>) -> Result<Option<Request>> {
             return Err(Rejected::bad("duplicate query option"));
         }
     }
+    let mut body = Vec::new();
+    let archive = if load {
+        use std::io::Seek;
+        if (chunked && size.is_some()) || (!chunked && size.unwrap_or(0) == 0) {
+            return Err(Rejected::bad("invalid Docker archive framing"));
+        }
+        let root = archive_root
+            .ok_or_else(|| Rejected(501, "native image store is not configured".into()))?;
+        let mut spool = tempfile::tempfile_in(root)
+            .map_err(|_| Rejected::internal("cannot spool Docker image archive"))?;
+        if expect {
+            reader
+                .get_ref()
+                .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                .map_err(|_| Rejected::bad("Docker archive client disconnected"))?;
+        }
+        let deadline = Instant::now() + ARCHIVE_READ_TIMEOUT;
+        if chunked {
+            copy_chunks(reader, &mut spool, deadline)?;
+        } else {
+            copy_body(reader, &mut spool, size.unwrap_or(0), deadline)?;
+        }
+        spool
+            .rewind()
+            .map_err(|_| Rejected::internal("cannot rewind Docker archive"))?;
+        Some(spool)
+    } else {
+        let count = size.unwrap_or(0);
+        body.reserve_exact(count);
+        copy_body(reader, &mut body, count, deadline)?;
+        None
+    };
     Ok(Some(Request {
         method: method.into(),
         path: path.into(),
         query,
         body,
+        archive,
         close,
     }))
 }
@@ -212,6 +375,7 @@ fn header(writer: &mut UnixStream, status: u16, lines: &str) -> io::Result<()> {
         404 => "Not Found",
         408 => "Request Timeout",
         409 => "Conflict",
+        413 => "Content Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
         _ => "Error",
@@ -269,6 +433,7 @@ impl Reply {
 
 enum Action {
     Reply(Reply),
+    Archive(File),
     Wait(Arc<Item>, String, u64),
     Attach(Arc<Item>, [bool; 2], u64),
     Logs(Arc<Item>, [bool; 2], u64, bool),
@@ -436,6 +601,44 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 }
                 _ => return Err(Rejected::bad("unsupported Docker network request")),
             }
+        }
+        ("POST", "/images/load") => {
+            if query.keys().any(|key| key != "quiet")
+                || query
+                    .get("quiet")
+                    .is_some_and(|value| !matches!(value.as_str(), "0" | "1" | "true" | "false"))
+            {
+                return Err(Rejected::bad("unsupported image load option"));
+            }
+            let archive = request
+                .archive
+                .as_ref()
+                .ok_or_else(|| Rejected::bad("missing Docker archive upload"))?;
+            Reply {
+                status: 200,
+                content_type: "application/json",
+                data: owner.load_archive(archive)?,
+                attributed: false,
+            }
+        }
+        ("GET", "/images/get") => {
+            if query.len() != 1 || !request.body.is_empty() {
+                return Err(Rejected::bad("image save requires one image"));
+            }
+            let name = query
+                .get("names")
+                .or_else(|| query.get("names[]"))
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| Rejected::bad("missing Docker image name"))?;
+            return Ok(Action::Archive(owner.save_archive(name)?));
+        }
+        ("GET", _) if path.starts_with("/images/") && path.ends_with("/get") => {
+            if !query.is_empty() || !request.body.is_empty() {
+                return Err(Rejected::bad("unsupported image save option"));
+            }
+            return Ok(Action::Archive(
+                owner.save_archive(&image_reference(path, "/get")?)?,
+            ));
         }
         ("GET", "/images/json") => {
             if query
@@ -905,7 +1108,7 @@ pub(super) fn serve(
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     while await_request(&reader)? {
-        let request = match parse(&mut reader) {
+        let request = match parse(&mut reader, owner.archive_root.as_deref()) {
             Ok(Some(request)) => request,
             Ok(None) => break,
             Err(Rejected(status, message)) => {
@@ -925,6 +1128,14 @@ pub(super) fn serve(
         }
         match dispatch(owner, &request) {
             Ok(Action::Reply(reply)) => reply.send(&mut stream, request.method == "HEAD", close)?,
+            Ok(Action::Archive(mut spool)) => {
+                header(&mut stream, 200, &format!(
+                    "Content-Type: application/x-tar\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    spool.metadata()?.len()
+                ))?;
+                io::copy(&mut spool, &mut stream)?;
+                break;
+            }
             Err(Rejected(status, message)) => Reply::json(status, json!({"message":message}))
                 .send(&mut stream, request.method == "HEAD", close)?,
             Ok(Action::Wait(item, condition, generation)) => {

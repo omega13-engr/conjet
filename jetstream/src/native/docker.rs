@@ -1,4 +1,5 @@
 //! Bounded Docker compatibility endpoint for the isolated OCI candidate.
+mod archive;
 mod discovery;
 mod events;
 mod exec;
@@ -56,10 +57,13 @@ pub(super) struct Options {
     receipt: PathBuf,
     #[arg(long)]
     image: String,
-    #[arg(long, requires = "registry")]
+    #[arg(long)]
     image_store: Option<PathBuf>,
     #[arg(long, requires = "image_store")]
     registry: Option<SocketAddr>,
+    /// Retain verified source layers for exporting the base image.
+    #[arg(long, requires = "image_store")]
+    boot_layout: Option<PathBuf>,
     /// Record methods, paths and parameter names in the isolated diagnostic.
     #[arg(long)]
     trace_requests: bool,
@@ -168,9 +172,14 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     );
     let store = options
         .image_store
-        .zip(options.registry)
-        .map(|(root, address)| registry::Store::open(root, address, &status))
+        .map(|root| registry::Store::open(root, options.registry, &status))
         .transpose()?;
+    if let Some(layout) = options.boot_layout {
+        store
+            .as_ref()
+            .expect("boot layout requires a store")
+            .seed_layout(&layout, &metadata.reference, &metadata.config_digest)?;
+    }
     let sequence = status["last_sequence"]
         .as_u64()
         .context("missing sequence")?;
@@ -710,6 +719,7 @@ struct Owner {
     native: Mutex<Native>,
     ledger: Mutex<Ledger>,
     store: Option<Mutex<registry::Store>>,
+    archive_root: Option<PathBuf>,
     exec_peer: Mutex<Option<client::Connection>>,
     event_changed: Condvar,
 }
@@ -719,6 +729,7 @@ impl Owner {
         Self {
             image,
             mapped_ids: native.mapped_ids,
+            archive_root: store.as_ref().map(|store| store.root().to_owned()),
             native: Mutex::new(native),
             ledger: Mutex::new(Ledger::default()),
             store: store.map(Mutex::new),
@@ -792,6 +803,9 @@ impl Owner {
             .map_err(|error| Rejected::bad(error.to_string()))?
             .ok_or_else(|| Rejected(404, "image is not staged".into()))?;
         let spec = process(&image.metadata)?;
+        if image.metadata.config_digest == self.image.config_digest {
+            return Ok(spec);
+        }
         if !store
             .installed(&image)
             .map_err(|error| Rejected::internal(error.to_string()))?
@@ -1118,6 +1132,74 @@ impl Owner {
             .map_err(|error| Rejected::internal(format!("{error:#}")))?;
         self.with_guest(|peer| store.ensure_guest(peer, &image))?;
         Ok(json!({"status":"Image is staged","id":reference}))
+    }
+
+    fn load_archive(&self, file: &fs::File) -> Result<Vec<u8>, Rejected> {
+        let mut ledger = self.ledger.lock().unwrap();
+        if !ledger.active.is_empty() || ledger.poisoned || ledger.closing {
+            return Err(Rejected(
+                409,
+                "native guest must be idle to load an archive".into(),
+            ));
+        }
+        let store = self.image_store()?;
+        let archive = archive::read(file).map_err(|error| Rejected::bad(format!("{error:#}")))?;
+        let reference = archive.reference();
+        let mut tags = ledger.tags.clone();
+        let mut response = Vec::new();
+        for name in &archive.tags {
+            let (repo, tag) = name
+                .rsplit_once(':')
+                .ok_or_else(|| Rejected::bad("untagged Docker archive name"))?;
+            tags.insert(repo, tag, reference.clone())?;
+            serde_json::to_writer(
+                &mut response,
+                &json!({"stream":format!("Loaded image: {name}\n")}),
+            )
+            .map_err(|_| Rejected::internal("cannot report loaded Docker tag"))?;
+            response.push(b'\n');
+        }
+        if response.is_empty() {
+            serde_json::to_writer(
+                &mut response,
+                &json!({"stream":format!("Loaded image: {}\n", archive.manifest)}),
+            )
+            .map_err(|_| Rejected::internal("cannot report loaded Docker image"))?;
+            response.push(b'\n');
+        }
+        store
+            .import(archive)
+            .map_err(|error| Rejected::bad(format!("{error:#}")))?;
+        ledger.tags = tags;
+        Ok(response)
+    }
+
+    fn save_archive(&self, name: &str) -> Result<fs::File, Rejected> {
+        let ledger = self.ledger.lock().unwrap();
+        let reference = ledger.tags.resolve(name);
+        let store = self.image_store()?;
+        let canonical = if self.boot_reference(reference) {
+            &self.image.reference
+        } else if store.get(reference).ok().flatten().is_some() {
+            reference
+        } else {
+            return Err(Rejected(404, "image is not staged".into()));
+        };
+        let manifest = canonical
+            .rsplit_once('@')
+            .expect("immutable image reference")
+            .1;
+        let tags = if name == reference {
+            ledger
+                .tags
+                .names_for(canonical)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        } else {
+            vec![image::Tags::key(name).into_owned()]
+        };
+        archive::export(store.root(), manifest, &tags)
+            .map_err(|error| Rejected(404, format!("image archive source unavailable: {error:#}")))
     }
 
     fn remove_image(&self, reference: &str) -> Result<Value, Rejected> {

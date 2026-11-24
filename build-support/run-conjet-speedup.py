@@ -551,15 +551,19 @@ def native_session(args, root):
         bridge_command = [sys.executable, adapter] if python_owner else [args.core, 'native', 'docker-serve']
         bridge_command += ['--native-session', directory, '--receipt', args.import_receipt or args.native_receipt,
                            '--image', args.image, '--socket', endpoint]
-        if args.diagnostics == 'registry':
-            registry_test = runpy.run_path(str(REPO / 'benchmarks/native-docker-registry.py'))
-            registry = registry_scope.enter_context(registry_test['Registry'](args.registry_fixtures).serve())
+        if not python_owner:
             store = root / 'image-store'
             store.mkdir(mode=0o700)
             if store.resolve(strict=True) != store or store.stat().st_dev != SCRATCH.stat().st_dev:
                 raise RuntimeError('native image store does not have the expected ExternalSSD backing')
-            bridge_command += ['--image-store', store, '--registry', registry.authority]
+            bridge_command += ['--image-store', store]
             report['image_store'] = str(store)
+            if args.native_boot_layout:
+                bridge_command += ['--boot-layout', args.native_boot_layout]
+        if args.diagnostics == 'registry':
+            registry_test = runpy.run_path(str(REPO / 'benchmarks/native-docker-registry.py'))
+            registry = registry_scope.enter_context(registry_test['Registry'](args.registry_fixtures).serve())
+            bridge_command += ['--registry', registry.authority]
             report['registry'] = registry.authority
         if args.diagnostics == 'trace':
             bridge_command += ['--trace', output / 'adapter-trace.json']
@@ -603,6 +607,9 @@ def native_session(args, root):
             elif args.diagnostics == 'credentials':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-credentials.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
+            elif args.diagnostics == 'archive':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-archive.py'))
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, store)
             elif args.diagnostics == 'compatibility-preflight':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-compatibility-preflight.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite)
@@ -755,11 +762,11 @@ def main():
     parser.add_argument('--network-helper', type=Path)
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output',
                  'native-memd', 'native-reclaimd', 'native-volume-disk', 'native-compose-cli',
-                 'import-package', 'import-receipt', 'registry-fixtures'):
+                 'import-package', 'import-receipt', 'registry-fixtures', 'native-boot-layout'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
-                                                  'concurrency', 'concurrency-loss', 'streaming', 'exec', 'credentials',
+                                                  'concurrency', 'concurrency-loss', 'streaming', 'exec', 'credentials', 'archive',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
                                                   'volume-disk', 'mounted-volume', 'admission-trace', 'compose',
@@ -803,7 +810,7 @@ def main():
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
     if (args.matched_output or args.diagnostics in (*CORE_DIAGNOSTICS, 'memory-telemetry',
-                                                   'compatibility-preflight')
+                                                   'compatibility-preflight', 'archive')
             or args.native_memd or args.native_reclaimd):
         if not (args.native_memd and args.native_reclaimd and args.docker_owner == 'rust'):
             parser.error('native timing and memory canaries require both static Core helpers and the Rust owner')
@@ -854,6 +861,12 @@ def main():
         native_assets += ('registry_fixtures',)
     elif args.registry_fixtures:
         parser.error('registry fixtures require registry diagnostics')
+    if args.native_boot_layout:
+        if args.legacy_baseline or args.docker_owner != 'rust' or args.diagnostics == 'oci-import':
+            parser.error('the boot layout requires the native Rust owner and boot image')
+        native_assets += ('native_boot_layout',)
+    elif args.diagnostics == 'archive':
+        parser.error('archive diagnostics require the pinned boot OCI layout')
     if (bool(args.benchmark_scenario) != bool(args.benchmark_archive)
             or (args.benchmark_scenario and not (args.benchmark_output or args.retained_trace_output))):
         parser.error('a staged scenario requires benchmark output and an image archive')

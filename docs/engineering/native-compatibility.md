@@ -51,6 +51,30 @@ require a bounded larger-image ingest and extraction design with Core
 memory accounting before public image provisioning can qualify.
 See `SPEED-098/staging-*.log` and `pinned-layer-descriptors.json`.
 
+## SPEED-099 Docker archives
+
+Docker image load accepts fixed and chunked framing on the dedicated
+archive endpoint and spools the bounded request to the private image
+store. The loader retains the archive's config bytes, verifies their
+digest and verifies every uncompressed layer against the config's
+diff IDs through the OCI verifier. An image and its aliases publish
+only after validation. Image save exports one image from verified
+source layers. A booted root can be exported when its pinned source
+OCI layout is supplied through `--native-boot-layout`.
+
+An isolated release boot loaded the exact frozen common archive and
+ran its executable. Both the common image and the pinned Alpine
+image passed save, tag removal, reload and native execution with
+their original config IDs. A corrupt layer failed content verification
+and left the blob inventory and aliases unchanged. The ordinary JSON
+endpoints retain their existing body limit and reject chunked
+framing. Raw CLI, release identity and cleanup evidence is under
+`SPEED-099/archive-roundtrip-cli/` on ExternalSSD.
+
+This increment supports one Linux ARM64 image per uncompressed
+Docker archive, including compressed layer members. It uses the
+existing OCI layer and guest package bounds.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,7 @@ use conjet_launch_service::oci::PACKAGE_LIMIT;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{client, image, private_scratch, request, STOP};
+use super::{archive, client, image, private_scratch, request, STOP};
 use crate::native::oci_stage;
 
 const MAX_STORED: u64 = 256 * 1024 * 1024;
@@ -27,7 +27,7 @@ const STORE_VERSION: &[u8] = b"conjet-native-image-store-1\n";
 
 pub(super) struct Store {
     root: PathBuf,
-    registry: SocketAddr,
+    registry: Option<SocketAddr>,
     installed: BTreeMap<String, String>,
     _lock: File,
 }
@@ -64,12 +64,12 @@ fn suffix(digest: &str) -> anyhow::Result<&str> {
 impl Store {
     pub(super) fn open(
         root: PathBuf,
-        registry: SocketAddr,
+        registry: Option<SocketAddr>,
         status: &Value,
     ) -> anyhow::Result<Self> {
         private_scratch(&root)?;
         ensure!(
-            registry.ip().is_loopback() && registry.port() > 0,
+            registry.is_none_or(|address| address.ip().is_loopback() && address.port() > 0),
             "registry must be an explicit loopback socket"
         );
         let marker = root.join(".conjet-native-store");
@@ -137,6 +137,7 @@ impl Store {
     }
 
     fn reference<'s>(&self, reference: &'s str) -> anyhow::Result<Reference<'s>> {
+        let registry = self.registry.context("native registry is not configured")?;
         let (name, manifest) = reference
             .rsplit_once('@')
             .context("native pull requires a pinned registry digest")?;
@@ -145,7 +146,7 @@ impl Store {
             .split_once('/')
             .context("native pull requires the allowlisted registry")?;
         ensure!(
-            authority == self.registry.to_string()
+            authority == registry.to_string()
                 && repository.len() <= 200
                 && repository.split('/').all(|part| {
                     !part.is_empty()
@@ -255,18 +256,116 @@ impl Store {
     }
 
     pub(super) fn get(&self, reference: &str) -> anyhow::Result<Option<Image>> {
-        let name = self.reference(reference)?;
-        let path = self.path(name.manifest)?;
+        let manifest = match reference
+            .strip_prefix(archive::LOCAL)
+            .and_then(|r| r.strip_prefix('@'))
+        {
+            Some(manifest) => manifest,
+            None => self.reference(reference)?.manifest,
+        };
+        let path = self.path(manifest)?;
         if !path.try_exists()? {
             return Ok(None);
         }
-        let receipt = self.receipt(name.manifest)?;
+        let receipt = self.receipt(manifest)?;
         let metadata = request::Image::new(reference.to_owned(), receipt.clone())?;
         Ok(Some(Image {
             metadata,
             receipt,
-            manifest: name.manifest.to_owned(),
+            manifest: manifest.to_owned(),
         }))
+    }
+
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(super) fn import(&self, archive: archive::Import) -> anyhow::Result<()> {
+        self.publish_blobs(&archive.manifest, archive.blobs)
+    }
+
+    pub(super) fn seed_layout(
+        &self,
+        layout: &Path,
+        reference: &str,
+        config: &str,
+    ) -> anyhow::Result<()> {
+        private_scratch(layout)?;
+        let (_, manifest) = reference
+            .rsplit_once('@')
+            .context("missing boot manifest digest")?;
+        let image = oci_stage::read_manifest(layout, manifest)?;
+        ensure!(
+            image.config.digest == config,
+            "boot OCI layout has a different config identity"
+        );
+        let mut blobs = BTreeMap::from([
+            (
+                manifest.to_owned(),
+                oci_stage::blob(layout, manifest, METADATA)?,
+            ),
+            (
+                config.to_owned(),
+                oci_stage::blob(layout, config, METADATA)?,
+            ),
+        ]);
+        let mut budget = LAYERS;
+        for layer in image.layers {
+            ensure!(layer.size <= budget, "boot layout exceeds OCI layer budget");
+            let bytes = oci_stage::blob(layout, &layer.digest, layer.size)?;
+            ensure!(bytes.len() == layer.size, "boot layout layer size differs");
+            budget -= bytes.len();
+            blobs.insert(layer.digest, bytes);
+        }
+        self.publish_blobs(manifest, blobs)
+    }
+
+    fn publish_blobs(
+        &self,
+        manifest: &str,
+        blobs: BTreeMap<String, Vec<u8>>,
+    ) -> anyhow::Result<()> {
+        let target = self.path(manifest)?;
+        if target.try_exists()? {
+            self.receipt(manifest)?;
+            return Ok(());
+        }
+        ensure!(
+            self.root.join("images").read_dir()?.count() < MAX_IMAGES,
+            "ExternalSSD OCI image capacity exceeded"
+        );
+        let mut free = MAX_STORED.saturating_sub(self.stored_bytes()?);
+        let mut created = Vec::new();
+        let result = (|| {
+            for (digest, bytes) in blobs {
+                let path = self.root.join("blobs/sha256").join(suffix(&digest)?);
+                if path.try_exists()? {
+                    oci_stage::blob(&self.root, &digest, bytes.len())?;
+                    continue;
+                }
+                free = free
+                    .checked_sub(bytes.len() as u64)
+                    .context("ExternalSSD OCI image capacity exceeded")?;
+                let mut pending =
+                    tempfile::NamedTempFile::new_in(path.parent().expect("blob parent"))?;
+                pending.write_all(&bytes)?;
+                pending.as_file().sync_all()?;
+                pending.persist_noclobber(&path)?;
+                created.push(path);
+            }
+            ensure!(
+                free >= PACKAGE_LIMIT,
+                "ExternalSSD OCI package capacity exceeded"
+            );
+            oci_stage::publish(&self.root, manifest, &target)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            for path in created {
+                fs::remove_file(path).context("cannot roll back an archive blob")?;
+            }
+        }
+        result
     }
 
     pub(super) fn prepare(&mut self, reference: &str) -> anyhow::Result<Image> {
@@ -337,7 +436,7 @@ impl Store {
         }
         let path = format!("/v2/{}/{kind}/{digest}", name.repository);
         let bytes = receive(
-            self.registry,
+            self.registry.context("native registry is not configured")?,
             &path,
             bound.min(download.free as usize),
             download.deadline,
