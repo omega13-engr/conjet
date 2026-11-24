@@ -117,6 +117,10 @@ pub(crate) fn verify_empty_capabilities() -> io::Result<()> {
 }
 
 pub(crate) const DEFAULT_OPEN_FILES: u64 = 32;
+pub(crate) const DEFAULT_FILE_SIZE: u64 = 16 * 1024 * 1024;
+pub(crate) const BUILDKIT_OPEN_FILES: u64 = 256;
+// The pinned Rust image stores a 299,606,552-byte compiler library.
+pub(crate) const BUILDKIT_FILE_SIZE: u64 = 512 * 1024 * 1024;
 // The pinned Redis server's default client limit requires this many
 // descriptors. Its cgroup still bounds memory, CPU and tasks.
 pub(crate) const REDIS_OPEN_FILES: u64 = 10_032;
@@ -136,11 +140,11 @@ pub(crate) fn prepare_redis_open_files() -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn set_process_limits(open_files: u64) -> io::Result<()> {
+pub(crate) fn set_process_limits(open_files: u64, file_size: u64) -> io::Result<()> {
     for (resource, maximum) in [
         (libc::RLIMIT_CORE, 0),
         (libc::RLIMIT_NOFILE, open_files),
-        (libc::RLIMIT_FSIZE, 16 * 1024 * 1024),
+        (libc::RLIMIT_FSIZE, file_size),
     ] {
         let bounds = libc::rlimit {
             rlim_cur: maximum,
@@ -426,6 +430,12 @@ impl WorkloadFilter {
                 libc::SYS_fchownat,
                 libc::SYS_statfs,
                 libc::SYS_fstatfs,
+                libc::SYS_utimensat,
+                libc::SYS_symlinkat,
+                libc::SYS_linkat,
+                libc::SYS_llistxattr,
+                libc::SYS_lgetxattr,
+                libc::SYS_waitid,
                 libc::SYS_mount,
                 libc::SYS_umount2,
             ] {

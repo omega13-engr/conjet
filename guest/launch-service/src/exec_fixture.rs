@@ -564,7 +564,10 @@ pub fn run_helper(
             libc::close(lifeline[1]);
         }
         let setup = (|| -> io::Result<()> {
-            security::set_process_limits(security::DEFAULT_OPEN_FILES)?;
+            security::set_process_limits(
+                security::DEFAULT_OPEN_FILES,
+                security::DEFAULT_FILE_SIZE,
+            )?;
             security::drop_workload_identity(
                 spec.uid,
                 spec.gid,

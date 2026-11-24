@@ -641,12 +641,19 @@ impl Sandbox {
                 io::Error::last_os_error()
             )));
         }
-        let open_files = if self.redis_bootstrap {
-            security::REDIS_OPEN_FILES
-        } else {
-            security::DEFAULT_OPEN_FILES
+        let (open_files, file_size) = match self.policy {
+            WorkloadPolicy::BuildKitWorker => {
+                (security::BUILDKIT_OPEN_FILES, security::BUILDKIT_FILE_SIZE)
+            }
+            WorkloadPolicy::RedisBootstrap => {
+                (security::REDIS_OPEN_FILES, security::DEFAULT_FILE_SIZE)
+            }
+            _ => (security::DEFAULT_OPEN_FILES, security::DEFAULT_FILE_SIZE),
         };
-        step("resource limits", security::set_process_limits(open_files))?;
+        step(
+            "resource limits",
+            security::set_process_limits(open_files, file_size),
+        )?;
         step(
             "credentials and capabilities",
             security::drop_workload_identity(

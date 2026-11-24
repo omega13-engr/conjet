@@ -368,7 +368,7 @@ def qualified_stress(matrix, manifest, report, fixture, connection, docker, env)
         run.__globals__['Docker'] = driver
 
 
-def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None):
+def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None, build_bases=None):
     contract()
     comparison = runpy.run_path(str(HERE / 'docker-comparison.py'))
     tools = comparison['TOOLS']
@@ -383,6 +383,10 @@ def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None)
     report = {'engine': 'conjet', 'backend': 'jetstream-native-oci',
               'endpoint': str(endpoint), 'peer_pid': peer,
               'scope': 'compatibility-preflight', 'mode': suite}
+    if build_bases is not None:
+        if suite != 'builds':
+            raise ValueError('OCI build bases require the builds suite')
+        report['input_source'] = 'verified-oci-layout'
     connection = tools['UnixHTTP'](endpoint, peer)
     try:
         with ExitStack() as resources:
@@ -415,7 +419,7 @@ def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None)
                     qualified_stress(matrix, manifest, report, fixture, connection, docker, env)
                 else:
                     matrix['run_matrix'](suite, manifest, report, fixture, docker, env,
-                                         connection=connection)
+                                         build_bases=build_bases, connection=connection)
     except (OSError, RuntimeError, ValueError, http.client.HTTPException,
             subprocess.SubprocessError) as error:
         report['error'] = str(error)

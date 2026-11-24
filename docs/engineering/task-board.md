@@ -1741,6 +1741,32 @@ worker. Preserve filesystem ownership, timestamps and content in the
 owned cache. Retain the frozen base digests, and verify cache cleanup and
 the original image transfer semantics.
 
+Evidence: The pinned client booted nine workers and completed all nine
+digest-verified OCI layout preloads, including native extraction of
+Rust, Go and Node base layers. Worker-only timestamp, hardlink and
+symlink handling and xattr reads preserve layer metadata. A bounded
+256-descriptor and 512 MiB per-file worker budget allowed the pinned
+layer processor and largest Rust compiler library. All nine workers
+were removed. `SPEED-161/frozen-native-extraction/` retains the
+successful preloads and failures in the subsequent RUN and cgroup
+observer stages.
+
+### SPEED-162
+
+Title: Resolve the frozen public registry references from the BuildKit worker
+
+Acceptance: Complete preload with the original Docker Hub references
+and original Docker-container driver through the isolated worker.
+Scope any registry transport to pinned image sources and retain
+effective build network limits. Report the public path independently
+from the existing digest-verified OCI layout diagnostic.
+
+Evidence: After timestamp handling was fixed, each original Dockerfile
+transferred and parsed, then public registry DNS timed out at
+`198.18.1.1:53`. See `SPEED-161/worker-timestamps/`. The separate OCI
+layout run used the original ARM64 image digests and reached actual
+layer extraction. It cannot qualify the public route.
+
 ### SPEED-160
 
 Title: Qualify RUN, cancellation and cache through the original Buildx client
@@ -1749,6 +1775,18 @@ Acceptance: Prove the original Rust, Go and Node build solves execute
 RUN in a native workload with verified cleanup and correct artifacts.
 Preserve exit and cancellation behavior, cache reuse, and source and
 dependency invalidation. Keep the frozen fixture limits and inputs.
+
+### SPEED-163
+
+Title: Read actual cgroup counters from the pinned BuildKit worker
+
+Acceptance: Complete both unchanged Docker exec cgroup observer calls in
+the build fixture and verify zero extra capabilities for the observer.
+The host and guest must select the same worker-control policy.
+
+Evidence: All 18 cgroup probes in the nine-builder preload run failed
+at host validation because ordinary argv inherited the daemon-only
+authority. See `SPEED-161/frozen-native-extraction/`.
 
 ### SPEED-091
 

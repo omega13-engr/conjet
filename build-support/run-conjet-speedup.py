@@ -647,7 +647,10 @@ def native_session(args, root):
             elif args.diagnostics == 'compatibility-preflight':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-compatibility-preflight.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite,
-                                      lifecycle_group=args.compatibility_lifecycle_group)
+                if args.compatibility_build_bases:
+                    report['compatibility_build_bases'] = str(args.compatibility_build_bases)
+                                      lifecycle_group=args.compatibility_lifecycle_group,
+                                      build_bases=args.compatibility_build_bases)
             elif args.diagnostics == 'guest-bridge':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-bridge.py'))
                 diagnostic['collect'](directory, vm.pid, output)
@@ -821,6 +824,8 @@ def main():
     parser.add_argument('--compatibility-lifecycle-group',
                         help='run one complete frozen lifecycle group in its own Core boot')
     parser.add_argument('--native-bind-storage', action='store_true')
+    parser.add_argument('--compatibility-build-bases', type=Path,
+                        help='use verified OCI layouts for a separate offline build diagnostic')
     parser.add_argument('--native-routed-bridge', action='store_true')
     parser.add_argument('--offline-oci-layout', type=Path, action='append', default=[])
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
@@ -856,6 +861,11 @@ def main():
     if bool(args.compatibility_suite) != (args.diagnostics == 'compatibility-preflight'):
         parser.error('select one frozen suite for the native compatibility preflight')
     if args.native_bind_storage and (
+    if args.compatibility_build_bases and (
+            args.compatibility_suite != 'builds' or not args.native_disk_images
+            or args.compatibility_build_bases.resolve(strict=True) != args.compatibility_build_bases
+            or not args.compatibility_build_bases.is_relative_to(SCRATCH)):
+        parser.error('offline build bases require the native builds suite and a canonical ExternalSSD bundle')
             args.compatibility_suite != 'storage_network' or args.docker_owner != 'rust'):
         parser.error('bind storage requires the isolated native storage suite')
     if args.native_routed_bridge and args.diagnostics != 'docker-network':
