@@ -97,3 +97,43 @@ preflights and regression canaries. Its summary enumerates all 71
 cases. It checks evidence against the release identity, Core policy,
 production fingerprint, guest shutdown and host removal. An unknown
 or unverified case remains failed. A nonzero exit blocks SPEED-065.
+
+The frozen lifecycle runner requires the common image archive. If
+that setup fails before any groups run, preflight also probes the eight
+independent Alpine cases with the frozen workload function and records
+native cleanup for each successful operation. The archive failure
+remains in the report. The loopback-free (`none`) Alpine CLI/API
+cases passed. The four original default-bridge cases failed because
+the native endpoint currently requires an explicitly created private
+bridge. The four common-image cases still lack an archive load path.
+
+## SPEED-092 Buildx worker boundary
+
+The pinned Docker-container driver loads a worker image, requests
+`Privileged` and `Init`, and attaches a named cache volume at
+`/var/lib/buildkit`. Readiness runs `buildctl debug workers`. The
+driver then opens a Docker exec connection with stdin, stdout and
+stderr for the bidirectional `buildctl dial-stdio` transport.
+The local direct RUN canary covers the executor after a worker
+exists. It does not exercise these Docker worker or transport calls.
+[Worker provisioning](https://github.com/docker/buildx/blob/v0.39.1/driver/docker-container/driver.go#L87-L162).
+[Exec transport](https://github.com/docker/buildx/blob/v0.39.1/driver/docker-container/driver.go#L349-L397).
+[BuildKit client dial](https://github.com/docker/buildx/blob/v0.39.1/driver/docker-container/driver.go#L481-L514).
+
+The execution policy must bind a builder reservation to the verified
+image digest, boot generation, owned worker configuration and cache
+inode. A name, label or caller-supplied image string confers no
+authority. The worker privilege boundary must be inside the isolated
+guest and have no host resources, production sockets or general
+privilege route. Worker disk, processes, memory and transport need
+their own ownership, cancellation and cleanup. Build workloads still
+need the Core admission policy and the pinned native executor.
+Qualification requires the original driver, worker readiness, exact
+cache path, bidirectional detach and cancellation, denied unrelated
+privileged create, scope-limited resource access and verified removal.
+
+The release preflight created and removed all three builder
+definitions. Bootstrap failed during pinned worker image provisioning.
+Separate negative API checks verified that regular workloads cannot
+request privilege or add capabilities. Worker provisioning and
+`dial-stdio` remain open.

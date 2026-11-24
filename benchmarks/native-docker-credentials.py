@@ -40,6 +40,14 @@ def collect(endpoint, peer, docker, env, output):
                 call(key, ['run', '--rm', '--pull', 'never', '--name', name, *FLAGS, *user,
                            image, '/bin/busybox', 'id', '-' + flag], f'{identity}\n'.encode())
                 cases[key]['guest'] = MATCHED['native_terminal'](connection, name, handles)
+        name = f'cj-id-{token}-matched-cli'
+        MATCHED['invoke'](docker, env, ['run', *MATCHED['FLAGS'], '--name', name, image, '/bin/sh',
+                                      '-c', 'printf matched-out; printf matched-err >&2; exit 23'],
+                          code=23, stdout=b'matched-out', stderr=b'matched-err')
+        cases['matched_cli'] = MATCHED['native_terminal'](connection, name, handles, 23)
+        name = f'cj-id-{token}-matched-api'
+        MATCHED['lifecycle'](connection, name, {}, argv=('/bin/true',))
+        cases['matched_api'] = MATCHED['native_terminal'](connection, name, handles)
         name = f'cj-id-{token}-exec'
         call('exec_parent', ['run', '--detach', '--pull', 'never', '--name', name, *FLAGS,
                              image, '/bin/busybox', 'sleep', '30'], None)

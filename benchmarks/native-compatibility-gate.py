@@ -69,6 +69,17 @@ def evaluate(root, revision, release):
         for case, result in required.items():
             if case.startswith(suite + '/'):
                 result.update(reason=reason, evidence=[str(folder / path)])
+        if suite == 'lifecycle' and verified:
+            for fixture, row in report.get('independent_alpine', {}).items():
+                case = 'lifecycle/' + fixture
+                if case not in required:
+                    raise ValueError(f'unknown lifecycle fixture: {fixture}')
+                witness = row.get('guest_witness', {})
+                if (row.get('error') is None and witness.get('conjet.guest_cleanup') == 'complete'
+                        and witness.get('conjet.native_handle')):
+                    pass_case(case, 'original Alpine fixture passed with verified guest cleanup', suite)
+                else:
+                    required[case].update(reason=row.get('error') or 'missing guest cleanup witness')
         if suite == 'stress' and verified:
             manifest_budget = json.loads((HERE / 'scenarios/docker-comparison-v1.json').read_text())['suites']['stress']
             count = manifest_budget['samples_per_session']
@@ -91,6 +102,11 @@ def evaluate(root, revision, release):
                                                evidence=[str(folder)])
         required['credentials/explicit'].update(reason='numeric pairs passed; account lookup is unqualified',
                                                 evidence=[str(folder)])
+        cases = credentials.get('cases', {})
+        if all(cases.get(case, {}).get('conjet.guest_cleanup') == 'complete'
+               for case in ('matched_cli', 'matched_api')):
+            pass_case('regression/matched-identity',
+                      'explicit 65532 CLI streams and API lifecycle retained verified cleanup', 'credentials')
 
     folder, verified = lane('dynamic-memory')
     memory = read(folder, 'native-core-memory-summary.json')
