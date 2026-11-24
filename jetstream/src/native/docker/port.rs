@@ -162,6 +162,10 @@ impl PublishedPort {
         };
         json!({(format!("{}/tcp",self.guest)):endpoint})
     }
+
+    pub(super) fn summary(&self) -> Value {
+        json!({"IP":"127.0.0.1","PrivatePort":self.guest,"PublicPort":self.port,"Type":"tcp"})
+    }
 }
 
 impl Drop for PublishedPort {

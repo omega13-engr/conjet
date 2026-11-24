@@ -406,8 +406,7 @@ Title: Qualify a two-service Compose lifecycle on the native engine
 
 Description: Run a pinned two-service Compose project using private bridge DNS, health checks, a named volume and one loopback published port.
 
-Is blocked by task: SPEED-074 health checks and subsequent lifecycle
-qualification. SPEED-060, SPEED-062, SPEED-072 and SPEED-073 passed.
+Is blocked by task: SPEED-060, SPEED-062 and SPEED-072–077 isolated validation, complete.
 
 Acceptance Criteria:
 
@@ -417,18 +416,16 @@ Problem and Evidence: Individual container fixtures do not establish Compose beh
 
 Approach: Use existing network/port research and native owner state; preserve lifecycle ordering and explicit feature errors.
 
-Evidence: Compose 5.8.0 accepted the frozen fixture and passed filtered
-network, container and volume discovery. The release two-alias DNS canary
-passed. The writer became healthy before Compose started the reader.
-The CLI then surfaced its missing daemon-time and filtered live event
-subscriptions. See SPEED-076.
+Evidence: Compose 5.8.0 passed the two-service up, ordered health
+dependency, private DNS, logs, loopback TCP, restart, persisted payload
+and down. The private disk passed offline filesystem verification.
+See [SPEED-064 evidence](native-engine-validation.md#speed-064).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
-Review: Pending implementation, validation and independent evidence review.
+Review: Isolated qualification and self-review passed. Independent review pending.
 
-Next Action: Qualify its health dependency through the authenticated
-guest exec path and complete lifecycle verification with scoped events.
+Next Action: Keep the fixture in release qualification after BuildKit passes.
 
 ### SPEED-072
 
@@ -471,8 +468,8 @@ Acceptance Criteria:
   restart. Reject unsupported modes and preserve cancellation.
 
 Evidence: The writer reported a real healthy state before Compose
-submitted the reader's start. Restart and shutdown verification continue
-with the event subscription in SPEED-076.
+submitted the reader's start. A second writer generation became healthy
+after restart and read the same mounted payload.
 
 ### SPEED-075
 
@@ -498,6 +495,23 @@ Acceptance Criteria:
   without changing the existing unfiltered benchmark snapshot. Preserve
   ordered delivery and stop subscriptions on disconnect or owner drain.
 - Verify Compose up, logs, restart and down through the pinned client.
+
+Evidence: The pinned client completed up, logs, restart and down. Its
+filtered stream used the daemon's real time. An independent bounded
+subscriber observed the writer start before the dependent reader.
+
+### SPEED-077
+
+Title: Report active native loopback ports in Docker container discovery
+
+Acceptance Criteria:
+
+- Report the actual loopback endpoint in the Docker container list used
+  by Compose. Verify it against TCP traffic and confirm down removes it.
+
+Evidence: The list and Compose port agreed with the live loopback binding,
+which returned the volume-backed payload. The port refused connection
+after down.
 
 ### SPEED-065
 

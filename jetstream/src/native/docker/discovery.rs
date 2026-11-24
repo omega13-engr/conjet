@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use super::Rejected;
@@ -10,52 +12,17 @@ pub(super) struct Filters {
 
 impl Filters {
     pub(super) fn parse(encoded: Option<&String>) -> Result<Self, Rejected> {
-        let Some(encoded) = encoded else {
-            return Ok(Self::default());
-        };
-        let raw: Value = serde_json::from_str(encoded)
-            .map_err(|_| Rejected::bad("invalid Docker discovery filters"))?;
-        let raw = raw
-            .as_object()
-            .ok_or_else(|| Rejected::bad("invalid Docker discovery filters"))?;
         let mut result = Self::default();
-        for (key, value) in raw {
-            let destination = match key.as_str() {
-                "name" => &mut result.names,
-                "label" => &mut result.labels,
+        for (key, values) in parse_filters(encoded)? {
+            match key.as_str() {
+                "name" => result.names = values,
+                "label" => result.labels = values,
                 _ => {
                     return Err(Rejected::bad(format!(
                         "unsupported Docker discovery filter {key}"
                     )))
                 }
-            };
-            let values: Vec<&str> = if let Some(values) = value.as_array() {
-                values
-                    .iter()
-                    .map(|value| {
-                        value
-                            .as_str()
-                            .ok_or_else(|| Rejected::bad("invalid Docker discovery filter value"))
-                    })
-                    .collect::<Result<_, _>>()?
-            } else if let Some(values) = value.as_object() {
-                if values.values().any(|value| value.as_bool() != Some(true)) {
-                    return Err(Rejected::bad("invalid Docker discovery filter set"));
-                }
-                values.keys().map(String::as_str).collect()
-            } else {
-                return Err(Rejected::bad("invalid Docker discovery filter set"));
-            };
-            if values.len() > 16
-                || values
-                    .iter()
-                    .any(|value| value.is_empty() || value.len() > 256 || value.starts_with('='))
-            {
-                return Err(Rejected::bad(
-                    "Docker discovery filter exceeds the supported scope",
-                ));
             }
-            destination.extend(values.into_iter().map(str::to_owned));
         }
         Ok(result)
     }
@@ -66,16 +33,62 @@ impl Filters {
                 .names
                 .iter()
                 .any(|filter| filter.trim_start_matches('/') == name))
-            && self.labels.iter().all(|filter| {
-                let (key, expected) = filter
-                    .split_once('=')
-                    .map_or((filter.as_str(), None), |(key, value)| (key, Some(value)));
-                labels
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .is_some_and(|value| expected.map_or(true, |expected| value == expected))
-            })
+            && labels_match(&self.labels, labels)
     }
+}
+
+pub(super) fn parse_filters(
+    encoded: Option<&String>,
+) -> Result<BTreeMap<String, Vec<String>>, Rejected> {
+    let Some(encoded) = encoded else {
+        return Ok(BTreeMap::new());
+    };
+    let raw: Value =
+        serde_json::from_str(encoded).map_err(|_| Rejected::bad("invalid Docker filters"))?;
+    let raw = raw
+        .as_object()
+        .ok_or_else(|| Rejected::bad("invalid Docker filters"))?;
+    let mut result = BTreeMap::new();
+    for (key, value) in raw {
+        let values: Vec<&str> = if let Some(values) = value.as_array() {
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| Rejected::bad("invalid Docker filter value"))
+                })
+                .collect::<Result<_, _>>()?
+        } else if let Some(values) = value.as_object() {
+            if values.values().any(|value| value.as_bool() != Some(true)) {
+                return Err(Rejected::bad("invalid Docker filter set"));
+            }
+            values.keys().map(String::as_str).collect()
+        } else {
+            return Err(Rejected::bad("invalid Docker filter set"));
+        };
+        if values.len() > 16
+            || values
+                .iter()
+                .any(|value| value.is_empty() || value.len() > 256 || value.starts_with('='))
+        {
+            return Err(Rejected::bad("Docker filter exceeds the supported scope"));
+        }
+        result.insert(key.clone(), values.into_iter().map(str::to_owned).collect());
+    }
+    Ok(result)
+}
+
+pub(super) fn labels_match(filters: &[String], labels: &Value) -> bool {
+    filters.iter().all(|filter| {
+        let (key, expected) = filter
+            .split_once('=')
+            .map_or((filter.as_str(), None), |(key, value)| (key, Some(value)));
+        labels
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| expected.map_or(true, |expected| value == expected))
+    })
 }
 
 #[cfg(test)]

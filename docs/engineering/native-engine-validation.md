@@ -242,3 +242,28 @@ and custom drivers remain outside this fixture.
 
 Evidence is under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-062/`.
+
+## SPEED-064
+
+Compose 5.8.0 ran the pinned two-service fixture against the private Rust
+owner with Core dynamic memory. The diagnostic created the external private
+network and named volume before up and removed them after down. The writer
+created a file on the volume, and a bounded guest exec healthcheck read its
+state before Compose started the dependent reader. A scoped event
+subscription observed both starts in dependency order.
+
+The reader resolved the writer to its private bridge address. Compose
+returned both service log lines and reported the actual loopback TCP
+endpoint. The endpoint returned HTTP 200 with the exact `compose-proof`
+payload. The writer's replacement generation became healthy after
+`compose restart` and read the same volume bytes. Compose down left no
+containers, and the launcher confirmed port closure, verified guest shutdown,
+the disk lease release and unchanged production. Offline `e2fsck -fn`
+passed. The exec proof disables both TTY and interactive stdin to match
+the existing noninteractive exec contract.
+
+Earlier attempts isolated filtered discovery, two DNS aliases, bounded
+health, the named-volume short form, filtered event streaming and active
+port metadata. Those failures and the successful Compose and Docker API
+transcripts are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-064/`.

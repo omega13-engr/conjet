@@ -264,6 +264,7 @@ enum Action {
     Attach(Arc<Item>, [bool; 2], u64),
     Logs(Arc<Item>, [bool; 2], u64, bool),
     Exec(Arc<super::exec::Entry>, Value),
+    Events(super::events::Subscription),
 }
 
 fn stop_grace(query: &BTreeMap<String, String>) -> Result<u64> {
@@ -314,6 +315,13 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 "ConjetContainerCapacity":super::CONTAINERS,
             }),
         ),
+        ("GET", "/info") if query.is_empty() => Reply::json(
+            200,
+            json!({
+                "SystemTime":super::events::daemon_time()?,
+                "OSType":"linux","Architecture":"aarch64","NCPU":2,"MemTotal":2147483648u64,
+            }),
+        ),
         ("POST", "/containers/create") => {
             if query
                 .keys()
@@ -353,6 +361,9 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 reply.data.push(b'\n');
             }
             reply
+        }
+        ("GET", "/events") => {
+            return Ok(Action::Events(super::events::Subscription::parse(query)?))
         }
         ("GET", "/networks") if query.keys().all(|key| key == "filters") => {
             let filters = super::discovery::Filters::parse(query.get("filters"))?;
@@ -867,6 +878,15 @@ pub(super) fn serve(
             Ok(Action::Logs(item, streams, generation, follow)) => {
                 header(&mut stream, 200, "Connection: close\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
                 send_output(&item, streams, generation, follow, &mut stream)?;
+                break;
+            }
+            Ok(Action::Events(subscription)) => {
+                header(
+                    &mut stream,
+                    200,
+                    "Connection: close\r\nContent-Type: application/json\r\n",
+                )?;
+                subscription.stream(owner, &mut stream)?;
                 break;
             }
             Ok(Action::Exec(entry, handle)) => {

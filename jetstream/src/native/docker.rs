@@ -1,5 +1,6 @@
 //! Bounded Docker compatibility endpoint for the isolated OCI candidate.
 mod discovery;
+mod events;
 mod exec;
 mod health;
 mod http;
@@ -677,6 +678,7 @@ struct Ledger {
     active: Vec<Arc<Item>>,
     history: VecDeque<Arc<Item>>,
     events: VecDeque<Value>,
+    discarded_events: usize,
     workers: Vec<JoinHandle<()>>,
     execs: VecDeque<Arc<exec::Entry>>,
     poisoned: bool,
@@ -699,6 +701,7 @@ struct Owner {
     ledger: Mutex<Ledger>,
     store: Option<Mutex<registry::Store>>,
     exec_peer: Mutex<Option<client::Connection>>,
+    event_changed: Condvar,
 }
 
 impl Owner {
@@ -709,6 +712,7 @@ impl Owner {
             ledger: Mutex::new(Ledger::default()),
             store: store.map(Mutex::new),
             exec_peer: Mutex::new(None),
+            event_changed: Condvar::new(),
         }
     }
 
@@ -825,11 +829,14 @@ impl Owner {
             let networks = state.network.as_ref().map_or_else(|| json!({}), |attachment| {
                 json!({(attachment.network.name.as_str()):attachment.inspect(state.network_address.as_deref())})
             });
+            let ports = item.published.lock().unwrap().as_ref()
+                .filter(|_| state.network_address.is_some())
+                .map(port::PublishedPort::summary).into_iter().collect::<Vec<_>>();
             Some(json!({"Id":container.id,"Names":[format!("/{}",container.name)],
                         "Image":container.config["Image"],"ImageID":container.spec["image_digest"],
                         "Command":command,"Created":container.created,"Labels":labels,
                         "State":state.status(),"Status":state.status(),
-                        "NetworkSettings":{"Networks":networks},
+                        "NetworkSettings":{"Networks":networks},"Ports":ports,
                         "Mounts":container.volume.iter().map(volume::mount_metadata).collect::<Vec<_>>() }))
         }).collect::<Vec<_>>();
         json!(selected)
@@ -1086,6 +1093,12 @@ impl Owner {
 
     fn event(&self, ledger: &mut Ledger, action: &str, item: &Item, terminal: Option<&Terminal>) {
         let mut attributes = json!({"name":item.container.name,"image":item.container.config["Image"],"conjet.backend":BACKEND});
+        if let Some(labels) = item.container.config["Labels"].as_object() {
+            let fields = attributes.as_object_mut().expect("event attributes");
+            for (key, value) in labels {
+                fields.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
         if let Some(terminal) = terminal {
             let state = &terminal.witness;
             attributes["exitCode"] = json!(terminal.code.to_string());
@@ -1112,12 +1125,14 @@ impl Owner {
             .unwrap_or_default();
         if ledger.events.len() == 64 {
             ledger.events.pop_front();
+            ledger.discarded_events += 1;
         }
         ledger
             .events
             .push_back(json!({"Type":"container","Action":action,
                                       "Actor":{"ID":item.container.id,"Attributes":attributes},
                                       "time":now.as_secs(),"timeNano":now.as_nanos()}));
+        self.event_changed.notify_all();
     }
 
     fn create(&self, name: Option<&str>, config: Value) -> Result<Arc<Item>, Rejected> {
@@ -1507,6 +1522,7 @@ impl Owner {
         let worker = {
             let mut ledger = self.ledger.lock().unwrap();
             ledger.closing = true;
+            self.event_changed.notify_all();
             for item in &ledger.active {
                 item.container.cancel.store(KILL, Ordering::Release);
                 // Unstarted admissions own no guest resources.
