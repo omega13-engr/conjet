@@ -942,6 +942,12 @@ Redis home directories. Reject set-user-ID on all entries and
 set-group-ID on non-directory entries. Verify the directory mode and
 mapped ownership without broadening workload credentials.
 
+Evidence: The fixed Node and Redis packages now stage their original
+`02755` directories with the pinned IDs. The pinned Redis image returned
+`2755:999:1000` in a native workload, with verified cleanup. Set-user-ID
+entries and set-group-ID files failed validation in tests. [Directory
+mode semantics](https://man7.org/linux/man-pages/man7/inode.7.html)
+
 ### SPEED-109
 
 Title: Stream large registry blobs into the private native disk image store

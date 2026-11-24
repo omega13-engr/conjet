@@ -99,6 +99,28 @@ That independent execution gate remains open. The full Node, Go
 and Rust images still need larger-image ingest. Raw logs are under
 `SPEED-101/` and `SPEED-102/` on ExternalSSD.
 
+## SPEED-104 through SPEED-108 disk-backed OCI ingest
+
+The guest hashes authenticated image chunks into an unlinked transfer file
+and checks the final size and digest before installation. The private Core
+disk profile places spools and published roots alongside the named-volume
+registry on the exclusive ext4 lease. Stale image generations are removed
+before the supervisor starts, and clean shutdown removes the current one
+before unmounting. Archive execution and offline ext4 checks passed across
+both a fresh and a preseeded stale disk.
+
+The disk package keeps validated OCI metadata separate from raw regular-file
+extents. The original two-layer image and a separate 80 MiB canary each passed
+live transfer, native execution, rollback and removal. The fixed Go and Rust
+layouts staged 214,178,773 and 1,042,718,012 byte packages with measured peak
+host process RSS of 20.1 and 8.7 MiB. Node and Redis staged after preserving
+the verified group inheritance mode on their home directories. The Redis
+home reported `2755:999:1000` from an isolated native process after a pinned
+public pull. The Node service and Go/Rust build workloads still require their
+own qualification.
+
+Evidence is under `SPEED-104/` through `SPEED-108/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

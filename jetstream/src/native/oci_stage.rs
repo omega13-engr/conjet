@@ -228,7 +228,7 @@ fn archive(
         let uid = u32::try_from(header.uid()?)?;
         let gid = u32::try_from(header.gid()?)?;
         ensure!(
-            mode & !0o1777 == 0 && uid <= 65535 && gid <= 65535,
+            mode & !oci::mode_mask(kind) == 0 && uid <= 65535 && gid <= 65535,
             "unsafe OCI mode or ownership"
         );
         if kind == Kind::Directory && matches!(raw.as_ref(), b"." | b"./") {

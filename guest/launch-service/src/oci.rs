@@ -53,6 +53,14 @@ pub enum Kind {
     Hardlink,
 }
 
+pub fn mode_mask(kind: Kind) -> u32 {
+    if kind == Kind::Directory {
+        0o3777
+    } else {
+        0o1777
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -139,7 +147,7 @@ impl Root {
         for record in &self.records {
             ensure!(root_path(&record.path), "invalid OCI rootfs path");
             ensure!(
-                record.mode & !0o1777 == 0
+                record.mode & !mode_mask(record.kind) == 0
                     && record.uid < ID_MAP_WIDTH
                     && record.gid < ID_MAP_WIDTH,
                 "invalid OCI rootfs mode or ownership"
@@ -178,5 +186,35 @@ impl Root {
             }
         }
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate_mode(mode: u32, kind: Kind) -> bool {
+        Root {
+            config_digest: format!("sha256:{}", "af".repeat(32)),
+            records: vec![Record {
+                path: "home".into(),
+                mode,
+                uid: 1000,
+                gid: 1000,
+                kind,
+                data: String::new(),
+                target: String::new(),
+            }],
+        }
+        .validate()
+        .is_ok()
+    }
+
+    #[test]
+    fn accepts_group_inheritance_only_on_directories() {
+        assert!(validate_mode(0o2755, Kind::Directory));
+        assert!(!validate_mode(0o2755, Kind::File));
+        assert!(!validate_mode(0o4755, Kind::Directory));
+        assert!(!validate_mode(0o4755, Kind::File));
     }
 }

@@ -44,6 +44,17 @@ def collect(endpoint, peer, docker, env, output):
                                  '--entrypoint', '/bin/busybox', pin, 'test', '-x', '/bin/registry'])
         cases['native_cleanup'] = MATCHED['native_terminal'](connection, name, set())
         call('pinned_remove', ['image', 'rm', pin])
+
+        redis = MANIFEST['images']['redis']['ref']
+        call('redis_pull', ['pull', '--platform', 'linux/arm64', redis])
+        name = 'cj-public-redis-home'
+        mode = call('redis_home', ['run', *MATCHED['FLAGS'], '--name', name,
+                                   '--entrypoint', '/bin/busybox', redis,
+                                   'stat', '-c', '%a:%u:%g', '/home/redis'])
+        if mode.strip() != '2755:999:1000':
+            raise RuntimeError(f'the Redis home mode or mapped owner changed: {mode!r}')
+        cases['redis_native_cleanup'] = MATCHED['native_terminal'](connection, name, set())
+        call('redis_remove', ['image', 'rm', redis])
     finally:
         connection.close()
         (output / 'public-image-checks.json').write_text(json.dumps(cases, indent=2) + '\n')

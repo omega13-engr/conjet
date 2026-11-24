@@ -550,5 +550,13 @@ fn copy_owner_mode(path: &Path, metadata: &Metadata) -> io::Result<()> {
     let c_path = CString::new(path.as_os_str().as_bytes())?;
     // Origin is a verified inode under the boot-staged OCI lower root.
     security::checked(unsafe { libc::chown(c_path.as_ptr(), metadata.uid(), metadata.gid()) })?;
-    fs::set_permissions(path, fs::Permissions::from_mode(metadata.mode() & 0o1777))
+    let kind = if metadata.is_dir() {
+        crate::oci::Kind::Directory
+    } else {
+        crate::oci::Kind::File
+    };
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(metadata.mode() & crate::oci::mode_mask(kind)),
+    )
 }
