@@ -784,6 +784,16 @@ Independent review and full matrix qualification pending.
 Next Action: Resolve the frozen-matrix compatibility gaps and attribute
 residual p99 variation before requalifying.
 
+The `21171de` comparison completed all 60 lifecycle pairs and five
+image pairs with zero workload failures. Four network-none lifecycle
+rows missed the 1.05 p99 upper-bound rule. The upper bounds were 1.0970
+and 1.0501 for Alpine true API and CLI, and 1.1440 and 1.0544 for
+common-static API and CLI. The first mixed-language build session
+reached the host image-store entry cap during Go and Node archive loads
+after earlier exports had been untagged. See
+`SPEED-065/cj-compat.tMPK1e-comparison-21171de/` for raw sessions,
+paired intervals and failure evidence.
+
 ### SPEED-089
 
 Title: Qualify the Docker builder gateway for the frozen matrix
@@ -1914,6 +1924,15 @@ RUN returned 23. Interrupting the live solve returned client status 130
 and guest signal 9 with teardown of the observed RUN generation. See
 `SPEED-165/cj-compat.tMPK1e-node-witness-retry/`.
 
+The mixed-language timing run reached the 16-image host cap while
+loading new exports. The last tag removal now retires a Buildx import
+owned by the private worker session once no container or alias uses
+it. The existing image-store limit stays in force. The Go and Node
+archive loads that failed in timing passed with the new cleanup witness,
+and the common, Alpine and Node archive regression passed. See
+`SPEED-160/cj-compat.tMPK1e-mixed-archive-lifetime/` and
+`SPEED-160/cj-compat.tMPK1e-archive-lifetime-regression/`.
+
 ### SPEED-163
 
 Title: Read actual cgroup counters from the pinned BuildKit worker
@@ -2096,6 +2115,18 @@ group. Each of the twelve independent group boots then verified all 2,000
 samples, ten warmups and guest cleanup. The 71-row ledger, both summaries,
 launcher reports and six binary hashes are under
 `SPEED-098/cj-compat.tMPK1e-a792b4c/`.
+
+Commit `21171de` passed all 71 frozen cases on six matching optimized
+executables. All twelve lifecycle groups retained 2,000 samples and ten
+warmups per group. Buildx public acquisition, Docker build API,
+standalone BuildKit, and the non-build suites passed. The Compose and
+storage public retries passed after the initial Docker Hub timeouts.
+Core verified 448 MiB to 2,048 MiB growth and return to 448 MiB, with
+independent guest pressure and matching active data. Launcher identities,
+disk checks and production fingerprints passed. Evidence and the
+complete ledger are in `SPEED-098/cj-compat.tMPK1e-release-21171def20e0/`.
+[Hosted macOS CI](https://github.com/omega13-engr/conjet/actions/runs/45440020877)
+passed for the same commit.
 
 
 ### SPEED-025

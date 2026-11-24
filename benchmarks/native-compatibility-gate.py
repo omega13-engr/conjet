@@ -465,6 +465,7 @@ def build_cases(report, budget, images):
         mounts = backing.get('mounts', [])
         if (not operation(builder, 'builder-create') or not valid_handle(handle)
                 or not clean(terminal) or terminal.get('worker') is not True
+                or operation(builder, 'builder-remove').get('exports_released') is not True
                 or handle_id(terminal.get('handle', {})) != handle
                 or not re.fullmatch(r'[0-9a-f]{64}', backing.get('id', ''))
                 or backing.get('image') != images['buildkit']['ref']

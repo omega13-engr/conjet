@@ -491,6 +491,7 @@ def qualified_builds(matrix, manifest, report, fixture, connection, docker, env,
                     [guest_worker] = [child for child in state()['builds']
                                       if child['worker'] and child['phase'] == 'running']
                     self.worker = guest_worker['handle']
+                    self.exported_configs = set()
                     row['worker'] = {
                         'handle': self.worker, 'id': docker_worker['Id'],
                         'name': str(args[1]), 'image': docker_worker['Config']['Image'],
@@ -520,6 +521,7 @@ def qualified_builds(matrix, manifest, report, fixture, connection, docker, env,
                     if (image['Id'], image['Architecture'], image['Os']) != (digest, 'arm64', 'linux'):
                         raise RuntimeError('loaded build image differs from its exported ARM64 config')
                     row['config_digest'] = image['Id']
+                    self.exported_configs.add(image['Id'])
                 elif scenario.endswith('.built-image-canary'):
                     connection.close()
                     die, destroy = [event for event in event_snapshot(connection, manifest['docker_api'])
@@ -534,6 +536,10 @@ def qualified_builds(matrix, manifest, report, fixture, connection, docker, env,
                     get('/volumes/' + name + '_state', 404)
                     [terminal] = [child for child in state()['builds'] if child['handle'] == self.worker]
                     row['native_worker'] = terminal
+                    remaining = {image['Id'] for image in get('/images/json', 200)}
+                    row['exports_released'] = not remaining.intersection(self.exported_configs)
+                    if not row['exports_released']:
+                        raise RuntimeError('build archive backing remained after the last tag was removed')
                     self.worker = None
                 elif (scenario == 'builder.cgroup.after-builds' and self.worker
                       and str(args[1]).endswith('-node-00') and build_bases is None):

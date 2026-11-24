@@ -22,7 +22,7 @@ mod workload_input;
 
 pub(super) use image::{install, InstallOptions};
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Read};
 use std::net::SocketAddr;
@@ -822,6 +822,7 @@ impl Item {
 struct Ledger {
     active: Vec<Arc<Item>>,
     tags: image::Tags,
+    transient_build_archives: BTreeSet<String>,
     registry_images: BTreeMap<String, String>,
     history: VecDeque<Arc<Item>>,
     events: VecDeque<Value>,
@@ -1501,7 +1502,7 @@ impl Owner {
                 "native guest must be idle to load an archive".into(),
             ));
         }
-        let store = self.image_store(&ledger)?;
+        let mut store = self.image_store(&ledger)?;
         let archive = archive::read(file, store.archive_layer_limit())
             .map_err(|error| Rejected::bad(format!("{error:#}")))?;
         let reference = archive.reference();
@@ -1527,11 +1528,69 @@ impl Owner {
             .map_err(|_| Rejected::internal("cannot report loaded Docker image"))?;
             response.push(b'\n');
         }
+        self.retire_build_archives(&mut ledger, &mut store)?;
+        let transient = !archive.tags.is_empty()
+            && ledger
+                .active
+                .iter()
+                .any(|item| item.container.buildkit_worker)
+            && store
+                .get(&reference)
+                .map_err(|error| Rejected::internal(error.to_string()))?
+                .is_none();
         store
             .import(archive)
             .map_err(|error| Rejected::bad(format!("{error:#}")))?;
         ledger.tags = tags;
+        if transient {
+            ledger.transient_build_archives.insert(reference);
+        }
         Ok(response)
+    }
+
+    fn retire_build_archives(
+        &self,
+        ledger: &mut Ledger,
+        store: &mut registry::Store,
+    ) -> Result<(), Rejected> {
+        // A tag can be removed while a workload still references the export.
+        // Revisit those archives before a later load reserves host capacity.
+        let untagged: Vec<_> = ledger
+            .transient_build_archives
+            .iter()
+            .filter(|image| !ledger.tags.references_manifest(image))
+            .cloned()
+            .collect();
+        for reference in untagged {
+            self.retire_build_archive(ledger, store, &reference)?;
+        }
+        Ok(())
+    }
+
+    fn retire_build_archive(
+        &self,
+        ledger: &mut Ledger,
+        store: &mut registry::Store,
+        reference: &str,
+    ) -> Result<Option<String>, Rejected> {
+        let image = store
+            .get(reference)
+            .map_err(|error| Rejected::internal(error.to_string()))?
+            .ok_or_else(|| Rejected::internal("tracked build archive is missing"))?;
+        if ledger
+            .active
+            .iter()
+            .any(|item| item.container.spec["image_digest"] == image.metadata.config_digest)
+        {
+            return Ok(None);
+        }
+        let config = image.metadata.config_digest.clone();
+        let mut peer = self.scoped_peer()?;
+        store
+            .remove(&mut peer, image)
+            .map_err(|error| Rejected::internal(format!("{error:#}")))?;
+        ledger.transient_build_archives.remove(reference);
+        Ok(Some(config))
     }
 
     fn save_archive(&self, name: &str) -> Result<fs::File, Rejected> {
@@ -1567,8 +1626,22 @@ impl Owner {
         if ledger.poisoned || ledger.closing {
             return Err(Rejected(409, "native OCI state is unresolved".into()));
         }
-        if let Some(tag) = ledger.tags.remove(reference) {
-            return Ok(json!([{"Untagged":tag}]));
+        let reference_target = ledger.tags.resolve(reference).to_owned();
+        let mut tags = ledger.tags.clone();
+        if let Some(tag) = tags.remove(reference) {
+            let mut response = vec![json!({"Untagged":tag})];
+            if ledger.transient_build_archives.contains(&reference_target)
+                && !tags.references_manifest(&reference_target)
+            {
+                let mut store = self.image_store(&ledger)?;
+                if let Some(config) =
+                    self.retire_build_archive(&mut ledger, &mut store, &reference_target)?
+                {
+                    response.push(json!({"Deleted":config}));
+                }
+            }
+            ledger.tags = tags;
+            return Ok(json!(response));
         }
         let mut registered = ledger
             .registry_images
@@ -1601,6 +1674,7 @@ impl Owner {
             return Err(Rejected(409, "image has local tags".into()));
         }
         let config = image.metadata.config_digest.clone();
+        let target = image.metadata.reference.clone();
         if owned.is_some() {
             let mut peer = self.scoped_peer()?;
             store
@@ -1612,6 +1686,7 @@ impl Owner {
         if let Some(owned) = owned {
             ledger.registry_images.remove(&owned);
         }
+        ledger.transient_build_archives.remove(&target);
         Ok(json!([{"Untagged":reference},{"Deleted":config}]))
     }
 
