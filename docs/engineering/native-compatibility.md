@@ -121,6 +121,22 @@ own qualification.
 
 Evidence is under `SPEED-104/` through `SPEED-108/` on ExternalSSD.
 
+## SPEED-109 large public pulls
+
+The Core disk profile streamed verified registry blobs to the private
+ExternalSSD store and installed packed OCI roots through the native Docker
+endpoint. The exact Registry, Redis, Node, Go and Rust pins passed pull,
+native filesystem execution and removal. Node, Go and Rust also passed
+config-identity inspection and cached pull. The complete run measured
+13.9, 17.5 and 54.6 seconds for those three pulls. A preceding run had
+already completed the Rust pull before its idle HTTP witness connection
+closed. The complete run used a fresh connection for each cleanup query.
+
+The loopback registry's corruption and interruption regressions passed.
+The large-image run left no image entries in the private host store,
+released the lease, passed offline ext4 checks and preserved production.
+Evidence is under `SPEED-109/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

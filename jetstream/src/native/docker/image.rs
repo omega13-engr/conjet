@@ -227,22 +227,6 @@ pub(super) fn image_request(
     )?)
 }
 
-pub(super) fn install_with_peer(
-    peer: &mut client::Connection,
-    image: &str,
-    sha256: &str,
-    package: &[u8],
-) -> anyhow::Result<Value> {
-    install_reader(
-        peer,
-        image,
-        sha256,
-        PackageEncoding::Json,
-        package.len() as u64,
-        package,
-    )
-}
-
 pub(super) fn install_reader(
     peer: &mut client::Connection,
     image: &str,
@@ -297,7 +281,11 @@ pub(super) fn install_reader(
     let budget = deadline
         .saturating_duration_since(Instant::now())
         .as_millis()
-        .min(10000) as u64;
+        .min(if encoding == PackageEncoding::DiskV2 {
+            30_000
+        } else {
+            10_000
+        }) as u64;
     ensure!(budget > 0, "OCI transfer deadline elapsed");
     let reply = image_request(peer, json!({"action":"commit","transfer":transfer}), budget)
         .context("OCI commit outcome requires inspection if the connection was lost")?;

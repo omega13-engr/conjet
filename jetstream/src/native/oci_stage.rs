@@ -21,7 +21,7 @@ const SCRATCH: &str = "/Volumes/ExternalSSD/dev_workspace/tmp";
 pub(super) const METADATA_LIMIT: usize = 64 * 1024;
 pub(super) const LAYER_BUDGET: usize = 40 * 1024 * 1024;
 const LAYERS_LIMIT: usize = 16;
-const DISK_COMPRESSED_BUDGET: u64 = 512 * 1024 * 1024;
+pub(super) const DISK_COMPRESSED_BUDGET: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Args)]
 pub(super) struct Options {
@@ -574,7 +574,7 @@ fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)>
     Ok((root, receipt))
 }
 
-fn digest_file(file: &mut File, size: u64) -> anyhow::Result<String> {
+pub(super) fn digest_file(file: &mut File, size: u64) -> anyhow::Result<String> {
     file.rewind()?;
     let mut hash = Sha256::new();
     ensure!(
@@ -716,10 +716,6 @@ pub(super) fn stage(options: Options) -> anyhow::Result<()> {
                          "manifest_digest":options.manifest_digest})
     );
     Ok(())
-}
-
-pub(super) fn publish(layout: &Path, manifest: &str, output: &Path) -> anyhow::Result<String> {
-    publish_with_encoding(layout, manifest, output, oci::PackageEncoding::Json)
 }
 
 pub(super) fn publish_with_encoding(

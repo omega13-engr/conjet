@@ -9,15 +9,15 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
-use conjet_launch_service::handshake::{hex, unhex};
-use conjet_launch_service::oci::PACKAGE_LIMIT;
+use conjet_launch_service::handshake::unhex;
+use conjet_launch_service::oci::PackageEncoding;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use super::{archive, client, image, private_scratch, public_registry, request, STOP};
 use crate::native::oci_stage;
 
 const MAX_STORED: u64 = 256 * 1024 * 1024;
+const MAX_DISK_STORED: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_IMAGES: usize = 16;
 const MAX_HEADERS: usize = 8192;
 const IO_TIMEOUT: Duration = Duration::from_secs(4);
@@ -29,6 +29,7 @@ pub(super) struct Store {
     root: PathBuf,
     registry: Option<SocketAddr>,
     public: public_registry::Pins,
+    encoding: PackageEncoding,
     installed: BTreeMap<String, String>,
     _lock: File,
 }
@@ -67,6 +68,20 @@ fn suffix(digest: &str) -> anyhow::Result<&str> {
         .context("expected an immutable SHA-256 digest")?;
     unhex::<32>(value)?;
     Ok(value)
+}
+
+fn package_encoding(receipt: &Value) -> anyhow::Result<PackageEncoding> {
+    match receipt.get("package_encoding") {
+        None => Ok(PackageEncoding::Json),
+        Some(value) => Ok(serde_json::from_value(value.clone())?),
+    }
+}
+
+fn package_name(encoding: PackageEncoding) -> &'static str {
+    match encoding {
+        PackageEncoding::Json => "package.json",
+        PackageEncoding::DiskV2 => "package.cjoci",
+    }
 }
 
 impl Store {
@@ -142,6 +157,11 @@ impl Store {
                 public_registry::Pins::frozen()?
             } else {
                 public_registry::Pins::default()
+            },
+            encoding: if status["disk_image_store"] == true {
+                PackageEncoding::DiskV2
+            } else {
+                PackageEncoding::Json
             },
             installed,
             _lock: lock,
@@ -274,9 +294,29 @@ impl Store {
             bytes = bytes.saturating_add(item?.metadata()?.len());
         }
         for item in self.root.join("images").read_dir()? {
-            bytes = bytes.saturating_add(item?.path().join("package.json").metadata()?.len());
+            let item = item?;
+            let name = item.file_name();
+            let digest = format!(
+                "sha256:{}",
+                name.to_str().context("invalid image directory name")?
+            );
+            let encoding = package_encoding(&self.receipt(&digest)?)?;
+            let package = oci_stage::open_bounded(
+                &self.root,
+                &item.path().join(package_name(encoding)),
+                encoding.byte_limit(),
+            )?;
+            bytes = bytes.saturating_add(package.metadata()?.len());
         }
         Ok(bytes)
+    }
+
+    fn free_bytes(&self) -> anyhow::Result<u64> {
+        let capacity = match self.encoding {
+            PackageEncoding::Json => MAX_STORED,
+            PackageEncoding::DiskV2 => MAX_DISK_STORED,
+        };
+        Ok(capacity.saturating_sub(self.stored_bytes()?))
     }
 
     pub(super) fn get(&self, reference: &str) -> anyhow::Result<Option<Image>> {
@@ -358,7 +398,7 @@ impl Store {
             self.root.join("images").read_dir()?.count() < MAX_IMAGES,
             "ExternalSSD OCI image capacity exceeded"
         );
-        let mut free = MAX_STORED.saturating_sub(self.stored_bytes()?);
+        let mut free = self.free_bytes()?;
         let mut created = Vec::new();
         let result = (|| {
             for (digest, bytes) in blobs {
@@ -378,10 +418,10 @@ impl Store {
                 created.push(path);
             }
             ensure!(
-                free >= PACKAGE_LIMIT,
+                free >= self.encoding.byte_limit(),
                 "ExternalSSD OCI package capacity exceeded"
             );
-            oci_stage::publish(&self.root, manifest, &target)?;
+            oci_stage::publish_with_encoding(&self.root, manifest, &target, self.encoding)?;
             Ok(())
         })();
         if result.is_err() {
@@ -401,13 +441,18 @@ impl Store {
             self.root.join("images").read_dir()?.count() < MAX_IMAGES,
             "ExternalSSD OCI image capacity exceeded"
         );
+        let disk = self.encoding == PackageEncoding::DiskV2;
         let mut download = Download {
-            free: MAX_STORED.saturating_sub(self.stored_bytes()?),
+            free: self.free_bytes()?,
             created: Vec::new(),
-            deadline: Instant::now() + Duration::from_secs(25),
+            deadline: Instant::now() + Duration::from_secs(if disk { 110 } else { 25 }),
             token: None,
         };
-        let mut total_layer = LAYERS;
+        let mut total_layer = if disk {
+            oci_stage::DISK_COMPRESSED_BUDGET as usize
+        } else {
+            LAYERS
+        };
         let results = (|| {
             self.receive(&name, "manifests", name.manifest, METADATA, &mut download)?;
             let manifest = oci_stage::read_manifest(&self.root, name.manifest)?;
@@ -427,10 +472,15 @@ impl Store {
                 total_layer -= layer.size;
             }
             ensure!(
-                download.free >= PACKAGE_LIMIT,
+                download.free >= self.encoding.byte_limit(),
                 "ExternalSSD OCI package capacity exceeded"
             );
-            oci_stage::publish(&self.root, name.manifest, &self.path(name.manifest)?)?;
+            oci_stage::publish_with_encoding(
+                &self.root,
+                name.manifest,
+                &self.path(name.manifest)?,
+                self.encoding,
+            )?;
             self.get(reference)?
                 .context("published OCI receipt is missing")
         })();
@@ -454,18 +504,26 @@ impl Store {
         bound: usize,
         download: &mut Download,
     ) -> anyhow::Result<()> {
-        let file = self.root.join("blobs/sha256").join(suffix(digest)?);
+        let expected = suffix(digest)?;
+        let file = self.root.join("blobs/sha256").join(expected);
         if file.try_exists()? {
-            oci_stage::blob(&self.root, digest, bound)?;
+            let mut stored = oci_stage::open_bounded(&self.root, &file, bound as u64)?;
+            let size = stored.metadata()?.len();
+            ensure!(
+                oci_stage::digest_file(&mut stored, size)? == expected,
+                "cached OCI blob digest mismatch"
+            );
             return Ok(());
         }
         let bound = bound.min(download.free as usize);
-        let bytes = match name.origin {
+        let mut pending = tempfile::NamedTempFile::new_in(file.parent().expect("blob parent"))?;
+        let size = match name.origin {
             Origin::Loopback(address) => receive(
                 address,
                 &format!("/v2/{}/{kind}/{digest}", name.repository),
                 bound,
                 download.deadline,
+                &mut pending,
             )?,
             Origin::Public => {
                 if download.token.is_none() {
@@ -478,18 +536,23 @@ impl Store {
                     .token
                     .as_ref()
                     .expect("scoped public token")
-                    .download(name.repository, kind, digest, bound, download.deadline)?
+                    .download(
+                        name.repository,
+                        kind,
+                        digest,
+                        bound,
+                        download.deadline,
+                        &mut pending,
+                    )?
             }
         };
         ensure!(
-            format!("sha256:{}", hex(&Sha256::digest(&bytes))) == digest,
+            oci_stage::digest_file(pending.as_file_mut(), size)? == expected,
             "registry blob digest mismatch"
         );
-        let mut pending = tempfile::NamedTempFile::new_in(file.parent().expect("blob parent"))?;
-        pending.write_all(&bytes)?;
         pending.as_file().sync_all()?;
         pending.persist_noclobber(&file)?;
-        download.free -= bytes.len() as u64;
+        download.free -= size;
         download.created.push(file);
         Ok(())
     }
@@ -506,17 +569,22 @@ impl Store {
         let hash = image.receipt["package_sha256"]
             .as_str()
             .context("missing staged OCI package digest")?;
-        let expected = unhex::<32>(hash)?;
-        let package = oci_stage::read_bounded(
-            &self.root,
-            &self.path(&image.manifest)?.join("package.json"),
-            PACKAGE_LIMIT as usize,
-        )?;
+        let encoding = package_encoding(&image.receipt)?;
         ensure!(
-            Sha256::digest(&package)[..] == expected,
+            encoding != PackageEncoding::DiskV2 || self.encoding == PackageEncoding::DiskV2,
+            "the cached image requires the native disk store"
+        );
+        let mut package = oci_stage::open_bounded(
+            &self.root,
+            &self.path(&image.manifest)?.join(package_name(encoding)),
+            encoding.byte_limit(),
+        )?;
+        let size = package.metadata()?.len();
+        ensure!(
+            oci_stage::digest_file(&mut package, size)? == hash,
             "staged OCI package digest mismatch"
         );
-        image::install_with_peer(peer, digest, hash, &package)?;
+        image::install_reader(peer, digest, hash, encoding, size, BufReader::new(package))?;
         self.installed.insert(digest.to_owned(), hash.to_owned());
         Ok(())
     }
@@ -594,7 +662,8 @@ fn receive(
     path: &str,
     bound: usize,
     deadline: Instant,
-) -> anyhow::Result<Vec<u8>> {
+    target: &mut impl Write,
+) -> anyhow::Result<u64> {
     let mut socket = TcpStream::connect_timeout(&address, remaining(deadline)?)?;
     socket.set_write_timeout(Some(remaining(deadline)?))?;
     write!(socket, "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nAccept: application/vnd.oci.image.manifest.v1+json, application/octet-stream\r\n\r\n")?;
@@ -638,17 +707,17 @@ fn receive(
     let length = length
         .filter(|length| *length <= bound)
         .context("registry blob is missing its length or exceeds its bound")?;
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(length)?;
+    let mut written = 0;
     let mut buffer = [0; 8192];
-    while bytes.len() < length {
+    while written < length {
         reader
             .get_ref()
             .set_read_timeout(Some(remaining(deadline)?))?;
-        let count = buffer.len().min(length - bytes.len());
+        let count = buffer.len().min(length - written);
         let read = reader.read(&mut buffer[..count])?;
         ensure!(read > 0, "registry blob transfer was interrupted");
-        bytes.extend_from_slice(&buffer[..read]);
+        target.write_all(&buffer[..read])?;
+        written += read;
     }
-    Ok(bytes)
+    Ok(written as u64)
 }

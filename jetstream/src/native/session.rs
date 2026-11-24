@@ -365,7 +365,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     ensure!(scratch.is_dir(), "scratch must be a directory");
     let volume = options
         .volume_disk
-        .map(|path| VolumeDisk::lease(path, &scratch))
+        .map(|path| VolumeDisk::lease(path, &scratch, options.disk_image_store))
         .transpose()?;
     let session = tempfile::Builder::new()
         .prefix("cn-")

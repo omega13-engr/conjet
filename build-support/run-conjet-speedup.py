@@ -619,7 +619,8 @@ def native_session(args, root):
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, store)
             elif args.diagnostics == 'public-images':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-public-images.py'))
-                diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output,
+                                      disk_store=store if args.native_disk_images else None)
             elif args.diagnostics == 'compatibility-preflight':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-compatibility-preflight.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite)

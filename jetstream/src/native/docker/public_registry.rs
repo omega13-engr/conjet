@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -68,7 +68,9 @@ impl Token {
         let url = format!(
             "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repository}:pull"
         );
-        let entry: Value = serde_json::from_slice(&get(&url, None, 65536, deadline)?)?;
+        let mut body = Vec::new();
+        get(&url, None, 65_536, deadline, &mut body)?;
+        let entry: Value = serde_json::from_slice(&body)?;
         let token = entry["token"]
             .as_str()
             .context("public registry response lacks a token")?;
@@ -90,18 +92,34 @@ impl Token {
         digest: &str,
         bound: usize,
         deadline: Instant,
-    ) -> anyhow::Result<Vec<u8>> {
+        target: &mut impl Write,
+    ) -> anyhow::Result<u64> {
         get(
             &format!("https://registry-1.docker.io/v2/{repository}/{kind}/{digest}"),
             Some(&self.0),
             bound,
             deadline,
+            target,
         )
     }
 }
 
-fn get(url: &str, token: Option<&str>, bound: usize, deadline: Instant) -> anyhow::Result<Vec<u8>> {
-    let time = super::registry::remaining(deadline)?.as_secs_f64();
+fn get(
+    url: &str,
+    token: Option<&str>,
+    bound: usize,
+    deadline: Instant,
+    target: &mut impl Write,
+) -> anyhow::Result<u64> {
+    let remaining = super::registry::remaining(deadline)?;
+    let time = if bound > super::super::oci_stage::LAYER_BUDGET {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .min(std::time::Duration::from_secs(90))
+    } else {
+        remaining
+    }
+    .as_secs_f64();
     ensure!(
         bound != 0,
         "public registry response has no remaining byte budget"
@@ -131,15 +149,14 @@ fn get(url: &str, token: Option<&str>, bound: usize, deadline: Instant) -> anyho
                 "Authorization: Bearer {token}"
             )?;
         }
-        let mut bytes = Vec::new();
-        child
+        let mut body = child
             .stdout
             .take()
             .expect("piped registry body")
-            .take(bound as u64 + 1)
-            .read_to_end(&mut bytes)?;
+            .take(bound as u64 + 1);
+        let bytes = io::copy(&mut body, target)?;
         ensure!(
-            bytes.len() <= bound,
+            bytes <= bound as u64,
             "public registry response exceeds its byte bound"
         );
         let status = child.wait()?;

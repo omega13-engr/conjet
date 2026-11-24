@@ -957,6 +957,24 @@ endpoint. Verify bounded blob downloads and packed guest installation,
 old JSON cache entries, shared references, rollback and cleanup. Keep
 the private lease and Core dynamic memory.
 
+Evidence: The optimized private endpoint pulled, inspected, cached and
+removed the fixed Registry, Redis, Node, Go and Rust images. Node, Go
+and Rust required 13.9, 17.5 and 54.6 seconds in the complete verification
+run. The guest execution and teardown witnesses passed, and the host image
+store and offline ext4 checks verified cleanup. A separate run retained the
+loopback interruption and hash rejection results. Logs include the first
+idle witness-connection failure under `SPEED-109/` on ExternalSSD.
+
+### SPEED-110
+
+Title: Attach Docker's built-in bridge without joining the custom bridge
+
+Acceptance: Resolve explicit bridge and default Docker network modes to
+the built-in network. Verify distinct namespace and address scope
+alongside the existing custom internal bridge, default-route metadata
+and cleanup. Run the original no-network and bridge lifecycle fixtures
+with their existing resources, commands and outputs.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

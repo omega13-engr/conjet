@@ -1690,6 +1690,7 @@ impl FreshFixture {
                         "last_sequence": guard.highest_sequence,
                         "workload": guard.records.back().map(Record::state),
                         "installed_images": guard.images.snapshot(),
+                        "disk_image_store": crate::image_store::disk_store_enabled(),
                         "exec_active": guard.exec_active,
                         "active_workloads": guard.active().map(Record::state).collect::<Vec<_>>(),
                     }),

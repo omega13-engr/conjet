@@ -15,7 +15,7 @@ pub(super) struct VolumeDisk {
 }
 
 impl VolumeDisk {
-    pub fn lease(path: PathBuf, scratch: &Path) -> Result<Self> {
+    pub fn lease(path: PathBuf, scratch: &Path, disk_image_store: bool) -> Result<Self> {
         ensure!(
             scratch == Path::new("/Volumes/ExternalSSD/dev_workspace/tmp")
                 && path.starts_with(scratch)
@@ -28,13 +28,18 @@ impl VolumeDisk {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&path)?;
         let info = file.metadata()?;
+        let max_bytes = if disk_image_store {
+            4 * 1024 * 1024 * 1024
+        } else {
+            512 * 1024 * 1024
+        };
         ensure!(
             info.is_file()
                 && info.nlink() == 1
                 && info.uid() == unsafe { libc::geteuid() }
                 && info.mode() & 0o077 == 0
                 && info.dev() == scratch.metadata()?.dev()
-                && (32 * 1024 * 1024..=512 * 1024 * 1024).contains(&info.len()),
+                && (32 * 1024 * 1024..=max_bytes).contains(&info.len()),
             "invalid owner, permissions, size or backing device for native volume disk"
         );
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
