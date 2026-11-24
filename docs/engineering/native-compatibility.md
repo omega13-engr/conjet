@@ -75,6 +75,30 @@ This increment supports one Linux ARM64 image per uncompressed
 Docker archive, including compressed layer members. It uses the
 existing OCI layer and guest package bounds.
 
+## SPEED-101 and SPEED-102 image provisioning
+
+The OCI verifier accepts bounded local PAX path and link-path fields
+on the immediately following archive entry. Existing path, ownership,
+mode and link checks still apply. The pinned Go image advanced past
+its PAX rejection to the existing size bound.
+
+The isolated launcher can enable `--native-public-images`. The
+native store then resolves only the immutable Docker Hub references
+from the frozen matrix. It fetches through HTTPS, shares verified
+blobs with the existing store, and verifies manifest, config and
+layer digests before guest admission. The short-lived registry token
+is passed over the curl child's stdin. Curl drops Authorization on
+cross-origin redirects. [curl documentation](https://curl.se/docs/manpage.html#--header)
+
+The release canary rejected the wrong digest and platform, fetched
+and inspected the pinned Registry image, repeated the cached pull,
+verified its executable within a native workload, and removed the
+image. A separate attempt to run that Registry binary failed with
+EPERM on Go thread creation within the existing syscall policy.
+That independent execution gate remains open. The full Node, Go
+and Rust images still need larger-image ingest. Raw logs are under
+`SPEED-101/` and `SPEED-102/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

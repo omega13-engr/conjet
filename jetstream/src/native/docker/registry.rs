@@ -14,7 +14,7 @@ use conjet_launch_service::oci::PACKAGE_LIMIT;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{archive, client, image, private_scratch, request, STOP};
+use super::{archive, client, image, private_scratch, public_registry, request, STOP};
 use crate::native::oci_stage;
 
 const MAX_STORED: u64 = 256 * 1024 * 1024;
@@ -28,6 +28,7 @@ const STORE_VERSION: &[u8] = b"conjet-native-image-store-1\n";
 pub(super) struct Store {
     root: PathBuf,
     registry: Option<SocketAddr>,
+    public: public_registry::Pins,
     installed: BTreeMap<String, String>,
     _lock: File,
 }
@@ -35,12 +36,19 @@ pub(super) struct Store {
 struct Reference<'a> {
     repository: &'a str,
     manifest: &'a str,
+    origin: Origin,
+}
+
+enum Origin {
+    Loopback(SocketAddr),
+    Public,
 }
 
 struct Download {
     free: u64,
     created: Vec<PathBuf>,
     deadline: Instant,
+    token: Option<public_registry::Token>,
 }
 
 fn incomplete_entry(name: &str) -> bool {
@@ -65,6 +73,7 @@ impl Store {
     pub(super) fn open(
         root: PathBuf,
         registry: Option<SocketAddr>,
+        allow_public: bool,
         status: &Value,
     ) -> anyhow::Result<Self> {
         private_scratch(&root)?;
@@ -129,6 +138,11 @@ impl Store {
         let store = Self {
             root,
             registry,
+            public: if allow_public {
+                public_registry::Pins::frozen()?
+            } else {
+                public_registry::Pins::default()
+            },
             installed,
             _lock: lock,
         };
@@ -136,12 +150,21 @@ impl Store {
         Ok(store)
     }
 
-    fn reference<'s>(&self, reference: &'s str) -> anyhow::Result<Reference<'s>> {
-        let registry = self.registry.context("native registry is not configured")?;
+    fn reference<'s>(&'s self, reference: &'s str) -> anyhow::Result<Reference<'s>> {
         let (name, manifest) = reference
             .rsplit_once('@')
             .context("native pull requires a pinned registry digest")?;
         suffix(manifest)?;
+        if let Some(repository) = self.public.repository(name, manifest) {
+            return Ok(Reference {
+                repository,
+                manifest,
+                origin: Origin::Public,
+            });
+        }
+        let registry = self
+            .registry
+            .context("image is outside the frozen public registry pins")?;
         let (authority, repository) = name
             .split_once('/')
             .context("native pull requires the allowlisted registry")?;
@@ -162,6 +185,7 @@ impl Store {
         Ok(Reference {
             repository,
             manifest,
+            origin: Origin::Loopback(registry),
         })
     }
 
@@ -381,6 +405,7 @@ impl Store {
             free: MAX_STORED.saturating_sub(self.stored_bytes()?),
             created: Vec::new(),
             deadline: Instant::now() + Duration::from_secs(25),
+            token: None,
         };
         let mut total_layer = LAYERS;
         let results = (|| {
@@ -434,13 +459,28 @@ impl Store {
             oci_stage::blob(&self.root, digest, bound)?;
             return Ok(());
         }
-        let path = format!("/v2/{}/{kind}/{digest}", name.repository);
-        let bytes = receive(
-            self.registry.context("native registry is not configured")?,
-            &path,
-            bound.min(download.free as usize),
-            download.deadline,
-        )?;
+        let bound = bound.min(download.free as usize);
+        let bytes = match name.origin {
+            Origin::Loopback(address) => receive(
+                address,
+                &format!("/v2/{}/{kind}/{digest}", name.repository),
+                bound,
+                download.deadline,
+            )?,
+            Origin::Public => {
+                if download.token.is_none() {
+                    download.token = Some(public_registry::Token::acquire(
+                        name.repository,
+                        download.deadline,
+                    )?);
+                }
+                download
+                    .token
+                    .as_ref()
+                    .expect("scoped public token")
+                    .download(name.repository, kind, digest, bound, download.deadline)?
+            }
+        };
         ensure!(
             format!("sha256:{}", hex(&Sha256::digest(&bytes))) == digest,
             "registry blob digest mismatch"
@@ -539,7 +579,7 @@ impl Store {
     }
 }
 
-fn remaining(deadline: Instant) -> anyhow::Result<Duration> {
+pub(super) fn remaining(deadline: Instant) -> anyhow::Result<Duration> {
     ensure!(
         !STOP.load(Ordering::Acquire),
         "native Docker owner is stopping"

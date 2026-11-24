@@ -560,6 +560,8 @@ def native_session(args, root):
             report['image_store'] = str(store)
             if args.native_boot_layout:
                 bridge_command += ['--boot-layout', args.native_boot_layout]
+            if args.native_public_images:
+                bridge_command.append('--pinned-public-registry')
         if args.diagnostics == 'registry':
             registry_test = runpy.run_path(str(REPO / 'benchmarks/native-docker-registry.py'))
             registry = registry_scope.enter_context(registry_test['Registry'](args.registry_fixtures).serve())
@@ -610,6 +612,9 @@ def native_session(args, root):
             elif args.diagnostics == 'archive':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-archive.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, store)
+            elif args.diagnostics == 'public-images':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-public-images.py'))
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
             elif args.diagnostics == 'compatibility-preflight':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-compatibility-preflight.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite)
@@ -760,6 +765,8 @@ def main():
     parser.add_argument('--core', required=True, type=Path)
     parser.add_argument('--legacy-baseline', action='store_true', help='explicit historical Docker/containerd lane')
     parser.add_argument('--network-helper', type=Path)
+    parser.add_argument('--native-public-images', action='store_true',
+                        help='use the frozen Docker Hub image pins in the private native store')
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output',
                  'native-memd', 'native-reclaimd', 'native-volume-disk', 'native-compose-cli',
                  'import-package', 'import-receipt', 'registry-fixtures', 'native-boot-layout'):
@@ -767,6 +774,7 @@ def main():
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec', 'credentials', 'archive',
+                                                  'public-images',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
                                                   'volume-disk', 'mounted-volume', 'admission-trace', 'compose',
@@ -810,7 +818,7 @@ def main():
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
     if (args.matched_output or args.diagnostics in (*CORE_DIAGNOSTICS, 'memory-telemetry',
-                                                   'compatibility-preflight', 'archive')
+                                                   'compatibility-preflight', 'archive', 'public-images')
             or args.native_memd or args.native_reclaimd):
         if not (args.native_memd and args.native_reclaimd and args.docker_owner == 'rust'):
             parser.error('native timing and memory canaries require both static Core helpers and the Rust owner')
@@ -867,6 +875,10 @@ def main():
         native_assets += ('native_boot_layout',)
     elif args.diagnostics == 'archive':
         parser.error('archive diagnostics require the pinned boot OCI layout')
+    if args.native_public_images and (args.legacy_baseline or args.docker_owner != 'rust'):
+        parser.error('frozen public images require the private native Rust owner')
+    if args.diagnostics == 'public-images' and not args.native_public_images:
+        parser.error('public image diagnostics require the frozen Docker Hub source')
     if (bool(args.benchmark_scenario) != bool(args.benchmark_archive)
             or (args.benchmark_scenario and not (args.benchmark_output or args.retained_trace_output))):
         parser.error('a staged scenario requires benchmark output and an image archive')

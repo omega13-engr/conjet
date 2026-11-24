@@ -8,6 +8,7 @@ mod http;
 mod image;
 mod network;
 mod port;
+mod public_registry;
 mod registry;
 mod request;
 mod volume;
@@ -61,6 +62,9 @@ pub(super) struct Options {
     image_store: Option<PathBuf>,
     #[arg(long, requires = "image_store")]
     registry: Option<SocketAddr>,
+    /// Enable the isolated comparison's immutable public image references.
+    #[arg(long, requires = "image_store")]
+    pinned_public_registry: bool,
     /// Retain verified source layers for exporting the base image.
     #[arg(long, requires = "image_store")]
     boot_layout: Option<PathBuf>,
@@ -172,7 +176,14 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     );
     let store = options
         .image_store
-        .map(|root| registry::Store::open(root, options.registry, &status))
+        .map(|root| {
+            registry::Store::open(
+                root,
+                options.registry,
+                options.pinned_public_registry,
+                &status,
+            )
+        })
         .transpose()?;
     if let Some(layout) = options.boot_layout {
         store

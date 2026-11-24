@@ -844,6 +844,31 @@ duplicate, dangling, unsupported and escaping metadata. The pinned Go
 layout advanced past the earlier PAX failure and reached the existing
 OCI byte bound. Logs are under `SPEED-101/` on ExternalSSD.
 
+### SPEED-102
+
+Title: Fetch the frozen Docker Hub pins through the native image store
+
+Acceptance: Provision the approved image references through authenticated
+HTTPS and verify every manifest, config and layer before admission.
+Retain the loopback test registry and confirm unknown repositories or
+digests cannot trigger outbound fetches. Keep credentials out of logs
+and the process command line.
+
+Evidence: The isolated HTTPS source provisioned and verified the
+pinned ARM64 Registry image. Cached pull, unrelated digest and
+platform rejection, and cleanup passed. The Registry executable
+exposed a separate Go thread-creation failure.
+
+### SPEED-103
+
+Title: Qualify thread creation inside the native OCI sandbox
+
+Acceptance: Admit only same-process threads under the established
+namespace, capability, seccomp and PID limits. Reject clone requests
+that create a separate process or namespace. Reproduce the observed
+Go workload behavior and preserve the evidence for any remaining
+resource or syscall failure.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle
