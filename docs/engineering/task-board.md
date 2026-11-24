@@ -83,7 +83,10 @@ experimental native-launch evidence. Their report verdicts apply to
 their recorded binaries and workloads. SPEED-037 through SPEED-045
 retain their old acceptance criteria for research provenance.
 
-## BACKLOG
+## Native candidate under review
+
+These tasks have isolated implementation or measurement evidence. They
+remain open for independent review.
 
 ### SPEED-081
 
@@ -669,42 +672,7 @@ Evidence: The list and Compose port agreed with the live loopback binding,
 which returned the volume-backed payload. The port refused connection
 after down.
 
-### SPEED-065
-
-Title: Qualify native speed and memory against official Kiri
-
-Description: Run the existing full comparison matrix on frozen native release artifacts.
-
-Dependencies: SPEED-058, SPEED-060, SPEED-063 and SPEED-064 passed
-their isolated gates. Standalone API/CLI lifecycle can proceed.
-The full comparison needs the Docker builder path in SPEED-089 and
-matching fixtures for the remaining surfaces.
-
-Acceptance Criteria:
-
-- Run five alternating lifecycle pairs per API/CLI lane with 2,000 measured operations and ten warmups per engine/boot; preserve failures. Re-run image, build, Compose, networking/storage and concurrency rows using existing report formats. Pass full dynamic-memory and production-cleanup gates. Apply existing parity/advantage rules and report unsupported coverage and external limitations.
-
-Problem and Evidence: Parity and superiority remain unproven for the new candidate.
-
-Approach: Keep native API, Docker API and CLI timers separate; record hashes, p50/p95/p99, throughput, confidence intervals, resource data and exact cleanup boundaries.
-
-Evidence: Two post-SPEED-085 release pilot pairs passed all 1,600
-measured operations. Native API p50 was 2.60–2.72 ms versus Kiri
-3.53–3.55 ms, passing the below-5-ms isolated median target. Native
-API p99 was 4.11–4.71 ms versus Kiri 4.49–4.57 ms. Formal parity
-and the full matrix remain unqualified. See [the tail correction
-and pilot](native-latency-diagnostic-results.md#speed-085).
-
-Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
-
-Review: Pending implementation, validation and independent evidence review.
-
-Next Action: Freeze only reviewed candidate code; do not promote on pilot results.
-
-
-
-
-
+## BACKLOG
 
 ### SPEED-014
 
@@ -765,6 +733,42 @@ Next Action: Set matching version metadata and release notes for the reviewed pa
 
 ## INPROGRESS
 
+### SPEED-065
+
+Title: Qualify native speed and memory against official Kiri
+
+Description: Run the existing full comparison matrix on frozen native release artifacts.
+
+Dependencies: SPEED-058, SPEED-060, SPEED-063 and SPEED-064 passed
+their isolated gates. The standalone API/CLI series is complete.
+The full comparison needs the Docker builder path in SPEED-089 and
+matching fixtures for the remaining surfaces.
+
+Acceptance Criteria:
+
+- Run five alternating lifecycle pairs per API/CLI lane with 2,000 measured operations and ten warmups per engine/boot; preserve failures. Re-run image, build, Compose, networking/storage and concurrency rows using existing report formats. Pass full dynamic-memory and production-cleanup gates. Apply existing parity/advantage rules and report unsupported coverage and external limitations.
+
+Problem and Evidence: Parity and superiority remain unproven for the new candidate.
+
+Approach: Keep native API, Docker API and CLI timers separate; record hashes, p50/p95/p99, throughput, confidence intervals, resource data and exact cleanup boundaries.
+
+Evidence: Five frozen release pairs passed 40,000 measured operations
+and 200 warmups. Native API p50 was 2.66–3.57 ms, clearing 5 ms in
+every boot. The paired median ratio was 0.8367 (95% CI 0.7703–0.9143).
+The API and CLI p99 upper bounds were 1.0586 and 1.0553, above the
+1.05 parity gate. Core pressure, idle shrink, data integrity and
+isolated cleanup passed. The frozen matrix preflight recorded unsupported
+builder provisioning, image tagging, public fixture pulls and stress
+credentials. See [release results](native-engine-validation.md#speed-065-five-pair-release-lifecycle).
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Matched lifecycle and isolated compatibility evidence recorded.
+Independent review and full matrix qualification pending.
+
+Next Action: Resolve the frozen-matrix compatibility gaps and attribute
+residual p99 variation before requalifying.
+
 ### SPEED-089
 
 Title: Qualify the Docker builder gateway for the frozen matrix
@@ -780,8 +784,10 @@ Acceptance Criteria:
 Evidence: The direct RUN canary in SPEED-063 uses a guest-local pinned
 BuildKit worker. The frozen comparison uses the Docker API to create a
 separate privileged Buildx worker container and its cache volume. The
-current API has no compatible worker provisioning or BuildKit session
-route. The constrained native OCI profile has no privileged worker mode.
+current API returned HTTP 501 to build and HTTP 400 to a privileged
+container create request. Each pinned Buildx worker bootstrap failed at
+image provisioning; all three builder definitions were removed. The
+constrained native OCI profile has no privileged worker mode.
 
 
 

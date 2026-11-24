@@ -85,3 +85,18 @@ fresh comparative verdict remains [revise](fresh-runtime-gate.md). Second
 hardware, privileged energy sampling, equivalent Kiri guest teardown,
 and the sub-1 ms prepared research target remain deferred. This release
 makes no superiority claim.
+
+## Native Docker candidate
+
+The replacement Docker engine is under isolated validation on the
+`enhancement/speed-up` branch. Its release evidence covers the native
+lifecycle, Core dynamic memory, named-volume recovery, the pinned Compose
+fixture and a bounded direct BuildKit RUN with cancellation and cache.
+The frozen Docker Buildx, image and service matrix still has unsupported
+rows. Track those separately from the standalone API and CLI timing gates.
+[Native engine validation](native-engine-validation.md)
+
+Production promotion requires the compatible workload matrix, independent
+review, required CI and the app release lane's signing and notarization
+gates. The isolated validation does not authorize production migration or
+publication. [Release process](../release.md)

@@ -268,7 +268,7 @@ port metadata. Those failures and the successful Compose and Docker API
 transcripts are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-064/`.
 
-## SPEED-065 current release pilot
+## SPEED-065 historical release pilot
 
 This pilot predates the pending-demand watch. The latest release pilot
 is in the [native latency results](native-latency-diagnostic-results.md#post-change-kiri-pilot).
@@ -290,9 +290,126 @@ unobservable.
 
 The native API median was 10.2–10.6 times Kiri's. The below-5-ms
 native API target failed. The pilot does not satisfy the five-pair
-statistical and workload coverage requirements for parity. SPEED-063
-blocks the full matrix. The measured OCI lifecycle excluded build
-snapshots and preceded the isolated snapshot ID mapping change.
+statistical and workload coverage requirements for parity. The measured
+OCI lifecycle excluded build snapshots and preceded the isolated
+snapshot ID mapping change.
 
 Raw samples, artifact hashes and cleanup reports are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-065/`.
+
+## SPEED-065 release compatibility and frozen matrix preflight
+
+The candidate source was frozen at `909b5bb`. The release native guest was
+built without the temporary BuildKit test hook and booted the pinned Core
+v1.3.1 kernel. The unchanged release host, Core memory helpers and pinned
+Alpine image were reused. Artifact hashes are in
+`SPEED-088/final-release-sha256.txt` under the evidence root.
+
+Ten separate native release boots passed. Growth and independent guest
+pressure each restored the 448 MiB idle VM to 2,048 MiB. The pressure boot
+observed zero active workloads during the independent trigger. The active
+data canary retained its checksum through twelve fresh launches. The VM
+returned to 448 MiB with consistent Core ownership and zero reclaim
+failures. The native endpoint also passed the bridge DNS, loopback port,
+concurrency, exec and output streaming canaries. The owned named volume
+survived reboot with its checksum, and Compose 5.8.0 passed health
+ordering, service DNS, loopback publishing, volume-backed restart and
+down. Offline ext4 checks, lease release, isolated teardown and production
+fingerprints passed.
+
+An eleventh boot reran the private registry canary with the two
+digest-pinned fixtures. Cold and cached pull, inspect, run, shared-layer
+retention, image removal and transfer-failure cleanup passed. This
+diagnostic used the explicitly configured loopback store.
+
+The frozen broader suites were then preflighted through their existing
+fixture runner and pinned client tools against a separate native release
+guest. Their individual rows and failures are retained under
+`SPEED-065/matrix-preflight/`.
+
+| Frozen suite | Observed boundary |
+| --- | --- |
+| Buildx | Rust, Go and Node builder creation and removal passed. All three bootstraps stopped on worker image acquisition in the current launcher. A separate API request returned HTTP 400 for `HostConfig.Privileged`, which the pinned Docker-container driver requests. `POST /v1.44/build` returned HTTP 501. [Buildx v0.39.1 worker creation](https://github.com/docker/buildx/blob/v0.39.1/driver/docker-container/driver.go#L144-L163) |
+| Images | Staged Alpine pull and inspect worked. Tagging returned an unsupported API response. The Node and registry-image pulls stopped because the native registry store was unconfigured. |
+| Compose and storage/network | The frozen Node prepull stopped with the same registry-store error. The smaller pinned native Compose and named-volume canaries passed separately. |
+| Stress | All 440 launch attempts across concurrency 1, 2, 4 and 8 were refused because the frozen stress argv did not select the required non-root identity. Pressure prepull also stopped at the unconfigured registry store. The native concurrency canary with the supported identity passed separately. |
+
+The preflight left no owned containers or builders. The direct BuildKit
+RUN qualified in SPEED-063 covers a different boundary than the frozen
+Docker-container driver. Extending the frozen matrix requires preserving
+the source workload and effective resource policy through an explicitly
+qualified builder, image and storage path.
+
+## SPEED-065 five-pair release lifecycle
+
+The [matched lifecycle runner](../../benchmarks/README.md#paired-docker-comparison)
+compared `909b5bb` against the frozen official Kiri 0.2.2 binary in five
+independent alternating pairs. Each engine and boot ran 2,000 measured
+operations and ten warmups per API and CLI lane. All 40,000 operations
+and 200 warmups passed with the pinned ARM64 Alpine image, UID/GID 65532,
+16 MiB, four PIDs, 0.5 CPU and networking disabled. Both output streams
+and deliberate exit 23 passed the separate canaries. The native controller
+was enabled at 2,048 MiB before and after timing in every boot, with
+consistent ownership and zero reclaim failures. The independent 448 MiB
+growth, pressure and idle results above are outside the warm timing windows.
+
+API elapsed time spans create, start, wait and removal acknowledgement.
+CLI elapsed time ends at Docker process exit. The native per-operation
+guest teardown witness is checked after timing and included in session
+throughput. Equivalent guest teardown remains unobservable on Kiri.
+
+| Pair | Engine | API p50 / p95 / p99 (ms) | CLI p50 / p95 / p99 (ms) | API / CLI verified ops/s |
+| --- | --- | --- | --- | --- |
+| 1 | Conjet native | 3.57 / 4.85 / 6.15 | 22.29 / 25.02 / 27.68 | 236.8 / 42.5 |
+| 1 | Kiri | 3.67 / 4.37 / 4.85 | 21.16 / 24.51 / 29.29 | 266.3 / 46.1 |
+| 2 | Conjet native | 2.69 / 3.61 / 4.36 | 21.72 / 23.89 / 26.95 | 313.7 / 43.9 |
+| 2 | Kiri | 3.58 / 4.47 / 6.48 | 21.30 / 24.33 / 27.93 | 266.9 / 46.1 |
+| 3 | Conjet native | 2.66 / 3.59 / 4.58 | 21.87 / 25.43 / 29.75 | 316.3 / 43.2 |
+| 3 | Kiri | 3.45 / 4.19 / 4.86 | 21.17 / 24.60 / 27.35 | 274.8 / 46.4 |
+| 4 | Conjet native | 3.03 / 3.98 / 5.02 | 22.23 / 23.35 / 24.52 | 281.3 / 43.0 |
+| 4 | Kiri | 3.36 / 4.10 / 5.38 | 21.08 / 24.21 / 27.80 | 286.6 / 46.7 |
+| 5 | Conjet native | 2.84 / 3.63 / 4.43 | 22.16 / 23.23 / 24.38 | 300.7 / 43.2 |
+| 5 | Kiri | 3.51 / 4.31 / 6.91 | 21.43 / 22.34 / 22.77 | 272.5 / 46.6 |
+
+Ratios are Conjet/Kiri geometric means across pairs with the frozen 95%
+bootstrap interval (10,000 resamples, seed 615026).
+
+| Metric | Ratio | 95% interval |
+| --- | ---: | ---: |
+| API p50 | 0.8367 | 0.7703–0.9143 |
+| API p95 | 0.9114 | 0.8314–1.0230 |
+| API p99 | 0.8637 | 0.6996–1.0586 |
+| CLI p50 | 1.0388 | 1.0278–1.0499 |
+| CLI p95 | 1.0078 | 0.9815–1.0337 |
+| CLI p99 | 0.9870 | 0.9231–1.0553 |
+| API session throughput | 1.0542 | 0.9548–1.1509 |
+| CLI session throughput | 0.9301 | 0.9224–0.9403 |
+
+The native API median met 5 ms in every boot and cleared the 5% median
+advantage threshold for this workload and timing boundary. API and CLI
+parity both missed the required p99 upper bound of 1.05. Native wait
+accounted for 2.30–3.04 ms at p50 and 3.89–5.42 ms at p99 across boots.
+The start acknowledgement itself was 0.09–0.13 ms at p50. These host
+stages locate the remaining variation within the API sequence. They
+cannot attribute an individual tail sample to a guest or VMM cause.
+
+All five native launchers verified guest teardown, production preservation,
+and removal of their private sockets and sessions. All five Kiri launchers
+verified process and socket cleanup and production preservation. Raw
+samples, per-stage timings, launch evidence, executable hashes and
+host CPU/RSS observations are under `SPEED-065/final-release-pairs/`.
+The hardware, energy, Kiri guest teardown and frozen workload gaps
+preclude a general parity or release-readiness claim.
+
+The candidate passed serial Rust workspace tests (184 passed, three
+ignored), ARM64 Linux guest Clippy with warnings denied, Swift tests
+(440 executed, two skipped, zero failures), and the Go network-helper
+tests. The Rust release build and formatting checks passed. Validation
+logs are under `SPEED-088/`.
+
+Local app staging, ad-hoc signature verification, DMG checksum and
+byte-for-byte checks of both staged guest copies passed. This host
+refused the local read-only DMG mount with both `hdiutil` and
+`diskutil`. The CI run for `909b5bb` passed release DMG creation,
+mounted contents verification and Homebrew package validation.
+[Candidate CI](https://github.com/omega13-engr/conjet/actions/runs/45344320151)
