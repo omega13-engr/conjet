@@ -179,6 +179,98 @@ def storage_cases(report, budget):
         results.append('named-volume')
     if verified('storage.bind', bind=True):
         results.append('bind')
+    if sustained_service(report, budget):
+        results.append('service')
+    return results
+
+
+def sustained_service(report, budget):
+    rows = report.get('operations', [])
+    service = [row for row in rows if row['scenario'].startswith('service')]
+    if (report.get('error') or report.get('service_limits_matched') is not True
+            or any(row.get('error') is not None for row in service)
+            or report.get('windows_ns', {}).get('service.transaction', 0)
+               < budget['steady_state_seconds'] * 1_000_000_000):
+        return False
+    for stage in ('dns', 'tcp_connect', 'redis_ping'):
+        selected = [row for row in service if row['scenario'] == 'service.guest.' + stage]
+        if (len(selected) != budget['samples_per_session'] + budget['warmups']
+                or sum(row['phase'] == 'warmup' for row in selected) != budget['warmups']
+                or any(row.get('elapsed_ns', 0) <= 0 for row in selected)):
+            return False
+    visits = [row.get('visits') for row in service if row['scenario'] == 'service.transaction']
+    if not visits or visits != list(range(1, len(visits) + 1)):
+        return False
+    stats = [row for row in service if row['scenario'] == 'service-snapshot-stats']
+    removed = [row for row in service if row['scenario'] == 'service-remove']
+    if not all(len(matches) == 1 and matches[0].get('exit_code') == 0 for matches in (stats, removed)):
+        return False
+    try:
+        metrics = [json.loads(line) for line in stats[0]['stdout'].splitlines()]
+        return (len(metrics) == 2 and len({entry['Container'] for entry in metrics}) == 2
+                and all(int(entry['PIDs']) > 0 and entry['MemUsage'].endswith(' / 128MiB')
+                        and re.fullmatch(r'[0-9]+\.[0-9]{2}%', entry['CPUPerc']) for entry in metrics))
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
+def compose_cases(report, budget):
+    if report.get('error'):
+        return []
+    projects = []
+    group = []
+    for row in report.get('operations', []):
+        group.append(row)
+        if row['scenario'] == 'compose-cleanup-networks':
+            projects.append(group)
+            group = []
+    warmups = budget['warmups']
+    if len(projects) != budget['samples_per_session'] + warmups:
+        return []
+
+    def operation(group, name):
+        matches = [row for row in group if row['scenario'] == name]
+        if len(matches) != 1 or matches[0].get('error') is not None:
+            return None
+        return matches[0]
+
+    def cleanup(group):
+        return all((row := operation(group, f'compose-cleanup-{kind}'))
+                   and row.get('stdout') == ''
+                   for kind in ('containers', 'volumes', 'networks'))
+
+    def successful(group, phase, case, visits):
+        row = operation(group, 'compose.' + case)
+        if row is None or row.get('phase') != phase or row.get('exit_code') != 0:
+            return False
+        if case == 'scale' and row.get('dns_witness') is not True:
+            return False
+        if case == 'up':
+            status = operation(row.get('witness', []), 'compose-redis-process')
+            if status is None or status.get('exit_code') != 0:
+                return False
+            if not all(operation(group, f'service.{name}.cgroup') for name in ('app', 'redis')):
+                return False
+        if case == 'restart':
+            ready = [sample for sample in group if sample['scenario'] == 'compose.restart-ready']
+            if len(ready) != 2 or any(observed.get('error') is not None for observed in ready):
+                return False
+        return all(any(sample['scenario'] == 'compose.transaction'
+                       and sample.get('visits') == expected and sample.get('error') is None
+                       for sample in group) for expected in visits)
+
+    cases = {
+        'up': [1], 'no-change': [2], 'recreate': [3], 'scale': [4, 5], 'restart': [6, 7],
+    }
+    results = [
+        case for case, visits in cases.items()
+        if all(cleanup(rows) and successful(rows, 'warmup' if i < warmups else 'sample', case, visits)
+               for i, rows in enumerate(projects))
+    ]
+    if all(cleanup(rows) and operation(rows, 'compose.down')
+           and (logs := operation(rows, 'compose-logs'))
+           and 'Ready to accept connections' in logs.get('stdout', '') for rows in projects):
+        results.append('logs-down')
     return results
 
 
@@ -314,6 +406,9 @@ def evaluate(root, revision, release):
         if suite == 'control' and verified:
             for case in control_cases(report, scenarios['suites']['control']):
                 pass_case(f'control/{case}', 'original control runs passed with native teardown', suite)
+        if suite == 'compose' and verified:
+            for case in compose_cases(report, scenarios['suites']['compose']):
+                pass_case(f'compose/{case}', 'original Compose fixture and project cleanup verified', suite)
         if suite == 'storage_network' and verified:
             for case in storage_cases(report, scenarios['suites']['storage_network']):
                 pass_case(f'storage_network/{case}', 'original storage cases verified data and teardown', suite)
