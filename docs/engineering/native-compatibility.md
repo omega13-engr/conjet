@@ -215,6 +215,16 @@ cases, the guest kept the same workload handle and limits while the
 actual PID count rose from one to three. Exec output and teardown
 regressions passed. Evidence is under `SPEED-115/` on ExternalSSD.
 
+## SPEED-116 shell subprocesses
+
+Ordinary native OCI workloads can create pipes and launch children with
+bounded fork or vfork flags. The child inherits its sandbox and resource
+group. The pinned Redis and Node entrypoints each ran the specified shell
+canary, and the Node workload's namespace-creation request still returned
+EPERM. These tests cover the entrypoint scripts. Application readiness
+and thread startup have separate acceptance. Evidence is under
+`SPEED-116/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

@@ -1078,6 +1078,12 @@ creation, process-parent changes, ptrace and privilege changes outside
 the workload's authority. Keep thread creation separately qualified by
 SPEED-103.
 
+Evidence: The pinned Redis script completed its earlier failing command
+substitution. The original Node entrypoint invoked the selected payload
+from the reloaded archive. A namespace-creation request failed with
+EPERM, and both Node cases had verified native teardown. Logs are under
+`SPEED-116/` on ExternalSSD.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

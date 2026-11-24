@@ -378,7 +378,8 @@ pub fn run_helper(
     checked(unsafe { libc::fchdir(TARGET_ROOT) })?;
     checked(unsafe { libc::chroot(c".".as_ptr()) })?;
     checked(unsafe { libc::chdir(cwd.as_ptr()) })?;
-    let filter = security::WorkloadFilter::new(spec.bridge_scope().is_some());
+    let filter =
+        security::WorkloadFilter::new(spec.bridge_scope().is_some(), spec.build_snapshot.is_none());
     let mut lifeline = [-1; 2];
     checked(unsafe { libc::pipe2(lifeline.as_mut_ptr(), libc::O_CLOEXEC) })?;
     let child = unsafe { libc::fork() };

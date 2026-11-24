@@ -115,7 +115,7 @@ pub(crate) struct WorkloadFilter {
 }
 
 impl WorkloadFilter {
-    pub(crate) fn new(bridge: bool) -> Self {
+    pub(crate) fn new(bridge: bool, ordinary_oci: bool) -> Self {
         fn statement(code: u16, k: u32) -> libc::sock_filter {
             libc::sock_filter {
                 code,
@@ -193,6 +193,50 @@ impl WorkloadFilter {
             statement(BPF_RETURN, RET_KILL_PROCESS),
             statement(BPF_LOAD_WORD, 0), // seccomp_data.nr
         ];
+        if ordinary_oci {
+            let denied = RET_ERRNO | libc::EPERM as u32;
+            let sigchld = libc::SIGCHLD as u32;
+            let tid_flags = (libc::CLONE_CHILD_CLEARTID
+                | libc::CLONE_CHILD_SETTID
+                | libc::CLONE_PARENT_SETTID) as u32;
+            let clone = [
+                statement(BPF_LOAD_WORD, 20), // high word of args[0]
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: 0,
+                    jt: 1,
+                    jf: 0,
+                },
+                statement(BPF_RETURN, denied),
+                statement(BPF_LOAD_WORD, 16), // low word of args[0]
+                statement(BPF_AND, !tid_flags),
+                next_or_skip(sigchld),
+                statement(BPF_RETURN, RET_ALLOW),
+                next_or_skip(sigchld | (libc::CLONE_VM | libc::CLONE_VFORK) as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, denied),
+            ];
+            program.push(libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                k: libc::SYS_clone as u32,
+                jt: 0,
+                jf: clone.len() as u8,
+            });
+            program.extend(clone);
+            // Classic BPF cannot inspect clone3's pointed-to flags. Let
+            // libc retry through the checked clone ABI.
+            program.push(next_or_skip(libc::SYS_clone3 as u32));
+            program.push(statement(BPF_RETURN, RET_ERRNO | libc::ENOSYS as u32));
+            for syscall in [
+                libc::SYS_pipe2,
+                libc::SYS_wait4,
+                libc::SYS_getppid,
+                libc::SYS_umask,
+            ] {
+                program.push(next_or_skip(syscall as u32));
+                program.push(statement(BPF_RETURN, RET_ALLOW));
+            }
+        }
         if bridge {
             let denied = RET_ERRNO | libc::EPERM as u32;
             let socket = [

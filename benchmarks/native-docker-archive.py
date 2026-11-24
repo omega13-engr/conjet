@@ -74,6 +74,18 @@ def collect(endpoint, peer, docker, env, output, store, *, node_roundtrip=False)
                                           'test', '-x', '/usr/local/bin/node'])
             connection.close()
             cases['node_cleanup'] = MATCHED['native_terminal'](connection, name, handles)
+            name = 'cj-archive-node-entrypoint'
+            value = call('node_entrypoint', ['run', *MATCHED['FLAGS'], '--name', name, tag,
+                                              '/bin/busybox', 'echo', 'node-entrypoint-ready'])
+            if value != b'node-entrypoint-ready\n':
+                raise RuntimeError('the pinned Node entrypoint changed the selected command')
+            cases['node_entrypoint_cleanup'] = MATCHED['native_terminal'](connection, name, handles)
+            name = 'cj-archive-node-isolation'
+            call('node_namespace_denied', ['run', *MATCHED['FLAGS'], '--name', name, tag,
+                                            '/bin/busybox', 'unshare', '-n', '/bin/true'], code=1)
+            if 'Operation not permitted' not in cases['node_namespace_denied']['stderr']:
+                raise RuntimeError('the node workload did not report the namespace rejection')
+            cases['node_namespace_cleanup'] = MATCHED['native_terminal'](connection, name, handles, code=1)
             call('node_final_remove_tag', ['image', 'rm', tag])
             call('node_remove_source', ['image', 'rm', fixture['ref']])
             if call('node_final_absent', ['image', 'ls', '--quiet', tag]):

@@ -200,7 +200,10 @@ impl Sandbox {
                         base.display()
                     ))?),
                 },
-                filter: WorkloadFilter::new(bridge),
+                filter: WorkloadFilter::new(
+                    bridge,
+                    oci.is_some_and(|spec| spec.build_snapshot.is_none()),
+                ),
                 resolver: oci
                     .and_then(|spec| spec.bridge_scope())
                     .map(|scope| scope.gateway()),
