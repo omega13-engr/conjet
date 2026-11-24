@@ -28,6 +28,7 @@ pub const BUILDKIT_NATIVE_ARGS: &[&str] = &[
     "--oci-worker-snapshotter=native",
     "--oci-worker-binary=/usr/bin/conjet-buildkit-runtime",
     "--oci-worker-net=host",
+    "--otel-socket-path=/var/lib/buildkit/otel-grpc.sock",
 ];
 pub const BUILDKIT_NETWORK_ENTITLEMENT: &str = "--allow-insecure-entitlement=network.host";
 
@@ -454,6 +455,7 @@ impl LaunchSpec {
             !crate::build_snapshot::valid_id(&snapshot.id)
                 || snapshot.inode == 0
                 || snapshot.device == 0
+                || (snapshot.live_worker && !snapshot.bundle_policy)
                 || spec.volume.is_some()
                 || spec.bind.is_some()
                 || spec.network != "none"
@@ -524,7 +526,13 @@ impl LaunchSpec {
         }
         if spec.uid >= ID_MAP_WIDTH
             || spec.gid >= ID_MAP_WIDTH
-            || (spec.build_snapshot.is_some() && !spec.fixture_identity())
+            || spec.build_snapshot.as_ref().is_some_and(|snapshot| {
+                if snapshot.live_worker {
+                    spec.uid != 0 || spec.gid != 0
+                } else {
+                    !spec.fixture_identity()
+                }
+            })
             || spec.account.as_ref().is_some_and(|account| {
                 !search_path
                     || spec.build_snapshot.is_some()
@@ -564,11 +572,14 @@ impl LaunchSpec {
         {
             return Err(SpecError::Network);
         }
-        if !spec
-            .limits
-            .validate(spec.docker_resource_defaults && spec.build_snapshot.is_none())
-            || (spec.memory_swap_disabled
-                && (!search_path || spec.build_snapshot.is_some() || spec.limits.memory_bytes == 0))
+        if !spec.limits.validate(
+            spec.docker_resource_defaults
+                && spec
+                    .build_snapshot
+                    .as_ref()
+                    .is_none_or(|snapshot| snapshot.live_worker),
+        ) || (spec.memory_swap_disabled
+            && (!search_path || spec.build_snapshot.is_some() || spec.limits.memory_bytes == 0))
         {
             return Err(SpecError::Resources);
         }
@@ -719,6 +730,7 @@ mod tests {
             device: 1,
             inode: 1,
             bundle_policy: true,
+            live_worker: false,
         });
         assert_eq!(request.spec.validate().err(), Some(SpecError::Identity));
     }

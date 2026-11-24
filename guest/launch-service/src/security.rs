@@ -19,6 +19,7 @@ pub(crate) enum WorkloadPolicy {
     Standard,
     RedisBootstrap,
     BuildKitWorker,
+    BuildKitRun,
     BuildKitControl,
 }
 
@@ -29,17 +30,12 @@ pub(crate) fn clear_supplementary_groups() -> io::Result<()> {
 pub(crate) fn drop_workload_identity(
     uid: u32,
     gid: u32,
-    supplementary_primary_gid: bool,
+    supplementary_groups: &[u32],
     policy: WorkloadPolicy,
 ) -> io::Result<()> {
-    let mut group = 0;
-    let count = unsafe { libc::getgroups(1, &mut group) };
-    let valid = if supplementary_primary_gid {
-        count == 1 && group == gid
-    } else {
-        count == 0
-    };
-    if !valid {
+    let mut groups = [0; 16];
+    let count = unsafe { libc::getgroups(groups.len() as i32, groups.as_mut_ptr()) };
+    if count < 0 || groups.get(..count as usize) != Some(supplementary_groups) {
         return Err(io::Error::other(
             "unexpected supplementary groups after clone",
         ));
@@ -422,6 +418,14 @@ impl WorkloadFilter {
             policy,
             WorkloadPolicy::BuildKitWorker | WorkloadPolicy::BuildKitControl
         );
+        if policy == WorkloadPolicy::BuildKitRun {
+            // Preserve modes when the pinned toolchain copies in the writable
+            // snapshot. The RUN retains its empty capability set and nosuid.
+            for syscall in [libc::SYS_fchmod, libc::SYS_fchmodat] {
+                program.push(next_or_skip(syscall as u32));
+                program.push(statement(BPF_RETURN, RET_ALLOW));
+            }
+        }
         if policy == WorkloadPolicy::BuildKitWorker {
             let denied = RET_ERRNO | libc::EPERM as u32;
             // BuildKit starts its runtime in a new process group. Permit

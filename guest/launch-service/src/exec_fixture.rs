@@ -585,7 +585,7 @@ pub fn run_helper(
             security::drop_workload_identity(
                 spec.uid,
                 spec.gid,
-                false,
+                &[],
                 security::WorkloadPolicy::Standard,
             )?;
             checked(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;

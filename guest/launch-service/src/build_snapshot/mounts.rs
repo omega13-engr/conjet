@@ -15,6 +15,7 @@ const FSOPEN_CLOEXEC: libc::c_uint = 1;
 const FSCONFIG_CMD_CREATE: libc::c_uint = 6;
 const FSMOUNT_CLOEXEC: libc::c_uint = 1;
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 4;
+pub(crate) const LIVE_FDS: &str = "CONJET_NATIVE_BUILD_MOUNTS";
 const MASKED: &[&str] = &[
     "proc/acpi",
     "proc/asound",
@@ -80,10 +81,157 @@ pub(crate) fn detached_sysfs(pidfd: &OwnedFd) -> io::Result<OwnedFd> {
 }
 
 pub(crate) struct Sources {
-    hosts: File,
-    resolver: File,
-    tracing: File,
+    hosts: WorkerFile,
+    resolver: WorkerFile,
+    tracing: WorkerFile,
     null: File,
+}
+
+enum WorkerFile {
+    Bind(File),
+    Detached(OwnedFd),
+}
+
+impl WorkerFile {
+    fn mount(&self, target: &Path) -> io::Result<()> {
+        match self {
+            Self::Bind(file) => bind(file, target, false),
+            Self::Detached(tree) => {
+                let path = CString::new(target.as_os_str().as_bytes())?;
+                checked(unsafe {
+                    libc::syscall(
+                        libc::SYS_move_mount,
+                        tree.as_raw_fd(),
+                        c"".as_ptr(),
+                        libc::AT_FDCWD,
+                        path.as_ptr(),
+                        MOVE_MOUNT_F_EMPTY_PATH,
+                    ) as i32
+                })
+            }
+        }
+    }
+}
+
+pub(crate) struct LiveMounts {
+    pub(crate) root: OwnedFd,
+    hosts: OwnedFd,
+    resolver: OwnedFd,
+    tracing: OwnedFd,
+}
+
+impl LiveMounts {
+    pub(crate) fn capture(
+        root: OwnedFd,
+        executor: &File,
+        cache: &File,
+        hosts: &str,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            root,
+            hosts: live_source(executor, &CString::new(hosts)?, false)?,
+            resolver: live_source(executor, c"resolv.conf", false)?,
+            tracing: live_source(cache, c"otel-grpc.sock", true)?,
+        })
+    }
+
+    pub(crate) fn descriptors(&self) -> [i32; 4] {
+        [
+            self.root.as_raw_fd(),
+            self.hosts.as_raw_fd(),
+            self.resolver.as_raw_fd(),
+            self.tracing.as_raw_fd(),
+        ]
+    }
+
+    pub(crate) fn inherited(required: bool) -> io::Result<Option<Self>> {
+        let configured = std::env::var_os(LIVE_FDS);
+        if configured.is_some() != required {
+            return Err(io::Error::other("missing or unexpected live build mounts"));
+        }
+        let Some(configured) = configured else {
+            return Ok(None);
+        };
+        let fds = configured
+            .to_str()
+            .ok_or_else(|| io::Error::other("invalid live build mount descriptor list"))?
+            .split(',')
+            .map(str::parse::<i32>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io::Error::other)?;
+        let [root, hosts, resolver, tracing]: [i32; 4] = fds
+            .try_into()
+            .map_err(|_| io::Error::other("wrong number of live build mount descriptors"))?;
+        let mut distinct = [root, hosts, resolver, tracing];
+        distinct.sort_unstable();
+        if distinct[0] <= 2 || distinct.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(io::Error::other(
+                "duplicate or invalid live build descriptors",
+            ));
+        }
+        for fd in distinct {
+            checked(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) })?;
+        }
+        // The trusted supervisor transferred sole inherited ownership across exec.
+        Ok(Some(unsafe {
+            Self {
+                root: OwnedFd::from_raw_fd(root),
+                hosts: OwnedFd::from_raw_fd(hosts),
+                resolver: OwnedFd::from_raw_fd(resolver),
+                tracing: OwnedFd::from_raw_fd(tracing),
+            }
+        }))
+    }
+
+    pub(crate) fn sources(&self) -> io::Result<Sources> {
+        Ok(Sources {
+            hosts: WorkerFile::Detached(self.hosts.try_clone()?),
+            resolver: WorkerFile::Detached(self.resolver.try_clone()?),
+            tracing: WorkerFile::Detached(self.tracing.try_clone()?),
+            null: File::open("/dev/null")?,
+        })
+    }
+}
+
+fn live_source(directory: &File, name: &CStr, socket: bool) -> io::Result<OwnedFd> {
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    let metadata = file.metadata()?;
+    let valid_type = if socket {
+        metadata.file_type().is_socket()
+    } else {
+        metadata.is_file() && metadata.len() <= 65_536
+    };
+    if !valid_type
+        || metadata.uid() != crate::spec::UID_BASE
+        || metadata.dev() != directory.metadata()?.dev()
+        || metadata.nlink() != 1
+    {
+        return Err(io::Error::other("unexpected live worker source identity"));
+    }
+    let tree = super::guest::clone_tree(&file)?;
+    super::guest::set_mount_attributes(
+        &tree,
+        &libc::mount_attr {
+            attr_set: libc::MOUNT_ATTR_RDONLY
+                | libc::MOUNT_ATTR_NOSUID
+                | libc::MOUNT_ATTR_NODEV
+                | libc::MOUNT_ATTR_NOEXEC,
+            attr_clr: 0,
+            propagation: 0,
+            userns_fd: 0,
+        },
+    )?;
+    Ok(tree)
 }
 
 pub(crate) struct MountPlan {
@@ -163,16 +311,16 @@ impl MountPlan {
 
     pub(crate) fn open(&self) -> io::Result<Sources> {
         Ok(Sources {
-            hosts: self.hosts.reopen()?,
-            resolver: self.resolver.reopen()?,
-            tracing: self.tracing.reopen()?,
+            hosts: WorkerFile::Bind(self.hosts.reopen()?),
+            resolver: WorkerFile::Bind(self.resolver.reopen()?),
+            tracing: WorkerFile::Bind(self.tracing.reopen()?),
             null: File::open("/dev/null")?,
         })
     }
 }
 
 impl Sources {
-    pub(crate) fn mount(self, root: &Path, sysfs: OwnedFd) -> io::Result<()> {
+    pub(crate) fn mount(self, root: &Path, sysfs: Option<OwnedFd>) -> io::Result<()> {
         checked(unsafe {
             libc::sethostname(
                 c"buildkitsandbox".as_ptr(),
@@ -200,48 +348,38 @@ impl Sources {
             let path = directory(root, target)?;
             attach(Some(fs_type), &path, Some(fs_type), flags, Some(options))?;
         }
-        let sys = CString::new(directory(root, "sys")?.as_os_str().as_bytes())?;
-        checked(unsafe {
-            libc::syscall(
-                libc::SYS_move_mount,
-                sysfs.as_raw_fd(),
-                c"".as_ptr(),
-                libc::AT_FDCWD,
-                sys.as_ptr(),
-                MOVE_MOUNT_F_EMPTY_PATH,
-            ) as i32
-        })?;
-        let cgroup = directory(root, "sys/fs/cgroup")?;
-        attach(
-            Some(c"cgroup2"),
-            &cgroup,
-            Some(c"cgroup2"),
-            SAFE | libc::MS_RDONLY,
-            None,
-        )?;
+        if let Some(sysfs) = sysfs {
+            let sys = CString::new(directory(root, "sys")?.as_os_str().as_bytes())?;
+            checked(unsafe {
+                libc::syscall(
+                    libc::SYS_move_mount,
+                    sysfs.as_raw_fd(),
+                    c"".as_ptr(),
+                    libc::AT_FDCWD,
+                    sys.as_ptr(),
+                    MOVE_MOUNT_F_EMPTY_PATH,
+                ) as i32
+            })?;
+            let cgroup = directory(root, "sys/fs/cgroup")?;
+            attach(
+                Some(c"cgroup2"),
+                &cgroup,
+                Some(c"cgroup2"),
+                SAFE | libc::MS_RDONLY,
+                None,
+            )?;
+        }
 
         for (path, file) in [
             ("etc/hosts", &self.hosts),
             ("etc/resolv.conf", &self.resolver),
             ("dev/otel-grpc.sock", &self.tracing),
-            ("dev/null", &self.null),
         ] {
-            let (parent, name) = path.rsplit_once('/').expect("fixed worker mount");
-            let target = directory(root, parent)?.join(name);
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o644)
-                .open(&target)
-            {
-                Ok(_) => {}
-                Err(error)
-                    if error.kind() == io::ErrorKind::AlreadyExists
-                        && target.symlink_metadata()?.is_file() => {}
-                Err(error) => return Err(error),
-            }
-            bind(file, &target, path == "dev/null")?;
+            let target = mount_file_target(root, path)?;
+            file.mount(&target)
+                .map_err(|error| io::Error::other(format!("worker mount {path}: {error}")))?;
         }
+        bind(&self.null, &mount_file_target(root, "dev/null")?, true)?;
         for path in MASKED {
             let target = root.join(path);
             if let Some(info) = optional_metadata(&target)? {
@@ -274,6 +412,24 @@ impl Sources {
         }
         Ok(())
     }
+}
+
+fn mount_file_target(root: &Path, path: &str) -> io::Result<PathBuf> {
+    let (parent, name) = path.rsplit_once('/').expect("fixed worker mount");
+    let target = directory(root, parent)?.join(name);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&target)
+    {
+        Ok(_) => {}
+        Err(error)
+            if error.kind() == io::ErrorKind::AlreadyExists
+                && target.symlink_metadata()?.is_file() => {}
+        Err(error) => return Err(error),
+    }
+    Ok(target)
 }
 
 fn optional_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {

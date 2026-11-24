@@ -4,6 +4,19 @@ Architecture: [speed engineering plan](speed-engineering-plan.md).
 
 Current iteration: [native engine implementation plan](native-engine-v2-plan.md).
 
+## New worker handoff and completion order — 2026-11-24
+
+After pausing for replanning, the user authorized a new GPT-6.2-Sol worker
+to complete compatibility fixes and tests. The previous worker remains paused.
+Follow the [compatibility completion plan](native-compatibility-completion-plan.md)
+in the new worker. It orders existing tasks instead of adding overlapping feature
+tasks: refresh the 71-case baseline; complete real BuildKit RUN, aggregate
+accounting and cancellation; fix public DNS; qualify Node, Go and Rust build
+rows; finish remaining original cases; requalify Core memory; run the exact
+71-case gate; then benchmark. Existing acceptance criteria remain unchanged.
+The historical 19 PASS / 52 FAIL result is not a current capability count.
+No task is advanced by this planning-only update.
+
 ## Current Docker performance priority
 
 Latency investigation: [native diagnostic plan](native-latency-diagnostic-plan.md).
@@ -1771,6 +1784,28 @@ resolves to the same leased snapshot inode from the supervisor's own
 mount namespace. A detached executable view of that inode was created
 with `nosuid,nodev`. The live root mount stays private and is never
 remounted by this operation.
+
+The pinned Node Docker-container builder completed both original Dockerfile
+RUN steps, copied the resulting files into the next stage and exported a
+61,172,224-byte Docker archive. The isolated Node run used digest-verified
+offline base layouts. The original `docker image load` then returned HTTP 409
+because the builder was still active. See
+`SPEED-165/cj-compat.tMPK1e-node-final/` for the exact source
+patch, release hashes, original client output and cleanup evidence.
+
+The earlier `/etc/hosts` EINVAL stopped after descriptor-pinned detached mount
+handoff. A worker probe reproduced export EPERM when a read-only bind remount
+omitted the locked `noexec` flag and succeeded when it included that flag.
+The pinned exporter uses a dedicated view of the leased BuildKit cache with
+`nosuid,nodev`. Its live OCI preset comparison canonicalizes permutations
+of the worker's bind flags. Guest shutdown, production fingerprints, socket
+removal, the private disk lease and offline ext4 checks all passed.
+[Pinned exporter remount](https://github.com/containerd/containerd/blob/v2.1.3/core/mount/mount_linux.go#L178-L231)
+[Pinned BuildKit flag collection](https://github.com/moby/buildkit/blob/v0.23.2/util/rootless/mountopts/mountopts_linux.go#L16-L38)
+
+Review: The real Node solve establishes RUN and snapshot writeback.
+Aggregate worker and RUN limits, active cancellation, public pulls and
+archive load remain open.
 
 ### SPEED-168
 

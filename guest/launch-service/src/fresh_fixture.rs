@@ -11,6 +11,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::build_snapshot::mounts::LiveMounts;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -237,8 +238,26 @@ enum BuildOperation {
 
 #[derive(Default)]
 struct BuildRuntime {
-    active: Option<(String, Handle)>,
-    deleted: Vec<String>,
+    active: Option<ActiveBuild>,
+    deleted: Vec<(Option<String>, String)>,
+}
+
+struct ActiveBuild {
+    id: String,
+    handle: Handle,
+    owner: Option<String>,
+}
+
+struct WorkerBuild {
+    owner: String,
+    volume: crate::spec::VolumeMount,
+    mounts: LiveMounts,
+}
+
+struct HelperLaunch {
+    spec: String,
+    open_stdin: bool,
+    live_mounts: Option<LiveMounts>,
 }
 
 const BUILD_GENERATIONS: usize = 256;
@@ -380,6 +399,7 @@ struct Record {
     bind_lease: Option<String>,
     build_snapshot: Option<crate::build_snapshot::Snapshot>,
     build_runtime_owned: bool,
+    build_parent: Option<String>,
     buildkit_worker: bool,
     core_admission_deadline: Option<Instant>,
     cancelled: bool,
@@ -523,6 +543,8 @@ impl Ledger {
             let id = &record.handle.workload_id;
             record.buildkit_worker
                 && record.phase == Phase::Running
+                && !record.cancelled
+                && !record.terminate_requested
                 && cgroup == format!("conjet-native-{id}/workloads/active/{id}")
         })
     }
@@ -1006,6 +1028,7 @@ impl FreshFixture {
         deadline: Instant,
         prepared: bool,
         build: bool,
+        live: Option<WorkerBuild>,
     ) -> Reply {
         if ready.request().boot_id != boot {
             return Err(("stale_generation", "unexpected boot ID"));
@@ -1037,6 +1060,11 @@ impl FreshFixture {
             .as_ref()
             .is_some_and(|snapshot| snapshot.bundle_policy)
             != build
+            || spec
+                .build_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.live_worker)
+                != live.is_some()
         {
             return Err(("invalid_spec", "invalid build bundle authority"));
         }
@@ -1179,20 +1207,37 @@ impl FreshFixture {
                     "native build snapshot requires Core admission",
                 ));
             }
-            let current = crate::build_snapshot::guest::inspect(&snapshot.id)
-                .map_err(|_| ("not_found", "native build snapshot is unavailable"))?;
-            if !current.same_mount(snapshot) {
-                return Err(("stale_generation", "native build snapshot identity changed"));
-            }
-            if snapshot.bundle_policy {
-                let bundle =
-                    crate::build_snapshot::guest::load_bundle(&snapshot.id, &spec.image_digest)
-                        .map_err(|error| ("unsupported_option", error))?;
-                if spec_digest(&bundle.spec) != spec_digest(spec) {
+            if let Some(live) = &live {
+                if !ledger.record(&live.owner).is_some_and(|worker| {
+                    worker.buildkit_worker
+                        && worker.phase == Phase::Running
+                        && !worker.cancelled
+                        && !worker.terminate_requested
+                        && worker.volume.as_ref().is_some_and(|volume| {
+                            volume.name == live.volume.name && volume.inode == live.volume.inode
+                        })
+                }) {
                     return Err((
-                        "spec_mismatch",
-                        "native build request differs from the verified bundle",
+                        "stale_generation",
+                        "BuildKit cache lease ended before RUN admission",
                     ));
+                }
+            } else {
+                let current = crate::build_snapshot::guest::inspect(&snapshot.id)
+                    .map_err(|_| ("not_found", "native build snapshot is unavailable"))?;
+                if !current.same_mount(snapshot) {
+                    return Err(("stale_generation", "native build snapshot identity changed"));
+                }
+                if snapshot.bundle_policy {
+                    let bundle =
+                        crate::build_snapshot::guest::load_bundle(&snapshot.id, &spec.image_digest)
+                            .map_err(|error| ("unsupported_option", error))?;
+                    if spec_digest(&bundle.spec) != spec_digest(spec) {
+                        return Err((
+                            "spec_mismatch",
+                            "native build request differs from the verified bundle",
+                        ));
+                    }
                 }
             }
             if ledger.active().any(|record| {
@@ -1312,10 +1357,14 @@ impl FreshFixture {
             slot_expires: prepared.then(|| Instant::now() + SLOT_TTL),
             slot_expired: false,
             memory_limit_bytes: spec.limits.memory_bytes,
-            volume: spec.volume.clone(),
+            volume: spec
+                .volume
+                .clone()
+                .or_else(|| live.as_ref().map(|build| build.volume.clone())),
             bind_lease: spec.bind.as_ref().map(|bind| bind.lease.clone()),
             build_snapshot: spec.build_snapshot.clone(),
             build_runtime_owned: build,
+            build_parent: live.as_ref().map(|build| build.owner.clone()),
             buildkit_worker: spec.buildkit_worker,
             core_admission_deadline: self.core_admission.then_some(deadline),
             cancelled: false,
@@ -1343,17 +1392,14 @@ impl FreshFixture {
         let owner = Arc::clone(self);
         let limits = spec.limits;
         let mode = mode.to_owned();
-        let oci_process = self.oci.then(|| {
-            (
-                serde_json::to_string(spec).expect("validated OCI spec"),
-                spec.open_stdin,
-            )
+        let oci_process = self.oci.then(|| HelperLaunch {
+            spec: serde_json::to_string(spec).expect("validated OCI spec"),
+            open_stdin: spec.open_stdin,
+            live_mounts: live.map(|build| build.mounts),
         });
         if thread::Builder::new()
             .name("fresh-workload".into())
-            .spawn(move || {
-                owner.run_workload(id, limits, &mode, bridge, prepared, oci_process.as_ref())
-            })
+            .spawn(move || owner.run_workload(id, limits, &mode, bridge, prepared, oci_process))
             .is_err()
         {
             let record = ledger.records.back_mut().expect("reserved record");
@@ -1377,10 +1423,11 @@ impl FreshFixture {
         mode: &str,
         bridge: bool,
         prepared: bool,
-        oci_process: Option<&(String, bool)>,
+        oci_process: Option<HelperLaunch>,
     ) {
         let workload = hex(&id);
-        {
+        let is_oci = oci_process.is_some();
+        let is_worker = {
             let mut ledger = self.ledger.lock().expect("fresh ledger");
             loop {
                 let record = ledger.record_mut(&workload).expect("admitted workload");
@@ -1400,7 +1447,7 @@ impl FreshFixture {
                     return;
                 }
                 let Some(deadline) = record.core_admission_deadline else {
-                    break;
+                    break record.buildkit_worker;
                 };
                 ledger = self
                     .changed
@@ -1408,9 +1455,9 @@ impl FreshFixture {
                     .expect("fresh ledger")
                     .0;
             }
-        }
+        };
         let scoped;
-        let intent = if oci_process.is_some() {
+        let intent = if is_oci {
             scoped = self.intent.scoped(id);
             &scoped
         } else {
@@ -1422,9 +1469,13 @@ impl FreshFixture {
         let trace_stamp = || self.trace_core_latency.then(Instant::now);
         let result = intent.record(id).and_then(|()| {
             intent_recorded = trace_stamp();
-            let output = self.run_helper(id, limits, mode, bridge, prepared, oci_process)?;
+            let output = self.run_helper(id, limits, mode, bridge, prepared, oci_process);
+            if is_worker {
+                self.drain_worker_builds(&workload)?;
+            }
+            let output = output?;
             output_drained = trace_stamp();
-            if oci_process.is_some() {
+            if is_oci {
                 crate::kernel_fixture::assert_owned_cgroup_absent(id)?;
                 crate::sandbox_fixture::assert_owned_absent(id)?;
             }
@@ -1468,6 +1519,62 @@ impl FreshFixture {
         });
     }
 
+    fn drain_worker_builds(&self, owner: &str) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(32);
+        {
+            let mut ledger = self.ledger.lock().expect("fresh ledger");
+            if let Some(worker) = ledger.record_mut(owner) {
+                worker.terminate_requested = true;
+            }
+            loop {
+                let mut pending = false;
+                for child in ledger
+                    .records
+                    .iter_mut()
+                    .filter(|record| record.build_parent.as_deref() == Some(owner))
+                {
+                    if child.phase == Phase::CleanupFailed {
+                        return Err(io::Error::other("worker RUN cleanup failed"));
+                    }
+                    if child.phase != Phase::Removed {
+                        child.cancel();
+                        pending = true;
+                    }
+                }
+                if !pending {
+                    break;
+                }
+                self.changed.notify_all();
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::other("worker RUN cleanup deadline elapsed"));
+                }
+                ledger = self
+                    .changed
+                    .wait_timeout(ledger, remaining)
+                    .expect("fresh ledger")
+                    .0;
+            }
+        }
+        let mut runtime = self.build_runtime.lock().expect("build runtime");
+        if runtime
+            .active
+            .as_ref()
+            .is_some_and(|build| build.owner.as_deref() == Some(owner))
+        {
+            let mut ledger = self.ledger.lock().expect("fresh ledger");
+            let active = runtime.active.as_ref().expect("checked worker build");
+            let record = ledger
+                .record_mut(&active.handle.workload_id)
+                .filter(|record| record.phase == Phase::Removed && record.handle == active.handle)
+                .ok_or_else(|| io::Error::other("missing terminal worker RUN ownership"))?;
+            record.build_runtime_owned = false;
+            let active = runtime.active.take().expect("checked worker build");
+            runtime.deleted.push((active.owner, active.id));
+        }
+        Ok(())
+    }
+
     fn run_helper(
         self: &Arc<Self>,
         id: [u8; 16],
@@ -1475,7 +1582,7 @@ impl FreshFixture {
         mode: &str,
         bridge: bool,
         prepared: bool,
-        oci_process: Option<&(String, bool)>,
+        mut oci_process: Option<HelperLaunch>,
     ) -> io::Result<bool> {
         const TRANSITION_TIMEOUT: Duration = Duration::from_secs(32);
         let (mut peer, helper) = UnixStream::pair()?;
@@ -1483,7 +1590,7 @@ impl FreshFixture {
         let owner = peer.try_clone()?;
         let workload = hex(&id);
         let mut command = Command::new("/init");
-        let (input_reader, input_writer) = if oci_process.is_some_and(|(_, open_stdin)| *open_stdin)
+        let (input_reader, input_writer) = if oci_process.as_ref().is_some_and(|oci| oci.open_stdin)
         {
             let (reader, writer) = crate::workload_input::pipe()?;
             (Some(reader), Some(writer))
@@ -1491,6 +1598,10 @@ impl FreshFixture {
             (None, None)
         };
         let input_fd = input_reader.as_ref().map(AsRawFd::as_raw_fd);
+        let build_fds = oci_process
+            .as_ref()
+            .and_then(|oci| oci.live_mounts.as_ref())
+            .map(LiveMounts::descriptors);
         if oci_process.is_some() {
             command.process_group(0);
             let owner_pid = std::process::id() as libc::pid_t;
@@ -1511,6 +1622,9 @@ impl FreshFixture {
                     if let Some(fd) = input_fd {
                         crate::security::checked(libc::fcntl(fd, libc::F_SETFD, 0))?;
                     }
+                    for fd in build_fds.into_iter().flatten() {
+                        crate::security::checked(libc::fcntl(fd, libc::F_SETFD, 0))?;
+                    }
                     Ok(())
                 });
             }
@@ -1518,6 +1632,12 @@ impl FreshFixture {
         command.env_clear();
         if let Some(fd) = input_fd {
             command.env(crate::workload_input::FD_ENV, fd.to_string());
+        }
+        if let Some(fds) = build_fds {
+            command.env(
+                crate::build_snapshot::mounts::LIVE_FDS,
+                fds.map(|fd| fd.to_string()).join(","),
+            );
         }
         let mut child = command
             .args([
@@ -1535,7 +1655,7 @@ impl FreshFixture {
                 if bridge { "bridge" } else { "none" },
                 if prepared { "prepared" } else { "fresh" },
             ])
-            .args(oci_process.map(|(spec, _)| spec))
+            .args(oci_process.as_ref().map(|oci| &oci.spec))
             .stdin(Stdio::from(OwnedFd::from(helper)))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1544,6 +1664,7 @@ impl FreshFixture {
         // control descriptor here so an early helper exit yields EOF.
         drop(command);
         drop(input_reader);
+        drop(oci_process.as_mut().and_then(|oci| oci.live_mounts.take()));
         let helper_spawned = self.trace_core_latency.then(Instant::now);
         let process_group = -(child.id() as libc::pid_t);
         let out = child.stdout.take().expect("piped stdout");
@@ -1668,9 +1789,9 @@ impl FreshFixture {
                             peer.set_read_timeout(None)?;
                         }
                         self.update(&workload, |record| {
-                            if let (Some((spec, _)), Some(target)) =
-                                (oci_process, descriptors.pop())
-                                && let Ok(spec) = serde_json::from_str(spec)
+                            if let (Some(oci), Some(target)) =
+                                (oci_process.as_ref(), descriptors.pop())
+                                && let Ok(spec) = serde_json::from_str(&oci.spec)
                             {
                                 record.exec_context = Some((spec, target));
                             }
@@ -2055,7 +2176,14 @@ impl FreshFixture {
                 }
                 .map_err(|err| (err.code(), "invalid native launch spec"))?;
                 let expires = deadline(ready.request().budget_ms)?;
-                self.admit(ready, boot, expires, frame.kind == Kind::Prepare, false)
+                self.admit(
+                    ready,
+                    boot,
+                    expires,
+                    frame.kind == Kind::Prepare,
+                    false,
+                    None,
+                )
             }
             Kind::Claim => {
                 let request: Claim = parse(frame)?;
@@ -2616,12 +2744,25 @@ impl FreshFixture {
         frame: Frame,
         stream: &mut Stream,
         boot: &str,
+        worker_cgroup: Option<&str>,
     ) -> Result<(), WireError> {
         stream.deadline(Some(Instant::now() + Duration::from_secs(2)));
         let reply = frame
             .decode()
             .map_err(|_| ("malformed", "invalid build runtime request"))
-            .and_then(|request| self.build_operation(request, boot));
+            .and_then(|request| {
+                let owner = worker_cgroup
+                    .map(|cgroup| {
+                        self.ledger
+                            .lock()
+                            .expect("fresh ledger")
+                            .build_worker(cgroup)
+                            .map(|record| record.handle.workload_id.clone())
+                            .ok_or(("stale_generation", "BuildKit worker lease ended"))
+                    })
+                    .transpose()?;
+                self.build_operation(request, boot, owner)
+            });
         match reply {
             Ok(body) => Frame::write(stream, Kind::BuildRuntime, frame.id, &body),
             Err((code, detail)) => write_error(stream, frame.id, code, detail),
@@ -2636,65 +2777,94 @@ impl FreshFixture {
             .is_some()
     }
 
-    pub(crate) fn inspect_build_worker_bundle(
+    fn prepare_worker_build(
         &self,
-        frame: &Frame,
-        boot: &str,
-        cgroup: &str,
-    ) -> io::Result<Value> {
-        let request: BuildRuntimeRequest = frame.decode().map_err(io::Error::other)?;
-        if request.boot_id != boot || !matches!(request.operation, BuildOperation::Run) {
-            return Err(io::Error::other(
-                "live BuildKit bundle inspection requires a current RUN",
-            ));
-        }
+        owner: &str,
+        id: &str,
+    ) -> Result<(LaunchSpec, WorkerBuild), Failure> {
         let (pidfd, volume) = {
             let ledger = self.ledger.lock().expect("fresh ledger");
             let record = ledger
-                .build_worker(cgroup)
-                .ok_or_else(|| io::Error::other("BuildKit worker lease ended"))?;
+                .record(owner)
+                .filter(|record| {
+                    record.phase == Phase::Running
+                        && record.buildkit_worker
+                        && !record.cancelled
+                        && !record.terminate_requested
+                })
+                .ok_or(("stale_generation", "BuildKit worker lease ended"))?;
             let (_, pidfd) = record
                 .exec_context
                 .as_ref()
-                .ok_or_else(|| io::Error::other("missing BuildKit worker process lease"))?;
+                .ok_or(("stale_generation", "missing BuildKit worker process lease"))?;
             let volume = record
                 .volume
                 .clone()
-                .ok_or_else(|| io::Error::other("missing BuildKit worker cache lease"))?;
-            (pidfd.try_clone()?, volume)
+                .ok_or(("stale_generation", "missing BuildKit worker cache lease"))?;
+            (
+                pidfd
+                    .try_clone()
+                    .map_err(|_| ("busy", "could not retain BuildKit process lease"))?,
+                volume,
+            )
         };
-        let root = crate::exec_fixture::target_root(&pidfd)?;
-        let mountinfo = crate::exec_fixture::target_mountinfo(&pidfd)?;
-        let bundle = crate::build_snapshot::guest::read_worker_config(
-            &root,
-            &mountinfo,
-            &volume,
-            &request.id,
-        )?;
-        let config: Value = serde_json::from_slice(&bundle.config)?;
-        let detached = bundle.clone_root().map(|_| ());
-        let mounts = config["mounts"]
-            .as_array()
-            .ok_or_else(|| io::Error::other("live BuildKit bundle omitted its mounts"))?;
-        let namespaces = config["linux"]["namespaces"]
-            .as_array()
-            .ok_or_else(|| io::Error::other("live BuildKit bundle omitted its namespaces"))?;
-        Ok(json!({
-            "groups": config["process"]["user"]["additionalGids"],
-            "mounts": mounts.iter().filter_map(|mount| mount["destination"].as_str())
-                .collect::<Vec<_>>().join(","),
-            "namespaces": namespaces.iter().map(|ns| {
-                let name = ns["type"].as_str().unwrap_or("?");
-                if ns["path"].as_str().is_some() { format!("{name}*") } else { name.into() }
-            }).collect::<Vec<_>>().join(","),
-            "root": detached.map(|_| "ready".into()).unwrap_or_else(|error| error.to_string()),
-        }))
+        let root = crate::exec_fixture::target_root(&pidfd).map_err(|_| {
+            (
+                "stale_generation",
+                "could not open live BuildKit worker root",
+            )
+        })?;
+        let mountinfo = crate::exec_fixture::target_mountinfo(&pidfd).map_err(|_| {
+            (
+                "stale_generation",
+                "could not open live BuildKit worker mounts",
+            )
+        })?;
+        let bundle =
+            crate::build_snapshot::guest::read_worker_config(&root, &mountinfo, &volume, id)
+                .map_err(|_| {
+                    (
+                        "stale_generation",
+                        "could not verify live BuildKit bundle and rootfs",
+                    )
+                })?;
+        let snapshot = bundle.identity(id.to_owned()).map_err(|_| {
+            (
+                "stale_generation",
+                "could not retain live BuildKit root identity",
+            )
+        })?;
+        let (spec, hosts) =
+            crate::build_snapshot::bundle::parse_live(&bundle.config, snapshot, &self.image_digest)
+                .map_err(|reason| ("unsupported_option", reason))?;
+        let detached = bundle.clone_root().map_err(|_| {
+            (
+                "invalid_spec",
+                "could not detach verified BuildKit snapshot",
+            )
+        })?;
+        let mounts = LiveMounts::capture(detached, &bundle.executor, &bundle.cache, &hosts)
+            .map_err(|_| {
+                (
+                    "invalid_spec",
+                    "could not pin verified BuildKit auxiliary mounts",
+                )
+            })?;
+        Ok((
+            spec,
+            WorkerBuild {
+                owner: owner.to_owned(),
+                volume,
+                mounts,
+            },
+        ))
     }
 
     fn build_operation(
         self: &Arc<Self>,
         request: BuildRuntimeRequest,
         boot: &str,
+        owner: Option<String>,
     ) -> Result<Value, Failure> {
         if !self.oci || !self.core_admission {
             return Err(("unsupported_option", "build runtime requires native Core"));
@@ -2706,7 +2876,11 @@ impl FreshFixture {
             return Err(("malformed", "invalid build runtime ID"));
         }
         let mut runtime = self.build_runtime.lock().expect("build runtime");
-        if runtime.deleted.contains(&request.id) {
+        if runtime
+            .deleted
+            .iter()
+            .any(|(scope, id)| scope == &owner && id == &request.id)
+        {
             return match request.operation {
                 BuildOperation::Delete => Ok(json!({"deleted": true})),
                 _ => Err(("stale_generation", "build runtime was already deleted")),
@@ -2716,9 +2890,17 @@ impl FreshFixture {
             if runtime.deleted.len() >= BUILD_GENERATIONS {
                 return Err(("busy", "build runtime boot generation budget is exhausted"));
             }
-            let bundle =
-                crate::build_snapshot::guest::seal_worker_bundle(&request.id, &self.image_digest)
-                    .map_err(|reason| ("unsupported_option", reason))?;
+            let (spec, live) = if let Some(owner) = &owner {
+                let (spec, live) = self.prepare_worker_build(owner, &request.id)?;
+                (spec, Some(live))
+            } else {
+                let bundle = crate::build_snapshot::guest::seal_worker_bundle(
+                    &request.id,
+                    &self.image_digest,
+                )
+                .map_err(|reason| ("unsupported_option", reason))?;
+                (bundle.spec, None)
+            };
             let intent: [u8; 16] = random().map_err(|_| ("busy", "unavailable build identity"))?;
             let expires = Instant::now() + Duration::from_secs(3);
             // A locally allocated sequence must not consume the host
@@ -2728,24 +2910,29 @@ impl FreshFixture {
                 sequence: BUILD_SEQUENCE_BASE + runtime.deleted.len() as u64 + 1,
                 operation_id: Some(hex(&intent)),
                 budget_ms: 3000,
-                spec: bundle.spec,
+                spec,
             };
             let launch = launch
                 .validate()
                 .map_err(|error| (error.code(), "invalid build launch"))?;
-            let (_, state) = self.admit(launch, boot, expires, false, true)?;
+            let (_, state) = self.admit(launch, boot, expires, false, true, live)?;
             let handle = serde_json::from_value(state["handle"].clone())
                 .expect("typed build workload handle");
-            runtime.active = Some((request.id, handle));
+            runtime.active = Some(ActiveBuild {
+                id: request.id,
+                handle,
+                owner,
+            });
             return Ok(state);
         }
-        let (runtime_id, handle) = runtime
+        let active = runtime
             .active
             .as_ref()
             .ok_or(("not_found", "unknown build runtime ID"))?;
-        if runtime_id != &request.id {
+        if active.id != request.id || active.owner != owner {
             return Err(("busy", "another build runtime owns this worker"));
         }
+        let handle = &active.handle;
         let mut ledger = self.ledger.lock().expect("fresh ledger");
         let record = ledger
             .record_mut(&handle.workload_id)
@@ -2777,7 +2964,7 @@ impl FreshFixture {
                 }
                 record.build_runtime_owned = false;
                 runtime.active = None;
-                runtime.deleted.push(request.id);
+                runtime.deleted.push((owner, request.id));
                 Ok(json!({"deleted": true}))
             }
         }

@@ -142,12 +142,7 @@ impl Server {
         {
             return Err(WireError::Unauthorized);
         }
-        let result = fresh.inspect_build_worker_bundle(&frame, &hex(&self.boot_id), &cgroup);
-        let detail = match result {
-            Ok(bundle) => format!("live bundle: {bundle}"),
-            Err(error) => format!("cannot verify live BuildKit bundle: {error}"),
-        };
-        write_error(&mut stream, frame.id, "unsupported_option", &detail)
+        fresh.dispatch_build(frame, &mut stream, &hex(&self.boot_id), Some(&cgroup))
     }
 
     fn serve_scoped(&self, mut stream: Stream, scope: Scope) -> Result<(), WireError> {
@@ -207,7 +202,7 @@ impl Server {
                 && frame.kind == Kind::BuildRuntime
                 && let Some(fresh) = &self.fresh
             {
-                fresh.dispatch_build(frame, &mut stream, &boot_id)?;
+                fresh.dispatch_build(frame, &mut stream, &boot_id, None)?;
                 continue;
             }
             if scope != Scope::Host && !matches!(frame.kind, Kind::Ping | Kind::BuildSnapshot) {

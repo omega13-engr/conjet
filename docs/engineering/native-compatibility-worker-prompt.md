@@ -1,5 +1,10 @@
 # One-shot worker: native compatibility, then full release benchmarking
 
+> The user authorized a NEW worker on 2026-11-24 to complete compatibility
+> fixes and tests. The previous worker remains paused. Use the checkpoint order in
+> [native-compatibility-completion-plan.md](native-compatibility-completion-plan.md)
+> while preserving the scope and qualification requirements below.
+
 Execute in /Users/sly/Workspace/Personal/conjet on enhancement/speed-up.
 The user authorizes completing remaining native compatibility work and running
 full benchmarks against official Kiri only AFTER all required compatibility

@@ -104,6 +104,7 @@ pub(crate) mod guest {
     const ROOT: &CStr = c"/run/conjet/volume-disk";
     const BUILD_WORKSPACE: &CStr = c"/run/conjet/volume-disk/buildkit";
     const VOLUMES: &str = "/run/conjet/volume-disk/volumes";
+    const BUILD_VOLUMES: &CStr = c"/run/conjet/buildkit-volumes";
     const PENDING: &str = "/run/conjet/volume-disk/volumes/.pending";
     const LIMIT: usize = 8;
     const METADATA: &CStr = c"trusted.conjet.volume-labels";
@@ -138,6 +139,20 @@ pub(crate) mod guest {
             Ok(Self(Some(target)))
         }
 
+        fn build_bind(source: &CStr, target: &'static CStr) -> io::Result<Self> {
+            let mount = Self::open(source, target, c"", libc::MS_BIND)?;
+            checked(unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    target.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV,
+                    std::ptr::null(),
+                )
+            })?;
+            Ok(mount)
+        }
+
         fn close(&mut self) -> io::Result<()> {
             if let Some(target) = self.0 {
                 checked(unsafe { libc::umount(target.as_ptr()) })?;
@@ -155,6 +170,7 @@ pub(crate) mod guest {
     }
 
     pub(crate) struct Store {
+        build_volumes: Option<Mount>,
         workspace: Option<Mount>,
         disk: Mount,
         devices: Mount,
@@ -224,6 +240,7 @@ pub(crate) mod guest {
                     return Err(io::Error::other("invalid native build workspace ownership"));
                 }
                 return Ok(Some(Self {
+                    build_volumes: None,
                     workspace: None,
                     disk,
                     devices,
@@ -250,24 +267,21 @@ pub(crate) mod guest {
                 if !info.is_dir() || info.uid() != 0 || info.mode() & 0o777 != 0o700 {
                     return Err(io::Error::other("invalid native build workspace ownership"));
                 }
-                let target = crate::build_snapshot::guest::ROOT;
-                let workspace = Mount::open(BUILD_WORKSPACE, target, c"", libc::MS_BIND)?;
-                // Only this private directory needs executable snapshots.
-                // Leave the rest of the volume-disk mount noexec.
-                checked(unsafe {
-                    libc::mount(
-                        std::ptr::null(),
-                        target.as_ptr(),
-                        std::ptr::null(),
-                        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV,
-                        std::ptr::null(),
-                    )
-                })?;
-                Some(workspace)
+                Some(Mount::build_bind(
+                    BUILD_WORKSPACE,
+                    crate::build_snapshot::guest::ROOT,
+                )?)
             } else {
                 None
             };
+            // BuildKit's exporter remounts snapshot binds read-only. Its pinned
+            // mount library cannot preserve an inherited, locked noexec flag.
+            // Only the authorized worker selects its cache from this alias.
+            let build_volumes = combined
+                .then(|| Mount::build_bind(c"/run/conjet/volume-disk/volumes", BUILD_VOLUMES))
+                .transpose()?;
             Ok(Some(Self {
+                build_volumes,
                 workspace,
                 disk,
                 devices,
@@ -275,6 +289,9 @@ pub(crate) mod guest {
         }
 
         pub(crate) fn close(mut self) -> io::Result<()> {
+            if let Some(build_volumes) = &mut self.build_volumes {
+                build_volumes.close()?;
+            }
             if let Some(workspace) = &mut self.workspace {
                 workspace.close()?;
             }
@@ -420,6 +437,21 @@ pub(crate) mod guest {
         checked_source(request, (UID_BASE, GID_BASE))
     }
 
+    pub(crate) fn worker_cache_mount_source(request: &VolumeMount) -> io::Result<File> {
+        if request.target != "/var/lib/buildkit" || request.read_only {
+            return Err(io::Error::other("invalid BuildKit worker cache mount"));
+        }
+        // The launch child is already in the mapped user namespace when it
+        // reopens the source. Its cache ownership is reported in that mapping.
+        let registered = mount_source(request)?.metadata()?;
+        let source = open_volume_at(path(BUILD_VOLUMES), &request.name, libc::O_PATH)?;
+        let mounted = source.metadata()?;
+        if (mounted.dev(), mounted.ino()) != (registered.dev(), registered.ino()) {
+            return Err(io::Error::other("BuildKit worker cache alias changed"));
+        }
+        Ok(source)
+    }
+
     fn checked_source(request: &VolumeMount, uid_gid_base: (u32, u32)) -> io::Result<File> {
         let source = open_volume(&request.name, libc::O_PATH)?;
         let info = checked_info(&request.name, &source.metadata()?, uid_gid_base)?;
@@ -465,6 +497,10 @@ pub(crate) mod guest {
     }
 
     fn open_volume(name: &str, flags: libc::c_int) -> io::Result<File> {
+        open_volume_at(Path::new(VOLUMES), name, flags)
+    }
+
+    fn open_volume_at(root: &Path, name: &str, flags: libc::c_int) -> io::Result<File> {
         if !valid_name(name) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -474,7 +510,7 @@ pub(crate) mod guest {
         OpenOptions::new()
             .read(true)
             .custom_flags(flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
-            .open(Path::new(VOLUMES).join(name))
+            .open(root.join(name))
     }
 
     fn checked_info(name: &str, info: &Metadata, base: (u32, u32)) -> io::Result<VolumeInfo> {

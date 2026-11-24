@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-mod bundle;
+pub(crate) mod bundle;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub(crate) mod mounts;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -21,6 +21,8 @@ pub struct Snapshot {
     pub inode: u64,
     #[serde(default, skip_serializing_if = "is_false")]
     pub bundle_policy: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub live_worker: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -29,7 +31,10 @@ fn is_false(value: &bool) -> bool {
 
 impl Snapshot {
     pub fn same_mount(&self, other: &Self) -> bool {
-        self.id == other.id && self.device == other.device && self.inode == other.inode
+        self.id == other.id
+            && self.device == other.device
+            && self.inode == other.inode
+            && self.live_worker == other.live_worker
     }
 }
 
@@ -72,7 +77,7 @@ pub(crate) mod guest {
     const OPEN_TREE: libc::c_int =
         libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY;
 
-    fn open_directory(parent: &File, name: &str) -> io::Result<File> {
+    pub(super) fn open_directory(parent: &File, name: &str) -> io::Result<File> {
         let name = CString::new(name)?;
         let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), OPEN_TREE) };
         if fd < 0 {
@@ -128,6 +133,7 @@ pub(crate) mod guest {
             device: info.dev(),
             inode: info.ino(),
             bundle_policy: false,
+            live_worker: false,
         };
         Ok(OpenSnapshot {
             root: rootfs,
@@ -143,10 +149,23 @@ pub(crate) mod guest {
 
     pub(crate) struct LiveBundle {
         pub(crate) config: Vec<u8>,
+        pub(crate) cache: File,
+        pub(crate) executor: File,
         root: File,
     }
 
     impl LiveBundle {
+        pub(crate) fn identity(&self, id: String) -> io::Result<Snapshot> {
+            let info = self.root.metadata()?;
+            Ok(Snapshot {
+                id,
+                device: info.dev(),
+                inode: info.ino(),
+                bundle_policy: true,
+                live_worker: true,
+            })
+        }
+
         pub(crate) fn clone_root(&self) -> io::Result<OwnedFd> {
             let tree = clone_tree(&self.root)
                 .map_err(|error| io::Error::other(format!("clone owned snapshot: {error}")))?;
@@ -198,13 +217,23 @@ pub(crate) mod guest {
             io::Error::other("worker rootfs bind is outside its native snapshots")
         })?;
         let native = open_directory(&leased_cache, "runc-native")?;
+        let leased_executor = open_directory(&native, "executor")?;
         let snapshots = open_directory(&native, "snapshots")?;
         let snapshots = open_directory(&snapshots, "snapshots")?;
         let source = open_directory(&snapshots, leaf)?;
         let info = source.metadata()?;
+        let worker_executor = executor.metadata()?;
+        let original_executor = leased_executor.metadata()?;
         if (info.dev(), info.ino()) != (mounted.dev(), mounted.ino()) {
             return Err(io::Error::other(
                 "leased snapshot did not match the active rootfs",
+            ));
+        }
+        if (worker_executor.dev(), worker_executor.ino())
+            != (original_executor.dev(), original_executor.ino())
+        {
+            return Err(io::Error::other(
+                "worker executor directory did not match its lease",
             ));
         }
         let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
@@ -230,6 +259,8 @@ pub(crate) mod guest {
         }
         Ok(LiveBundle {
             config: bytes,
+            cache: leased_cache,
+            executor: leased_executor,
             root: source,
         })
     }
@@ -322,7 +353,7 @@ pub(crate) mod guest {
         Ok(tree)
     }
 
-    fn clone_tree(root: &File) -> io::Result<OwnedFd> {
+    pub(super) fn clone_tree(root: &File) -> io::Result<OwnedFd> {
         // Clone a detached mount of only the verified root, without child mounts.
         let fd = unsafe {
             libc::syscall(
@@ -338,7 +369,10 @@ pub(crate) mod guest {
         Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
     }
 
-    fn set_mount_attributes(tree: &OwnedFd, attributes: &libc::mount_attr) -> io::Result<()> {
+    pub(super) fn set_mount_attributes(
+        tree: &OwnedFd,
+        attributes: &libc::mount_attr,
+    ) -> io::Result<()> {
         // Both descriptors remain open until the kernel copies the attributes.
         crate::security::checked(unsafe {
             libc::syscall(

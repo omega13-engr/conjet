@@ -92,6 +92,7 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
             prepared: false,
             process: None,
             stdin: None,
+            live_mounts: None,
         },
     )
 }
@@ -176,6 +177,12 @@ pub fn run_helper(
     }
     let stdin =
         crate::workload_input::inherited(process.as_ref().is_some_and(|spec| spec.open_stdin))?;
+    let live_mounts = crate::build_snapshot::mounts::LiveMounts::inherited(
+        process
+            .as_ref()
+            .and_then(|spec| spec.build_snapshot.as_ref())
+            .is_some_and(|snapshot| snapshot.live_worker),
+    )?;
     run(
         id,
         limits,
@@ -187,6 +194,7 @@ pub fn run_helper(
             prepared,
             process: process.as_ref(),
             stdin,
+            live_mounts,
         },
     )
 }
@@ -199,6 +207,7 @@ struct RunProfile<'a> {
     prepared: bool,
     process: Option<&'a crate::spec::LaunchSpec>,
     stdin: Option<std::fs::File>,
+    live_mounts: Option<crate::build_snapshot::mounts::LiveMounts>,
 }
 
 fn run(
@@ -214,6 +223,7 @@ fn run(
         prepared,
         process,
         stdin,
+        live_mounts,
     } = profile;
     if controlled {
         notify_control(b'P', &[])?;
@@ -233,21 +243,19 @@ fn run(
         _ => "/init",
     };
     let sandbox = with_sandbox
-        .then(|| Sandbox::prepare(network, executable, process, id, stdin))
+        .then(|| Sandbox::prepare(network, executable, process, id, stdin, live_mounts))
         .transpose()?;
     inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)
         .then(ProcMount::new)
         .transpose()?;
-    if process
-        .and_then(|spec| spec.build_snapshot.as_ref())
-        .is_some_and(|snapshot| snapshot.bundle_policy)
-    {
-        let group = crate::spec::GID_BASE + crate::spec::WORKLOAD_GID;
-        security::checked(unsafe { libc::setgroups(1, &group) })?;
-    } else {
-        security::clear_supplementary_groups()?;
-    }
+    let groups = sandbox
+        .as_ref()
+        .map_or(&[][..], Sandbox::groups)
+        .iter()
+        .map(|gid| crate::spec::GID_BASE + gid)
+        .collect::<Vec<_>>();
+    security::checked(unsafe { libc::setgroups(groups.len(), groups.as_ptr()) })?;
     let (mount_path, root_name) = cgroup_paths(&handshake::hex(&id), process.is_some());
     let mount = CgroupMount::new(&mount_path)?;
     inject(mode, "fault-mount");
@@ -542,7 +550,7 @@ fn clone_and_reap(
                     .ok_or_else(|| io::Error::other("missing detached build snapshot"))?;
                 let sysfs = process
                     .and_then(|spec| spec.build_snapshot.as_ref())
-                    .filter(|snapshot| snapshot.bundle_policy)
+                    .filter(|snapshot| snapshot.bundle_policy && !snapshot.live_worker)
                     .map(|_| crate::build_snapshot::mounts::detached_sysfs(&pidfd))
                     .transpose()?;
                 let mut descriptors = vec![mount.as_raw_fd()];

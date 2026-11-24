@@ -45,6 +45,8 @@ pub(crate) struct Sandbox {
     stdin: File,
     volume: Option<FileBinding>,
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
+    live_mounts: Option<crate::build_snapshot::mounts::LiveMounts>,
+    groups: &'static [u32],
     uid: u32,
     gid: u32,
     redis_bootstrap: bool,
@@ -115,6 +117,7 @@ fn mount_standard_devices(root: &CStr, devices: [File; 2]) -> io::Result<()> {
 
 enum BindingSource {
     Volume(VolumeMount),
+    BuildKitCache(VolumeMount),
     Bind(crate::spec::BindMount),
 }
 
@@ -244,11 +247,12 @@ impl FileBinding {
             if !valid_volume_target(&volume.target) {
                 return Err(io::Error::other("unsupported native named volume target"));
             }
-            (
-                BindingSource::Volume(volume.clone()),
-                volume.target.as_str(),
-                volume.read_only,
-            )
+            let source = if spec.buildkit_worker {
+                BindingSource::BuildKitCache(volume.clone())
+            } else {
+                BindingSource::Volume(volume.clone())
+            };
+            (source, volume.target.as_str(), volume.read_only)
         } else if let Some(bind) = &spec.bind {
             (
                 BindingSource::Bind(bind.clone()),
@@ -271,6 +275,9 @@ impl FileBinding {
     fn open(&self) -> io::Result<File> {
         match &self.source {
             BindingSource::Volume(volume) => crate::volume_disk::guest::mount_source(volume),
+            BindingSource::BuildKitCache(volume) => {
+                crate::volume_disk::guest::worker_cache_mount_source(volume)
+            }
             BindingSource::Bind(bind) => crate::bind_mount::source(&bind.lease),
         }
     }
@@ -333,6 +340,7 @@ impl Sandbox {
         oci: Option<&LaunchSpec>,
         id: [u8; 16],
         stdin: Option<File>,
+        live_mounts: Option<crate::build_snapshot::mounts::LiveMounts>,
     ) -> io::Result<Self> {
         let base = owned_path(id, oci.is_some());
         std::fs::create_dir(&base)?;
@@ -342,7 +350,7 @@ impl Sandbox {
             }
             let snapshot = oci.and_then(|spec| spec.build_snapshot.as_ref());
             let worker_mounts = match (oci, snapshot) {
-                (Some(spec), Some(snapshot)) if snapshot.bundle_policy => {
+                (Some(spec), Some(snapshot)) if snapshot.bundle_policy && !snapshot.live_worker => {
                     let bundle =
                         crate::build_snapshot::guest::load_bundle(&snapshot.id, &spec.image_digest)
                             .map_err(io::Error::other)?;
@@ -354,6 +362,16 @@ impl Sandbox {
                     )?)
                 }
                 _ => None,
+            };
+            if snapshot.is_some_and(|snapshot| snapshot.live_worker) != live_mounts.is_some() {
+                return Err(io::Error::other("unexpected live snapshot mount lease"));
+            }
+            let groups: &'static [u32] = if live_mounts.is_some() {
+                crate::build_snapshot::bundle::LIVE_GROUPS
+            } else if worker_mounts.is_some() {
+                &[WORKLOAD_GID]
+            } else {
+                &[]
             };
             let lower = if snapshot.is_some() {
                 base.join("lower")
@@ -403,6 +421,8 @@ impl Sandbox {
             )?;
             let policy = if oci.is_some_and(|spec| spec.buildkit_worker) {
                 WorkloadPolicy::BuildKitWorker
+            } else if live_mounts.is_some() {
+                WorkloadPolicy::BuildKitRun
             } else if oci.is_some_and(|spec| spec.redis_bootstrap) {
                 WorkloadPolicy::RedisBootstrap
             } else {
@@ -423,7 +443,7 @@ impl Sandbox {
                 },
                 filter: WorkloadFilter::new(
                     bridge,
-                    oci.is_some_and(|spec| spec.build_snapshot.is_none()),
+                    oci.is_some_and(|spec| spec.build_snapshot.is_none()) || live_mounts.is_some(),
                     policy,
                 ),
                 resolver: oci
@@ -439,6 +459,8 @@ impl Sandbox {
                     .transpose()?
                     .flatten(),
                 worker_mounts,
+                live_mounts,
+                groups,
                 uid: oci.map_or(WORKLOAD_UID, |spec| spec.uid),
                 gid: oci.map_or(WORKLOAD_GID, |spec| spec.gid),
                 redis_bootstrap: oci.is_some_and(|spec| spec.redis_bootstrap),
@@ -472,11 +494,18 @@ impl Sandbox {
         let RootMode::BuildSnapshot(snapshot) = &self.root else {
             return Ok(None);
         };
+        if let Some(mounts) = &self.live_mounts {
+            return mounts.root.try_clone().map(Some);
+        }
         // The helper owns this child PID and has yet to open its startup gate.
         let user = File::open(format!("/proc/{pid}/ns/user"))?;
         crate::build_snapshot::guest::mapped_mount(snapshot, &user)
             .map(Some)
             .map_err(|error| io::Error::other(format!("map build snapshot IDs: {error}")))
+    }
+
+    pub(crate) fn groups(&self) -> &'static [u32] {
+        self.groups
     }
 
     pub(crate) fn enter(
@@ -502,11 +531,14 @@ impl Sandbox {
                     .open(path)
             })
             .transpose()?;
-        let worker = self
-            .worker_mounts
-            .as_ref()
-            .map(crate::build_snapshot::mounts::MountPlan::open)
-            .transpose()?;
+        let worker = if let Some(mounts) = &self.live_mounts {
+            Some(mounts.sources()?)
+        } else {
+            self.worker_mounts
+                .as_ref()
+                .map(crate::build_snapshot::mounts::MountPlan::open)
+                .transpose()?
+        };
         let devices = if self.standard_devices {
             Some([standard_device("null", 3)?, standard_device("zero", 5)?])
         } else {
@@ -599,7 +631,9 @@ impl Sandbox {
             )?;
         }
         if let Some(worker) = worker {
-            let sysfs = sysfs.ok_or_else(|| io::Error::other("missing worker sysfs mount"))?;
+            if sysfs.is_some() != self.worker_mounts.is_some() {
+                return Err(io::Error::other("unexpected worker sysfs mount"));
+            }
             let root = Path::new(std::ffi::OsStr::from_bytes(self.new_root.as_bytes()));
             worker.mount(root, sysfs)?;
         }
@@ -657,12 +691,7 @@ impl Sandbox {
         )?;
         step(
             "credentials and capabilities",
-            security::drop_workload_identity(
-                self.uid,
-                self.gid,
-                self.worker_mounts.is_some(),
-                self.policy,
-            ),
+            security::drop_workload_identity(self.uid, self.gid, self.groups, self.policy),
         )?;
         before_filter()?;
         step("seccomp", self.filter.install())

@@ -6,14 +6,17 @@ use sha2::{Digest, Sha256};
 
 use super::{Snapshot, valid_id};
 use crate::handshake::hex;
-use crate::spec::{LaunchSpec, NATIVE_LIMITS, WORKLOAD_GID, WORKLOAD_UID};
+use crate::spec::{LaunchSpec, NATIVE_LIMITS, ResourceLimits, WORKLOAD_GID, WORKLOAD_UID};
 
 pub(super) const EXECUTOR: &str = "/run/conjet/buildkit/worker/runc-native/executor";
+pub(crate) const LIVE_EXECUTOR: &str = "/var/lib/buildkit/runc-native/executor";
+pub(crate) const LIVE_GROUPS: &[u32] = &[0, 1, 2, 3, 4, 6, 10, 11, 20, 26, 27];
 pub(crate) const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
 // Canonical policy shared by three independently generated pinned bundles.
 // Dynamic process fields and validated worker-owned paths are excluded.
 const POLICY: &str = "65a0504290aa0fed601cf5f19b860b77d1ba682595b92c69b8909bfc4cfd4224";
+const LIVE_POLICY: &str = "90e0f262862d2b34e3cf86f74011abeec843b7f2ed2552d77ef2ac4d16913dd6";
 
 #[derive(Serialize)]
 pub(crate) struct BundleWitness {
@@ -66,43 +69,13 @@ pub(crate) fn parse(
         }
     }
     let mount_count = mounts.len();
-    let process = bundle["process"]
-        .as_object_mut()
-        .ok_or("missing build process")?;
-    let mut field = |name| process.remove(name).ok_or("missing build process field");
     let mut selected = snapshot.clone();
     selected.bundle_policy = true;
-    let spec = LaunchSpec {
-        docker_resource_defaults: false,
-        memory_swap_disabled: false,
-        open_stdin: false,
-        redis_bootstrap: false,
-        buildkit_worker: false,
-        image_digest: image_digest.to_owned(),
-        argv: serde_json::from_value(field("args")?).map_err(|_| "invalid build argv")?,
-        env: serde_json::from_value(field("env")?).map_err(|_| "invalid build environment")?,
-        cwd: serde_json::from_value(field("cwd")?)
-            .map_err(|_| "invalid build working directory")?,
-        uid: WORKLOAD_UID,
-        gid: WORKLOAD_GID,
-        account: None,
-        network: "none".into(),
-        network_alias: None,
-        secondary_network_alias: None,
-        network_alias_project: None,
-        volume: None,
-        bind: None,
-        build_snapshot: Some(selected),
-        limits: NATIVE_LIMITS,
-    };
-    spec.validate()
-        .map_err(|_| "build process violates native launch limits")?;
+    let spec = process_spec(&mut bundle, selected, image_digest)?;
 
     // The pinned preset includes user credentials, namespaces, device rules,
     // seccomp, capabilities, and the complete ordered mount contract.
-    bundle.sort_all_objects();
-    let policy = serde_json::to_vec(&bundle).map_err(|_| "invalid build policy")?;
-    if hex(&Sha256::digest(policy)) != POLICY {
+    if policy_sha256(&mut bundle)? != POLICY {
         return Err("unsupported BuildKit OCI preset");
     }
     Ok(WorkerBundle {
@@ -114,4 +87,135 @@ pub(crate) fn parse(
         spec,
         hosts_file: hosts_file.ok_or("missing worker hosts file")?,
     })
+}
+
+pub(crate) fn parse_live(
+    bytes: &[u8],
+    snapshot: Snapshot,
+    image_digest: &str,
+) -> Result<(LaunchSpec, String), &'static str> {
+    if bytes.len() as u64 > MAX_CONFIG_BYTES || !snapshot.live_worker || !valid_id(&snapshot.id) {
+        return Err("invalid live build bundle bounds");
+    }
+    let mut bundle: Value =
+        serde_json::from_slice(bytes).map_err(|_| "invalid live BuildKit bundle JSON")?;
+    let root = format!("{LIVE_EXECUTOR}/{}/rootfs", snapshot.id);
+    if bundle["root"]["path"].as_str() != Some(root.as_str()) {
+        return Err("live BuildKit root does not match the snapshot");
+    }
+    let hosts = bundle["mounts"][6]["source"]
+        .as_str()
+        .and_then(|source| source.strip_prefix(LIVE_EXECUTOR))
+        .and_then(|name| name.strip_prefix("/hosts."))
+        .filter(|suffix| valid_id(suffix))
+        .ok_or("live BuildKit hosts source changed")?;
+    let hosts = format!("hosts.{hosts}");
+    let spec = process_spec(&mut bundle, snapshot, image_digest)?;
+    // Bind the dynamic paths to the verified lease before comparing all
+    // remaining requested OCI semantics against the pinned rootless preset.
+    bundle["root"]["path"] = "<root>".into();
+    bundle["mounts"][6]["source"] = "<hosts>".into();
+    // BuildKit appends the bind flags by iterating a Go map. The accepted
+    // flags only add restrictions, so their order does not affect the mount.
+    for index in [5, 6, 7] {
+        let options = bundle["mounts"]
+            .get_mut(index)
+            .and_then(|mount| mount.get_mut("options"))
+            .and_then(Value::as_array_mut)
+            .ok_or("missing live BuildKit bind flags")?;
+        options.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    }
+    if policy_sha256(&mut bundle)? != LIVE_POLICY {
+        return Err("unsupported live BuildKit OCI preset");
+    }
+    Ok((spec, hosts))
+}
+
+fn policy_sha256(bundle: &mut Value) -> Result<String, &'static str> {
+    bundle.sort_all_objects();
+    let policy = serde_json::to_vec(bundle).map_err(|_| "invalid build policy")?;
+    Ok(hex(&Sha256::digest(policy)))
+}
+
+fn process_spec(
+    bundle: &mut Value,
+    snapshot: Snapshot,
+    image_digest: &str,
+) -> Result<LaunchSpec, &'static str> {
+    let process = bundle["process"]
+        .as_object_mut()
+        .ok_or("missing build process")?;
+    let mut field = |name| process.remove(name).ok_or("missing build process field");
+    let live = snapshot.live_worker;
+    let spec = LaunchSpec {
+        docker_resource_defaults: live,
+        memory_swap_disabled: false,
+        open_stdin: false,
+        redis_bootstrap: false,
+        buildkit_worker: false,
+        image_digest: image_digest.to_owned(),
+        argv: serde_json::from_value(field("args")?).map_err(|_| "invalid build argv")?,
+        env: serde_json::from_value(field("env")?).map_err(|_| "invalid build environment")?,
+        cwd: serde_json::from_value(field("cwd")?)
+            .map_err(|_| "invalid build working directory")?,
+        uid: if live { 0 } else { WORKLOAD_UID },
+        gid: if live { 0 } else { WORKLOAD_GID },
+        account: None,
+        network: "none".into(),
+        network_alias: None,
+        secondary_network_alias: None,
+        network_alias_project: None,
+        volume: None,
+        bind: None,
+        build_snapshot: Some(snapshot),
+        limits: if live {
+            ResourceLimits {
+                memory_bytes: 0,
+                pids: 0,
+                cpu_millicores: 0,
+            }
+        } else {
+            NATIVE_LIMITS
+        },
+    };
+    spec.validate()
+        .map_err(|_| "build process violates native launch limits")?;
+
+    Ok(spec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_bundle_rejects_missing_or_malformed_bind_flags() {
+        let snapshot = Snapshot {
+            id: "nativeRun".into(),
+            device: 1,
+            inode: 1,
+            bundle_policy: true,
+            live_worker: true,
+        };
+        let mut bundle = serde_json::json!({
+            "root": {"path": format!("{LIVE_EXECUTOR}/nativeRun/rootfs")},
+            "process": {"args": ["/bin/true"], "env": [], "cwd": "/"},
+            "mounts": [
+                null, null, null, null, null,
+                {"options": ["ro"]},
+                {"source": format!("{LIVE_EXECUTOR}/hosts.test"), "options": ["ro"]}
+            ]
+        });
+        let error = |bundle: &Value| match parse_live(
+            &serde_json::to_vec(bundle).unwrap(),
+            snapshot.clone(),
+            crate::spec::BUILDKIT_CONFIG,
+        ) {
+            Ok(_) => panic!("invalid bind flags were accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error(&bundle), "missing live BuildKit bind flags");
+        bundle["mounts"].as_array_mut().unwrap().push(0.into());
+        assert_eq!(error(&bundle), "missing live BuildKit bind flags");
+    }
 }
