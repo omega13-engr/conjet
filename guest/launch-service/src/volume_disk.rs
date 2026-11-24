@@ -1,9 +1,32 @@
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
 
 const LABEL: &[u8; 16] = b"CJ_NATIVE_VOL\0\0\0";
 pub const MARKER: &str = "/etc/conjet/native-volume";
+pub type VolumeLabels = BTreeMap<String, String>;
+const LABELS_LIMIT: usize = 1024;
+
+pub fn encode_labels(labels: &VolumeLabels) -> io::Result<Vec<u8>> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "invalid native volume labels");
+    if labels.len() > 16
+        || labels.iter().any(|(name, value)| {
+            name.is_empty()
+                || name.len() > 128
+                || value.len() > 256
+                || name.contains(['=', '\0'])
+                || value.contains('\0')
+        })
+    {
+        return Err(invalid());
+    }
+    let encoded = serde_json::to_vec(labels)?;
+    if encoded.len() > LABELS_LIMIT {
+        return Err(invalid());
+    }
+    Ok(encoded)
+}
 
 pub struct VolumeIdentity {
     pub uuid: [u8; 16],
@@ -63,13 +86,17 @@ pub(crate) mod guest {
     use std::ffi::CStr;
     use std::fs::{self, DirBuilder, File, Metadata, OpenOptions};
     use std::io;
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
     use std::path::Path;
     use std::time::{Duration, Instant};
 
     use serde::Serialize;
 
-    use super::{MARKER, VolumeIdentity, filesystem_uuid, valid_name};
+    use super::{
+        LABELS_LIMIT, MARKER, VolumeIdentity, VolumeLabels, encode_labels, filesystem_uuid,
+        valid_name,
+    };
     use crate::security::checked;
     use crate::spec::{GID_BASE, UID_BASE, VolumeMount, WORKLOAD_GID, WORKLOAD_UID};
 
@@ -78,6 +105,7 @@ pub(crate) mod guest {
     const VOLUMES: &str = "/run/conjet/volume-disk/volumes";
     const PENDING: &str = "/run/conjet/volume-disk/volumes/.pending";
     const LIMIT: usize = 8;
+    const METADATA: &CStr = c"trusted.conjet.volume-labels";
 
     fn path(value: &CStr) -> &Path {
         Path::new(value.to_str().expect("static mount path"))
@@ -241,13 +269,14 @@ pub(crate) mod guest {
         Ok(names)
     }
 
-    pub(crate) fn create(name: &str) -> io::Result<VolumeInfo> {
+    pub(crate) fn create(name: &str, labels: &VolumeLabels) -> io::Result<VolumeInfo> {
         if !valid_name(name) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid native volume name",
             ));
         }
+        let encoded = encode_labels(labels)?;
         let entries = names()?;
         if entries.iter().any(|entry| entry == name) {
             return inspect(name);
@@ -263,7 +292,19 @@ pub(crate) mod guest {
                 Some(UID_BASE + WORKLOAD_UID),
                 Some(GID_BASE + WORKLOAD_GID),
             )?;
-            File::open(PENDING)?.sync_all()?;
+            let pending = File::open(PENDING)?;
+            if !labels.is_empty() {
+                checked(unsafe {
+                    libc::fsetxattr(
+                        pending.as_raw_fd(),
+                        METADATA.as_ptr(),
+                        encoded.as_ptr().cast(),
+                        encoded.len(),
+                        libc::XATTR_CREATE,
+                    )
+                })?;
+            }
+            pending.sync_all()?;
             fs::rename(PENDING, path)?;
             File::open(VOLUMES)?.sync_all()?;
             inspect(name)
@@ -287,6 +328,7 @@ pub(crate) mod guest {
         guest_gid: u32,
         mode: u32,
         pub(crate) inode: u64,
+        labels: VolumeLabels,
     }
 
     pub(crate) fn inspect(name: &str) -> io::Result<VolumeInfo> {
@@ -296,12 +338,34 @@ pub(crate) mod guest {
                 "invalid native volume name",
             ));
         }
-        let info = fs::symlink_metadata(Path::new(VOLUMES).join(name))?;
-        checked_info(
+        let source = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(Path::new(VOLUMES).join(name))?;
+        let mut info = checked_info(
             name,
-            &info,
+            &source.metadata()?,
             (UID_BASE + WORKLOAD_UID, GID_BASE + WORKLOAD_GID),
-        )
+        )?;
+        let mut payload = [0u8; LABELS_LIMIT];
+        let length = unsafe {
+            libc::fgetxattr(
+                source.as_raw_fd(),
+                METADATA.as_ptr(),
+                payload.as_mut_ptr().cast(),
+                payload.len(),
+            )
+        };
+        if length < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ENODATA) {
+                return Err(error);
+            }
+        } else {
+            info.labels = serde_json::from_slice(&payload[..length as usize])?;
+            encode_labels(&info.labels)?;
+        }
+        Ok(info)
     }
 
     pub(crate) fn mount_source(request: &VolumeMount) -> io::Result<File> {
@@ -338,6 +402,7 @@ pub(crate) mod guest {
             guest_gid: WORKLOAD_GID,
             mode: info.mode() & 0o777,
             inode: info.ino(),
+            labels: VolumeLabels::new(),
         })
     }
 }

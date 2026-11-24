@@ -221,10 +221,21 @@ const BUILD_SEQUENCE_BASE: u64 = 1 << 63;
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum VolumeOperation {
-    List,
-    Create { name: String },
-    Inspect { name: String },
-    Remove { name: String },
+    List {
+        #[serde(default)]
+        details: bool,
+    },
+    Create {
+        name: String,
+        #[serde(default)]
+        labels: crate::volume_disk::VolumeLabels,
+    },
+    Inspect {
+        name: String,
+    },
+    Remove {
+        name: String,
+    },
 }
 
 impl VolumeOperation {
@@ -240,8 +251,17 @@ impl VolumeOperation {
             _ => ("storage_failed", "native volume operation failed"),
         };
         let response = match self {
-            Self::List => json!({"volumes": volumes::names().map_err(error)?}),
-            Self::Create { name } => json!(volumes::create(&name).map_err(error)?),
+            Self::List { details: false } => json!({"volumes": volumes::names().map_err(error)?}),
+            Self::List { details: true } => {
+                let entries = volumes::names()
+                    .map_err(error)?
+                    .iter()
+                    .map(|name| volumes::inspect(name))
+                    .collect::<io::Result<Vec<_>>>()
+                    .map_err(error)?;
+                json!({"volumes": entries})
+            }
+            Self::Create { name, labels } => json!(volumes::create(&name, &labels).map_err(error)?),
             Self::Inspect { name } => json!(volumes::inspect(&name).map_err(error)?),
             Self::Remove { name } => {
                 volumes::remove(&name).map_err(error)?;

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use conjet_launch_service::spec::{valid_volume_target, VolumeMount};
-use conjet_launch_service::volume_disk::valid_name;
+use conjet_launch_service::volume_disk::{encode_labels, valid_name, VolumeLabels};
 use conjet_launch_service::wire::{Kind, WireError};
 use serde_json::{json, Value};
 
@@ -134,6 +134,10 @@ pub(super) fn ask(owner: &Owner, action: &str, name: Option<&str>) -> Result<Val
         }
         operation["name"] = json!(name);
     }
+    exchange(owner, operation)
+}
+
+fn exchange(owner: &Owner, operation: Value) -> Result<Value, Rejected> {
     let (directory, identity, key, boot) = {
         let native = owner.native.lock().unwrap();
         (
@@ -172,9 +176,14 @@ pub(super) fn ask(owner: &Owner, action: &str, name: Option<&str>) -> Result<Val
     }
 }
 
-pub(super) fn describe(name: &str) -> Value {
+fn describe(name: &str, labels: &Value) -> Value {
     json!({"Name":name,"Driver":"local","Mountpoint":guest_path(name),"Scope":"local",
-           "Options":{},"Labels":{}})
+           "Options":{},"Labels":labels})
+}
+
+pub(super) fn inspect(owner: &Owner, name: &str) -> Result<Value, Rejected> {
+    let info = ask(owner, "inspect", Some(name))?;
+    Ok(describe(name, &info["labels"]))
 }
 
 fn guest_path(name: &str) -> String {
@@ -182,20 +191,22 @@ fn guest_path(name: &str) -> String {
 }
 
 pub(super) fn list(owner: &Owner, filters: &super::discovery::Filters) -> Result<Value, Rejected> {
-    let names = ask(owner, "list", None)?;
+    let names = exchange(owner, json!({"action":"list","details":true}))?;
     let volumes = names["volumes"]
         .as_array()
         .ok_or_else(|| Rejected::internal("invalid native volume inventory"))?
         .iter()
-        .map(|name| {
-            name.as_str()
+        .map(|info| {
+            info["name"]
+                .as_str()
                 .filter(|name| valid_name(name))
+                .map(|name| (name, &info["labels"]))
                 .ok_or_else(|| Rejected::internal("invalid native volume inventory name"))
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .filter(|name| filters.matches(name, &Value::Null))
-        .map(describe)
+        .filter(|(name, labels)| filters.matches(name, labels))
+        .map(|(name, labels)| describe(name, labels))
         .collect::<Vec<_>>();
     Ok(json!({"Volumes":volumes,"Warnings":[]}))
 }
@@ -203,7 +214,7 @@ pub(super) fn list(owner: &Owner, filters: &super::discovery::Filters) -> Result
 pub(super) fn create(owner: &Owner, body: &Value) -> Result<Value, Rejected> {
     let data = request::object(body, "Docker volume request")?
         .ok_or_else(|| Rejected::bad("invalid Docker volume request"))?;
-    request::options(data, &["Name", "Driver"], "volume ")?;
+    request::options(data, &["Name", "Driver", "Labels"], "volume ")?;
     if !body["Driver"].is_null() && body["Driver"] != "" && body["Driver"] != "local" {
         return Err(Rejected::bad(
             "only the native local volume driver is supported",
@@ -211,9 +222,20 @@ pub(super) fn create(owner: &Owner, body: &Value) -> Result<Value, Rejected> {
     }
     let name = body["Name"]
         .as_str()
+        .filter(|name| valid_name(name))
         .ok_or_else(|| Rejected::bad("native volume creation requires a name"))?;
-    ask(owner, "create", Some(name))?;
-    Ok(describe(name))
+    let labels: VolumeLabels = if body["Labels"].is_null() {
+        VolumeLabels::new()
+    } else {
+        serde_json::from_value(body["Labels"].clone())
+            .map_err(|_| Rejected::bad("invalid native volume labels"))?
+    };
+    encode_labels(&labels).map_err(|error| Rejected::bad(error.to_string()))?;
+    let info = exchange(
+        owner,
+        json!({"action":"create","name":name,"labels":labels}),
+    )?;
+    Ok(describe(name, &info["labels"]))
 }
 
 pub(super) fn mount_metadata(volume: &VolumeMount) -> Value {

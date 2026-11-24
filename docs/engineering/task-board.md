@@ -1312,6 +1312,20 @@ pinned Node image. Verify sequential and random data plus small-file
 metadata. Retain total spec size, executable paths, build snapshots
 and static argument bounds.
 
+### SPEED-133
+
+Title: Preserve Docker labels on native named volumes
+
+Acceptance: The frozen storage and Compose clients can create labeled
+local volumes. Inspect and filtered list return the original labels
+after another guest boot. Bound the metadata and keep it outside
+workload control.
+
+Evidence: Both optimized boots returned the original label by inspect
+and exact filter. The frozen Node storage preflight passed all six
+labeled creates and removals. Compose progressed past volume creation.
+See `SPEED-133/` and `SPEED-132/storage-positional-vector/` on ExternalSSD.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

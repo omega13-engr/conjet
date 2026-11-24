@@ -591,8 +591,7 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             let name = decode(&path["/volumes/".len()..])?;
             match method {
                 "GET" if query.is_empty() => {
-                    super::volume::ask(owner, "inspect", Some(&name))?;
-                    Reply::json(200, super::volume::describe(&name))
+                    Reply::json(200, super::volume::inspect(owner, &name)?)
                 }
                 "DELETE"
                     if query.keys().all(|key| key == "force") && disabled(query.get("force")) =>

@@ -11,6 +11,8 @@ MATCHED = runpy.run_path(str(Path(__file__).with_name('native-docker-comparison.
 NATIVE = runpy.run_path(str(Path(__file__).with_name('native-oci-live-install.py')))
 NAME = 'cj-mount-data'
 PAYLOAD = b'conjet native volume canary'
+LABEL = 'dev.conjet.benchmark.volume'
+VALUE = 'owned-mount'
 
 
 def collect(endpoint, owner_pid, session, vm_pid, output, phase, client, env, *, target='/data'):
@@ -38,7 +40,7 @@ def collect(endpoint, owner_pid, session, vm_pid, output, phase, client, env, *,
 
     try:
         if phase == 'create':
-            invoke(['volume', 'create', NAME], stdout=(NAME + '\n').encode())
+            invoke(['volume', 'create', '--label', f'{LABEL}={VALUE}', NAME], stdout=(NAME + '\n').encode())
             evidence['created'] = api(conn, 'GET', volume_path, (200,))
             if evidence['created']['Name'] != NAME or evidence['created']['Driver'] != 'local':
                 raise RuntimeError('Docker volume identity is missing')
@@ -75,6 +77,11 @@ def collect(endpoint, owner_pid, session, vm_pid, output, phase, client, env, *,
             api(conn, 'DELETE', holder + '?force=true', (204,))
             evidence['cancelled'] = MATCHED['native_terminal'](conn, holder_name, set(), code=137)
 
+        evidence['labels'] = api(conn, 'GET', volume_path, (200,))['Labels']
+        if evidence['labels'] != {LABEL: VALUE}:
+            raise RuntimeError('Docker volume lost its labels')
+        invoke(['volume', 'ls', '-q', '--filter', f'label={LABEL}={VALUE}'], stdout=(NAME + '\n').encode())
+        invoke(['volume', 'ls', '-q', '--filter', f'label={LABEL}=wrong'])
         run(['/bin/busybox', 'stat', '-c', '%u:%g:%a', target], stdout=b'65532:65532:700\n')
         run(['/bin/busybox', 'cat', witness], stdout=PAYLOAD)
         result = subprocess.run([*client, 'run', *MATCHED['FLAGS'], '--mount', readonly_mount, image,
