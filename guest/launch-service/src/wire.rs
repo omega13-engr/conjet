@@ -44,6 +44,7 @@ pub enum Kind {
     BuildRuntime = 27,
     ExecOutput = 28,
     Copy = 29,
+    Input = 30,
 }
 
 impl TryFrom<u8> for Kind {
@@ -81,6 +82,7 @@ impl TryFrom<u8> for Kind {
             27 => Ok(BuildRuntime),
             28 => Ok(ExecOutput),
             29 => Ok(Copy),
+            30 => Ok(Input),
             _ => Err(WireError::BadHeader),
         }
     }

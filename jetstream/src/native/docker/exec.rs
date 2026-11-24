@@ -131,12 +131,23 @@ impl Entry {
         if self.created.elapsed() >= Duration::from_secs(30) {
             return Err(Rejected(404, "native exec reservation expired".into()));
         }
-        let container = self.container.state();
-        if container.removed
-            || container.terminal.is_some()
-            || container.error.is_some()
-            || container.generation != self.generation
-        {
+        let no_longer_running = |container: &super::Lifecycle| {
+            !container.started
+                || container.removed
+                || container.terminal.is_some()
+                || container.error.is_some()
+                || container.generation != self.generation
+        };
+        let (container, _) = self
+            .container
+            .changed
+            .wait_timeout_while(
+                self.container.state(),
+                Duration::from_millis(500),
+                |container| !no_longer_running(container) && container.native_handle.is_none(),
+            )
+            .unwrap();
+        if no_longer_running(&container) {
             return Err(Rejected(
                 409,
                 "native exec target is no longer running".into(),
@@ -199,18 +210,28 @@ pub(super) fn execute(
     if tty {
         request["tty"] = json!(true);
     }
-    let reply = connected.exchange(
-        Kind::Exec,
-        Kind::Exec,
-        &request,
-        Duration::from_millis(budget_ms + 1000),
-    );
-    let reply = match reply {
-        Ok(reply) => reply,
-        Err(WireError::PeerError(code)) => return Err(format!("native exec rejected: {code}")),
-        Err(error) => {
-            *control = None;
-            return Err(format!("native exec outcome is unresolved: {error}"));
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    let reply = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("native exec startup budget elapsed".into());
+        }
+        request["budget_ms"] = json!((remaining.as_millis() as u64).max(1));
+        match connected.exchange(
+            Kind::Exec,
+            Kind::Exec,
+            &request,
+            remaining + Duration::from_secs(1),
+        ) {
+            Ok(reply) => break reply,
+            Err(WireError::PeerError(code)) if code == "preparing" => {
+                std::thread::sleep(remaining.min(Duration::from_millis(5)));
+            }
+            Err(WireError::PeerError(code)) => return Err(format!("native exec rejected: {code}")),
+            Err(error) => {
+                *control = None;
+                return Err(format!("native exec outcome is unresolved: {error}"));
+            }
         }
     };
     let result = decode_output(connected, reply, enabled);

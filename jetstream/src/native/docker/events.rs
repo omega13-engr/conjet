@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -113,11 +112,6 @@ impl Subscription {
             } else {
                 ledger.events.len()
             };
-        let mut client = libc::pollfd {
-            fd: writer.as_raw_fd(),
-            events: 0,
-            revents: 0,
-        };
         while !ledger.closing {
             if self.until.is_some_and(|until| {
                 SystemTime::now()
@@ -126,9 +120,7 @@ impl Subscription {
             }) {
                 break;
             }
-            if unsafe { libc::poll(&mut client, 1, 0) } > 0
-                && client.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
-            {
+            if super::http::client_disconnected(writer) {
                 break;
             }
             let index = cursor.checked_sub(ledger.discarded_events).ok_or_else(|| {

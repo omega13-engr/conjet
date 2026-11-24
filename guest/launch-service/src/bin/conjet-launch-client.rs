@@ -41,6 +41,7 @@ fn launch(
         budget_ms: 3_000,
         spec: LaunchSpec {
             docker_resource_defaults: false,
+            open_stdin: false,
             image_digest,
             argv: vec!["/bin/probe".into()],
             env: Vec::new(),

@@ -185,6 +185,9 @@ impl Image {
                 "HostConfig",
                 "AttachStdout",
                 "AttachStderr",
+                "AttachStdin",
+                "OpenStdin",
+                "StdinOnce",
                 "Labels",
                 "Healthcheck",
                 "NetworkingConfig",
@@ -278,6 +281,18 @@ impl Image {
             .as_str()
             .ok_or_else(|| Rejected::bad("invalid working directory"))?;
         let (uid, gid) = identity(&data["User"], &self.defaults["User"], mapped_ids)?;
+        let flags = ["AttachStdin", "OpenStdin", "StdinOnce"];
+        let open_stdin = data["OpenStdin"] == true;
+        if flags
+            .iter()
+            .any(|name| !data[name].is_null() && !data[name].is_boolean())
+            || (["AttachStdin", "StdinOnce"]
+                .iter()
+                .any(|name| data[name] == true)
+                && !open_stdin)
+        {
+            return Err(Rejected::bad("invalid native stdin options"));
+        }
         let limits = resources(host)?;
         let spec = LaunchSpec {
             image_digest: self.config_digest.clone(),
@@ -296,6 +311,7 @@ impl Image {
             build_snapshot: None,
             limits,
             docker_resource_defaults: limits.has_unlimited(),
+            open_stdin,
         };
         spec.validate_exec()
             .map_err(|error| Rejected::bad(error.to_string()))?;

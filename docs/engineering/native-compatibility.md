@@ -396,6 +396,17 @@ The final run denied escape paths and symlinks, rejected corrupt
 content, preserved the previous bytes after a disconnected write, and
 verified native teardown. See `SPEED-124/live-copy-final/` on ExternalSSD.
 
+The subsequent control preflight passed all 110 original attach, log
+and lifecycle-event repetitions and all 440 copy operations. It also
+passed the original immediate 128 KiB exec, real TTY, and the API and
+CLI control assertions. The preceding run reproduced the Darwin
+event-subscriber leak at the 32-socket limit and the early exec
+startup race. An independent release run verified graceful exit 42,
+SIGKILL and escalated exit 137, and three distinct guest generations
+with complete cleanup. Raw artifacts are under `SPEED-130/` on
+ExternalSSD. This is control qualification evidence ahead of the full
+gate rerun on one finished release artifact set.
+
 Revision `fa1cbad84f30482d08862aee051914a0bd4a8c9b` ran the native
 preflights and regressions against a single optimized release artifact
 set. Evaluating the 71 requirements produced **19 PASS and 52 FAIL**.

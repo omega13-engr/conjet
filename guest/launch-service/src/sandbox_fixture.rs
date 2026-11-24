@@ -163,6 +163,7 @@ impl Sandbox {
         executable: &str,
         oci: Option<&LaunchSpec>,
         id: [u8; 16],
+        stdin: Option<File>,
     ) -> io::Result<Self> {
         let base = owned_path(id, oci.is_some());
         std::fs::create_dir(&base)?;
@@ -265,7 +266,10 @@ impl Sandbox {
                     .and_then(|spec| spec.bridge_scope())
                     .map(|scope| scope.gateway()),
                 standard_devices: oci.is_some_and(|spec| spec.build_snapshot.is_none()),
-                stdin: File::open("/dev/null")?,
+                stdin: match stdin {
+                    Some(stdin) => stdin,
+                    None => File::open("/dev/null")?,
+                },
                 volume: oci
                     .and_then(|spec| spec.volume.as_ref())
                     .map(|volume| VolumeBinding::prepare(volume, &base.join("root")))

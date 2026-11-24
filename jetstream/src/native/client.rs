@@ -374,6 +374,7 @@ fn execute(
 ) -> anyhow::Result<()> {
     let spec = LaunchSpec {
         docker_resource_defaults: false,
+        open_stdin: false,
         image_digest: identity.image_digest.clone(),
         argv: vec!["/bin/probe".into()],
         cwd: "/work".into(),

@@ -145,6 +145,15 @@ fn copy_body(
 mod framing_tests {
     use super::*;
 
+    #[test]
+    fn disconnected_stream_releases_darwin_slot_but_half_close_preserves_output() {
+        let (client, server) = UnixStream::pair().unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        assert!(!client_disconnected(&server));
+        drop(client);
+        assert!(client_disconnected(&server));
+    }
+
     fn request(bytes: &[u8]) -> (BufReader<UnixStream>, UnixStream) {
         let (mut client, server) = UnixStream::pair().unwrap();
         client.write_all(bytes).unwrap();
@@ -456,7 +465,7 @@ enum Action {
     Archive(File),
     WorkloadArchive(String, Option<File>),
     Wait(Arc<Item>, String, u64),
-    Attach(Arc<Item>, [bool; 2], u64),
+    Attach(Arc<Item>, [bool; 2], u64, bool),
     Logs(Arc<Item>, [bool; 2], u64, bool),
     Exec(Arc<super::exec::Entry>, Value),
     Events(super::events::Subscription),
@@ -897,13 +906,19 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             return Ok(Action::Wait(item, condition.to_owned(), generation));
         }
         ("POST", "attach") => {
-            if !disabled(query.get("stdin")) || !disabled(query.get("logs")) {
-                return Err(Rejected::bad("stdin and attachment replay are unsupported"));
+            let stdin = !disabled(query.get("stdin"));
+            if !disabled(query.get("logs")) {
+                return Err(Rejected::bad("attachment replay is unsupported"));
+            }
+            if stdin && (item.container.config["OpenStdin"] != true || !request.tcp_upgrade) {
+                return Err(Rejected::bad(
+                    "attached stdin requires an open workload input and TCP upgrade",
+                ));
             }
             let streams = ["stdout", "stderr"]
                 .map(|name| query.get(name).is_none() || !disabled(query.get(name)));
             let generation = item.state().generation;
-            return Ok(Action::Attach(item, streams, generation));
+            return Ok(Action::Attach(item, streams, generation, stdin));
         }
         ("GET", "logs") => {
             if !disabled(query.get("timestamps"))
@@ -1087,10 +1102,13 @@ fn send_output(
                 break (chunks, complete, failure);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if remaining.is_zero() || client_disconnected(writer) {
                 return Ok(());
             }
-            let (next, _) = item.changed.wait_timeout(state, remaining).unwrap();
+            let (next, _) = item
+                .changed
+                .wait_timeout(state, remaining.min(Duration::from_millis(200)))
+                .unwrap();
             state = next;
         };
         drop(state);
@@ -1115,6 +1133,19 @@ fn send_output(
             ));
         }
     }
+}
+
+pub(super) fn client_disconnected(stream: &UnixStream) -> bool {
+    // Darwin does not return a hangup if no events were requested. A
+    // read poll also sees a peer's write half-close as a hangup, which
+    // is valid for a client that is still receiving streamed output.
+    let mut socket = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut socket, 1, 0) };
+    ready > 0 && socket.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
 }
 
 fn send_frame(writer: &mut UnixStream, kind: u8, data: &[u8]) -> io::Result<()> {
@@ -1208,8 +1239,34 @@ pub(super) fn serve(
                 wait(&item, &condition, generation, &mut stream)?;
                 break;
             }
-            Ok(Action::Attach(item, streams, generation)) => {
-                attach(&item, streams, generation, &mut stream)?;
+            Ok(Action::Attach(item, streams, generation, stdin)) => {
+                if stdin {
+                    let Ok(_input) = item.input_attachment.try_lock() else {
+                        Reply::json(
+                            409,
+                            json!({"message":"native workload input already has an attachment"}),
+                        )
+                        .send(&mut stream, false, true)?;
+                        break;
+                    };
+                    std::thread::scope(|tasks| -> io::Result<()> {
+                        let input = tasks.spawn(|| {
+                            super::workload_input::relay(owner, &item, generation, reader)
+                        });
+                        let output = attach(&item, streams, generation, &mut stream);
+                        let _ = stream.shutdown(Shutdown::Read);
+                        let sent = input
+                            .join()
+                            .map_err(|_| io::Error::other("native input worker stopped"))?;
+                        output?;
+                        if let Err(error) = sent {
+                            send_frame(&mut stream, 3, error.to_string().as_bytes())?;
+                        }
+                        Ok(())
+                    })?;
+                } else {
+                    attach(&item, streams, generation, &mut stream)?;
+                }
                 break;
             }
             Ok(Action::Logs(item, streams, generation, follow)) => {

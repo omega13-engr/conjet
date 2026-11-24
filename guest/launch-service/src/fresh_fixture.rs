@@ -137,6 +137,14 @@ struct WorkloadCopy {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WorkloadInput {
+    handle: Handle,
+    budget_ms: u64,
+    data: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NetworkRequest {
     boot_id: String,
     budget_ms: u64,
@@ -328,6 +336,7 @@ struct Record {
     cancelled: bool,
     terminate_requested: bool,
     control: Option<UnixStream>,
+    input: Option<fs::File>,
     stdout: Capture,
     stderr: Capture,
 }
@@ -1164,6 +1173,7 @@ impl FreshFixture {
             cancelled: false,
             terminate_requested: false,
             control: None,
+            input: None,
             stdout: Capture::default(),
             stderr: Capture::default(),
         };
@@ -1185,13 +1195,16 @@ impl FreshFixture {
         let owner = Arc::clone(self);
         let limits = spec.limits;
         let mode = mode.to_owned();
-        let oci_process = self
-            .oci
-            .then(|| serde_json::to_string(spec).expect("validated OCI spec"));
+        let oci_process = self.oci.then(|| {
+            (
+                serde_json::to_string(spec).expect("validated OCI spec"),
+                spec.open_stdin,
+            )
+        });
         if thread::Builder::new()
             .name("fresh-workload".into())
             .spawn(move || {
-                owner.run_workload(id, limits, &mode, bridge, prepared, oci_process.as_deref())
+                owner.run_workload(id, limits, &mode, bridge, prepared, oci_process.as_ref())
             })
             .is_err()
         {
@@ -1216,7 +1229,7 @@ impl FreshFixture {
         mode: &str,
         bridge: bool,
         prepared: bool,
-        oci_process: Option<&str>,
+        oci_process: Option<&(String, bool)>,
     ) {
         let workload = hex(&id);
         {
@@ -1280,6 +1293,7 @@ impl FreshFixture {
             record.mark_at("intent_completed", intent_completed);
             record.control = None;
             record.exec_context = None;
+            record.input = None;
             record.network_address = None;
             if let Some(slot) = &mut record.slot {
                 slot.discard();
@@ -1313,7 +1327,7 @@ impl FreshFixture {
         mode: &str,
         bridge: bool,
         prepared: bool,
-        oci_process: Option<&str>,
+        oci_process: Option<&(String, bool)>,
     ) -> io::Result<bool> {
         const TRANSITION_TIMEOUT: Duration = Duration::from_secs(32);
         let (mut peer, helper) = UnixStream::pair()?;
@@ -1321,6 +1335,14 @@ impl FreshFixture {
         let owner = peer.try_clone()?;
         let workload = hex(&id);
         let mut command = Command::new("/init");
+        let (input_reader, input_writer) = if oci_process.is_some_and(|(_, open_stdin)| *open_stdin)
+        {
+            let (reader, writer) = crate::workload_input::pipe()?;
+            (Some(reader), Some(writer))
+        } else {
+            (None, None)
+        };
+        let input_fd = input_reader.as_ref().map(AsRawFd::as_raw_fd);
         if oci_process.is_some() {
             command.process_group(0);
             let owner_pid = std::process::id() as libc::pid_t;
@@ -1338,9 +1360,16 @@ impl FreshFixture {
                     if libc::getppid() != owner_pid {
                         return Err(io::Error::from_raw_os_error(libc::ECHILD));
                     }
+                    if let Some(fd) = input_fd {
+                        crate::security::checked(libc::fcntl(fd, libc::F_SETFD, 0))?;
+                    }
                     Ok(())
                 });
             }
+        }
+        command.env_clear();
+        if let Some(fd) = input_fd {
+            command.env(crate::workload_input::FD_ENV, fd.to_string());
         }
         let mut child = command
             .args([
@@ -1358,8 +1387,7 @@ impl FreshFixture {
                 if bridge { "bridge" } else { "none" },
                 if prepared { "prepared" } else { "fresh" },
             ])
-            .args(oci_process)
-            .env_clear()
+            .args(oci_process.map(|(spec, _)| spec))
             .stdin(Stdio::from(OwnedFd::from(helper)))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1367,6 +1395,7 @@ impl FreshFixture {
         // The command retains its configured stdin. Close the helper-side
         // control descriptor here so an early helper exit yields EOF.
         drop(command);
+        drop(input_reader);
         let helper_spawned = self.trace_core_latency.then(Instant::now);
         let process_group = -(child.id() as libc::pid_t);
         let out = child.stdout.take().expect("piped stdout");
@@ -1388,6 +1417,7 @@ impl FreshFixture {
         self.update(&workload, |record| {
             record.mark_at("helper_spawned", helper_spawned);
             record.control = Some(owner);
+            record.input = input_writer;
             if record.cancelled {
                 let _ = record.control.as_mut().unwrap().write_all(&[CANCEL]);
             } else if record.terminate_requested {
@@ -1480,7 +1510,8 @@ impl FreshFixture {
                             peer.set_read_timeout(None)?;
                         }
                         self.update(&workload, |record| {
-                            if let (Some(spec), Some(target)) = (oci_process, descriptors.pop())
+                            if let (Some((spec, _)), Some(target)) =
+                                (oci_process, descriptors.pop())
                                 && let Ok(spec) = serde_json::from_str(spec)
                             {
                                 record.exec_context = Some((spec, target));
@@ -2006,6 +2037,12 @@ impl FreshFixture {
                 let record = guard
                     .record(&request.handle.workload_id)
                     .expect("checked record");
+                if matches!(
+                    record.phase,
+                    Phase::Accepted | Phase::Preparing | Phase::ChildCreated
+                ) {
+                    return Err(("preparing", "native exec target is still starting"));
+                }
                 let (spec, target) = record
                     .exec_context
                     .as_ref()
@@ -2104,6 +2141,44 @@ impl FreshFixture {
                         }
                     })?;
                 Ok((Kind::Copy, reply))
+            }
+            Kind::Input if self.oci => {
+                let request: WorkloadInput = parse(frame)?;
+                let expires = deadline(request.budget_ms)?;
+                check(&guard, &request.handle)?;
+                if guard.closing || Instant::now() >= expires {
+                    return Err(("busy", "native workload input is unavailable"));
+                }
+                let record = guard
+                    .record_mut(&request.handle.workload_id)
+                    .filter(|record| record.phase == Phase::Running)
+                    .ok_or(("not_running", "input requires a running native workload"))?;
+                let Some(writer) = record.input.as_mut() else {
+                    return Err(("input_closed", "native workload input is closed"));
+                };
+                let accepted = if let Some(data) = request.data {
+                    const LIMIT: usize = crate::workload_input::CHUNK;
+                    if data.is_empty() || data.len() > LIMIT.div_ceil(3) * 4 {
+                        return Err(("malformed", "invalid workload input size"));
+                    }
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .map_err(|_| ("malformed", "invalid workload input encoding"))?;
+                    if bytes.is_empty() || bytes.len() > LIMIT {
+                        return Err(("malformed", "invalid workload input size"));
+                    }
+                    match crate::workload_input::write(writer, &bytes) {
+                        Ok(accepted) => accepted,
+                        Err(_) => {
+                            record.input = None;
+                            return Err(("input_closed", "native workload input pipe closed"));
+                        }
+                    }
+                } else {
+                    record.input = None;
+                    true
+                };
+                Ok((Kind::Input, json!({"accepted":accepted})))
             }
             Kind::Status | Kind::Cancel => {
                 let request: Control = parse(frame)?;

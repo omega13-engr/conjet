@@ -42,6 +42,87 @@ def lifecycle_failure(series, report, budget):
     return None
 
 
+def control_cases(report, budget):
+    def succeeded(names, phases):
+        counts = {'sample': budget['samples_per_session'], 'warmup': budget['warmups']}
+        for name in names:
+            rows = [row for row in report.get('operations', []) if row['scenario'] == name]
+            if (not rows or any(row.get('error') is not None for row in rows)
+                    or {row['phase'] for row in rows} != set(phases)
+                    or any(sum(row['phase'] == phase for row in rows) != counts.get(phase, 1)
+                           for phase in phases)):
+                return False
+        return True
+
+    def destruction(events, ident, code, handle_set):
+        if (not re.fullmatch(r'[0-9a-f]{12,64}', ident)
+                or [event.get('Action') for event in events][-2:] != ['die', 'destroy']
+                or any(event.get('Actor', {}).get('ID') != ident for event in events)):
+            return False
+        attributes = events[-2]['Actor'].get('Attributes', {})
+        handle = attributes.get('conjet.native_handle', '')
+        if (attributes.get('conjet.backend') != 'jetstream-native-oci'
+                or attributes.get('conjet.guest_cleanup') != 'complete'
+                or attributes.get('exitCode') != str(code)
+                or not re.fullmatch(r'[0-9a-f]{32}', handle)
+                or handle in handle_set):
+            return False
+        handle_set.add(handle)
+        return True
+
+    def identities(ident):
+        for row in report['operations']:
+            try:
+                if row['scenario'] == 'inspect.one':
+                    [state] = json.loads(row['stdout'])
+                    if state['Id'] != ident or state['State']['Running'] is not True:
+                        return False
+                if (row['scenario'] == 'list.one'
+                        and row['stdout'].splitlines() not in ([ident[:12]], [ident])):
+                    return False
+            except (ValueError, KeyError, TypeError):
+                return False
+        return True
+
+    def attached(handles):
+        identities = set()
+        for row in report['operations']:
+            if row['scenario'] != 'events.lifecycle':
+                continue
+            try:
+                events = [json.loads(line) for line in row['stdout'].splitlines()]
+                ident = next(arg.removeprefix('container=') for arg in row['argv']
+                             if arg.startswith('container='))
+                if ident in identities or not destruction(events, ident, 23, handles):
+                    return False
+            except (ValueError, KeyError, TypeError, StopIteration):
+                return False
+            identities.add(ident)
+        return True
+
+    handles = set()
+    ident = report.get('persistent_id', '')
+    if (report.get('error') or not destruction(report.get('persistent_events', []), ident, 137, handles)
+            or not succeeded(('control-remove', 'fixture-leak-inventory'), ('cleanup',))):
+        return []
+    phase = ('warmup', 'sample')
+    results = []
+    if succeeded(('exec.streams', 'exec.api'), phase):
+        results.append('exec')
+    for name, operation in (('exec-large', 'exec.large-output'), ('exec-tty', 'exec.tty')):
+        if succeeded((operation,), ('verification',)):
+            results.append(name)
+    if succeeded(('inspect.api', 'inspect.one', 'list.one'), phase) and identities(ident):
+        results.append('inspect-list')
+    if (succeeded(('attach.stdin-streams', 'logs.streams', 'events.lifecycle'), phase)
+            and succeeded(('attach.disconnect', 'attach.disconnect-recovery'), ('verification',))
+            and attached(handles)):
+        results.append('attach')
+    if succeeded(tuple(f'cp.{action}.{size}' for action in ('in', 'out') for size in (4096, 8388608)), phase):
+        results.append('cp')
+    return results
+
+
 def evaluate(root, revision, release):
     manifest = PREFLIGHT['contract']()
     required = {case['id']: {
@@ -135,6 +216,9 @@ def evaluate(root, revision, release):
                         and sum(row['phase'] == 'warmup' for row in rows) == warmups):
                     pass_case(f'stress/concurrency-{concurrency}',
                               f'{count} original runs and {warmups} warmups passed', suite)
+        if suite == 'control' and verified:
+            for case in control_cases(report, scenarios['suites']['control']):
+                pass_case(f'control/{case}', 'original control runs passed with native teardown', suite)
 
     folder, verified = lane('credentials')
     credentials = read(folder, 'native-credentials.json')
@@ -178,6 +262,17 @@ def evaluate(root, revision, release):
               'docker-network', 'published-port')
     pass_case('regression/controls', 'native concurrency, exec and streaming canaries passed',
               'concurrency', 'exec', 'streaming')
+    folder, verified = lane('concurrency')
+    controls = read(folder, 'docker-controls.json')
+    executions = controls.get('guest_executions', [])
+    statuses = (('graceful_status', '42'), ('kill_status', '137'), ('timeout_status', '137'))
+    if (verified and len(executions) == 3
+            and len({event.get('conjet.native_handle') for event in executions}) == 3
+            and all(event.get('conjet.backend') == 'jetstream-native-oci'
+                    and event.get('conjet.guest_cleanup') == 'complete' for event in executions)
+            and all(controls.get(case, {}).get('stdout', '').strip() == status for case, status in statuses)
+            and controls.get('timeout_remove', {}).get('code') == 0):
+        pass_case('control/stop-kill-restart', 'three verified guest generations and escalation', 'concurrency')
     pass_case('regression/volume', 'owned volume write and recovery canaries passed across two boots',
               'volume-create', 'volume-inspect')
     pass_case('regression/native-compose', 'existing pinned native Compose project canary passed',

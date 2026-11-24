@@ -13,6 +13,7 @@ mod registry;
 mod request;
 mod volume;
 mod workload_copy;
+mod workload_input;
 
 pub(super) use image::{install, InstallOptions};
 
@@ -667,6 +668,7 @@ struct Item {
     container: Container,
     state: Mutex<Lifecycle>,
     control: Mutex<()>,
+    input_attachment: Mutex<()>,
     changed: Condvar,
     published: Mutex<Option<port::PublishedPort>>,
 }
@@ -818,6 +820,21 @@ impl Owner {
             }
         }
         result.map_err(|error| Rejected::internal(format!("{error:#}")))
+    }
+
+    fn scoped_peer(&self) -> Result<client::Connection, Rejected> {
+        let native = self.native.lock().unwrap();
+        if native.broken {
+            return Err(Rejected::internal(
+                "authenticated native channel is unresolved",
+            ));
+        }
+        let peer = client::Connection::open(&native.peer_directory, &native.identity, &native.key)
+            .map_err(|error| Rejected::internal(error.to_string()))?;
+        if !peer.oci || peer.boot != native.boot {
+            return Err(Rejected::internal("native control boot generation changed"));
+        }
+        Ok(peer)
     }
 
     fn process(&self, tags: &image::Tags, config: &Value) -> Result<Value, Rejected> {
@@ -1494,6 +1511,7 @@ impl Owner {
                 ..Lifecycle::default()
             }),
             control: Mutex::new(()),
+            input_attachment: Mutex::new(()),
             changed: Condvar::new(),
             published: Mutex::new(published),
         });
@@ -1625,6 +1643,7 @@ impl Owner {
                 .begin(spec.unwrap_or(&item.container.spec));
             admitted.and_then(|mut admitted| {
                 item.state().native_handle = Some(admitted.state["handle"].clone());
+                item.changed.notify_all();
                 let result = wait_for_native(self, &mut admitted, &item, generation);
                 self.native.lock().unwrap().finish(admitted, result.is_ok());
                 result

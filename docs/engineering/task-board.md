@@ -1217,6 +1217,10 @@ Acceptance: Support the frozen interactive create and attach request
 through a bounded stdin path. Preserve the original output streams,
 exit 23, logs, disconnect recovery and cleanup.
 
+Evidence: The pinned control run passed 110 interactive attach cases,
+110 exact log checks and the idle disconnect/recovery assertions.
+See `SPEED-130/control-preflight/` on ExternalSSD.
+
 ### SPEED-126
 
 Title: Publish the first copy into an absent guest destination
@@ -1252,6 +1256,21 @@ Verify persistent identity, every attach and copy result, separate
 stop/kill/restart generations, and native teardown on exact release
 artifacts before recording any control requirement as passing.
 
+Evidence: The full control run retained the persistent removal witness
+and 110 distinct attach teardown witnesses. The separate control
+diagnostic verified three generations and graceful stop, SIGKILL, and
+timeout escalation. Final gate aggregation still requires all suites
+on one exact artifact set.
+
+### SPEED-129
+
+Title: Mount owned named volumes at the frozen workload paths
+
+Acceptance: Bind the verified named-volume inode at the original
+dataset and registry targets, preserve the data target, and reject
+symlinked ancestors and unsupported targets. Verify healthy removal
+and the volume contents after a second mount.
+
 ### SPEED-130
 
 Title: Release disconnected native Docker stream subscribers on Darwin
@@ -1260,6 +1279,11 @@ Acceptance: Distinguish a client that closed its socket from one
 that only closed its write side. Run all original attach cases
 beyond the 32-socket endpoint limit and preserve detach recovery.
 
+Evidence: The original run hit the socket limit after 29 successful
+attaches. A Darwin socket-pair test reproduced the missing hangup and
+verified that the new check preserves a write half-close. All 110
+attach cases passed the subsequent release preflight.
+
 ### SPEED-131
 
 Title: Resolve immediate exec while the assigned workload is still starting
@@ -1267,6 +1291,20 @@ Title: Resolve immediate exec while the assigned workload is still starting
 Acceptance: Retry only the same generation's in-progress startup
 within the exec budget. Observe the original immediate large-output
 command and keep stopped, removed and failed workloads rejected.
+
+Evidence: The original initial exec failed with `not_running` before
+the guest entered its running phase. The release preflight passed the
+immediate exact 128 KiB exec canary, all 110 exec API and CLI samples,
+and TTY and lifecycle regressions.
+
+### SPEED-132
+
+Title: Admit the exact bounded Node storage program
+
+Acceptance: Run the original 2,121-byte storage program using the
+pinned Node image. Verify sequential and random data plus small-file
+metadata. Retain total spec size, executable paths, build snapshots
+and static argument bounds.
 
 ### SPEED-091
 

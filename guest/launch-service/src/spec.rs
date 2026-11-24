@@ -58,6 +58,8 @@ pub struct LaunchSpec {
     pub limits: ResourceLimits,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub docker_resource_defaults: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_stdin: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -244,6 +246,7 @@ impl LaunchSpec {
                 || snapshot.device == 0
                 || spec.volume.is_some()
                 || spec.network != "none"
+                || spec.open_stdin
         }) {
             return Err(SpecError::BuildSnapshot);
         }
@@ -367,6 +370,7 @@ mod tests {
                     cpu_millicores: 500,
                 },
                 docker_resource_defaults: false,
+                open_stdin: false,
             },
         }
     }

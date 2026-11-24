@@ -84,6 +84,34 @@ def qualified_lifecycle(workload, manifest, report, fixture, connection, docker,
         run.__globals__['sample'] = sample
 
 
+def qualified_control(matrix, manifest, report, fixture, connection, docker, env):
+    run = matrix['run_matrix']
+    driver = run.__globals__['Docker']
+
+    class PrepareWitness(driver):
+        def call(self, scenario, args, **options):
+            result = super().call(scenario, args, **options)
+            if scenario == 'control-start' and result:
+                report['persistent_id'] = result.decode().strip()
+            if scenario == 'control-remove' and result is not None:
+                connection.request('GET', f"/v{manifest['docker_api']}/events")
+                with connection.getresponse() as response:
+                    raw = response.read(65537)
+                    if response.status != 200 or len(raw) > 65536:
+                        raise RuntimeError('persistent control teardown snapshot was unavailable')
+                report['persistent_events'] = [
+                    event for event in map(json.loads, raw.splitlines())
+                    if event['Actor']['ID'] == report['persistent_id']
+                ]
+            return result
+
+    run.__globals__['Docker'] = PrepareWitness
+    try:
+        run('control', manifest, report, fixture, docker, env, connection=connection)
+    finally:
+        run.__globals__['Docker'] = driver
+
+
 def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None):
     contract()
     comparison = runpy.run_path(str(HERE / 'docker-comparison.py'))
@@ -117,8 +145,11 @@ def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None)
                         workload, manifest, connection, docker, env)
             else:
                 matrix = runpy.run_path(str(HERE / 'docker-comparison-matrix.py'))
-                matrix['run_matrix'](suite, manifest, report, fixture, docker, env,
-                                     connection=connection)
+                if suite == 'control':
+                    qualified_control(matrix, manifest, report, fixture, connection, docker, env)
+                else:
+                    matrix['run_matrix'](suite, manifest, report, fixture, docker, env,
+                                         connection=connection)
     except (OSError, RuntimeError, ValueError, http.client.HTTPException,
             subprocess.SubprocessError) as error:
         report['error'] = str(error)

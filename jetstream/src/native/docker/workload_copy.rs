@@ -242,21 +242,6 @@ fn file_archive(
 }
 
 impl Owner {
-    fn archive_peer(&self) -> Result<client::Connection, Rejected> {
-        let native = self.native.lock().unwrap();
-        if native.broken {
-            return Err(Rejected::internal(
-                "authenticated native channel is unresolved",
-            ));
-        }
-        let peer = client::Connection::open(&native.peer_directory, &native.identity, &native.key)
-            .map_err(|error| Rejected::internal(error.to_string()))?;
-        if !peer.oci || peer.boot != native.boot {
-            return Err(Rejected::internal("native archive boot generation changed"));
-        }
-        Ok(peer)
-    }
-
     pub(super) fn workload_archive(
         &self,
         item: &Item,
@@ -266,7 +251,7 @@ impl Owner {
         let _control = item.control.lock().unwrap();
         let handle = archive_handle(item)?;
         let path = archive_path(path)?;
-        let mut peer = self.archive_peer()?;
+        let mut peer = self.scoped_peer()?;
         let stat = exchange(&mut peer, &handle, json!({"action":"stat","path":path})).map_err(
             |error| match error {
                 WireError::PeerError(code) if code == "not_found" => {
@@ -309,7 +294,7 @@ impl Owner {
         let path = archive_path(path)?;
         let _control = item.control.lock().unwrap();
         let handle = archive_handle(item)?;
-        let mut peer = self.archive_peer()?;
+        let mut peer = self.scoped_peer()?;
         upload
             .send(file, &mut peer, &handle, &path)
             .map_err(|error| match error.downcast_ref::<WireError>() {

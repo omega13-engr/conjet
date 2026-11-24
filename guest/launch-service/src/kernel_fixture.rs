@@ -91,6 +91,7 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
             network: false,
             prepared: false,
             process: None,
+            stdin: None,
         },
     )
 }
@@ -173,6 +174,8 @@ pub fn run_helper(
     {
         return Err("unexpected fixture helper arguments".into());
     }
+    let stdin =
+        crate::workload_input::inherited(process.as_ref().is_some_and(|spec| spec.open_stdin))?;
     run(
         id,
         limits,
@@ -183,6 +186,7 @@ pub fn run_helper(
             network: network == "bridge",
             prepared,
             process: process.as_ref(),
+            stdin,
         },
     )
 }
@@ -194,6 +198,7 @@ struct RunProfile<'a> {
     network: bool,
     prepared: bool,
     process: Option<&'a crate::spec::LaunchSpec>,
+    stdin: Option<std::fs::File>,
 }
 
 fn run(
@@ -208,6 +213,7 @@ fn run(
         network,
         prepared,
         process,
+        stdin,
     } = profile;
     if controlled {
         notify_control(b'P', &[])?;
@@ -227,7 +233,7 @@ fn run(
         _ => "/init",
     };
     let sandbox = with_sandbox
-        .then(|| Sandbox::prepare(network, executable, process, id))
+        .then(|| Sandbox::prepare(network, executable, process, id, stdin))
         .transpose()?;
     inject(mode, "fault-sandbox");
     let proc_mount = (with_sandbox && !controlled)
