@@ -1372,6 +1372,28 @@ the workload held the volume. After another boot, the pinned client
 removed it, a repeated forced removal returned 204, and the offline
 ext4 check passed. See `SPEED-136/` on ExternalSSD.
 
+### SPEED-137
+
+Title: Mount each workload's real cgroup read-only
+
+Acceptance: Original Docker exec and Node startup can read the live
+memory, CPU, PID, and swap fields under `/sys/fs/cgroup`. Keep ancestor
+and sibling cgroups outside the workload and reject control writes.
+
+Evidence: The optimized resource canary read the actual controller
+files using the pinned Docker CLI for default, partial, lifecycle and
+service limits. It rejected writes, verified exec membership in the
+same cgroup, and confirmed all teardown. See `SPEED-137/live-cgroup/`.
+
+### SPEED-138
+
+Title: Enforce the frozen swap setting and attribute real cgroup OOM
+
+Acceptance: The pinned Node workload reads its actual 64 MiB and
+zero-swap controls, exits 137 after a kernel OOM kill, and reports
+OOMKilled. The other workload keeps its data and the survivor and
+recovery starts retain their original controls.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

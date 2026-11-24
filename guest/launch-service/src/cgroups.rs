@@ -72,6 +72,10 @@ impl WorkloadCgroup {
         &self.directory
     }
 
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn kill(&self) -> io::Result<()> {
         write_control(&self.path, "cgroup.kill", "1")
     }

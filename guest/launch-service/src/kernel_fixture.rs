@@ -453,7 +453,10 @@ fn clone_and_reap(
                 eprintln!("workload trace stop failed: {error}");
                 unsafe { libc::_exit(124) }
             }
-            if let Err(error) = sandbox.enter(snapshot_mount, sysfs_mount, || {
+            let cgroup_view = process
+                .filter(|spec| spec.build_snapshot.is_none())
+                .map(|_| cgroup.path());
+            if let Err(error) = sandbox.enter(snapshot_mount, sysfs_mount, cgroup_view, || {
                 if prepared {
                     stop_for_tracer()?;
                 }

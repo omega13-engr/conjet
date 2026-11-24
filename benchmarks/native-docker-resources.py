@@ -87,6 +87,14 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
                     if (tuple(record['host_limits']) != requested
                             or tuple(effective[key] for key in ('memory_max', 'pids_max', 'cpu_max')) != limits):
                         raise RuntimeError(f'{case} reported resource policy differs from the kernel')
+                    cgroup = '/sys/fs/cgroup'
+                    observed = call(['exec', name, 'cat', *[f'{cgroup}/{key}' for key in
+                                     ('memory.max', 'pids.max', 'cpu.max', 'memory.swap.max')]])
+                    record['workload_cgroup'] = observed.splitlines()
+                    if tuple(record['workload_cgroup']) != (*limits, 'max'):
+                        raise RuntimeError(f'{case} workload view differs from the live cgroup')
+                    call(['exec', name, 'sh', '-c', f'printf 1 >{cgroup}/pids.max'], expected=1)
+                    call(['exec', name, 'sh', '-c', f'test ! -e {cgroup}/../workloads'])
                     record['exec_membership'] = exec_in_group(name, active[0])
                 finally:
                     call(['rm', '--force', name])

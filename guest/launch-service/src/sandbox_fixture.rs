@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -100,6 +100,48 @@ fn mount_standard_devices(root: &CStr, devices: [File; 2]) -> io::Result<()> {
 enum BindingSource {
     Volume(VolumeMount),
     Bind(crate::spec::BindMount),
+}
+
+fn mount_cgroup(root: &CStr, source: File) -> io::Result<()> {
+    let mut target = PathBuf::from(OsStr::from_bytes(root.to_bytes()));
+    for component in ["sys", "fs", "cgroup"] {
+        target.push(component);
+        match fs::create_dir(&target) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && target.symlink_metadata()?.is_dir() => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if fs::read_dir(&target)?.next().is_some() {
+        return Err(io::Error::other("native cgroup mount target must be empty"));
+    }
+    let target = CString::new(target.as_os_str().as_bytes())?;
+    let source_path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
+    security::checked(unsafe {
+        libc::mount(
+            source_path.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        )
+    })?;
+    security::checked(unsafe {
+        libc::mount(
+            std::ptr::null(),
+            target.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND
+                | libc::MS_REMOUNT
+                | libc::MS_RDONLY
+                | libc::MS_NODEV
+                | libc::MS_NOSUID
+                | libc::MS_NOEXEC,
+            std::ptr::null(),
+        )
+    })
 }
 
 struct FileBinding {
@@ -354,6 +396,7 @@ impl Sandbox {
         &self,
         snapshot_mount: Option<OwnedFd>,
         sysfs: Option<OwnedFd>,
+        cgroup_path: Option<&Path>,
         before_filter: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
         fn step(name: &str, result: io::Result<()>) -> io::Result<()> {
@@ -364,6 +407,14 @@ impl Sandbox {
         // for a bind here. The child still owns its inherited guest UID when
         // opening the registry; only stdio survives into the workload.
         let volume_source = self.volume.as_ref().map(FileBinding::open).transpose()?;
+        let cgroup = cgroup_path
+            .map(|path| {
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                    .open(path)
+            })
+            .transpose()?;
         let worker = self
             .worker_mounts
             .as_ref()
@@ -429,6 +480,9 @@ impl Sandbox {
         }
         if let Some((volume, source)) = self.volume.as_ref().zip(volume_source) {
             step("private workload mount", volume.mount(source))?;
+        }
+        if let Some(cgroup) = cgroup {
+            step("workload cgroup view", mount_cgroup(&self.new_root, cgroup))?;
         }
         if let Some(devices) = devices {
             step(
