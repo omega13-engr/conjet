@@ -460,6 +460,17 @@ struct SharedLinks {
     ports: [Option<BridgePort>; 8],
 }
 
+fn private_mac(scope: crate::spec::BridgeScope, address: Ipv4Addr, peer: bool) -> [u8; 6] {
+    [
+        0x02,
+        b'C',
+        b'J',
+        scope.subnet(),
+        address.octets()[3],
+        u8::from(peer),
+    ]
+}
+
 impl SharedLinks {
     fn create(scope: crate::spec::BridgeScope) -> io::Result<Self> {
         checked(unsafe { libc::unshare(libc::CLONE_NEWNET) })?;
@@ -473,6 +484,10 @@ impl SharedLinks {
             scope,
             ports: Default::default(),
         };
+        let gateway_mac = private_mac(scope, scope.gateway(), false);
+        links
+            .route
+            .configure_link(bridge, false, &[(libc::IFLA_ADDRESS, &gateway_mac)])?;
         links.route.configure_link(bridge, true, &[])?;
         links
             .route
@@ -536,6 +551,11 @@ impl SharedLinks {
         });
         let port = owner.as_ref().expect("owned bridge port");
         let result = (|| {
+            // Address slots are reused only after old links have been removed.
+            // Keep the associated MACs stable for other namespaces' ARP caches.
+            let link_mac = private_mac(self.scope, address, false);
+            self.route
+                .configure_link(index, false, &[(libc::IFLA_ADDRESS, &link_mac)])?;
             self.route.configure_link(
                 index,
                 true,
@@ -545,6 +565,8 @@ impl SharedLinks {
                 assert_link_absent(BRIDGE)?;
                 let mut route = Route::open()?;
                 let peer = interface_index(PEER)?;
+                let peer_mac = private_mac(self.scope, address, true);
+                route.configure_link(peer, false, &[(libc::IFLA_ADDRESS, &peer_mac)])?;
                 route.configure_link(peer, true, &[])?;
                 route.configure_link(interface_index(c"lo")?, true, &[])?;
                 route.address_with_prefix(peer, address, SHARED_PREFIX)?;

@@ -1578,6 +1578,14 @@ endpoint after the earlier network namespace and links are removed.
 Preserve both readiness and the next persisted sequence numbers within
 the original fixture windows.
 
+Evidence: Stable locally administered MAC addresses now follow the
+private bridge and its owned IPv4 slots. After verified detachment,
+the replacement had the same IP and MAC and both app replicas became
+ready after Redis restart in all six projects. The 12 readiness probes
+took 2.34–4.15 ms in this diagnostic, and all projects observed
+persisted transactions 6 and 7. See `SPEED-151/compose-persisted/`
+on ExternalSSD. The work exercised private seeded image content.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle
