@@ -6,6 +6,17 @@ use thiserror::Error;
 pub const VERSION: u8 = 1;
 pub const MAX_PAYLOAD: usize = 16_384;
 pub const EXEC_OUTPUT_LIMIT: usize = 256 * 1024;
+
+#[derive(Deserialize, Serialize)]
+pub struct CgroupUsage {
+    pub cpu_ns: u64,
+    pub system_ns: u64,
+    pub cpus: u64,
+    pub memory_bytes: u64,
+    pub memory_limit: u64,
+    pub inactive_file: u64,
+    pub tasks: u64,
+}
 pub const COPY_LIMIT: u64 = 16 * 1024 * 1024;
 const HEADER_SIZE: usize = 28;
 const MAGIC: [u8; 4] = *b"CJLS";

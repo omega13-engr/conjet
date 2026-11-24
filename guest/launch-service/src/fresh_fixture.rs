@@ -118,6 +118,14 @@ struct Exec {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Inspect {
+    budget_ms: u64,
+    #[serde(default)]
+    workload: Option<Handle>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ExecOutput {
     boot_id: String,
     budget_ms: u64,
@@ -1952,8 +1960,31 @@ impl FreshFixture {
                 Ok((Kind::State, record.state()))
             }
             Kind::Inspect if self.native => {
-                let request: crate::server::Budget = parse(frame)?;
-                deadline(request.budget_ms)?;
+                let request: Inspect = parse(frame)?;
+                let expires = deadline(request.budget_ms)?;
+                if let Some(handle) = request.workload {
+                    check(&guard, &handle)?;
+                    if !self.oci
+                        || !guard
+                            .record(&handle.workload_id)
+                            .is_some_and(|record| record.phase == Phase::Running)
+                    {
+                        return Err((
+                            "not_running",
+                            "native statistics require a running workload",
+                        ));
+                    }
+                    let usage = crate::cgroups::usage(&handle.workload_id).map_err(|_| {
+                        (
+                            "stats_unavailable",
+                            "workload cgroup statistics are unavailable",
+                        )
+                    })?;
+                    if Instant::now() >= expires {
+                        return Err(("deadline_exceeded", "workload statistics budget elapsed"));
+                    }
+                    return Ok((Kind::Inspect, json!({"handle":handle,"usage":usage})));
+                }
                 Ok((
                     Kind::Inspect,
                     json!({

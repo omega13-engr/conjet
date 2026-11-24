@@ -1686,6 +1686,67 @@ impl Owner {
         self.submit(item, false)
     }
 
+    fn stats(&self, item: &Item, one_shot: bool) -> Result<Value, Rejected> {
+        use conjet_launch_service::wire::CgroupUsage;
+
+        let (handle, generation) = {
+            let state = item.state();
+            let handle = state.native_handle.clone().ok_or_else(|| {
+                Rejected(409, "statistics require a running native container".into())
+            })?;
+            (handle, state.generation)
+        };
+        let mut peer = self.scoped_peer()?;
+        let request = json!({"workload": handle, "budget_ms": 500});
+        let mut read = || {
+            let reply = peer
+                .exchange(
+                    Kind::Inspect,
+                    Kind::Inspect,
+                    &request,
+                    Duration::from_secs(1),
+                )
+                .map_err(|error| Rejected::internal(error.to_string()))?;
+            if reply["handle"] != handle {
+                return Err(Rejected::internal("statistics workload identity changed"));
+            }
+            serde_json::from_value::<CgroupUsage>(reply["usage"].clone())
+                .map_err(|_| Rejected::internal("invalid native workload statistics"))
+        };
+        let started = events::daemon_time()?;
+        let previous = if one_shot {
+            None
+        } else {
+            let counters = read()?;
+            thread::sleep(Duration::from_millis(100));
+            Some(counters)
+        };
+        let current = read()?;
+        let observed = events::daemon_time()?;
+        let state = item.state();
+        if state.generation != generation || state.native_handle.as_ref() != Some(&handle) {
+            return Err(Rejected(
+                409,
+                "statistics target generation has exited".into(),
+            ));
+        }
+        let cpu = |sample: &CgroupUsage| {
+            json!({
+                "cpu_usage":{"total_usage":sample.cpu_ns},
+                "system_cpu_usage":sample.system_ns,"online_cpus":sample.cpus,
+            })
+        };
+        Ok(json!({
+            "id":item.container.id, "name":format!("/{}", item.container.name().as_str()),
+            "read":observed, "preread":started,
+            "cpu_stats":cpu(&current),
+            "precpu_stats":previous.as_ref().map(cpu).unwrap_or_else(|| json!({})),
+            "memory_stats":{"usage":current.memory_bytes,"limit":current.memory_limit,
+                            "stats":{"inactive_file":current.inactive_file}},
+            "pids_stats":{"current":current.tasks},
+        }))
+    }
+
     fn rename(&self, item: &Arc<Item>, name: &str) -> Result<(), Rejected> {
         let _control = item.control.lock().unwrap();
         let mut ledger = self.ledger.lock().unwrap();

@@ -1548,6 +1548,14 @@ task counters and expose them through Docker's one-shot stats operation.
 Preserve the resource limits and verify the original sustained-service
 window, counts and teardown.
 
+Evidence: The optimized storage/network preflight ran for 60.011 s
+and verified 4,691 sequential Redis-backed transactions. The native
+stats query returned CPU, memory and task counters for both services.
+The direct cgroup checks still read 128 MiB, 64 tasks and 500 mCPU.
+All storage checks passed. Guest cleanup, ExternalSSD lease release,
+production fingerprints and offline ext4 checks passed. See
+`SPEED-151/storage-sustained-stats/` and `SPEED-151/disk-check.log`.
+
 ### SPEED-149
 
 Title: Support Compose's staged replacement and rename

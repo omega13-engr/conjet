@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::handshake::hex;
 use crate::spec::ResourceLimits;
+use crate::wire::CgroupUsage;
 
 const CPU_PERIOD_US: u64 = 100_000;
 pub(crate) const CGROUP2_SUPER_MAGIC: i128 = 0x6367_7270;
@@ -14,6 +15,69 @@ pub(crate) const CGROUP2_SUPER_MAGIC: i128 = 0x6367_7270;
 pub struct WorkloadCgroup {
     directory: File,
     path: PathBuf,
+}
+
+pub(crate) fn usage(workload: &str) -> io::Result<CgroupUsage> {
+    fn read(path: &Path) -> io::Result<String> {
+        let mut value = String::new();
+        File::open(path)?.take(16_385).read_to_string(&mut value)?;
+        if value.len() > 16_384 {
+            return Err(io::Error::other(
+                "kernel statistics exceeded their read limit",
+            ));
+        }
+        Ok(value)
+    }
+    fn number(value: &str) -> io::Result<u64> {
+        value.trim().parse().map_err(io::Error::other)
+    }
+    fn field<'a>(text: &'a str, key: &str) -> io::Result<&'a str> {
+        text.lines()
+            .find_map(|line| {
+                line.split_once(' ')
+                    .filter(|(name, _)| *name == key)
+                    .map(|(_, value)| value)
+            })
+            .ok_or_else(|| io::Error::other(format!("missing kernel statistic {key}")))
+    }
+
+    let (root, scope) = crate::kernel_fixture::cgroup_paths(workload, true);
+    let directory = root.join(scope).join("workloads/active").join(workload);
+    let cpu = read(&directory.join("cpu.stat"))?;
+    let memory = read(&directory.join("memory.stat"))?;
+    let memory_limit = read(&directory.join("memory.max"))?;
+    let memory_limit = if memory_limit.trim() == "max" {
+        let total = read(Path::new("/proc/meminfo"))?;
+        let kb = field(&total, "MemTotal:")?
+            .strip_suffix(" kB")
+            .ok_or_else(|| io::Error::other("invalid guest memory total"))?;
+        number(kb)?.saturating_mul(1024)
+    } else {
+        number(&memory_limit)?
+    };
+    let stat = read(Path::new("/proc/stat"))?;
+    let cpu_ticks = field(&stat, "cpu")?
+        .split_whitespace()
+        .take(8)
+        .try_fold(0u64, |sum, tick| {
+            Ok::<_, io::Error>(sum.saturating_add(number(tick)?))
+        })?;
+    let tick_rate = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    if tick_rate <= 0 || cpus <= 0 {
+        return Err(io::Error::other("guest CPU statistics are unavailable"));
+    }
+    Ok(CgroupUsage {
+        cpu_ns: number(field(&cpu, "usage_usec")?)?.saturating_mul(1000),
+        system_ns: ((u128::from(cpu_ticks) * 1_000_000_000) / tick_rate as u128)
+            .try_into()
+            .map_err(io::Error::other)?,
+        cpus: cpus as u64,
+        memory_bytes: number(&read(&directory.join("memory.current"))?)?,
+        memory_limit,
+        inactive_file: number(field(&memory, "inactive_file")?)?,
+        tasks: number(&read(&directory.join("pids.current"))?)?,
+    })
 }
 
 impl WorkloadCgroup {

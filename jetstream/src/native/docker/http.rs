@@ -820,6 +820,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
         ("POST", "stop" | "restart") => &["t", "signal"],
         ("POST", "kill") => &["signal"],
         ("POST", "rename") => &["name"],
+        ("GET", "stats") => &["stream", "one-shot"],
         ("DELETE", "") => &["force", "v", "link"],
         _ => &[],
     };
@@ -880,6 +881,12 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                 .ok_or_else(|| Rejected::bad("invalid Docker container name"))?;
             owner.rename(&item, name)?;
             Reply::empty(204)
+        }
+        ("GET", "stats") => {
+            if query.get("stream").is_none() || !disabled(query.get("stream")) {
+                return Err(Rejected::bad("native stats require stream=false"));
+            }
+            Reply::json(200, owner.stats(&item, !disabled(query.get("one-shot")))?)
         }
         ("POST", "stop" | "restart") => {
             if query
