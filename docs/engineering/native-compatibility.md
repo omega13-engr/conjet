@@ -446,3 +446,36 @@ are under `SPEED-098/exact-release/` in the ExternalSSD evidence root.
 The new full Kiri comparison remains blocked by the required failures.
 There is no current Kiri parity result. The historical p99 upper bounds
 remain 1.0586 for API and 1.0553 for CLI.
+
+## Qualified optimized candidate
+
+Commit `66a8a908e0ce39aa8fec831482fbd083b449334d` passed all **71 frozen
+cases** with six checksum-verified optimized executables. The refreshed
+`a792b4c` baseline passed 53 of 71. The [task board](task-board.md#speed-098)
+records the intermediate candidate and retained attempts.
+
+| Surface | Qualified behavior |
+| --- | --- |
+| Build clients | Original public Rust, Go and Node builds through pinned Docker-container Buildx, bounded local Docker build API, and pinned standalone BuildKit. The witnesses cover native RUN, cache hits and invalidation, exit 23, active cancellation, executable exports, and builder teardown. |
+| Images and credentials | Pinned ARM64 public images, controlled registry, cache and shared-layer handling, verified single-image archives, and Linux image-default and mapped explicit credentials. |
+| Runtime and services | Twelve original lifecycle groups, Compose readiness and Redis persistence, persistent exec, attach and copy, writable layer, named volume, authenticated host bind, bridge routing, and concurrency at 1/2/4/8 with cancellation and OOM recovery. |
+| Core and isolation | Workload demand and independent guest pressure grew Core from 448 MiB to 2,048 MiB. Active data passed its checksum and idle shrink returned to 448 MiB with verified backing and page-reporting ownership. Production fingerprints, launcher cleanup and detached ext4 checks passed. |
+
+The qualified worker profile is scoped to the pinned identity and its
+owned cache and cgroup. Ordinary privileged containers, remote build
+contexts and general multi-image archive imports remain outside the
+profile. The frozen compatibility gate covers the capabilities listed
+in its manifest.
+
+The full ledger, six retained binaries and checksums, commands, launcher
+receipts, and checks are in `SPEED-098/cj-compat.tMPK1e-release-66a8a908e0ce/`
+under the ExternalSSD evidence root. Redis and BuildKit timed out during
+public image acquisition in the initial default-credentials run. The
+retry passed all seven public image pins on the same checksummed binaries.
+The initial attempt remains in the evidence directory.
+
+Local Rust workspace tests, ARM64 guest Clippy, Swift, Go, Core C and
+benchmark-harness tests passed. Strict macOS workspace Clippy reproduced
+the baseline diagnostics. The changes affect the headless engine.
+Structured native runtime witnesses provide end-to-end evidence.
+[Hosted macOS CI](https://github.com/omega13-engr/conjet/actions/runs/45473119435)

@@ -763,7 +763,9 @@ Acceptance Criteria:
 
 - Run five alternating lifecycle pairs per API/CLI lane with 2,000 measured operations and ten warmups per engine/boot; preserve failures. Re-run image, build, Compose, networking/storage and concurrency rows using existing report formats. Pass full dynamic-memory and production-cleanup gates. Apply existing parity/advantage rules and report unsupported coverage and external limitations.
 
-Problem and Evidence: Parity and superiority remain unproven for the new candidate.
+Problem and Evidence: Four lifecycle p99 bounds missed the parity gate.
+The current Kiri pressure canary failed in all five boots. Performance
+varied by workload.
 
 Approach: Keep native API, Docker API and CLI timers separate; record hashes, p50/p95/p99, throughput, confidence intervals, resource data and exact cleanup boundaries.
 
@@ -778,11 +780,12 @@ credentials. See [release results](native-engine-validation.md#speed-065-five-pa
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
-Review: Matched lifecycle and isolated compatibility evidence recorded.
-Independent review and full matrix qualification pending.
+Review: The full planned sample counts, engine identities, paired
+intervals and cleanup receipts are recorded. Independent review remains
+pending.
 
-Next Action: Resolve the frozen-matrix compatibility gaps and attribute
-residual p99 variation before requalifying.
+Next Action: Review the lifecycle p99 misses, slower build and control
+rows, and the Kiri pressure boundary before making release claims.
 
 The `21171de` comparison completed all 60 lifecycle pairs and five
 image pairs with zero workload failures. Four network-none lifecycle
@@ -793,6 +796,16 @@ reached the host image-store entry cap during Go and Node archive loads
 after earlier exports had been untagged. See
 `SPEED-065/cj-compat.tMPK1e-comparison-21171de/` for raw sessions,
 paired intervals and failure evidence.
+
+The exact `66a8a90` candidate passed SPEED-098 and completed the remaining
+25 pairs. Both engines passed Buildx, Compose, control, storage and
+network, and the 4,000 combined stress launches. Conjet passed all five
+OOM canaries. Kiri timed out on Docker wait and reported no OOM flag in
+all five boots at the verified limits. Both engines recovered and released
+their private host resources. The untimed Docker Hub failure in build pair
+four was retained alongside the passing same-artifact replay. The lifecycle
+and image cohorts retain their original `21171de` hashes.
+[Current comparison and limits](docker-benchmark-results.md#speed-065-optimized-native-comparison)
 
 ### SPEED-089
 
@@ -2136,6 +2149,16 @@ disk checks and production fingerprints passed. Evidence and the
 complete ledger are in `SPEED-098/cj-compat.tMPK1e-release-21171def20e0/`.
 [Hosted macOS CI](https://github.com/omega13-engr/conjet/actions/runs/45440020877)
 passed for the same commit.
+
+The current candidate `66a8a908e0ce39aa8fec831482fbd083b449334d`
+passed **71 of 71** after the image lifetime and durable volume removal
+fixes. The initial default-credentials lane recorded Docker Hub timeouts
+for Redis and BuildKit. The same artifacts passed all seven original image
+pins on a fresh public retry. Production checks, native guest teardown,
+detached ext4 checks, and all six executable hashes passed. The ledger,
+checksums, retained binaries and receipts are in
+`SPEED-098/cj-compat.tMPK1e-release-66a8a908e0ce/`.
+[Current qualifications](native-compatibility.md#qualified-optimized-candidate)
 
 
 ### SPEED-025

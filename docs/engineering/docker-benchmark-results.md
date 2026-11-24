@@ -9,6 +9,40 @@ boundary. SPEED-008 remains unresolved.
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Native OCI research scope](docker-native-adapter.md)
 
+## SPEED-065 optimized native comparison
+
+The `66a8a90` optimized native candidate passed the [71-case gate](native-compatibility.md#qualified-optimized-candidate)
+before timing official Kiri 0.2.2. Both engines used the same M1 Pro,
+ExternalSSD, pinned clients and inputs, and a 2-vCPU, 2,048 MiB VM
+configuration. Core dynamic memory remained active.
+
+| Suite | Alternating pairs | Result |
+| --- | ---: | --- |
+| Buildx | 5 | 180 solves/exports, loads and execution canaries per engine passed across Rust, Go and Node. |
+| Compose | 5 | 200 measurements per engine passed, including Redis restart and persisted transactions. |
+| Control | 5 | 6,000 measurements per engine passed, including independent copy checksums. |
+| Storage and network | 5 | Writable layer, volume, ExternalSSD bind and 60-second service windows passed. Conjet completed 24,362 transactions and Kiri completed 24,217. |
+| Stress | 5 | Both engines passed 2,000 launches each. Conjet passed all five OOM canaries. Kiri's Docker wait timed out and its OOM flag remained false in all five boots at the verified 64 MiB limit and zero swap. |
+
+Paired Conjet/Kiri median latency ratios included 0.356 for Compose up,
+39.734 for Rust dependency solve/export, 17.875 for API exec, and
+21.225 for 8 MiB copy out. A Docker Hub timeout interrupted worker
+bootstrap before affected build samples in pair four. Its same-artifact
+public replay completed, with the initial attempt retained. Per-boot
+percentiles, throughput, stages, paired 95% intervals, failure records,
+footprint and launcher evidence are in
+`SPEED-065/cj-compat.tMPK1e-comparison-66a8a90-builds-and-services/report.md`
+under the ExternalSSD evidence root.
+
+The earlier `21171de` artifact cohort completed all 60 lifecycle pairs
+and five image acquisition pairs. Four no-network lifecycle rows exceeded
+the 1.05 upper paired p99 bound. Alpine true recorded 1.0970 API and 1.0501
+CLI. Common static recorded 1.1440 API and 1.0544 CLI. The cohorts retain
+separate artifact identities. Full Kiri parity remains unqualified.
+Kiri's per-workload guest teardown, second-host replication and energy
+remain unmeasured. Production fingerprints and isolated host cleanup
+passed.
+
 ## SPEED-056 retained guest start attribution
 
 Two disposable Core 1.3.1 boots ran the pinned guest-local API lifecycle
