@@ -1694,6 +1694,22 @@ request and the bootstrap config copy. Bind its exact named cache
 volume and verify the object and volume are removed on failure.
 Ordinary privileged and nonempty configuration requests remain denied.
 
+Evidence: The pinned Docker-container client created the worker and
+its exact named cache, uploaded the original empty setup archive and
+reached Start for Rust, Go and Node. Start returned the explicit
+unavailable worker error. The original builder removal deleted each
+container and its cache volume. See
+`SPEED-157/frozen-buildx-automatic-cache/`. Worker execution is separate.
+
+### SPEED-158
+
+Title: Boot the pinned BuildKit daemon with Conjet's native executor selected
+
+Acceptance: Bring up the real daemon in the worker's private sandbox,
+report its native OCI worker through the original Buildx debug call,
+and retain separate task-owned configuration, cache, cgroup and
+network leases. Runtime RUN and cancellation remain their own gates.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

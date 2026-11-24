@@ -2,6 +2,7 @@
 mod archive;
 mod bind;
 mod bind_fuse;
+mod buildkit;
 mod discovery;
 mod events;
 mod exec;
@@ -644,6 +645,7 @@ struct Container {
     created: u64,
     healthcheck: Option<health::Config>,
     auto_remove: bool,
+    buildkit_worker: bool,
     cancel: AtomicU8,
 }
 
@@ -1618,26 +1620,17 @@ impl Owner {
         } else {
             None
         };
+        let buildkit_worker = buildkit::requested(&name, &config, mount.as_ref())?;
         let volume = mount
-            .map(|mount| {
-                let info = volume::ask(self, "inspect", Some(mount.name))?;
-                let inode = info["inode"]
-                    .as_u64()
-                    .filter(|value| *value > 0)
-                    .ok_or_else(|| Rejected::internal("native volume has no inode identity"))?;
-                Ok::<_, Rejected>(conjet_launch_service::spec::VolumeMount {
-                    name: mount.name.into(),
-                    read_only: mount.read_only,
-                    inode,
-                    target: mount.target.into(),
-                })
-            })
+            .as_ref()
+            .filter(|_| !buildkit_worker)
+            .map(|mount| self.volume_mount(mount, false))
             .transpose()?;
         let network = network::configured(
             &config,
             &self.built_in_bridge,
             ledger.network.as_ref(),
-            &name,
+            if buildkit_worker { &id[..12] } else { &name },
         )?;
         let replacement = network
             .as_ref()
@@ -1655,18 +1648,26 @@ impl Owner {
                 "loopback port publication requires a private bridge",
             ));
         }
-        let mut spec = if network.is_some() || volume.is_some() || bind.is_some() {
+        let mut spec = if network.is_some() || mount.is_some() || bind.is_some() {
             let mut process = config.clone();
             if network.is_some() {
                 process["HostConfig"]["NetworkMode"] = json!("none");
                 process["NetworkingConfig"] = Value::Null;
             }
-            if volume.is_some() || bind.is_some() {
+            if mount.is_some() || bind.is_some() {
                 let host = process["HostConfig"]
                     .as_object_mut()
                     .expect("Docker host config");
                 host.remove("Mounts");
                 host.remove("Binds");
+            }
+            if buildkit_worker {
+                let host = process["HostConfig"]
+                    .as_object_mut()
+                    .expect("BuildKit host config");
+                for field in ["Privileged", "Init", "RestartPolicy"] {
+                    host.remove(field);
+                }
             }
             if publication.is_some() {
                 process["HostConfig"]
@@ -1681,6 +1682,19 @@ impl Owner {
             self.process(&ledger, &process)?
         } else {
             self.process(&ledger, &config)?
+        };
+        let volume = if buildkit_worker {
+            if spec["image_digest"] != conjet_launch_service::spec::BUILDKIT_CONFIG
+                || spec["uid"] != 0
+                || spec["gid"] != 0
+            {
+                return Err(Rejected::bad(
+                    "BuildKit worker image has a different verified identity",
+                ));
+            }
+            Some(self.volume_mount(mount.as_ref().expect("approved BuildKit cache"), true)?)
+        } else {
+            volume
         };
         if let Some(volume) = &volume {
             spec["volume"] = json!(volume);
@@ -1727,6 +1741,7 @@ impl Owner {
                     .as_secs(),
                 healthcheck,
                 auto_remove,
+                buildkit_worker,
                 cancel: AtomicU8::new(0),
             },
             state: Mutex::new(Lifecycle {
@@ -1742,6 +1757,50 @@ impl Owner {
         ledger.active.push(item.clone());
         self.event(&mut ledger, "create", &item, None);
         Ok(item)
+    }
+
+    fn volume_mount(
+        &self,
+        mount: &volume::Mount<'_>,
+        create_if_missing: bool,
+    ) -> Result<conjet_launch_service::spec::VolumeMount, Rejected> {
+        let info = match volume::ask(self, "inspect", Some(mount.name)) {
+            Err(Rejected(404, _)) if create_if_missing => {
+                volume::ask(self, "create", Some(mount.name))?
+            }
+            result => result?,
+        };
+        let inode = info["inode"]
+            .as_u64()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| Rejected::internal("native volume has no inode identity"))?;
+        Ok(conjet_launch_service::spec::VolumeMount {
+            name: mount.name.into(),
+            read_only: mount.read_only,
+            inode,
+            target: mount.target.into(),
+        })
+    }
+
+    fn accept_buildkit_config(
+        &self,
+        item: &Item,
+        path: &str,
+        archive: &fs::File,
+    ) -> Result<bool, Rejected> {
+        if !item.container.buildkit_worker {
+            return Ok(false);
+        }
+        let _control = item.control.lock().unwrap();
+        let state = item.state();
+        if state.started || state.removed {
+            return Err(Rejected(
+                409,
+                "BuildKit bootstrap requires an unstarted worker".into(),
+            ));
+        }
+        buildkit::accept_empty_config(path, archive)?;
+        Ok(true)
     }
 
     fn remove_volume(&self, name: &str) -> Result<(), Rejected> {
@@ -1891,6 +1950,12 @@ impl Owner {
     }
 
     fn submit(self: &Arc<Self>, item: &Arc<Item>, restart: bool) -> Result<(), Rejected> {
+        if item.container.buildkit_worker {
+            return Err(Rejected(
+                501,
+                "native BuildKit worker execution is not configured".into(),
+            ));
+        }
         let mut ledger = self.ledger.lock().unwrap();
         let mut state = item.state();
         if !ledger.active.iter().any(|active| Arc::ptr_eq(active, item))

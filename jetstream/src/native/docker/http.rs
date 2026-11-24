@@ -899,7 +899,9 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                 .archive
                 .as_ref()
                 .ok_or_else(|| Rejected::bad("missing workload archive body"))?;
-            owner.workload_upload(&item, path, archive)?;
+            if !owner.accept_buildkit_config(&item, path, archive)? {
+                owner.workload_upload(&item, path, archive)?;
+            }
             Reply::empty(200)
         }
         ("POST", "exec") => {
