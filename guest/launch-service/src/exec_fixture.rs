@@ -170,6 +170,7 @@ pub(crate) fn execute(
     id: [u8; 16],
     spec: LaunchSpec,
     tty: bool,
+    stdin: Option<Vec<u8>>,
     deadline: Instant,
 ) -> io::Result<ExecResult> {
     let root = target_root(&pidfd)?;
@@ -186,6 +187,15 @@ pub(crate) fn execute(
     if remaining.is_zero() {
         return Err(io::ErrorKind::TimedOut.into());
     }
+    let input = if let Some(bytes) = stdin {
+        let (reader, mut writer) = crate::workload_input::pipe()?;
+        if !crate::workload_input::write(&mut writer, &bytes)? {
+            return Err(io::Error::other("could not stage bounded exec stdin"));
+        }
+        Stdio::from(reader)
+    } else {
+        Stdio::null()
+    };
     let mut command = Command::new("/init");
     command.process_group(0);
     command
@@ -197,7 +207,7 @@ pub(crate) fn execute(
             &serde_json::to_string(&spec)?,
         ])
         .env_clear()
-        .stdin(Stdio::null());
+        .stdin(input);
     let master = if tty {
         let (master, slave) = crate::pty::pair()?;
         command

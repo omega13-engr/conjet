@@ -25,6 +25,7 @@ pub(super) struct Entry {
     argv: Vec<String>,
     output: [bool; 2],
     tty: bool,
+    stdin: bool,
     state: Mutex<State>,
     created: Instant,
 }
@@ -42,7 +43,8 @@ fn apply_defaults(value: &Value, config: &Value) -> std::result::Result<Vec<Stri
         let supported = match name.as_str() {
             "Cmd" => value.is_array(),
             "AttachStdout" | "AttachStderr" => value.is_boolean(),
-            "AttachStdin" | "Privileged" => value.is_null() || value == false,
+            "AttachStdin" => value.is_null() || value.is_boolean(),
+            "Privileged" => value.is_null() || value == false,
             "Tty" => value.is_null() || value.is_boolean(),
             "User" | "WorkingDir" | "DetachKeys" => value.is_null() || value == "",
             "Env" => value.is_null() || value.as_array().is_some_and(Vec::is_empty),
@@ -53,6 +55,9 @@ fn apply_defaults(value: &Value, config: &Value) -> std::result::Result<Vec<Stri
                 "unsupported Docker exec option {name}"
             )));
         }
+    }
+    if value["Tty"] == true && value["AttachStdin"] == true {
+        return Err(Rejected::bad("exec stdin requires a non-terminal stream"));
     }
     let mut spec: LaunchSpec = serde_json::from_value(config.clone())
         .map_err(|_| Rejected::internal("could not read container process defaults"))?;
@@ -79,6 +84,7 @@ impl Entry {
             argv,
             output: [data["AttachStdout"] == true, data["AttachStderr"] == true],
             tty: data["Tty"] == true,
+            stdin: data["AttachStdin"] == true,
             state: Mutex::new(State::Created),
             created: Instant::now(),
         })
@@ -86,6 +92,10 @@ impl Entry {
 
     pub(super) fn tty(&self) -> bool {
         self.tty
+    }
+
+    pub(super) fn stdin(&self) -> bool {
+        self.stdin
     }
 
     pub(super) fn inspect(&self) -> Value {
@@ -97,7 +107,7 @@ impl Entry {
             "Running":matches!(*state, State::Submitted),
             "ExitCode":match *state {State::Finished(code)=>Some(code), _=>None},
             "ProcessConfig":{"entrypoint":self.argv[0],"arguments":self.argv[1..],"tty":self.tty,"user":user},
-            "OpenStdin":false, "OpenStdout":self.output[0], "OpenStderr":self.output[1],
+            "OpenStdin":self.stdin, "OpenStdout":self.output[0], "OpenStderr":self.output[1],
         })
     }
 
@@ -162,22 +172,26 @@ impl Entry {
         Ok(handle)
     }
 
-    pub(super) fn run(&self, owner: &Owner, handle: Value) -> Result {
+    pub(super) fn fail(&self, error: String) -> Result {
+        *self.state.lock().unwrap() = State::Finished(125);
+        Result {
+            output: Default::default(),
+            error: Some(error),
+        }
+    }
+
+    pub(super) fn run(&self, owner: &Owner, handle: Value, stdin: Option<&[u8]>) -> Result {
         let enabled = if self.tty {
             [self.output[0] || self.output[1], false]
         } else {
             self.output
         };
-        let result = execute(owner, handle, &self.argv, enabled, self.tty, BUDGET_MS);
+        let result = execute(
+            owner, handle, &self.argv, enabled, self.tty, stdin, BUDGET_MS,
+        );
         let (status, reply) = match result {
             Ok(result) => result,
-            Err(error) => (
-                125,
-                Result {
-                    output: Default::default(),
-                    error: Some(error),
-                },
-            ),
+            Err(error) => return self.fail(error),
         };
         *self.state.lock().unwrap() = State::Finished(status);
         reply
@@ -190,6 +204,7 @@ pub(super) fn execute(
     argv: &[String],
     enabled: [bool; 2],
     tty: bool,
+    stdin: Option<&[u8]>,
     budget_ms: u64,
 ) -> std::result::Result<(i64, Result), String> {
     let deadline = Instant::now() + Duration::from_millis(budget_ms);
@@ -222,6 +237,9 @@ pub(super) fn execute(
     let mut request = json!({"handle":handle,"budget_ms":budget_ms,"argv":argv});
     if tty {
         request["tty"] = json!(true);
+    }
+    if let Some(stdin) = stdin {
+        request["stdin"] = json!(base64::engine::general_purpose::STANDARD.encode(stdin));
     }
     let reply = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());

@@ -140,6 +140,7 @@ pub(super) fn probe(owner: &Owner, item: &Item, generation: u64, handle: &Value)
         &config.argv,
         [false, false],
         false,
+        None,
         config.budget_ms,
     )
     .is_ok_and(|(code, result)| code == 0 && result.error.is_none());

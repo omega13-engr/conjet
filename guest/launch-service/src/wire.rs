@@ -6,6 +6,7 @@ use thiserror::Error;
 pub const VERSION: u8 = 1;
 pub const MAX_PAYLOAD: usize = 16_384;
 pub const EXEC_OUTPUT_LIMIT: usize = 256 * 1024;
+pub const EXEC_STDIN_LIMIT: usize = 4096;
 
 #[derive(Deserialize, Serialize)]
 pub struct CgroupUsage {

@@ -23,8 +23,8 @@ def collect(endpoint, peer, docker, env, output, session, vmm_pid):
     name = 'cj-exec'
     path = prefix + '/containers/' + name
 
-    def call(label, args, expected=0, stdout=None, stderr=None):
-        result = subprocess.run([*docker, *args], env=env, capture_output=True, timeout=10)
+    def call(label, args, expected=0, stdout=None, stderr=None, stdin=None):
+        result = subprocess.run([*docker, *args], env=env, input=stdin, capture_output=True, timeout=10)
         cases[label] = {'args': args, 'code': result.returncode, 'stdout': result.stdout.decode(errors='replace'),
                         'stderr': result.stderr.decode(errors='replace')}
         if (result.returncode != expected or (stdout is not None and stdout != result.stdout)
@@ -57,6 +57,13 @@ def collect(endpoint, peer, docker, env, output, session, vmm_pid):
                  expected=23, stdout=b'exec-out', stderr=b'exec-err')
             call('inherited_exec_context', ['exec', name, 'sh', '-c', 'printf "%s:%s" "$CJ_EXEC_PROOF" "$PWD"'],
                  stdout=b'context:/tmp')
+            data = bytes(range(256)) * 16
+            call('stdin_binary', ['exec', '-i', name, 'cat'], stdin=data, stdout=data)
+            call('stdin_empty', ['exec', '-i', name, 'cat'], stdin=b'', stdout=b'')
+            call('stdin_overflow', ['exec', '-i', name, 'sh', '-c', 'touch /tmp/cj-exec-overflow'],
+                 stdin=data + b'x', expected=1, stderr=b'native exec stdin exceeds 4096 bytes')
+            call('stdin_overflow_not_executed',
+                 ['exec', name, 'sh', '-c', 'test ! -e /tmp/cj-exec-overflow'])
             call('missing', ['exec', name, '/bin/cj-missing-exec'], expected=127)
             call('invalid_creds', ['exec', '--user', '0:0', name, '/bin/true'],
                  expected=1, stderr=b'unsupported Docker exec option User')

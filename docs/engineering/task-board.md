@@ -1570,12 +1570,18 @@ and received transaction 3 after the generation change. See
 
 ### SPEED-150
 
-Title: Preserve stdin for native Docker exec without a terminal
+Title: Preserve finite stdin for native Docker exec without a terminal
 
 Acceptance: Round-trip bounded stdin and EOF through the Docker exec
 stream without modifying the caller or treating an attached stream as
-empty. Qualify the original Compose cgroup observer and retain the
-input and output integrity checks for the Buildx worker gateway.
+empty. Qualify the original Compose cgroup observer.
+
+Evidence: The optimized Docker exec diagnostic round-tripped 4,096
+binary bytes and immediate EOF and rejected 4,097 bytes before
+starting the command. The same run passed exit-code, TTY, separate
+output, active removal and bounded output checks. The six Compose
+projects each read the exact Linux limits from both guest cgroups.
+See `SPEED-150/exec-stdin/` and `SPEED-151/compose-persisted/`.
 
 ### SPEED-151
 
@@ -1593,6 +1599,24 @@ ready after Redis restart in all six projects. The 12 readiness probes
 took 2.34–4.15 ms in this diagnostic, and all projects observed
 persisted transactions 6 and 7. See `SPEED-151/compose-persisted/`
 on ExternalSSD. The work exercised private seeded image content.
+
+### SPEED-152
+
+Title: Pull through the owned frozen Registry loopback publication
+
+Acceptance: Run the pinned Registry service with the original default
+resource request. Scope pulls to its live internal loopback publication,
+verify digest and inventory identity, and remove imported fixtures and
+the Registry store after each original run.
+
+### SPEED-153
+
+Title: Stream the pinned Buildx dial-stdio exec transport
+
+Acceptance: Keep the authenticated native worker exec attached in both
+directions while the pinned Buildx client exchanges frames. Preserve
+EOF, backpressure, stderr, terminal status, disconnect and cancellation.
+Finish guest cleanup before releasing the exact exec owner.
 
 ### SPEED-091
 

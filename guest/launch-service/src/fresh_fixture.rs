@@ -114,6 +114,8 @@ struct Exec {
     argv: Vec<String>,
     #[serde(default)]
     tty: bool,
+    #[serde(default)]
+    stdin: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2152,6 +2154,18 @@ impl FreshFixture {
             Kind::Exec if self.oci => {
                 let request: Exec = parse(frame)?;
                 let expires = deadline(request.budget_ms)?;
+                let stdin = request
+                    .stdin
+                    .map(|encoded| {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(encoded)
+                            .ok()
+                            .filter(|bytes| {
+                                bytes.len() <= crate::wire::EXEC_STDIN_LIMIT && !request.tty
+                            })
+                            .ok_or(("invalid_spec", "invalid attached exec stdin"))
+                    })
+                    .transpose()?;
                 check(&guard, &request.handle)?;
                 if guard.closing || guard.exec_active || guard.exec_output.is_some() {
                     return Err(("busy", "the native exec slot is already owned"));
@@ -2182,7 +2196,8 @@ impl FreshFixture {
                     .map_err(|_| ("malformed", "invalid native workload ID"))?;
                 guard.exec_active = true;
                 drop(guard);
-                let result = crate::exec_fixture::execute(target, id, spec, request.tty, expires);
+                let result =
+                    crate::exec_fixture::execute(target, id, spec, request.tty, stdin, expires);
                 let mut guard = self.ledger.lock().expect("fresh ledger");
                 guard.exec_active = false;
                 self.changed.notify_all();

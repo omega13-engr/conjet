@@ -141,6 +141,26 @@ fn copy_body(
     Ok(())
 }
 
+fn read_exec_stdin(reader: &mut BufReader<UnixStream>) -> io::Result<Vec<u8>> {
+    use conjet_launch_service::wire::EXEC_STDIN_LIMIT;
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let mut buffer = [0; EXEC_STDIN_LIMIT + 1];
+    let mut consumed = 0;
+    while consumed <= EXEC_STDIN_LIMIT {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::other("native exec stdin deadline elapsed"));
+        }
+        reader.get_ref().set_read_timeout(Some(remaining))?;
+        let count = reader.read(&mut buffer[consumed..])?;
+        if count == 0 {
+            return Ok(buffer[..consumed].to_vec());
+        }
+        consumed += count;
+    }
+    Err(io::Error::other("native exec stdin exceeds 4096 bytes"))
+}
+
 #[cfg(test)]
 mod framing_tests {
     use super::*;
@@ -778,6 +798,9 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             let entry = owner.lookup_exec(id)?;
             match (method, operation) {
                 ("POST", "start") => {
+                    if entry.stdin() && !request.tcp_upgrade {
+                        return Err(Rejected::bad("exec stdin requires a TCP upgrade"));
+                    }
                     let handle = entry.reserve(&request.body)?;
                     return Ok(Action::Exec(entry, handle));
                 }
@@ -1314,20 +1337,30 @@ pub(super) fn serve(
                 break;
             }
             Ok(Action::Exec(entry, handle)) => {
-                let result = entry.run(owner, handle);
+                let completed = (!entry.stdin()).then(|| entry.run(owner, handle.clone(), None));
                 let (status, connection) = if request.tcp_upgrade {
                     (101, "Connection: Upgrade\r\nUpgrade: tcp\r\n")
                 } else {
                     (200, "Connection: close\r\n")
                 };
                 let stream_type = if entry.tty() { "raw" } else { "multiplexed" };
-                header(
+                let sent = header(
                     &mut stream,
                     status,
                     &format!(
                         "{connection}Content-Type: application/vnd.docker.{stream_type}-stream\r\n"
                     ),
-                )?;
+                );
+                if let Err(error) = sent {
+                    if completed.is_none() {
+                        entry.fail("native exec client disconnected before start".into());
+                    }
+                    return Err(error);
+                }
+                let result = completed.unwrap_or_else(|| match read_exec_stdin(&mut reader) {
+                    Ok(input) => entry.run(owner, handle, Some(&input)),
+                    Err(error) => entry.fail(error.to_string()),
+                });
                 if entry.tty() {
                     stream.write_all(&result.output[0])?;
                     if let Some(error) = result.error {
