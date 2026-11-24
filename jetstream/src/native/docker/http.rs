@@ -1162,14 +1162,22 @@ pub(super) fn serve(
             }
             Ok(Action::Exec(entry, handle)) => {
                 let result = entry.run(owner, handle);
-                header(&mut stream, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
-                for (index, data) in result.output.into_iter().enumerate() {
-                    if !data.is_empty() {
-                        send_frame(&mut stream, index as u8 + 1, &data)?;
+                if entry.tty() {
+                    header(&mut stream, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.raw-stream\r\n")?;
+                    stream.write_all(&result.output[0])?;
+                    if let Some(error) = result.error {
+                        stream.write_all(error.as_bytes())?;
                     }
-                }
-                if let Some(error) = result.error {
-                    send_frame(&mut stream, 3, error.as_bytes())?;
+                } else {
+                    header(&mut stream, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
+                    for (index, data) in result.output.into_iter().enumerate() {
+                        if !data.is_empty() {
+                            send_frame(&mut stream, index as u8 + 1, &data)?;
+                        }
+                    }
+                    if let Some(error) = result.error {
+                        send_frame(&mut stream, 3, error.as_bytes())?;
+                    }
                 }
                 break;
             }

@@ -169,6 +169,7 @@ pub(crate) fn execute(
     pidfd: OwnedFd,
     id: [u8; 16],
     spec: LaunchSpec,
+    tty: bool,
     deadline: Instant,
 ) -> io::Result<ExecResult> {
     let root = target_root(&pidfd)?;
@@ -196,9 +197,17 @@ pub(crate) fn execute(
             &serde_json::to_string(&spec)?,
         ])
         .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdin(Stdio::null());
+    let master = if tty {
+        let (master, slave) = crate::pty::pair()?;
+        command
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave));
+        Some(master)
+    } else {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        None
+    };
     unsafe {
         command.pre_exec(move || {
             checked(libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0))?;
@@ -217,8 +226,15 @@ pub(crate) fn execute(
     let mut child = command.spawn()?;
     let process_group = -(child.id() as libc::pid_t);
     drop(command);
-    let out = child.stdout.take().expect("piped output");
-    let err = child.stderr.take().expect("piped error");
+    type Reader = Box<dyn Read + Send>;
+    let (out, err): (Reader, Reader) = if let Some(master) = master {
+        (Box::new(master), Box::new(io::empty()))
+    } else {
+        (
+            Box::new(child.stdout.take().expect("piped output")),
+            Box::new(child.stderr.take().expect("piped error")),
+        )
+    };
     let stdout = thread::spawn(move || capture(out));
     let stderr = thread::spawn(move || capture(err));
     let mut forced = false;

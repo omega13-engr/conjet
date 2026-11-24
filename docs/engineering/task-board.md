@@ -1162,6 +1162,45 @@ slave terminal and raw Docker output. Verify the terminal belongs to the
 isolated guest, non-TTY exec still multiplexes streams, and guest
 shutdown releases the private PTY mount.
 
+Evidence: The pinned CLI passed the original `exec -t` operation and
+its `isatty` and output assertions. The unchanged exec regressions
+passed, and clean shutdown released the PTY mount. The full control
+preflight also passed the frozen TTY and 128 KiB exec cases. Logs are
+under `SPEED-121/` on ExternalSSD.
+
+### SPEED-122
+
+Title: Negotiate Docker exec HTTP streaming and socket upgrade
+
+Acceptance: Return a 200 multiplexed response for a plain exec API
+request and preserve HTTP 101 for an explicit TCP upgrade. Verify
+original stdout, stderr, exit status and follow-up inspect semantics.
+
+### SPEED-123
+
+Title: Read bounded Docker copy archives from an owned running workload
+
+Acceptance: Implement Docker path stat and single-file export from the
+verified workload root. Verify the 4 KiB and 8 MiB data paths, bounded
+transfer and symlink rejection.
+
+### SPEED-124
+
+Title: Upload bounded Docker copy archives into an owned running workload
+
+Acceptance: Accept the original pinned client's request framing and tar
+layout. Stage a single-file upload, verify contents, publish atomically
+and prove the frozen round trips by SHA-256. Reject escapes and discard
+partial writes.
+
+### SPEED-125
+
+Title: Relay attached stdin to an owned native container
+
+Acceptance: Support the frozen interactive create and attach request
+through a bounded stdin path. Preserve the original output streams,
+exit 23, logs, disconnect recovery and cleanup.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

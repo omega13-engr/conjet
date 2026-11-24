@@ -138,6 +138,7 @@ pub(super) fn probe(owner: &Owner, item: &Item, generation: u64, handle: &Value)
         handle.clone(),
         &config.argv,
         [false, false],
+        false,
         config.budget_ms,
     )
     .is_ok_and(|(code, result)| code == 0 && result.error.is_none());

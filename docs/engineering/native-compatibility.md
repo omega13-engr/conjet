@@ -275,6 +275,18 @@ returned 131,072 zero bytes. The same session verified null output,
 limited device visibility and complete exec and workload cleanup.
 Evidence is under `SPEED-120/` on ExternalSSD.
 
+## SPEED-121 noninteractive exec TTY
+
+Docker exec can allocate a slave terminal from a devpts instance owned by
+the disposable guest. The original `test -t 1` command returned
+`tty-ok` from the raw Docker stream. The non-TTY exec regressions
+and clean PTY shutdown passed.
+
+The exact control preflight also passed large output, CLI exec and attach
+disconnect recovery. Plain HTTP exec received HTTP 101, archive uploads
+were rejected at framing and interactive attach failed at create.
+Evidence is under `SPEED-121/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

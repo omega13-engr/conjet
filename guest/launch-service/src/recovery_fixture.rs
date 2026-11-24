@@ -76,6 +76,7 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
     let _core_cgroups = (oci && Path::new(MEMD).try_exists()?)
         .then(core_cgroups)
         .transpose()?;
+    let mut pty = oci.then(crate::pty::Mount::open).transpose()?;
     let volume = if oci {
         crate::volume_disk::guest::Store::open()?
     } else {
@@ -112,6 +113,9 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
             }
             if let Some(volume) = volume {
                 volume.close()?;
+            }
+            if let Some(pty) = &mut pty {
+                pty.close()?;
             }
             return Ok(());
         }

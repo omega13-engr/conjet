@@ -85,6 +85,8 @@ def collect(endpoint, peer, docker, env, output, session, vmm_pid):
                  expected=23, stdout=b'0' * (128 * 1024), stderr=b'0' * 8199 + b'1')
             call('frozen_zero_output', ['exec', name, 'dd', 'if=/dev/zero', 'bs=1024', 'count=128'],
                  stdout=bytes(128 * 1024))
+            call('frozen_tty', ['exec', '-t', name, 'sh', '-c', 'test -t 1 && printf tty-ok'],
+                 stdout=b'tty-ok')
             call('device_scope', ['exec', name, '/bin/sh', '-c',
                  'printf suppressed >/dev/null; test ! -e /dev/mem && test ! -e /dev/kmsg'],
                  stdout=b'')

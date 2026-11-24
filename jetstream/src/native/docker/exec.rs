@@ -24,6 +24,7 @@ pub(super) struct Entry {
     generation: u64,
     argv: Vec<String>,
     output: [bool; 2],
+    tty: bool,
     state: Mutex<State>,
     created: Instant,
 }
@@ -41,7 +42,8 @@ fn apply_defaults(value: &Value, config: &Value) -> std::result::Result<Vec<Stri
         let supported = match name.as_str() {
             "Cmd" => value.is_array(),
             "AttachStdout" | "AttachStderr" => value.is_boolean(),
-            "AttachStdin" | "Privileged" | "Tty" => value.is_null() || value == false,
+            "AttachStdin" | "Privileged" => value.is_null() || value == false,
+            "Tty" => value.is_null() || value.is_boolean(),
             "User" | "WorkingDir" | "DetachKeys" => value.is_null() || value == "",
             "Env" => value.is_null() || value.as_array().is_some_and(Vec::is_empty),
             _ => false,
@@ -75,9 +77,14 @@ impl Entry {
             generation,
             argv,
             output: [data["AttachStdout"] == true, data["AttachStderr"] == true],
+            tty: data["Tty"] == true,
             state: Mutex::new(State::Created),
             created: Instant::now(),
         })
+    }
+
+    pub(super) fn tty(&self) -> bool {
+        self.tty
     }
 
     pub(super) fn inspect(&self) -> Value {
@@ -88,7 +95,7 @@ impl Entry {
             "ID":self.id, "ContainerID":self.container.container.id,
             "Running":matches!(*state, State::Submitted),
             "ExitCode":match *state {State::Finished(code)=>Some(code), _=>None},
-            "ProcessConfig":{"entrypoint":self.argv[0],"arguments":self.argv[1..],"tty":false,"user":user},
+            "ProcessConfig":{"entrypoint":self.argv[0],"arguments":self.argv[1..],"tty":self.tty,"user":user},
             "OpenStdin":false, "OpenStdout":self.output[0], "OpenStderr":self.output[1],
         })
     }
@@ -101,7 +108,8 @@ impl Entry {
             .ok_or_else(|| Rejected::bad("invalid exec start body"))?;
         for (name, value) in data {
             let supported = match name.as_str() {
-                "Tty" | "Detach" => value.is_null() || value == false,
+                "Detach" => value.is_null() || value == false,
+                "Tty" => value.is_null() || value.is_boolean(),
                 "ConsoleSize" => value.is_null() || value == &json!([0, 0]),
                 _ => false,
             };
@@ -110,6 +118,11 @@ impl Entry {
                     "unsupported exec start option {name}"
                 )));
             }
+        }
+        if data.get("Tty").and_then(Value::as_bool).unwrap_or(false) != self.tty {
+            return Err(Rejected::bad(
+                "exec start TTY differs from the created exec",
+            ));
         }
         let mut state = self.state.lock().unwrap();
         if !matches!(*state, State::Created) {
@@ -138,7 +151,12 @@ impl Entry {
     }
 
     pub(super) fn run(&self, owner: &Owner, handle: Value) -> Result {
-        let result = execute(owner, handle, &self.argv, self.output, BUDGET_MS);
+        let enabled = if self.tty {
+            [self.output[0] || self.output[1], false]
+        } else {
+            self.output
+        };
+        let result = execute(owner, handle, &self.argv, enabled, self.tty, BUDGET_MS);
         let (status, reply) = match result {
             Ok(result) => result,
             Err(error) => (
@@ -159,6 +177,7 @@ pub(super) fn execute(
     handle: Value,
     argv: &[String],
     enabled: [bool; 2],
+    tty: bool,
     budget_ms: u64,
 ) -> std::result::Result<(i64, Result), String> {
     let mut control = owner
@@ -176,10 +195,14 @@ pub(super) fn execute(
         *control = Some(candidate);
     }
     let connected = control.as_mut().expect("exec peer");
+    let mut request = json!({"handle":handle,"budget_ms":budget_ms,"argv":argv});
+    if tty {
+        request["tty"] = json!(true);
+    }
     let reply = connected.exchange(
         Kind::Exec,
         Kind::Exec,
-        &json!({"handle":handle,"budget_ms":budget_ms,"argv":argv}),
+        &request,
         Duration::from_millis(budget_ms + 1000),
     );
     let reply = match reply {

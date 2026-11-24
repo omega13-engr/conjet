@@ -112,6 +112,8 @@ struct Exec {
     handle: Handle,
     budget_ms: u64,
     argv: Vec<String>,
+    #[serde(default)]
+    tty: bool,
 }
 
 #[derive(Deserialize)]
@@ -2009,7 +2011,7 @@ impl FreshFixture {
                     .map_err(|_| ("malformed", "invalid native workload ID"))?;
                 guard.exec_active = true;
                 drop(guard);
-                let result = crate::exec_fixture::execute(target, id, spec, expires);
+                let result = crate::exec_fixture::execute(target, id, spec, request.tty, expires);
                 let mut guard = self.ledger.lock().expect("fresh ledger");
                 guard.exec_active = false;
                 self.changed.notify_all();

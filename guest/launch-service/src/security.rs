@@ -250,12 +250,16 @@ impl WorkloadFilter {
                 jf: clone.len() as u8,
             });
             program.extend(clone);
-            let nonblocking = [
+            let descriptor_control = [
                 statement(BPF_LOAD_WORD, 28), // high word of args[1]
                 skip_if_zero(1),
                 statement(BPF_RETURN, denied),
                 statement(BPF_LOAD_WORD, 24), // low word of args[1]
                 next_or_skip(libc::FIONBIO as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                next_or_skip(libc::TCGETS as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                next_or_skip(libc::TIOCGWINSZ as u32),
                 statement(BPF_RETURN, RET_ALLOW),
                 statement(BPF_RETURN, denied),
             ];
@@ -263,9 +267,9 @@ impl WorkloadFilter {
                 code: BPF_JUMP_EQUAL,
                 k: libc::SYS_ioctl as u32,
                 jt: 0,
-                jf: nonblocking.len() as u8,
+                jf: descriptor_control.len() as u8,
             });
-            program.extend(nonblocking);
+            program.extend(descriptor_control);
             // Classic BPF cannot inspect clone3's pointed-to flags. Let
             // libc retry through the checked clone ABI.
             program.push(next_or_skip(libc::SYS_clone3 as u32));
