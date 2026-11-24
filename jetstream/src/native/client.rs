@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
@@ -101,6 +101,21 @@ impl Connection {
     }
 
     pub(super) fn open(directory: &Path, identity: &Identity, key: &Key) -> anyhow::Result<Self> {
+        // The guest bounds concurrent transport workers. A just-closed peer
+        // can still occupy a slot when the next socket makes its handshake.
+        // Retry only a connection closed before any operation was sent.
+        for delay in [20, 50, 100] {
+            match Self::open_once(directory, identity, key) {
+                Err(error) if transient_open(&error) => {
+                    std::thread::sleep(Duration::from_millis(delay));
+                }
+                result => return result,
+            }
+        }
+        Self::open_once(directory, identity, key)
+    }
+
+    fn open_once(directory: &Path, identity: &Identity, key: &Key) -> anyhow::Result<Self> {
         let unix = UnixStream::connect(directory.join(ENDPOINT))?;
         let mut pid: libc::pid_t = 0;
         let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
@@ -298,6 +313,39 @@ impl Connection {
                 "output cursor did not advance"
             );
         }
+    }
+}
+
+fn transient_open(error: &anyhow::Error) -> bool {
+    let io = match error.downcast_ref::<WireError>() {
+        Some(WireError::Io(io)) => Some(io),
+        Some(_) => None,
+        None => error.downcast_ref::<io::Error>(),
+    };
+    io.is_some_and(|io| {
+        matches!(
+            io.kind(),
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::WouldBlock
+        )
+    })
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn retries_transport_closure_but_not_rejected_authentication() {
+        let eof = WireError::Io(io::Error::from(io::ErrorKind::UnexpectedEof));
+        assert!(transient_open(&eof.into()));
+        assert!(!transient_open(&WireError::Unauthorized.into()));
+        assert!(!transient_open(&WireError::BadHeader.into()));
+        assert!(!transient_open(
+            &io::Error::from(io::ErrorKind::TimedOut).into()
+        ));
     }
 }
 
