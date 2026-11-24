@@ -145,6 +145,14 @@ struct WorkloadInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ImageAccount {
+    boot_id: String,
+    image_digest: String,
+    account: crate::spec::Account,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NetworkRequest {
     boot_id: String,
     budget_ms: u64,
@@ -1162,6 +1170,25 @@ impl FreshFixture {
                 "sequence was previously admitted or superseded",
             ));
         }
+        let resolved = spec
+            .account
+            .as_ref()
+            .map(|account| {
+                let (uid, gid) = crate::image_account::resolve_image(&spec.image_digest, account)?;
+                let mut runtime = spec.clone();
+                runtime.uid = uid;
+                runtime.gid = gid;
+                runtime.account = None;
+                Ok::<_, io::Error>(runtime)
+            })
+            .transpose()
+            .map_err(|_| {
+                (
+                    "unsupported_option",
+                    "unknown or unmapped OCI image account",
+                )
+            })?;
+        let spec = resolved.as_ref().unwrap_or(spec);
         if deadline <= Instant::now() {
             return Err((
                 "deadline_exceeded",
@@ -2195,6 +2222,23 @@ impl FreshFixture {
                         }
                     })?;
                 Ok((Kind::Copy, reply))
+            }
+            Kind::Account if self.oci => {
+                let request: ImageAccount = parse(frame)?;
+                if request.boot_id != boot {
+                    return Err(("stale_generation", "unexpected image account boot ID"));
+                }
+                if request.image_digest != self.image_digest
+                    && !guard.images.contains(&request.image_digest)
+                {
+                    return Err(("not_found", "image is not installed for account resolution"));
+                }
+                let (uid, gid) =
+                    crate::image_account::resolve_image(&request.image_digest, &request.account)
+                        .map_err(|_| {
+                            ("unknown_account", "unknown or unmapped OCI image account")
+                        })?;
+                Ok((Kind::Account, json!({"uid":uid,"gid":gid})))
             }
             Kind::Input if self.oci => {
                 let request: WorkloadInput = parse(frame)?;

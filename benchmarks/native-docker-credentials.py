@@ -33,6 +33,10 @@ def collect(endpoint, peer, docker, env, output):
     try:
         for case, user, expected in (('default', [], (0, 0)),
                                      ('numeric', ['--user', '1234:4321'], (1234, 4321)),
+                                     ('named', ['--user', 'nobody'], (65534, 65534)),
+                                     ('named-group', ['--user', 'root:nogroup'], (0, 65533)),
+                                     ('numeric-primary-group', ['--user', '65534'], (65534, 65534)),
+                                     ('missing-numeric', ['--user', '61234'], (61234, 0)),
                                      ('fixture', ['--user', '65532:65532'], (65532, 65532))):
             for flag, identity in zip(('u', 'g'), expected):
                 key = f'{case}-{flag}'
@@ -56,8 +60,20 @@ def collect(endpoint, peer, docker, env, output):
                 call('exec_inherited_' + flag, ['exec', name, '/bin/busybox', 'id', '-' + flag], b'0\n')
         finally:
             call('exec_cleanup', ['rm', '--force', name], (name + '\n').encode())
+        name = f'cj-id-{token}-exec-account'
+        call('exec_named_parent', ['run', '--detach', '--pull', 'never', '--name', name, *FLAGS,
+                                   '--user', 'nobody', image, '/bin/busybox', 'sleep', '30'], None)
+        try:
+            for flag in ('u', 'g'):
+                call('exec_named_inherited_' + flag,
+                     ['exec', name, '/bin/busybox', 'id', '-' + flag], b'65534\n')
+        finally:
+            call('exec_named_cleanup', ['rm', '--force', name], (name + '\n').encode())
+        cases['exec_named_witness'] = MATCHED['native_terminal'](connection, name, handles, 137)
         for case, user, extra in (('unmapped_uid', '65536:0', {}),
                                   ('unmapped_gid', '0:65536', {}),
+                                  ('unknown_user', 'cj-missing-account', {}),
+                                  ('unknown_group', 'root:cj-missing-group', {}),
                                   ('privileged', '0:0', {'Privileged': True}),
                                   ('added_capability', '0:0', {'CapAdd': ['SYS_ADMIN']})):
             body = {'Image': image, 'User': user, 'Cmd': ['/bin/true'],

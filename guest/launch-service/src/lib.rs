@@ -51,5 +51,7 @@ mod prepared;
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 mod bind_mount;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod image_account;
 #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 mod memory;

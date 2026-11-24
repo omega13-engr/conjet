@@ -47,6 +47,8 @@ pub struct LaunchSpec {
     pub cwd: String,
     pub uid: u32,
     pub gid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<Account>,
     pub network: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_alias: Option<String>,
@@ -85,6 +87,39 @@ pub struct VolumeMount {
 pub struct BindMount {
     pub lease: String,
     pub read_only: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Account {
+    pub user: String,
+    pub group: Option<String>,
+}
+
+impl Account {
+    pub fn parse(value: &str) -> Option<Self> {
+        let (user, group) = value
+            .split_once(':')
+            .map_or((value, None), |(user, group)| (user, Some(group)));
+        let account = Self {
+            user: user.to_owned(),
+            group: group.map(str::to_owned),
+        };
+        account.valid().then_some(account)
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        let field = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+                && (!value.bytes().all(|byte| byte.is_ascii_digit())
+                    || value.parse::<u32>().is_ok_and(|id| id < ID_MAP_WIDTH))
+        };
+        field(&self.user) && self.group.as_deref().is_none_or(field)
+    }
 }
 
 fn default_volume_target() -> String {
@@ -351,6 +386,14 @@ impl LaunchSpec {
         if spec.uid >= ID_MAP_WIDTH
             || spec.gid >= ID_MAP_WIDTH
             || (spec.build_snapshot.is_some() && !spec.fixture_identity())
+            || spec.account.as_ref().is_some_and(|account| {
+                !search_path
+                    || spec.build_snapshot.is_some()
+                    || spec.bind.is_some()
+                    || spec.uid != 0
+                    || spec.gid != 0
+                    || !account.valid()
+            })
         {
             return Err(SpecError::Identity);
         }
@@ -419,6 +462,7 @@ mod tests {
                 cwd: "/".into(),
                 uid: WORKLOAD_UID,
                 gid: WORKLOAD_GID,
+                account: None,
                 network: "none".into(),
                 network_alias: None,
                 secondary_network_alias: None,

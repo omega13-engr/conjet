@@ -1437,6 +1437,12 @@ groups and numeric primary groups. Retain explicit numeric pairs,
 inherit the resolved identity on exec, and reject unknown or
 unmapped identities without adding capabilities.
 
+Evidence: The optimized Alpine canary resolved named user and group
+selectors, numeric primary groups and an unmapped account-file entry
+fallback for an otherwise valid numeric ID. Exec inherited the real
+resolved UID and GID. Unknown names and unmapped numeric IDs were
+rejected before launch. See `SPEED-141/credentials/`.
+
 ### SPEED-142
 
 Title: Accept the frozen Compose healthcheck retry count
@@ -1444,6 +1450,19 @@ Title: Accept the frozen Compose healthcheck retry count
 Acceptance: Preserve the pinned fixture's 1-second interval, 2-second
 timeout and 12 retries without expanding the healthcheck command scope
 or weakening timeout and exhaustion checks.
+
+Evidence: The original fixture progressed past the retry policy and
+created both containers. Redis then exited 1 before becoming healthy.
+Compose teardown separately exposed its container-removal volume flag.
+See `SPEED-142/compose-health-policy/`.
+
+### SPEED-143
+
+Title: Preserve named volumes during Compose container removal
+
+Acceptance: Accept the original Compose container-removal flag for
+anonymous volumes. Release the container's named-volume reference and
+let the subsequent explicit volume request remove it.
 
 ### SPEED-091
 

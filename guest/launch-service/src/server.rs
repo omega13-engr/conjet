@@ -298,6 +298,7 @@ impl Server {
                         | Kind::ExecOutput
                         | Kind::Copy
                         | Kind::Input
+                        | Kind::Account
                         | Kind::Network
                         | Kind::Volume
                         | Kind::BuildSnapshot

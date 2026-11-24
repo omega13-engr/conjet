@@ -71,7 +71,7 @@ fn valid_path(path: &str) -> bool {
         && !path.contains('\0')
 }
 
-fn open_path(root: &File, path: &str, flags: i32) -> io::Result<File> {
+pub(crate) fn open_path(root: &File, path: &str, flags: i32) -> io::Result<File> {
     open_beneath(root, path, flags, false)
 }
 

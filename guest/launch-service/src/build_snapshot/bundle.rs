@@ -83,6 +83,7 @@ pub(crate) fn parse(
             .map_err(|_| "invalid build working directory")?,
         uid: WORKLOAD_UID,
         gid: WORKLOAD_GID,
+        account: None,
         network: "none".into(),
         network_alias: None,
         secondary_network_alias: None,

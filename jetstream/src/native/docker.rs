@@ -886,11 +886,11 @@ impl Owner {
             }
         };
         if self.boot_reference(reference) {
-            return process(&self.image);
+            return self.resolve_account(process(&self.image)?);
         }
         if self.store.is_none() {
             // Preserve the existing request validation on the boot-only route.
-            return self.image.process(config, self.mapped_ids);
+            return self.resolve_account(self.image.process(config, self.mapped_ids)?);
         }
         let mut store = self.image_store()?;
         let image = store
@@ -899,7 +899,7 @@ impl Owner {
             .ok_or_else(|| Rejected(404, "image is not staged".into()))?;
         let spec = process(&image.metadata)?;
         if image.metadata.config_digest == self.image.config_digest {
-            return Ok(spec);
+            return self.resolve_account(spec);
         }
         if !store
             .installed(&image)
@@ -907,6 +907,33 @@ impl Owner {
         {
             self.with_guest(|peer| store.ensure_guest(peer, &image))?;
         }
+        self.resolve_account(spec)
+    }
+
+    fn resolve_account(&self, mut spec: Value) -> Result<Value, Rejected> {
+        if spec["account"].is_null() {
+            return Ok(spec);
+        }
+        let mut peer = self.scoped_peer()?;
+        let reply = peer.exchange(Kind::Account, Kind::Account, &json!({
+            "boot_id":peer.boot,"image_digest":spec["image_digest"],"account":spec["account"],
+        }), Duration::from_secs(2)).map_err(|error| match error {
+            WireError::PeerError(code) if code == "unknown_account" =>
+                Rejected::bad("unknown or unmapped OCI image account"),
+            _ => Rejected::internal(error.to_string()),
+        })?;
+        for field in ["uid", "gid"] {
+            let id = reply[field]
+                .as_u64()
+                .filter(|id| *id < u64::from(conjet_launch_service::spec::ID_MAP_WIDTH))
+                .ok_or_else(|| {
+                    Rejected::internal("invalid native image account acknowledgement")
+                })?;
+            spec[field] = json!(id);
+        }
+        spec.as_object_mut()
+            .expect("typed native process")
+            .remove("account");
         Ok(spec)
     }
 
@@ -1519,7 +1546,7 @@ impl Owner {
         if let Some(volume) = &volume {
             spec["volume"] = json!(volume);
         }
-        if bind.is_some() && (spec["uid"] != 0 || spec["gid"] != 0) {
+        if bind.is_some() && (spec["uid"] != 0 || spec["gid"] != 0 || !spec["account"].is_null()) {
             return Err(Rejected::bad(
                 "isolated host binds require the mapped root identity",
             ));

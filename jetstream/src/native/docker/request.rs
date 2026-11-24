@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{ensure, Context};
 use conjet_launch_service::handshake::unhex;
 use conjet_launch_service::spec::{
-    LaunchSpec, ResourceLimits, ID_MAP_WIDTH, WORKLOAD_GID, WORKLOAD_UID,
+    Account, LaunchSpec, ResourceLimits, WORKLOAD_GID, WORKLOAD_UID,
 };
 use serde_json::{json, Map, Value};
 
@@ -101,7 +101,11 @@ fn env(value: &Value) -> Result<BTreeMap<String, String>, Rejected> {
     Ok(entries)
 }
 
-fn identity(request: &Value, image: &Value, mapped_ids: bool) -> Result<(u32, u32), Rejected> {
+fn identity(
+    request: &Value,
+    image: &Value,
+    mapped_ids: bool,
+) -> Result<(u32, u32, Option<Account>), Rejected> {
     let value = match request {
         Value::Null => image.as_str().or(image.is_null().then_some("")),
         Value::String(value) if value.is_empty() => {
@@ -110,29 +114,28 @@ fn identity(request: &Value, image: &Value, mapped_ids: bool) -> Result<(u32, u3
         _ => request.as_str(),
     }
     .ok_or_else(|| Rejected::bad("expected a Docker user string"))?;
-    const FIXTURE: (u32, u32) = (WORKLOAD_UID, WORKLOAD_GID);
     if value == "65532:65532" {
-        return Ok(FIXTURE);
+        return Ok((WORKLOAD_UID, WORKLOAD_GID, None));
     }
     if !mapped_ids {
         return Err(Rejected::bad("guest requires UID and GID 65532"));
     }
     if value.is_empty() {
-        return Ok((0, 0));
+        return Ok((0, 0, None));
     }
-    let numeric = |value: &str| {
-        if !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit()) {
-            value.parse::<u32>().ok().filter(|&id| id < ID_MAP_WIDTH)
-        } else {
-            None
-        }
-    };
-    let (uid, gid) = value
-        .split_once(':')
-        .ok_or_else(|| Rejected::bad("native credentials require a mapped numeric UID:GID"))?;
-    numeric(uid)
-        .zip(numeric(gid))
-        .ok_or_else(|| Rejected::bad("native credentials require a mapped numeric UID:GID"))
+    let account = Account::parse(value).ok_or_else(|| {
+        Rejected::bad("native credentials require mapped IDs or image account names")
+    })?;
+    if let (Ok(uid), Some(gid)) = (
+        account.user.parse::<u32>(),
+        account
+            .group
+            .as_ref()
+            .and_then(|group| group.parse::<u32>().ok()),
+    ) {
+        return Ok((uid, gid, None));
+    }
+    Ok((0, 0, Some(account)))
 }
 
 impl Image {
@@ -281,7 +284,7 @@ impl Image {
         let cwd = working_directory
             .as_str()
             .ok_or_else(|| Rejected::bad("invalid working directory"))?;
-        let (uid, gid) = identity(&data["User"], &self.defaults["User"], mapped_ids)?;
+        let (uid, gid, account) = identity(&data["User"], &self.defaults["User"], mapped_ids)?;
         let flags = ["AttachStdin", "OpenStdin", "StdinOnce"];
         let open_stdin = data["OpenStdin"] == true;
         if flags
@@ -315,6 +318,7 @@ impl Image {
             cwd: cwd.into(),
             uid,
             gid,
+            account,
             network: "none".into(),
             network_alias: None,
             secondary_network_alias: None,
@@ -393,27 +397,34 @@ mod tests {
 
     #[test]
     fn resolves_the_requested_pair_before_the_image_default() {
-        assert_eq!(identity(&Value::Null, &json!(""), true).unwrap(), (0, 0));
+        assert_eq!(
+            identity(&Value::Null, &json!(""), true).unwrap(),
+            (0, 0, None)
+        );
         assert_eq!(
             identity(&json!(""), &json!("12:34"), true).unwrap(),
-            (12, 34)
+            (12, 34, None)
         );
         assert_eq!(
             identity(&json!("0:1"), &json!("12:34"), true).unwrap(),
-            (0, 1)
+            (0, 1, None)
         );
         assert_eq!(
             identity(&json!("65532:65532"), &json!(""), false).unwrap(),
-            (65532, 65532)
+            (65532, 65532, None)
         );
     }
 
     #[test]
     fn rejects_unmapped_ambiguous_and_unnegotiated_identities() {
-        for value in ["65536:0", "0:65536", "root", "1", "1:", "+1:2", "1:2:3"] {
+        for value in ["65536:0", "0:65536", "1:", "+1:2", "1:2:3"] {
             assert!(identity(&json!(value), &Value::Null, true).is_err());
         }
         assert!(identity(&Value::Null, &json!(""), false).is_err());
         assert!(identity(&json!(123), &json!(""), true).is_err());
+        assert_eq!(
+            identity(&json!(""), &json!("node:node"), true).unwrap().2,
+            Account::parse("node:node")
+        );
     }
 }

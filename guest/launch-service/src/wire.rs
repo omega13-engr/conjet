@@ -46,6 +46,7 @@ pub enum Kind {
     Copy = 29,
     Input = 30,
     Bind = 31,
+    Account = 32,
 }
 
 impl TryFrom<u8> for Kind {
@@ -85,6 +86,7 @@ impl TryFrom<u8> for Kind {
             29 => Ok(Copy),
             30 => Ok(Input),
             31 => Ok(Bind),
+            32 => Ok(Account),
             _ => Err(WireError::BadHeader),
         }
     }

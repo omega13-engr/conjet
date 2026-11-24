@@ -21,6 +21,19 @@ const OCI_LINKS: &str = "/etc/conjet/native-oci-hardlinks.json";
 pub(crate) const NATIVE_EXECUTABLE: &str = "/etc/conjet/native-executable";
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x04; // Linux mount UAPI.
 
+pub(crate) fn image_lower(digest: &str) -> io::Result<(PathBuf, PathBuf)> {
+    if fs::read_to_string(OCI_MARKER)? == digest {
+        return Ok((PathBuf::from(OCI_ROOT), PathBuf::from(OCI_LINKS)));
+    }
+    let imported = crate::image_store::imported_root(digest)
+        .ok_or_else(|| io::Error::other("invalid OCI image digest"))?;
+    let lower = imported.join("root");
+    if !lower.symlink_metadata()?.is_dir() {
+        return Err(io::Error::other("OCI lower root is unavailable"));
+    }
+    Ok((lower, imported.join("hardlinks.json")))
+}
+
 pub(crate) struct Sandbox {
     base: PathBuf,
     new_root: CString,
@@ -272,20 +285,7 @@ impl Sandbox {
             let lower = if snapshot.is_some() {
                 base.join("lower")
             } else if let Some(spec) = oci {
-                let (lower, links) = if fs::read_to_string(OCI_MARKER)? == spec.image_digest {
-                    (
-                        Path::new(OCI_ROOT).to_path_buf(),
-                        Path::new(OCI_LINKS).to_path_buf(),
-                    )
-                } else {
-                    let imported = crate::image_store::imported_root(&spec.image_digest)
-                        .ok_or_else(|| io::Error::other("invalid OCI image digest"))?;
-                    let lower = imported.join("root");
-                    if !lower.symlink_metadata()?.is_dir() {
-                        return Err(io::Error::other("OCI lower root is unavailable"));
-                    }
-                    (lower, imported.join("hardlinks.json"))
-                };
+                let (lower, links) = image_lower(&spec.image_digest)?;
                 prepare_oci_hardlinks(&lower, &links, &base.join("upper"))?;
                 lower
             } else {
