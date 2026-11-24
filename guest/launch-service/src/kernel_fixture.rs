@@ -303,7 +303,11 @@ fn run(
         bridge.close()?;
         notify_control(b'B', &[])?;
     }
-    cgroup.remove_empty()?;
+    if process.is_some() {
+        cgroup.drain()?;
+    } else {
+        cgroup.remove_empty()?;
+    }
     drop(cgroup);
     for path in [&scope, &workloads, &root] {
         std::fs::remove_dir(path)?;

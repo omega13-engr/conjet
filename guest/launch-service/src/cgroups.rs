@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::handshake::hex;
 use crate::spec::ResourceLimits;
@@ -110,6 +111,28 @@ impl WorkloadCgroup {
         }
         // The kernel rechecks membership atomically with rmdir.
         std::fs::remove_dir(&self.path)
+    }
+
+    pub(crate) fn drain(&self) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if self.populated()? {
+                self.kill()?;
+            } else {
+                match std::fs::remove_dir(&self.path) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if error.raw_os_error() == Some(libc::EBUSY) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "owned cgroup did not drain",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
