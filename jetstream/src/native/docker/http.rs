@@ -992,9 +992,15 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             reply
         }
         ("DELETE", "") => {
-            if !disabled(query.get("v")) || !disabled(query.get("link")) {
-                return Err(Rejected::bad("volume and link removal are not supported"));
+            if !disabled(query.get("link"))
+                || query
+                    .get("v")
+                    .is_some_and(|value| !matches!(value.as_str(), "0" | "1" | "false" | "true"))
+            {
+                return Err(Rejected::bad("unsupported container removal options"));
             }
+            // Docker's v flag removes anonymous volumes. Native mounts are
+            // explicitly named and released through their own endpoint.
             owner.remove(
                 &item,
                 query

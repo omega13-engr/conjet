@@ -75,8 +75,9 @@ def collect(endpoint, owner_pid, session, vm_pid, output, phase, client, env, *,
                 evidence['guest_busy'] = NATIVE['exchange'](stream, 25, {
                     'boot_id': boot, 'budget_ms': 1000, 'operation': {'action': 'remove', 'name': NAME},
                 }, 15, 'in_use')
-            api(conn, 'DELETE', holder + '?force=true', (204,))
+            api(conn, 'DELETE', holder + '?force=true&v=true', (204,))
             evidence['cancelled'] = MATCHED['native_terminal'](conn, holder_name, set(), code=137)
+            evidence['named_volume_retained'] = api(conn, 'GET', volume_path, (200,))['Name']
 
         evidence['labels'] = api(conn, 'GET', volume_path, (200,))['Labels']
         if evidence['labels'] != {LABEL: VALUE}:

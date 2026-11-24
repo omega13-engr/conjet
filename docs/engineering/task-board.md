@@ -1464,6 +1464,32 @@ Acceptance: Accept the original Compose container-removal flag for
 anonymous volumes. Release the container's named-volume reference and
 let the subsequent explicit volume request remove it.
 
+Evidence: The frozen Compose client removed both containers, the
+network and the named volume in all six teardown runs. See
+`SPEED-145/compose-redis-bootstrap/` on ExternalSSD.
+
+### SPEED-144
+
+Title: Drain owned descendant processes before releasing a workload cgroup
+
+Acceptance: Close the original workload and any in-flight health
+exec in its exact cgroup. Confirm empty removal within the cleanup
+budget and retain the main process's exit status.
+
+Evidence: The earlier Compose run hit a busy cgroup while Redis and
+its health probe were exiting. All six rapid Redis exit and removal
+cycles finished cleanly after the bounded cgroup drain. See
+`SPEED-145/compose-redis-bootstrap/`.
+
+### SPEED-145
+
+Title: Run the pinned Redis entrypoint with scoped credential transitions
+
+Acceptance: The original Redis entrypoint can transfer its private
+data directory and drop to the pinned Redis account. Limit any
+additional authority to the verified fixture image and startup
+arguments. Preserve the ordinary no-capabilities profile.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle
