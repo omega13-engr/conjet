@@ -69,7 +69,7 @@ impl Config {
             value if value == &json!(0) => 3,
             value => value
                 .as_u64()
-                .filter(|value| (1..=5).contains(value))
+                .filter(|value| (1..=12).contains(value))
                 .ok_or_else(|| Rejected::bad("invalid native healthcheck retry count"))?,
         };
         Ok(Some(Self {
