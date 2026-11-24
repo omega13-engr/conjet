@@ -103,6 +103,15 @@ pub fn serve(key_path: &Path, profile: Profile) -> Result<(), Box<dyn std::error
     };
     let shutdown = server.shutdown();
     let listener = listener()?;
+    #[cfg(target_arch = "aarch64")]
+    let local = if matches!(profile, Profile::Native) {
+        Path::new(crate::build_snapshot::MARKER)
+            .try_exists()?
+            .then(|| crate::build_snapshot::guest::listen(Arc::clone(&server)))
+            .transpose()?
+    } else {
+        None
+    };
     let mut workers: Vec<thread::JoinHandle<()>> = Vec::with_capacity(MAX_CONNECTIONS);
     println!("conjet-launchd ready");
     let result = loop {
@@ -152,6 +161,12 @@ pub fn serve(key_path: &Path, profile: Profile) -> Result<(), Box<dyn std::error
         if worker.join().is_err() {
             eprintln!("launch transport worker panicked");
         }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if let Some(local) = local {
+        local
+            .join()
+            .map_err(|_| io::Error::other("build snapshot control panicked"))??;
     }
     Ok(result?)
 }

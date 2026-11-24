@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const MARKER: &str = "/etc/conjet/native-build-snapshot";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const CONTROL_ADDRESS: &[u8] = b"conjet-build-snapshot-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +124,68 @@ pub(crate) mod guest {
             ) as i32
         })?;
         Ok(tree)
+    }
+
+    pub(crate) fn listen(
+        server: std::sync::Arc<crate::server::Server>,
+    ) -> io::Result<std::thread::JoinHandle<io::Result<()>>> {
+        use std::os::linux::net::SocketAddrExt;
+        use std::os::unix::net::{SocketAddr, UnixListener};
+        use std::sync::Arc;
+
+        let address = SocketAddr::from_abstract_name(super::CONTROL_ADDRESS)?;
+        let listener = UnixListener::bind_addr(&address)?;
+        listener.set_nonblocking(true)?;
+        let shutdown = server.shutdown();
+        std::thread::Builder::new()
+            .name("build-snapshot-control".into())
+            .spawn(move || {
+                while !shutdown.requested() {
+                    match crate::socket::wait(
+                        listener.as_raw_fd(),
+                        libc::POLLIN,
+                        Some(&shutdown),
+                        None,
+                    ) {
+                        Err(_) if shutdown.requested() => return Ok(()),
+                        Err(error) => return Err(error),
+                        Ok(()) => {}
+                    }
+                    let (socket, _) = match listener.accept() {
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                        result => result?,
+                    };
+                    if !root_peer(socket.as_raw_fd())? {
+                        continue;
+                    }
+                    let stream = crate::socket::Stream::unix(socket, Some(Arc::clone(&shutdown)))?;
+                    if let Err(error) = server.serve_build_snapshot(stream)
+                        && !shutdown.requested()
+                    {
+                        eprintln!("build snapshot client closed: {error}");
+                    }
+                }
+                Ok(())
+            })
+    }
+
+    fn root_peer(fd: libc::c_int) -> io::Result<bool> {
+        let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+        let mut length = size_of::<libc::ucred>() as libc::socklen_t;
+        // The socket is owned by the listener and the bounded output is writable.
+        crate::security::checked(unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                credentials.as_mut_ptr().cast(),
+                &mut length,
+            )
+        })?;
+        if length as usize != size_of::<libc::ucred>() {
+            return Err(io::Error::other("invalid build snapshot peer credentials"));
+        }
+        Ok(unsafe { credentials.assume_init() }.uid == 0)
     }
 }
 

@@ -84,3 +84,20 @@ socket. The current native build sandbox can mount the root with the
 correct ownership. The generated OCI process and mount contract still
 needs handling or explicit rejection in SPEED-079. BuildKit RUN,
 BuildKit-driven cancellation and cache hits remain unqualified.
+
+## SPEED-080 guest-local authentication boundary
+
+The isolated build snapshot profile now exposes a guest-local abstract
+Unix socket for snapshot identity. The listener checks kernel peer
+credentials for guest UID 0 and requires the launch service handshake.
+It shares the host-visible boot generation and permits only ping and
+snapshot lookup. It admits one connection at a time with a bounded idle
+wait and closes with the supervised guest. A separate host connection
+retains workload and shutdown authority.
+
+The pinned BuildKit capture process looked up the live mounted root over
+the guest-local socket. The response matched its actual device and inode.
+A guest UID 65532 peer received EOF without a handshake. The protocol
+regression test also verified that an authenticated local client cannot
+launch, cancel or shut down the host service. BuildKit still deliberately
+stopped before RUN during this capture.

@@ -14,6 +14,13 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 pub const FIXTURE_WORKLOAD: &str = "00000000000000000000000000000000";
 const CAPABILITIES: &[&str] = &["ping", "shutdown", "request_cancel", "fixture_wait"];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Host,
+    #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+    BuildSnapshot,
+}
+
 pub struct Server {
     boot_id: BootId,
     key: Key,
@@ -89,9 +96,23 @@ impl Server {
         Arc::clone(&self.shutdown)
     }
 
-    pub fn serve(&self, mut stream: Stream) -> Result<(), WireError> {
+    pub fn serve(&self, stream: Stream) -> Result<(), WireError> {
+        self.serve_scoped(stream, Scope::Host)
+    }
+
+    #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+    pub(crate) fn serve_build_snapshot(&self, stream: Stream) -> Result<(), WireError> {
+        self.serve_scoped(stream, Scope::BuildSnapshot)
+    }
+
+    fn serve_scoped(&self, mut stream: Stream, scope: Scope) -> Result<(), WireError> {
         stream.deadline(Some(Instant::now() + FRAME_TIMEOUT));
-        handshake::guest(&mut stream, &self.key, self.boot_id, self.capabilities())?;
+        let capabilities = if scope == Scope::Host {
+            self.capabilities()
+        } else {
+            &["ping", "native_build_snapshot_v1"]
+        };
+        handshake::guest(&mut stream, &self.key, self.boot_id, capabilities)?;
         let boot_id = hex(&self.boot_id);
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         let lease = self
@@ -103,11 +124,15 @@ impl Server {
             .transpose()?;
         let mut pending: Option<Pending<'_>> = None;
         loop {
-            let wait_deadline = pending.as_ref().map(|request| request.due);
+            let wait_deadline = if scope == Scope::Host {
+                pending.as_ref().map(|request| request.due)
+            } else {
+                Some(Instant::now() + FRAME_TIMEOUT)
+            };
             match stream.readable(wait_deadline) {
                 Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-                    let request = pending.take().expect("deadline belongs to a pending wait");
+                Err(error) if error.kind() == io::ErrorKind::TimedOut && pending.is_some() => {
+                    let request = pending.take().expect("pending wait");
                     stream.deadline(Some(Instant::now() + FRAME_TIMEOUT));
                     write_error(
                         &mut stream,
@@ -128,6 +153,15 @@ impl Server {
                 }
                 Err(error) => return Err(error),
             };
+            if scope != Scope::Host && !matches!(frame.kind, Kind::Ping | Kind::BuildSnapshot) {
+                write_error(
+                    &mut stream,
+                    frame.id,
+                    "unsupported_option",
+                    "operation is outside the local build snapshot scope",
+                )?;
+                continue;
+            }
             if pending
                 .as_ref()
                 .is_some_and(|request| request.due <= Instant::now())
@@ -497,6 +531,35 @@ mod tests {
         assert_eq!(response.id, [3; 16]);
         drop(host);
         worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn local_snapshot_connection_cannot_launch_or_stop_host_workloads() {
+        let key = [43; 32];
+        let server = Server::new(key).unwrap();
+        let (client, guest) = UnixStream::pair().unwrap();
+        let owner = Arc::clone(&server);
+        let worker = thread::spawn(move || {
+            let socket = Stream::unix(guest, Some(owner.shutdown())).unwrap();
+            owner.serve_build_snapshot(socket)
+        });
+        let mut stream = Stream::unix(client, None).unwrap();
+        stream.deadline(Some(Instant::now() + Duration::from_secs(2)));
+        let hello = handshake::host(&mut stream, &key).unwrap();
+        let (mut host, host_worker) = endpoint(&server);
+        let control = handshake::host(&mut host, &key).unwrap();
+        assert_eq!(hello.boot_id, control.boot_id);
+        for (id, operation) in [(1, Kind::Launch), (2, Kind::Cancel), (3, Kind::Shutdown)] {
+            send(&mut stream, operation, id, json!({"budget_ms": 500}));
+            expect_error(&mut stream, id, "unsupported_option");
+        }
+        send(&mut stream, Kind::Ping, 4, json!({"budget_ms":500}));
+        assert_eq!(Frame::read(&mut stream).unwrap().kind, Kind::Pong);
+        assert!(!server.shutdown().requested());
+        send(&mut host, Kind::Shutdown, 5, json!({"budget_ms":500}));
+        assert_eq!(Frame::read(&mut host).unwrap().kind, Kind::ShutdownAck);
+        worker.join().unwrap().unwrap();
+        host_worker.join().unwrap().unwrap();
     }
 
     #[test]

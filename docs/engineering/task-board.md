@@ -400,6 +400,11 @@ the live BuildKit mount and the ID-mapped read/write canary.
 
 Title: Implement the minimum pinned BuildKit runtime lifecycle
 
+Evidence: SPEED-080 established guest-local authenticated lookup of the
+actual worker snapshot. Launch, output forwarding, kill and delete
+implementation remain open. See [the guest-local
+boundary](native-buildkit-executor.md#speed-080-guest-local-authentication-boundary).
+
 Acceptance Criteria:
 
 - Route the first standalone RUN, kill and delete to the same guest
@@ -430,6 +435,17 @@ Acceptance Criteria:
   gates. Verify the supported mounts, ownership, and cleanup. Reject
   unsupported requests explicitly and keep cache, RUN, and lifecycle
   results scoped to observed behavior.
+
+### SPEED-080
+
+Title: Authenticate the BuildKit runtime client inside the native guest
+
+Evidence: The pinned worker's capture executable verified the actual
+mounted root through the boot-bound local socket. Peer credentials
+rejected a guest UID 65532 process. Authenticated connections in this
+scope cannot issue workload mutations or stop the host service.
+
+Review: Isolated validation passed. Independent review pending.
 
 ### SPEED-064
 
