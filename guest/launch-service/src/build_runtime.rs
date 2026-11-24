@@ -10,13 +10,14 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde_json::{Value, json};
 
+use crate::build_snapshot::worker_control;
 use crate::build_snapshot::{CONTROL_ADDRESS, valid_id};
 use crate::handshake::{host, random};
 use crate::socket::{Stream, read_key};
 use crate::wire::{ErrorReply, Frame, Kind, WireError};
 
 const EXECUTOR: &str = "/run/conjet/buildkit/worker/runc-native/executor";
-const LOG: &str = "/run/conjet/buildkit/worker/runc-native/executor/runc-log.json";
+const WORKER_EXECUTOR: &str = "/var/lib/buildkit/runc-native/executor";
 const KEY: &str = "/etc/conjet/launch.key";
 const POLL: Duration = Duration::from_millis(10);
 
@@ -31,25 +32,30 @@ enum RuntimeError {
 }
 
 pub fn run() -> Result<i32, Box<dyn Error>> {
+    let worker = Path::new(worker_control::KEY).try_exists()?;
+    let executor = if worker { WORKER_EXECUTOR } else { EXECUTOR };
     let args: Vec<_> = std::env::args().skip(1).collect();
     let words: Vec<_> = args.iter().map(String::as_str).collect();
-    let ["--log", LOG, "--log-format", "json", command @ ..] = words.as_slice() else {
+    let ["--log", log, "--log-format", "json", command @ ..] = words.as_slice() else {
         return Err("unsupported BuildKit runtime global options".into());
     };
+    if *log != format!("{executor}/runc-log.json") {
+        return Err("unexpected BuildKit log path".into());
+    }
     match command {
         ["run", "--bundle", bundle, "--keep", id]
-            if valid_id(id) && *bundle == format!("{EXECUTOR}/{id}") =>
+            if valid_id(id) && *bundle == format!("{executor}/{id}") =>
         {
-            run_workload(id)
+            run_workload(worker, id)
         }
         ["kill", id, "9"] if valid_id(id) => {
-            exchange(id, json!({"action":"kill"}))?;
+            exchange(worker, id, json!({"action":"kill"}))?;
             Ok(0)
         }
         ["delete", id] if valid_id(id) => {
             let expires = Instant::now() + Duration::from_secs(3);
             loop {
-                match exchange(id, json!({"action":"delete"})) {
+                match exchange(worker, id, json!({"action":"delete"})) {
                     Ok(_) => return Ok(0),
                     Err(RuntimeError::Peer { code, .. })
                         if code == "busy" && Instant::now() < expires =>
@@ -64,10 +70,18 @@ pub fn run() -> Result<i32, Box<dyn Error>> {
     }
 }
 
-fn exchange(id: &str, operation: Value) -> Result<Value, RuntimeError> {
-    let address = SocketAddr::from_abstract_name(CONTROL_ADDRESS)?;
-    let key = read_key(Path::new(KEY))?;
-    let mut stream = Stream::unix(UnixStream::connect_addr(&address)?, None)?;
+fn exchange(worker: bool, id: &str, operation: Value) -> Result<Value, RuntimeError> {
+    let (path, socket) = if worker {
+        (
+            worker_control::KEY,
+            UnixStream::connect(worker_control::SOCKET)?,
+        )
+    } else {
+        let address = SocketAddr::from_abstract_name(CONTROL_ADDRESS)?;
+        (KEY, UnixStream::connect_addr(&address)?)
+    };
+    let key = read_key(Path::new(path))?;
+    let mut stream = Stream::unix(socket, None)?;
     stream.deadline(Some(Instant::now() + Duration::from_secs(2)));
     let hello = host(&mut stream, &key)?;
     if !hello
@@ -116,14 +130,15 @@ fn forward(
     Ok(chunk["eof"].as_bool().ok_or("missing build output EOF")?)
 }
 
-fn run_workload(id: &str) -> Result<i32, Box<dyn Error>> {
-    let admitted = exchange(id, json!({"action":"run"}))?;
+fn run_workload(worker: bool, id: &str) -> Result<i32, Box<dyn Error>> {
+    let admitted = exchange(worker, id, json!({"action":"run"}))?;
     let handle = &admitted["handle"];
     let mut stdout = 0;
     let mut stderr = 0;
     let deadline = Instant::now() + Duration::from_secs(33);
     loop {
         let state = exchange(
+            worker,
             id,
             json!({"action":"status","stdout":stdout,"stderr":stderr}),
         )?;

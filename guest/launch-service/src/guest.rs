@@ -112,6 +112,14 @@ pub fn serve(key_path: &Path, profile: Profile) -> Result<(), Box<dyn std::error
     } else {
         None
     };
+    #[cfg(target_arch = "aarch64")]
+    let build_worker = if local.is_some() && crate::image_store::disk_store_enabled() {
+        Some(crate::build_snapshot::worker_control::listen(Arc::clone(
+            &server,
+        ))?)
+    } else {
+        None
+    };
     let mut workers: Vec<thread::JoinHandle<()>> = Vec::with_capacity(MAX_CONNECTIONS);
     println!("conjet-launchd ready");
     let result = loop {
@@ -167,6 +175,12 @@ pub fn serve(key_path: &Path, profile: Profile) -> Result<(), Box<dyn std::error
         local
             .join()
             .map_err(|_| io::Error::other("build snapshot control panicked"))??;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if let Some(worker) = build_worker {
+        worker
+            .join()
+            .map_err(|_| io::Error::other("BuildKit worker control panicked"))??;
     }
     Ok(result?)
 }

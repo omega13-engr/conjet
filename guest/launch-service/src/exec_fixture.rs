@@ -109,7 +109,10 @@ pub(crate) fn receive_event(socket: i32) -> io::Result<Option<(u8, Vec<OwnedFd>)
     Ok(Some((event, received)))
 }
 
-fn pinned_target(pidfd: &OwnedFd, open: impl FnOnce(i32) -> io::Result<File>) -> io::Result<File> {
+pub(crate) fn pinned_target(
+    pidfd: &OwnedFd,
+    open: impl FnOnce(i32) -> io::Result<File>,
+) -> io::Result<File> {
     let live = || {
         checked(unsafe {
             libc::syscall(

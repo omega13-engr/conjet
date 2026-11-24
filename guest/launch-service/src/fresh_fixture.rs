@@ -2619,6 +2619,16 @@ impl FreshFixture {
         }
     }
 
+    pub(crate) fn owns_build_worker(&self, cgroup: &str) -> bool {
+        let ledger = self.ledger.lock().expect("fresh ledger");
+        ledger.active().any(|record| {
+            let id = &record.handle.workload_id;
+            record.buildkit_worker
+                && record.phase == Phase::Running
+                && cgroup == format!("conjet-native-{id}/workloads/active/{id}")
+        })
+    }
+
     fn build_operation(
         self: &Arc<Self>,
         request: BuildRuntimeRequest,

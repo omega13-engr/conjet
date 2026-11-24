@@ -1732,6 +1732,25 @@ Resolve only the requested bundle in that generation's owned cache
 and mount namespace. Verify the detached snapshot identity before
 admission. Fail stale, foreign and unmounted bundle requests.
 
+Evidence: The original Buildx RUN for Go and Node started Conjet's
+runtime helper in six separate builders and authenticated it through a
+private, boot-keyed Unix channel. The supervisor verifies the peer's
+mapped credentials, PID descriptor and live worker cgroup. It currently
+returns the explicit bundle-attachment error before creating a RUN
+workload. Rust encountered a separate 4 GiB scratch-volume exhaustion
+while copying native snapshots. See `SPEED-159/authenticated-runtime-start/`.
+
+### SPEED-165
+
+Title: Attach a live pinned BuildKit root to native RUN admission
+
+Acceptance: Verify and pin the current worker-owned OCI bundle and
+rootfs through kernel descriptors. Apply the original credentials and
+network semantics within the native sandbox. Account for compiler
+processes in the owned build instead of attributing daemon-only
+counters as the whole workload. Prove snapshot writes and teardown for
+RUN, kill and delete, including a canceled worker.
+
 ### SPEED-161
 
 Title: Preserve frozen Dockerfile and base-layer metadata in the worker
@@ -1788,9 +1807,19 @@ Evidence: All 18 cgroup probes in the nine-builder preload run failed
 at host validation because ordinary argv inherited the daemon-only
 authority. The host and guest now use the same argv replacement logic.
 `SPEED-163/build-worker-observations/` verified all 18 original
-observer calls, including the worker's CPU, memory and I/O counters.
+observer calls. They reported CPU and memory counters and marked
+`io.stat` unavailable.
 Those shell observers use the ordinary exec policy, which verifies an
 empty capability set before process exec.
+
+### SPEED-164
+
+Title: Attribute BuildKit block I/O to the owned worker cgroup
+
+Acceptance: Record the original observer's `io.stat` from the worker
+cgroup hierarchy during the private disk-backed build, or document the
+exact kernel capability that prevents collection. Keep VM-wide I/O out
+of the worker measurements.
 
 ### SPEED-091
 

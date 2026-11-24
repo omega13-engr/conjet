@@ -201,7 +201,8 @@ fn prepare_buildkit_worker(root: &CStr) -> io::Result<()> {
         .mode(0o555)
         .open(root.join("usr/bin/conjet-buildkit-runtime"))?;
     io::copy(&mut File::open("/init")?, &mut runtime)?;
-    std::os::unix::fs::symlink("/var/lib/buildkit", root.join("run/conjet/buildkit/worker"))
+    std::os::unix::fs::symlink("/var/lib/buildkit", root.join("run/conjet/buildkit/worker"))?;
+    crate::build_snapshot::worker_control::mount(root)
 }
 
 fn expose_cpu_information(root: &CStr) -> io::Result<()> {

@@ -121,6 +121,35 @@ impl Server {
         self.serve_scoped(stream, Scope::BuildSnapshot)
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) fn serve_build_worker(
+        &self,
+        mut stream: Stream,
+        key: &Key,
+        peer: &std::os::fd::OwnedFd,
+    ) -> Result<(), WireError> {
+        let fresh = self.fresh.as_ref().ok_or(WireError::Unauthorized)?;
+        let cgroup = crate::build_snapshot::worker_control::peer_cgroup(peer)?;
+        if !fresh.owns_build_worker(&cgroup) {
+            return Err(WireError::Unauthorized);
+        }
+        stream.deadline(Some(Instant::now() + FRAME_TIMEOUT));
+        handshake::guest(&mut stream, key, self.boot_id, &["native_build_runtime_v1"])?;
+        let frame = Frame::read(&mut stream)?;
+        if frame.kind != Kind::BuildRuntime
+            || crate::build_snapshot::worker_control::peer_cgroup(peer)? != cgroup
+            || !fresh.owns_build_worker(&cgroup)
+        {
+            return Err(WireError::Unauthorized);
+        }
+        write_error(
+            &mut stream,
+            frame.id,
+            "unsupported_option",
+            "the live BuildKit worker bundle is not attached",
+        )
+    }
+
     fn serve_scoped(&self, mut stream: Stream, scope: Scope) -> Result<(), WireError> {
         stream.deadline(Some(Instant::now() + FRAME_TIMEOUT));
         let capabilities = if scope == Scope::Host {

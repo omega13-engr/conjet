@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 mod bundle;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub(crate) mod mounts;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub(crate) mod worker_control;
 
 pub const MARKER: &str = "/etc/conjet/native-build-snapshot";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]

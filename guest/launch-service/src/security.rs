@@ -423,6 +423,52 @@ impl WorkloadFilter {
             WorkloadPolicy::BuildKitWorker | WorkloadPolicy::BuildKitControl
         );
         if policy == WorkloadPolicy::BuildKitWorker {
+            let denied = RET_ERRNO | libc::EPERM as u32;
+            // BuildKit starts its runtime in a new process group. Permit
+            // setpgid(0, 0), which can only change the caller's own group.
+            let own_process_group = [
+                statement(BPF_LOAD_WORD, 16),
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: 0,
+                    jt: 1,
+                    jf: 0,
+                },
+                statement(BPF_RETURN, denied),
+                statement(BPF_LOAD_WORD, 24),
+                next_or_skip(0),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, denied),
+            ];
+            program.push(libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                k: libc::SYS_setpgid as u32,
+                jt: 0,
+                jf: own_process_group.len() as u8,
+            });
+            program.extend(own_process_group);
+            // The pinned launcher gives its child SIGKILL on parent death.
+            let parent_death = [
+                statement(BPF_LOAD_WORD, 16),
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: libc::PR_SET_PDEATHSIG as u32,
+                    jt: 1,
+                    jf: 0,
+                },
+                statement(BPF_RETURN, denied),
+                statement(BPF_LOAD_WORD, 24),
+                next_or_skip(libc::SIGKILL as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, denied),
+            ];
+            program.push(libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                k: libc::SYS_prctl as u32,
+                jt: 0,
+                jf: parent_death.len() as u8,
+            });
+            program.extend(parent_death);
             for syscall in [
                 libc::SYS_flock,
                 libc::SYS_fchmod,
