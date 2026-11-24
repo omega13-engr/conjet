@@ -5,15 +5,23 @@ from pathlib import Path
 import re
 import runpy
 import subprocess
+from urllib.parse import quote
 import uuid
 
 MATCHED = runpy.run_path(str(Path(__file__).with_name('native-docker-comparison.py')))
 TOOLS = MATCHED['TOOLS']
 FLAGS = ['--network', 'none', '--memory', '16m', '--pids-limit', '4', '--cpus', '0.5']
+SCENARIOS = Path(__file__).with_name('scenarios') / 'docker-comparison-v1.json'
+DEFAULT_PROBE = ('printf "%s:%s\\n" "$(id -u)" "$(id -g)"; '
+                 'read memory </sys/fs/cgroup/memory.max; '
+                 'read pids </sys/fs/cgroup/pids.max; '
+                 'read quota period </sys/fs/cgroup/cpu.max; '
+                 'printf "%s:%s:%s:%s\\n" "$memory" "$pids" "$quota" "$period"')
+DEFAULT_RESULT = '0:0\n16777216:4:50000:100000\n'
 
 
-def collect(endpoint, peer, docker, env, output):
-    report = {'passed': False, 'cases': {}}
+def collect(endpoint, peer, docker, env, output, *, all_images=False):
+    report = {'passed': False, 'cases': {}, 'image_defaults': {}}
     cases = report['cases']
     image = MATCHED['IMAGE']['ref']
     token = uuid.uuid4().hex[:12]
@@ -78,11 +86,41 @@ def collect(endpoint, peer, docker, env, output):
                                   ('added_capability', '0:0', {'CapAdd': ['SYS_ADMIN']})):
             body = {'Image': image, 'User': user, 'Cmd': ['/bin/true'],
                     'HostConfig': {**MATCHED['HOST_CONFIG'], **extra}}
+            name = f'cj-id-{token}-{case}'
             rejected = TOOLS['api'](connection, 'POST',
-                                    f'{MATCHED["PREFIX"]}/containers/create?name=cj-id-{token}-{case}',
+                                    f'{MATCHED["PREFIX"]}/containers/create?name={name}',
                                     (400,), body)
             cases[case] = {'expected_status': 400, 'response': rejected}
+            TOOLS['api'](connection, 'GET', f'{MATCHED["PREFIX"]}/containers/{name}/json', (404,))
+            cases[case]['absent_after_rejection'] = True
         report['passed'] = True
+        if all_images:
+            for case, descriptor in json.loads(SCENARIOS.read_bytes())['images'].items():
+                name = f'cj-id-{token}-default-{case}'
+                argv = ['run', '--rm', '--pull', 'missing', '--name', name, *FLAGS,
+                        '--entrypoint', '/bin/sh', descriptor['ref'], '-ec', DEFAULT_PROBE]
+                row = {'argv': argv}
+                report['image_defaults'][case] = row
+                try:
+                    result = subprocess.run([*docker, *argv], env=env, capture_output=True,
+                                            text=True, timeout=300)
+                    row.update(exit=result.returncode, stdout=result.stdout, stderr=result.stderr)
+                    if result.returncode == 0 and result.stdout == DEFAULT_RESULT:
+                        row['guest'] = MATCHED['native_terminal'](connection, name, handles)
+                    else:
+                        row['error'] = 'default image credentials or cgroup witness failed'
+                except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                    row['error'] = str(error)
+                    connection.close()
+                finally:
+                    TOOLS['api'](connection, 'DELETE', f'{MATCHED["PREFIX"]}/containers/{name}?force=true',
+                                 (204, 404))
+                    if case != 'alpine':
+                        ref = quote(descriptor['ref'], safe='')
+                        path = f'{MATCHED["PREFIX"]}/images/{ref}'
+                        TOOLS['api'](connection, 'DELETE', path, (200, 404))
+                        TOOLS['api'](connection, 'GET', path + '/json', (404,))
+                        row['image_released'] = True
     finally:
         connection.close()
         (output / 'native-credentials.json').write_text(json.dumps(report, indent=2) + '\n')

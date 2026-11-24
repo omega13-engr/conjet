@@ -494,13 +494,38 @@ def evaluate(root, revision, release):
     folder, verified = lane('credentials')
     credentials = read(folder, 'native-credentials.json')
     if verified and credentials.get('passed'):
-        pass_case('credentials/reject', 'API denied unmapped IDs, privileged create and capability addition',
-                  'credentials')
-        required['credentials/default'].update(reason='Alpine default passed; remaining pinned images lack release evidence',
-                                               evidence=[str(folder)])
-        required['credentials/explicit'].update(reason='numeric pairs passed; account lookup is unqualified',
-                                                evidence=[str(folder)])
         cases = credentials.get('cases', {})
+        rejected = ('unmapped_uid', 'unmapped_gid', 'unknown_user', 'unknown_group',
+                    'privileged', 'added_capability')
+        if all(cases.get(case, {}).get('expected_status') == 400
+               and cases.get(case, {}).get('absent_after_rejection') is True
+               for case in rejected):
+            pass_case('credentials/reject', 'API denied invalid identity and privilege requests before admission',
+                      'credentials')
+        explicit = {
+            'numeric-u': 1234, 'numeric-g': 4321, 'named-u': 65534, 'named-g': 65534,
+            'named-group-u': 0, 'named-group-g': 65533,
+            'numeric-primary-group-u': 65534, 'numeric-primary-group-g': 65534,
+            'missing-numeric-u': 61234, 'missing-numeric-g': 0,
+            'fixture-u': 65532, 'fixture-g': 65532,
+        }
+        if (all(cases.get(case, {}).get('stdout') == f'{identity}\n'
+                and cases.get(case, {}).get('guest', {}).get('conjet.guest_cleanup') == 'complete'
+                for case, identity in explicit.items())
+                and all(cases.get('exec_named_inherited_' + flag, {}).get('stdout') == '65534\n'
+                        for flag in ('u', 'g'))
+                and cases.get('exec_named_witness', {}).get('conjet.guest_cleanup') == 'complete'):
+            pass_case('credentials/explicit', 'numeric and named UID/GID semantics and inherited exec verified',
+                      'credentials')
+        defaults = credentials.get('image_defaults', {})
+        if all(defaults.get(image, {}).get('exit') == 0
+               and defaults[image].get('stdout') == '0:0\n16777216:4:50000:100000\n'
+               and defaults[image].get('guest', {}).get('image') == descriptor['ref']
+               and defaults[image]['guest'].get('conjet.guest_cleanup') == 'complete'
+               and (image == 'alpine' or defaults[image].get('image_released') is True)
+               for image, descriptor in scenarios['images'].items()):
+            pass_case('credentials/default', 'all frozen images reported default IDs and effective cgroup limits',
+                      'credentials')
         if all(cases.get(case, {}).get('conjet.guest_cleanup') == 'complete'
                for case in ('matched_cli', 'matched_api')):
             pass_case('regression/matched-identity',

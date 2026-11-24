@@ -1448,6 +1448,13 @@ absent from the account file used group zero. Exec inherited the real
 resolved UID and GID. Unknown names and unmapped numeric IDs were
 rejected before launch. See `SPEED-141/credentials/`.
 
+The isolated qualification in `SPEED-141/frozen-image-identities-cleanup/`
+also verified every pinned image's default UID/GID and read its effective
+16 MiB memory, four-task and half-CPU limits in the guest. The original
+explicit probes and inherited exec passed. All six denied requests left
+no container object. The diagnostic used digest-verified offline inputs,
+released each nonboot image and left the production session unchanged.
+
 ### SPEED-142
 
 Title: Accept the frozen Compose healthcheck retry count
@@ -1845,10 +1852,11 @@ mapped namespace IDs and enforce the original resources, capabilities,
 network policy, seccomp and cleanup. Reject unmapped IDs and privilege
 expansion. Exercise each workload, API/CLI boundary and network pair.
 
-Evidence: The isolated release verified Alpine default and explicit
-numeric credentials, inherited exec identity, and unmapped ID and
-privilege rejection. Named-account resolution and frozen lifecycle
-fixtures remain open. [Credential evidence](native-compatibility.md#speed-091-mapped-oci-credentials)
+Evidence: SPEED-141 covers all seven pinned default identities, explicit
+numeric and named selectors, exec inheritance, and rejection without
+admission. The complete frozen lifecycle still requires qualification on
+the final optimized artifacts.
+[Credential evidence](native-compatibility.md#speed-091-mapped-oci-credentials)
 
 ### SPEED-092
 

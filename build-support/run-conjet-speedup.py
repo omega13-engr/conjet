@@ -593,7 +593,9 @@ def native_session(args, root):
         with (output / 'adapter.stderr').open('w') as log:
             bridge = subprocess.Popen(bridge_command, env=env, stdin=subprocess.DEVNULL,
                                       stdout=subprocess.PIPE, stderr=log, text=True)
-        ready = await_ready(bridge, 10)
+        # The offline credential lane verifies every pinned layout before binding.
+        ready = await_ready(bridge, 60 if args.diagnostics == 'credentials'
+                            and args.offline_oci_layout else 10)
         if not python_owner and processes().get(bridge.pid) != args.core:
             raise RuntimeError('unexpected Rust Docker owner executable')
         with socket.socket(socket.AF_UNIX) as probe:
@@ -629,7 +631,8 @@ def native_session(args, root):
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
             elif args.diagnostics == 'credentials':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-credentials.py'))
-                diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output,
+                                      all_images=args.native_disk_images and args.native_public_images)
             elif args.diagnostics == 'resources':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-resources.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
@@ -646,9 +649,9 @@ def native_session(args, root):
                                       disk_store=store if args.native_disk_images else None)
             elif args.diagnostics == 'compatibility-preflight':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-compatibility-preflight.py'))
-                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite,
                 if args.compatibility_build_bases:
                     report['compatibility_build_bases'] = str(args.compatibility_build_bases)
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite,
                                       lifecycle_group=args.compatibility_lifecycle_group,
                                       build_bases=args.compatibility_build_bases)
             elif args.diagnostics == 'guest-bridge':
@@ -823,9 +826,9 @@ def main():
                                  'storage_network', 'stress'))
     parser.add_argument('--compatibility-lifecycle-group',
                         help='run one complete frozen lifecycle group in its own Core boot')
-    parser.add_argument('--native-bind-storage', action='store_true')
     parser.add_argument('--compatibility-build-bases', type=Path,
                         help='use verified OCI layouts for a separate offline build diagnostic')
+    parser.add_argument('--native-bind-storage', action='store_true')
     parser.add_argument('--native-routed-bridge', action='store_true')
     parser.add_argument('--offline-oci-layout', type=Path, action='append', default=[])
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
@@ -860,19 +863,19 @@ def main():
     args = parser.parse_args()
     if bool(args.compatibility_suite) != (args.diagnostics == 'compatibility-preflight'):
         parser.error('select one frozen suite for the native compatibility preflight')
-    if args.native_bind_storage and (
     if args.compatibility_build_bases and (
             args.compatibility_suite != 'builds' or not args.native_disk_images
             or args.compatibility_build_bases.resolve(strict=True) != args.compatibility_build_bases
             or not args.compatibility_build_bases.is_relative_to(SCRATCH)):
         parser.error('offline build bases require the native builds suite and a canonical ExternalSSD bundle')
+    if args.native_bind_storage and (
             args.compatibility_suite != 'storage_network' or args.docker_owner != 'rust'):
         parser.error('bind storage requires the isolated native storage suite')
     if args.native_routed_bridge and args.diagnostics != 'docker-network':
         parser.error('select the routed bridge only for the network diagnostic')
     if args.offline_oci_layout and (
             (args.compatibility_suite not in ('registry-service', 'builds', 'compose', 'storage_network', 'stress')
-             and args.diagnostics != 'exec')
+             and args.diagnostics not in ('exec', 'credentials'))
             or not args.native_public_images or not args.native_disk_images
             or any(layout.resolve(strict=True) != layout or not layout.is_relative_to(SCRATCH)
                    for layout in args.offline_oci_layout)):
@@ -911,7 +914,7 @@ def main():
     if args.native_latency_idle and not (args.matched_output and args.native_latency_trace):
         parser.error('an idle latency window requires matched traced timing')
     if args.native_disk_images and (
-            args.diagnostics not in ('archive', 'oci-import', 'public-images', 'exec', 'build-snapshot',
+            args.diagnostics not in ('archive', 'oci-import', 'public-images', 'exec', 'credentials', 'build-snapshot',
                                      'build-bundle', 'compatibility-preflight')
             or args.legacy_baseline or not args.native_memd or args.docker_owner != 'rust'):
         parser.error('the disk image store requires a private native Core image diagnostic')
