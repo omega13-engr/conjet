@@ -153,6 +153,8 @@ enum AdmissionSpan {
         sequence: u64,
         h1_ns: u128,
         h2_ns: u128,
+        first_evaluated_ns: Option<u128>,
+        capacity_held: bool,
         h3_ns: u128,
         observed_to_approval_ns: u128,
         approval_to_send_ns: u128,
@@ -411,7 +413,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     let force_stop = Arc::new(AtomicBool::new(false));
     let admission = options
         .core_dynamic_memory
-        .then(|| Arc::new(NativeMemoryAdmission::default()));
+        .then(|| Arc::new(NativeMemoryAdmission::new(options.trace_core_admission)));
     let finished = AtomicBool::new(false);
     let orderly = std::thread::scope(|scope| -> anyhow::Result<bool> {
         let control_stop = Arc::clone(&force_stop);
@@ -642,6 +644,8 @@ fn poll_native_admission(
                 sequence: grant.admission.sequence,
                 h1_ns: trace.ns(grant.observed_at),
                 h2_ns: trace.ns(grant.approved_at),
+                first_evaluated_ns: grant.first_evaluated_at.map(|stamp| trace.ns(stamp)),
+                capacity_held: grant.capacity_held,
                 h3_ns: trace.ns(sent),
                 observed_to_approval_ns: grant
                     .approved_at

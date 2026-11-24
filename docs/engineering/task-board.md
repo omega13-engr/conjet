@@ -6,8 +6,9 @@ Current iteration: [native engine implementation plan](native-engine-v2-plan.md)
 
 ## Current Docker performance priority
 
-Latency investigation: [native diagnostic plan](native-latency-diagnostic-plan.md),
-SPEED-081–083. These diagnose fresh launch independently of BuildKit completion.
+Latency investigation: [native diagnostic plan](native-latency-diagnostic-plan.md).
+SPEED-081–083 met the isolated warm median target. SPEED-084–085 address
+the remaining warm API tail before BuildKit and full comparison qualification.
 
 The user now authorizes replacing dockerd/containerd/runc in the candidate
 with Conjet's native Rust engine. Preserve Core dynamic memory in full.
@@ -173,6 +174,41 @@ review pending.
 Next Action: The default isolated release uses the authenticated watch
 on capable guests. The full comparison remains in SPEED-065.
 
+
+### SPEED-084
+
+Title: Attribute the warm native API p99 outliers
+
+Acceptance Criteria:
+
+- Freeze the SPEED-083 release. Retain per-request wait, admission,
+  VMM controller evaluation, setup, output and cleanup stages.
+  Compare traced and untraced release boots and identify the dominant
+  span in the slowest requests. Separate capacity/pressure holds from
+  scheduling delays. Preserve the Core controller and safety tick.
+
+Evidence: The SPEED-083 Kiri pilot reported native API p99 of
+18.76–20.13 ms. The two longest operations in its separate trace spent
+19.92 and 21.31 ms between host observation publication and approval.
+In two 1,000-operation traces, the ten slowest requests per boot spent
+12.67–29.97 ms waiting for the first Core evaluation. Approval followed
+within 0.01 ms and the accepted observations had no capacity holds.
+See [the tail attribution](native-latency-diagnostic-results.md#speed-084).
+
+Review: Isolated attribution passed. Independent review pending.
+
+### SPEED-085
+
+Title: Correct the attributed warm native admission tail
+
+Depends on task: SPEED-084 attribution, passed in isolation.
+
+Acceptance Criteria:
+
+- Change the measured transition, keep the 25 ms safety tick, and
+  test stale, empty and coalesced demand. Record the release p50, p95
+  and p99 in two untraced A/B pairs. Requalify reduced growth, pressure,
+  idle shrink, data integrity and verified cleanup before adoption.
 
 ### SPEED-057
 

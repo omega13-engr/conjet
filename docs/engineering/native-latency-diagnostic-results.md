@@ -192,3 +192,30 @@ SPEED-065 matrix still depends on SPEED-063.
 
 Raw data, process inventories, and release hashes are in
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-083/`.
+
+## SPEED-084
+
+The frozen SPEED-083 release recorded p50/p95/p99 of 2.76/3.85/16.21 ms
+untraced and 2.75/3.98/16.31 ms traced, with 1,000 operations per boot.
+The added Core-evaluation trace ran a 1,000-operation control and two
+1,000-operation traced boots. All operations and warmups passed with
+verified cleanup and no dropped trace records. The p50 was
+2.82 ms in the control and 2.80–2.82 ms traced. Tail results varied
+across boots, so attribution uses individual joined requests.
+
+All ten slowest requests in each expanded trace waited 12.67–29.97 ms
+from host publication to the first VMM Core evaluation. Core approved
+each in under 0.01 ms from that evaluation, with no capacity hold for the
+accepted observation. Guest discovery, setup, output and cleanup were
+shorter in those requests. The frozen trace did show occasional other
+outliers, including one 16.24 ms lifecycle with 0.23 ms publication to
+approval. The qualification therefore targets controller scheduling
+while retaining complete stage evidence for remaining outliers.
+
+The host publishes the snapshot on the admission thread after receiving
+the guest frame. A transport wake can service that frame before the new
+snapshot has been published. The observed delay to the next Core loop
+supports testing an explicit wake after fresh pending publication.
+
+Raw data is in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-084/`.

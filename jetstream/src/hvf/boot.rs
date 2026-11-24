@@ -3133,6 +3133,8 @@ impl HvfBootRunner {
                     && core_balloon_target_converged(&shared)
                 {
                     gate.allow(seen);
+                } else {
+                    gate.note_capacity_hold(seen);
                 }
             }
             if let Err(error) =

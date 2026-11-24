@@ -73,8 +73,13 @@ def join(sample, observations, grants):
         'api_wait': sample['stages_ns'].get('wait'),
         'lifecycle': sample['elapsed_ns'],
     })
+    if 'first_evaluated_ns' in approval:
+        evaluated = approval['first_evaluated_ns']
+        spans['publication_to_first_core_evaluation'] = span(approval['h1_ns'], evaluated)
+        spans['first_core_evaluation_to_approval'] = span(evaluated, approval['h2_ns'])
     return {'key': key, 'owned': observed['owned'], 'pending': observed['pending'],
-            'observations': len(observations[key]), 'spans_ns': spans}
+            'observations': len(observations[key]), 'spans_ns': spans,
+            'capacity_held': approval.get('capacity_held')}
 
 
 def percentiles(values):

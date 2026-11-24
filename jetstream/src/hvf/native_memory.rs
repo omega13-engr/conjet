@@ -12,12 +12,16 @@ struct Sample {
     owned: usize,
     pending: Vec<Admission>,
     approved_at: Option<Instant>,
+    first_evaluated_at: Option<Instant>,
+    capacity_held: bool,
 }
 
 pub struct Grant {
     pub admission: Admission,
     pub observed_at: Instant,
     pub approved_at: Instant,
+    pub first_evaluated_at: Option<Instant>,
+    pub capacity_held: bool,
 }
 
 /// Connects a boot-scoped authenticated guest poller to the VMM's Core policy.
@@ -25,9 +29,17 @@ pub struct Grant {
 pub struct NativeMemoryAdmission {
     sample: Mutex<Option<Sample>>,
     approval: Condvar,
+    trace: bool,
 }
 
 impl NativeMemoryAdmission {
+    pub fn new(trace: bool) -> Self {
+        Self {
+            trace,
+            ..Self::default()
+        }
+    }
+
     pub fn publish(&self, report: Observation, now: Instant) -> bool {
         let valid = report.owned <= CAPACITY
             && report.pending.len() <= report.owned
@@ -48,6 +60,8 @@ impl NativeMemoryAdmission {
             owned: report.owned,
             pending: report.pending,
             approved_at: None,
+            first_evaluated_at: None,
+            capacity_held: false,
         });
         valid
     }
@@ -57,15 +71,24 @@ impl NativeMemoryAdmission {
     }
 
     pub(super) fn observe(&self, now: Instant) -> Option<(Instant, usize, bool)> {
-        let sample = self.sample.lock().expect("native memory admission");
+        let mut sample = self.sample.lock().expect("native memory admission");
         let sample = sample
-            .as_ref()
+            .as_mut()
             .filter(|sample| now.saturating_duration_since(sample.seen) < MAX_AGE)?;
-        Some((
-            sample.seen,
-            sample.owned,
-            !sample.pending.is_empty() && sample.approved_at.is_none(),
-        ))
+        let pending = !sample.pending.is_empty() && sample.approved_at.is_none();
+        if self.trace && pending {
+            sample.first_evaluated_at.get_or_insert_with(Instant::now);
+        }
+        Some((sample.seen, sample.owned, pending))
+    }
+
+    pub(super) fn note_capacity_hold(&self, seen: Instant) {
+        if self.trace {
+            let mut sample = self.sample.lock().expect("native memory admission");
+            if let Some(current) = sample.as_mut().filter(|current| current.seen == seen) {
+                current.capacity_held = true;
+            }
+        }
     }
 
     pub(super) fn allow(&self, seen: Instant) {
@@ -102,6 +125,8 @@ impl NativeMemoryAdmission {
             .and_then(|sample| {
                 let approved_at = sample.approved_at?;
                 let observed_at = sample.seen;
+                let first_evaluated_at = sample.first_evaluated_at;
+                let capacity_held = sample.capacity_held;
                 Some(
                     std::mem::take(&mut sample.pending)
                         .into_iter()
@@ -109,6 +134,8 @@ impl NativeMemoryAdmission {
                             admission,
                             observed_at,
                             approved_at,
+                            first_evaluated_at,
+                            capacity_held,
                         })
                         .collect(),
                 )
@@ -167,6 +194,20 @@ mod tests {
         gate.invalidate();
         assert!(gate.take_grants(next).is_empty());
         assert!(gate.observe(next).is_none());
+    }
+
+    #[test]
+    fn traced_grant_distinguishes_first_evaluation_and_capacity_hold() {
+        let gate = NativeMemoryAdmission::new(true);
+        let seen = Instant::now();
+        assert!(gate.publish(pending(1), seen));
+        assert_eq!(gate.observe(Instant::now()), Some((seen, 1, true)));
+        gate.note_capacity_hold(seen);
+        gate.allow(seen);
+        let grant = gate.take_grants(Instant::now()).pop().unwrap();
+        let evaluated = grant.first_evaluated_at.unwrap();
+        assert!(seen <= evaluated && evaluated <= grant.approved_at);
+        assert!(grant.capacity_held);
     }
 
     #[test]
