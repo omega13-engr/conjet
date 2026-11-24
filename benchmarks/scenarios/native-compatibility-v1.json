@@ -1,0 +1,394 @@
+{
+  "schema_version": 1,
+  "source_revision": "4a6ec46021591dd8585a1d760d348ecf4e9eb146",
+  "sources": {
+    "benchmarks/scenarios/docker-comparison-v1.json": "572fa7ec2ff060d488daa8adaccc0bb5ffeb9ed0adcd6d009873f86f36826d19",
+    "benchmarks/docker-comparison-workloads.py": "413e689977d4d146d01ac5e1125569a8f032a42a02db3cfa1ec00f3484d071ce",
+    "benchmarks/docker-comparison-matrix.py": "b3a3a38fb61b4ab5e3302a113e8e1c55832779b39b37b8df599e5abf790161ff"
+  },
+  "groups": [
+    {
+      "task": "SPEED-090",
+      "suite": "images",
+      "effective_policy": "Pinned Alpine and Node; linux/arm64 config and manifest digests",
+      "expected": "Digest, platform, archive SHA-256 and executable output agree",
+      "cleanup": "Owned tags, images and archive removed",
+      "cases": [
+        {
+          "id": "images/public-pull",
+          "operation": "Pull and inspect each original registry reference, then re-pull cached"
+        },
+        {
+          "id": "images/tag",
+          "operation": "Tag the staged image and resolve both ID and tag"
+        },
+        {
+          "id": "images/save-load",
+          "operation": "Save, remove tag, load, inspect and run the original fixture"
+        },
+        {
+          "id": "images/registry-cold",
+          "operation": "Pull controlled one-layer and three-layer tags with absent content; witness all required transfers"
+        },
+        {
+          "id": "images/registry-warm",
+          "operation": "Pull and run known content with the original warm cache"
+        },
+        {
+          "id": "images/registry-faults",
+          "operation": "Reject corrupt/interrupted descriptors, clean pending state, retry verified bytes"
+        },
+        {
+          "id": "images/shared-layer",
+          "operation": "Retain shared content and refuse destructive removal while a container references the image"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-091",
+      "suite": "lifecycle",
+      "effective_policy": "Frozen lifecycle_limits; default image credentials; explicit identities verified separately; namespaces and Core",
+      "expected": "Pinned image, stdout/stderr and actual exit match the selected fixture",
+      "cleanup": "Unique guest generation, drained output and removal; no owned processes",
+      "cases": [
+        {
+          "id": "lifecycle/alpine-true/none/api",
+          "operation": "API create/start/wait/remove equivalent for alpine-true on none; verify exit 0 and empty output"
+        },
+        {
+          "id": "lifecycle/alpine-true/none/cli",
+          "operation": "CLI create/start/wait/remove equivalent for alpine-true on none; verify exit 0 and empty output"
+        },
+        {
+          "id": "lifecycle/alpine-true/bridge/api",
+          "operation": "API create/start/wait/remove equivalent for alpine-true on bridge; verify exit 0 and empty output"
+        },
+        {
+          "id": "lifecycle/alpine-true/bridge/cli",
+          "operation": "CLI create/start/wait/remove equivalent for alpine-true on bridge; verify exit 0 and empty output"
+        },
+        {
+          "id": "lifecycle/alpine-stream-exit/none/api",
+          "operation": "API create/start/wait/remove equivalent for alpine-stream-exit on none; verify separate docker-stdout/docker-stderr and exit 23"
+        },
+        {
+          "id": "lifecycle/alpine-stream-exit/none/cli",
+          "operation": "CLI create/start/wait/remove equivalent for alpine-stream-exit on none; verify separate docker-stdout/docker-stderr and exit 23"
+        },
+        {
+          "id": "lifecycle/alpine-stream-exit/bridge/api",
+          "operation": "API create/start/wait/remove equivalent for alpine-stream-exit on bridge; verify separate docker-stdout/docker-stderr and exit 23"
+        },
+        {
+          "id": "lifecycle/alpine-stream-exit/bridge/cli",
+          "operation": "CLI create/start/wait/remove equivalent for alpine-stream-exit on bridge; verify separate docker-stdout/docker-stderr and exit 23"
+        },
+        {
+          "id": "lifecycle/common-static/none/api",
+          "operation": "API create/start/wait/remove equivalent for common-static on none; verify exit 0 and empty output"
+        },
+        {
+          "id": "lifecycle/common-static/none/cli",
+          "operation": "CLI create/start/wait/remove equivalent for common-static on none; verify exit 0 and empty output"
+        },
+        {
+          "id": "lifecycle/common-static/bridge/api",
+          "operation": "API create/start/wait/remove equivalent for common-static on bridge; verify exit 0 and empty output"
+        },
+        {
+          "id": "lifecycle/common-static/bridge/cli",
+          "operation": "CLI create/start/wait/remove equivalent for common-static on bridge; verify exit 0 and empty output"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-091",
+      "suite": "credentials",
+      "effective_policy": "Native namespace UID/GID mapping, capabilities, no-new-privileges and seccomp",
+      "expected": "Effective IDs and cgroup limits measured inside workload",
+      "cleanup": "Denied requests leave no admitted workloads",
+      "cases": [
+        {
+          "id": "credentials/default",
+          "operation": "Run with frozen image/default user and group, including namespace root"
+        },
+        {
+          "id": "credentials/explicit",
+          "operation": "Verify explicit numeric/name user and group semantics as needed by the frozen fixtures"
+        },
+        {
+          "id": "credentials/reject",
+          "operation": "Reject unmapped IDs, capabilities escalation and unauthorized privileged requests"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-092",
+      "suite": "builds",
+      "effective_policy": "Pinned Buildx Docker-container driver, worker identity, Linux ARM64, native executor and private guest cache",
+      "expected": "Worker bootstraps and owns the named cache; API and worker identity evidence",
+      "cleanup": "Owned worker, cache and builder definition removed",
+      "cases": [
+        {
+          "id": "builds/bootstrap",
+          "operation": "Create/bootstrap/inspect/remove worker using unmodified pinned client; verify requested privilege policy, backing volume and API exec transport"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-093",
+      "suite": "builds",
+      "effective_policy": "Pinned base, network none, real language tools, archive exporter and native executor",
+      "expected": "Expected source/dependency output, cache behavior and digest-qualified export/load",
+      "cleanup": "No residual build runtime, builder, cache volume or exported aliases",
+      "cases": [
+        {
+          "id": "builds/failure-cancel",
+          "operation": "Observe failing RUN exit and cancel a live build through the real worker API with verified cleanup"
+        },
+        {
+          "id": "builds/docker-build-api",
+          "operation": "Exercise the native Docker POST /build path with verified build output and cleanup"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-094",
+      "suite": "compose",
+      "effective_policy": "Frozen Node/Redis images, service_limits, original healthcheck/network/volume and ephemeral loopback port",
+      "expected": "Redis-backed transaction/readiness, logs and persisted visits through service changes",
+      "cleanup": "Down removes owned services, network, publication and volume",
+      "cases": [
+        {
+          "id": "compose/up",
+          "operation": "Run the original Compose up, health order, service DNS and loopback transaction"
+        },
+        {
+          "id": "compose/no-change",
+          "operation": "Repeat up; assert no-change behavior and transaction"
+        },
+        {
+          "id": "compose/recreate",
+          "operation": "Force recreate app without Redis; verify transactions and data"
+        },
+        {
+          "id": "compose/scale",
+          "operation": "Scale app to two replicas and probe each published endpoint"
+        },
+        {
+          "id": "compose/restart",
+          "operation": "Restart Redis and verify recovered visits and healthy app replicas"
+        },
+        {
+          "id": "compose/logs-down",
+          "operation": "Verify service logs, down and removal of owned network and volume"
+        },
+        {
+          "id": "compose/rust/empty",
+          "operation": "Original rust empty build-export, load and run; stdout source-one dep-one plus newline"
+        },
+        {
+          "id": "compose/rust/unchanged",
+          "operation": "Original rust unchanged build-export, load and run; stdout source-one dep-one plus newline"
+        },
+        {
+          "id": "compose/rust/source",
+          "operation": "Original rust source build-export, load and run; stdout source-two dep-one plus newline"
+        },
+        {
+          "id": "compose/rust/dependency",
+          "operation": "Original rust dependency build-export, load and run; stdout source-two dep-two plus newline"
+        },
+        {
+          "id": "compose/go/empty",
+          "operation": "Original go empty build-export, load and run; stdout source-one dep-one plus newline"
+        },
+        {
+          "id": "compose/go/unchanged",
+          "operation": "Original go unchanged build-export, load and run; stdout source-one dep-one plus newline"
+        },
+        {
+          "id": "compose/go/source",
+          "operation": "Original go source build-export, load and run; stdout source-two dep-one plus newline"
+        },
+        {
+          "id": "compose/go/dependency",
+          "operation": "Original go dependency build-export, load and run; stdout source-two dep-two plus newline"
+        },
+        {
+          "id": "compose/node/empty",
+          "operation": "Original node empty build-export, load and run; stdout source-one dep-one plus newline"
+        },
+        {
+          "id": "compose/node/unchanged",
+          "operation": "Original node unchanged build-export, load and run; stdout source-one dep-one plus newline"
+        },
+        {
+          "id": "compose/node/source",
+          "operation": "Original node source build-export, load and run; stdout source-two dep-one plus newline"
+        },
+        {
+          "id": "compose/node/dependency",
+          "operation": "Original node dependency build-export, load and run; stdout source-two dep-two plus newline"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-095",
+      "suite": "control",
+      "effective_policy": "Frozen live Alpine process; original security, output and transfer bounds",
+      "expected": "CLI/API responses, streaming and byte identity match fixture",
+      "cleanup": "Owned exec and attach sessions released; parent preserves lifecycle; remove witness",
+      "cases": [
+        {
+          "id": "control/exec",
+          "operation": "CLI/API noninteractive exec, inspect, streams and exit 23"
+        },
+        {
+          "id": "control/exec-large",
+          "operation": "Return full 128 KiB /dev/zero output with no truncation"
+        },
+        {
+          "id": "control/exec-tty",
+          "operation": "Report a real TTY on docker exec"
+        },
+        {
+          "id": "control/inspect-list",
+          "operation": "CLI list and inspect plus API inspect show same persistent identity"
+        },
+        {
+          "id": "control/attach",
+          "operation": "Verify attached output/event order, disconnect and parent still-running recovery"
+        },
+        {
+          "id": "control/cp",
+          "operation": "Copy 4 KiB and 8 MiB in both directions and match SHA-256"
+        },
+        {
+          "id": "control/stop-kill-restart",
+          "operation": "Verify Docker lifecycle controls and fresh guest generation on restart"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-096",
+      "suite": "storage_network",
+      "effective_policy": "Frozen Node, 4 KiB/16 MiB data, exact mounts and 60 s steady-state service interval",
+      "expected": "Checksum equality, writable layer, volume reopen or host visibility; DNS and TCP success",
+      "cleanup": "Owned stores, bind directory, network and workload cleaned",
+      "cases": [
+        {
+          "id": "storage_network/writable-layer",
+          "operation": "Run original writable-layer dataset, fsync and readback"
+        },
+        {
+          "id": "storage_network/named-volume",
+          "operation": "Run original /dataset named volume and read checksum from another container"
+        },
+        {
+          "id": "storage_network/bind",
+          "operation": "Run original exclusive ExternalSSD /dataset bind and verify host checksum"
+        },
+        {
+          "id": "storage_network/service",
+          "operation": "Run original Node/Redis DNS, TCP, transaction persistence and service churn"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-097",
+      "suite": "stress",
+      "effective_policy": "Frozen UID defaults, limits and concurrency; 32/64 MiB survivor and limit pair; swap 0",
+      "expected": "Successful constrained churn; cgroup OOM exit 137 and unchanged survivor",
+      "cleanup": "Drain all task-owned generations and verify successful fresh recovery",
+      "cases": [
+        {
+          "id": "stress/concurrency-1",
+          "operation": "Original one-way workload"
+        },
+        {
+          "id": "stress/concurrency-2",
+          "operation": "Original two-way workload"
+        },
+        {
+          "id": "stress/concurrency-4",
+          "operation": "Original four-way workload"
+        },
+        {
+          "id": "stress/concurrency-8",
+          "operation": "Original eight-way workload"
+        },
+        {
+          "id": "stress/oom-recover",
+          "operation": "Verify effective memory/swap limit, OOM flag and exit, survivor bytes and fresh recovery"
+        },
+        {
+          "id": "stress/cancellation",
+          "operation": "Cancel concurrent owned work and verify generation, data and cleanup"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-098",
+      "suite": "memory",
+      "effective_policy": "Actual Core governor, safety tick and owned balloon/page-reporting backing",
+      "expected": "Reduced-to-full growth on demand and independent pressure, data integrity and idle shrink",
+      "cleanup": "No unauthorized reclaim, ownership residuals or reclaim errors",
+      "cases": [
+        {
+          "id": "memory/growth",
+          "operation": "Start reduced and verify demand-driven growth before workload admission"
+        },
+        {
+          "id": "memory/pressure",
+          "operation": "Verify independent guest pressure response with no containers"
+        },
+        {
+          "id": "memory/churn",
+          "operation": "Preserve active data checksum during fresh launch churn"
+        },
+        {
+          "id": "memory/idle",
+          "operation": "Converge to configured reduced target and verify balloon/page ownership"
+        }
+      ]
+    },
+    {
+      "task": "SPEED-098",
+      "suite": "regression",
+      "effective_policy": "Advertised isolated native fixture policy and authenticated generations",
+      "expected": "Published advertised features retain their verified behavior",
+      "cleanup": "Each canary records guest teardown, owned assets and production snapshot",
+      "cases": [
+        {
+          "id": "regression/matched-identity",
+          "operation": "Alpine explicit 65532 API/CLI life, streams, code and limits"
+        },
+        {
+          "id": "regression/native-compose",
+          "operation": "Original small native Compose regression fixture"
+        },
+        {
+          "id": "regression/buildkit-direct",
+          "operation": "Pinned direct worker RUN, output/export, cancellation and cache"
+        },
+        {
+          "id": "regression/registry-local",
+          "operation": "Existing loopback immutable registry integrity, sharing and cleanup"
+        },
+        {
+          "id": "regression/network",
+          "operation": "Private bridge DNS, alias ownership, loopback publish and release"
+        },
+        {
+          "id": "regression/volume",
+          "operation": "Persistent named volume across reboot, read-only, and lease release"
+        },
+        {
+          "id": "regression/controls",
+          "operation": "Native concurrent lifecycle, streaming and exec regression canaries"
+        }
+      ]
+    }
+  ]
+}

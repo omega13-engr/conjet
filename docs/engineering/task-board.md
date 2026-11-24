@@ -741,8 +741,9 @@ Description: Run the existing full comparison matrix on frozen native release ar
 
 Dependencies: SPEED-058, SPEED-060, SPEED-063 and SPEED-064 passed
 their isolated gates. The standalone API/CLI series is complete.
-The full comparison needs the Docker builder path in SPEED-089 and
-matching fixtures for the remaining surfaces.
+The full comparison requires the exact release compatibility gate in
+SPEED-098. The older five-pair lifecycle evidence remains historical
+for this gate.
 
 Acceptance Criteria:
 
@@ -789,6 +790,85 @@ container create request. Each pinned Buildx worker bootstrap failed at
 image provisioning; all three builder definitions were removed. The
 constrained native OCI profile has no privileged worker mode.
 
+Child tasks are frozen in the [native compatibility manifest](../../benchmarks/scenarios/native-compatibility-v1.json).
+An unsupported, missing, skipped, flaky or failed required case fails
+SPEED-098 and gates a new SPEED-065 matrix.
+
+### SPEED-090
+
+Title: Qualify native image provisioning and identity
+
+Acceptance: Boot-private store and pinned Linux ARM64 matrix references,
+tag and digest resolution, inspect, load/save, shared layer accounting,
+and interrupted/corrupt transfer cleanup. An image referenced by a
+container must not be destructively removed.
+
+### SPEED-091
+
+Title: Qualify workload credentials and the frozen lifecycle
+
+Acceptance: Preserve default and explicit image credentials under
+mapped namespace IDs and enforce the original resources, capabilities,
+network policy, seccomp and cleanup. Reject unmapped IDs and privilege
+expansion. Exercise each workload, API/CLI boundary and network pair.
+
+### SPEED-092
+
+Title: Qualify isolated Buildx worker provisioning
+
+Acceptance: Use the pinned Docker-container driver unchanged. Verify
+worker privilege policy, owned bootstrap and cache assets, exact
+worker identity, API and cleanup. Ordinary workload privilege must
+remain unavailable.
+
+### SPEED-093
+
+Title: Qualify native build execution and cache
+
+Acceptance: Run the frozen Rust, Go and Node source/cache variants,
+export/load/run the resulting images and verify native executor
+ownership. Cover failure and cancellation and the Docker build API.
+
+### SPEED-094
+
+Title: Qualify the frozen Node and Redis Compose fixture
+
+Acceptance: Verify health, transaction readiness, DNS, published ports,
+service change cases, persistent data and project teardown using the
+original fixture.
+
+### SPEED-095
+
+Title: Qualify persistent container control and copy
+
+Acceptance: Verify CLI/API exec, TTY, output extent, attach and
+disconnect recovery, stop/kill/restart, and matched copy hashes for
+both frozen payload sizes.
+
+### SPEED-096
+
+Title: Qualify frozen storage and service networking
+
+Acceptance: Verify the original writable layer, named volume and
+ExternalSSD bind datasets plus Node/Redis DNS, TCP, churn and persistent
+data. Inventory all guest and host resources after teardown.
+
+### SPEED-097
+
+Title: Qualify frozen stress, OOM and recovery
+
+Acceptance: Keep the unchanged concurrency 1/2/4/8 workloads,
+effective limits, cancellation, guest OOM attribution, active-data
+checks and fresh recovery.
+
+### SPEED-098
+
+Title: Gate the full comparison on release compatibility
+
+Acceptance: Record all 71 frozen required cases against one exact
+native release artifact set, including advertised-feature regressions
+and Core dynamic memory. Verify production and disposable cleanup.
+Only a complete PASS authorizes a new full SPEED-065 matrix.
 
 
 ### SPEED-025
