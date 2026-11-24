@@ -9,6 +9,32 @@ boundary. SPEED-008 remains unresolved.
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Native OCI research scope](docker-native-adapter.md)
 
+## SPEED-055 qualification status
+
+The SPEED-051 exit-127 attribution and correctness gate remains open.
+A retained Docker qualification series for Kiri API or CLI parity
+was not started. SPEED-049 remains the latest paired comparison.
+It failed API parity and had too few eligible CLI pairs to decide
+formal CLI parity. The SPEED-050 guest-local diagnostic missed the
+below-5-ms median target on every boot.
+
+One private retained-engine compatibility boot used the SPEED-050
+diagnostic VMM with tracing disabled and the shipped Core 1.3.1 guest.
+It passed all 26 existing capability probes covering image inspection,
+copy and save, network and volume lifecycle, exec and process controls,
+effective cgroup witnesses, Buildx build and artifact execution,
+and a Compose Redis transaction and teardown. Two API and two CLI
+canaries verified exact stdout, stderr and exit 23 on no-network and
+bridge workloads. The launcher verified resource cleanup and
+production fingerprints. Evidence is in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-055/compatibility`.
+
+These smoke checks do not qualify the full image, build, Compose,
+storage, sustained-network or concurrency matrix. Second-host,
+privileged energy and equivalent Kiri guest teardown remain open.
+Independent review and CI still gate integration. Release signing
+and publication remain outside this diagnostic.
+
 ## SPEED-053 response write readiness
 
 The two SPEED-050 traced boots recorded 96 tagged measured lifecycle
@@ -116,14 +142,16 @@ Both completed capture boots passed production and host cleanup guards.
 
 Four private boots on the SPEED-049 host used two vCPUs, a 2 GiB ceiling,
 Core 1.3.1, Docker 29.1.3, containerd 2.2.1, runc 1.3.4, VMM ingress wake,
-and the 25 ms recovery tick. The diagnostic client executed API 1.44
+and the 25 ms recovery tick. Two supplemental boots used the same
+rebuilt relay and VMM as the trace boots, with tracing disabled in both.
+The diagnostic client executed API 1.44
 create, start, wait and remove, in order, against the guest Docker Unix
 socket and the forwarded Unix socket. Each lane used four warmups and
 12 measured operations per boot with the pinned ARM64 Alpine config,
 `/bin/true`, no networking, 16 MiB, four PIDs, 500 millicores, all
 capabilities dropped and no-new-privileges. Both lanes sent the same
-per-workload Conjet cgroup parent. The lane order alternated within
-each boot. All 96 measured lifecycles and 32 warmups succeeded.
+per-workload Conjet cgroup parent. The lane order alternated between
+boots. All 144 measured lifecycles and 48 warmups succeeded.
 
 | Boot | Guest-local lifecycle median (ms) | Forwarded lifecycle median (ms) | Guest start / wait (ms) | Forwarded start / wait (ms) |
 | --- | ---: | ---: | ---: | ---: |
@@ -131,17 +159,20 @@ each boot. All 96 measured lifecycles and 32 warmups succeeded.
 | Control 4 | 117.316 | 134.210 | 79.374 / 22.484 | 90.499 / 26.102 |
 | Trace 3 | 92.247 | 111.037 | 66.240 / 14.344 | 75.960 / 22.025 |
 | Trace 4 | 91.970 | 105.037 | 69.878 / 16.381 | 79.246 / 15.168 |
+| Matching control 1 | 92.946 | 102.024 | 71.556 / 17.771 | 72.350 / 16.815 |
+| Matching control 2 | 97.576 | 102.612 | 72.531 / 21.025 | 75.609 / 19.415 |
 
-The guest-local retained-engine floor on the untraced boots was
+The guest-local retained-engine floor on the shipped, untraced boots was
 112–117 ms, with start as the largest stage. The below-5-ms median
 target failed for this diagnostic workload, including with transport
-bypassed. The trace configurations observed lower medians on both
-lanes. The traced boots staged a diagnostic VMM and rebuilt guest
-relay, restarted that relay before measurement, and had lower
-`system.slice` CPU usage during the lane snapshots. Those differences
-prevent isolating logging overhead from the boot/configuration effect.
-This diagnostic client and boot budget differ from the frozen
-SPEED-049 qualification.
+bypassed. The supplemental control uses identical diagnostic binaries
+and repeats the private relay restart with both trace settings off.
+The traced forwarded medians were about 2.4% and 8.8% higher than
+these same-binary controls at the corresponding lane orders. The
+unforwarded medians also moved between boots. These small samples
+bound the observed configuration difference without isolating pure
+logging overhead from independent-boot variation. The diagnostic
+client and boot budget differ from the frozen SPEED-049 qualification.
 
 All tagged forwarded measurements joined by request ID. Each duration
 uses only its own monotonic clock.
@@ -167,17 +198,22 @@ Dynamic memory was enabled, with a 512 MiB idle target and observed
 1 ms configured quiet dwell. The before/after snapshots during both
 lifecycle lanes reported 2,048 MiB. The untraced forwarded trials
 recorded 2 and 3 accepted reclaim requests over the snapshot
-intervals. Both traced forwarded trials recorded 34. Those counters
+intervals. Both traced and both supplemental forwarded trials recorded
+34. Those counters
 measure submissions and include observer traffic near the windows.
 They do not time worker completion or demonstrate a cache drop.
-No range bytes were reported. The services slice reported zero
-PID-limit and CPU-throttle counter increases at the sampled parent.
-Per-container scopes had disappeared by the after snapshots.
+No range bytes were reported. The services slice reported zero PID-limit
+and CPU-throttle counter increases at the sampled parent. The supplemental
+controls also recorded zero increments for dockerd and containerd
+individually. Their observed CPU usage per lifecycle snapshot interval was
+147–169 ms and 420–470 ms respectively. Per-container scopes had
+disappeared by the after snapshots.
 
 Raw samples, timestamps, checksums, resource counters, failed setup
 attempts and the diagnostic client and runner live under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-050`.
-`floor-summary.json` identifies `control-{3,4}` and `host-trace-{3,4}`.
+`floor-summary.json` identifies `control-{3,4}`, `host-trace-{3,4}` and
+`matching-control-{1,2}`.
 The diagnostic VMM SHA-256 was
 `b104e6d5f9782feecc6df18423e4fef9c21b0fd440ea79a5e2b008e85fe9378b`.
 The diagnostic guest relay SHA-256 was

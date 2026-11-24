@@ -108,17 +108,21 @@ Acceptance Criteria:
 - Apply existing CLI parity and API advantage criteria; explicitly report API parity using the declared 1.05 upper-bound rule for both percentiles. Report the below-5-ms median target separately; do not claim a p99 or CLI 5-ms result.
 - Leave SPEED-049 historical failure intact. Mark build, Compose and other lanes unqualified for this candidate until their existing matrix tasks are rerun; no release or global superiority claim from this task alone.
 
-Problem and Evidence: SPEED-049 API ratio was 102.9228; one CLI failure prevented formal CLI qualification. Small A/B improvements cannot establish parity.
+Problem and Evidence: [SPEED-055 qualification status](docker-benchmark-results.md#speed-055-qualification-status).
+The private retained-engine probe passed 26 compatibility probes
+and four API/CLI output canaries. The five-pair candidate series and
+full benchmark matrix were held behind the open SPEED-051 gate.
 
-Approach: Use existing docker-comparison.py and report renderer with explicit private endpoints, frozen release hashes and tracing disabled. Keep production guards and owned-process cleanup for every leg.
+Source: `benchmarks/docker-comparison.py`, the
+[benchmark protocol](docker-benchmark-plan.md) and the
+[architecture plan](retained-docker-latency-architecture.md).
 
-Evidence: Pending. Architecture/source review only; no candidate benchmark has run.
+Review: Formal requalification remains blocked. Historical SPEED-049
+API parity failed and CLI parity was inconclusive. The new guest-local
+diagnostic missed the below-5-ms target.
 
-Source: benchmarks/docker-comparison.py; docs/engineering/docker-benchmark-plan.md; docs/engineering/docker-benchmark-results.md. See [architecture](retained-docker-latency-architecture.md).
-
-Review: Pending qualification and independent evidence review.
-
-Next Action: Freeze only accepted candidate changes after correctness and memory review.
+Next Action: Resolve and verify the four-PID correctness issue before
+freezing a candidate.
 
 ### SPEED-014
 
@@ -815,14 +819,14 @@ Raw records, artifact hashes and resource observations are under
 Source: [SPEED-047](#speed-047), [SPEED-048](#speed-048), [SPEED-049](#speed-049).
 
 Review: Host and guest traces correlated by tag. Dynamic memory and
-the 25 ms tick ran throughout. The traced relay was rebuilt and
-restarted, so the observer cost could not be isolated. The separate
-SPEED-051 syscall evidence implicates OCI setup, with exact untraced
-component attribution still open. No performance change is qualified.
+the 25 ms tick ran throughout. Two supplemental controls used the same
+binaries with tracing off and collected the engine cgroup counters.
+The traced forwarded medians were 2.4% and 8.8% higher than their
+same-binary controls. The separate SPEED-051 syscall evidence
+implicates OCI setup, with exact untraced component attribution open.
 
-Next Action: Review the diagnostic and collect pre/post engine cgroup
-counters with a same-binary observer-off comparison if deeper
-attribution is needed.
+Next Action: Review the diagnostic and exact deployable attribution
+before selecting a runtime change.
 
 
 ### SPEED-049
