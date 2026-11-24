@@ -1405,16 +1405,17 @@ impl Owner {
             .map_err(|_| Rejected::internal("cannot allocate container identity"))?);
         let name = name.unwrap_or(&id[..12]).to_owned();
         let volume = volume::requested(&config)?
-            .map(|(name, read_only)| {
-                let info = volume::ask(self, "inspect", Some(name))?;
+            .map(|mount| {
+                let info = volume::ask(self, "inspect", Some(mount.name))?;
                 let inode = info["inode"]
                     .as_u64()
                     .filter(|value| *value > 0)
                     .ok_or_else(|| Rejected::internal("native volume has no inode identity"))?;
                 Ok::<_, Rejected>(conjet_launch_service::spec::VolumeMount {
-                    name: name.into(),
-                    read_only,
+                    name: mount.name.into(),
+                    read_only: mount.read_only,
                     inode,
+                    target: mount.target.into(),
                 })
             })
             .transpose()?;

@@ -1271,6 +1271,12 @@ dataset and registry targets, preserve the data target, and reject
 symlinked ancestors and unsupported targets. Verify healthy removal
 and the volume contents after a second mount.
 
+Evidence: The baseline returned HTTP 400 for `/dataset`. The optimized
+diagnostic wrote its witness there, remounted the same volume read-only
+at `/var/lib/registry` in a second boot, and verified the payload, removal,
+and offline ext4 check. This exercised the volume targets independently
+of the frozen Node workload. See `SPEED-129/` on ExternalSSD.
+
 ### SPEED-130
 
 Title: Release disconnected native Docker stream subscribers on Darwin

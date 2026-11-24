@@ -1,13 +1,20 @@
 use std::time::Duration;
 
-use conjet_launch_service::spec::{VolumeMount, VOLUME_TARGET};
+use conjet_launch_service::spec::{valid_volume_target, VolumeMount};
 use conjet_launch_service::volume_disk::valid_name;
 use conjet_launch_service::wire::{Kind, WireError};
 use serde_json::{json, Value};
 
 use super::{client, request, Owner, Rejected};
 
-pub(super) fn requested(config: &Value) -> Result<Option<(&str, bool)>, Rejected> {
+#[derive(Debug, PartialEq)]
+pub(super) struct Mount<'a> {
+    pub name: &'a str,
+    pub target: &'a str,
+    pub read_only: bool,
+}
+
+pub(super) fn requested(config: &Value) -> Result<Option<Mount<'_>>, Rejected> {
     let value = &config["HostConfig"]["Mounts"];
     let binds = &config["HostConfig"]["Binds"];
     let has_binds = !binds.is_null() && !binds.as_array().is_some_and(Vec::is_empty);
@@ -34,9 +41,12 @@ pub(super) fn requested(config: &Value) -> Result<Option<(&str, bool)>, Rejected
         }
     }
     let naming = |field: &str| mount.get(field).and_then(Value::as_str);
-    if naming("Type") != Some("volume") || naming("Target") != Some(VOLUME_TARGET) {
-        return Err(Rejected::bad("require a named volume mounted at /data"));
+    if naming("Type") != Some("volume") {
+        return Err(Rejected::bad("require a named volume"));
     }
+    let target = naming("Target")
+        .filter(|target| valid_volume_target(target))
+        .ok_or_else(|| Rejected::bad("unsupported native volume target"))?;
     let name = naming("Source")
         .filter(|name| valid_name(name))
         .ok_or_else(|| Rejected::bad("invalid native volume name"))?;
@@ -54,23 +64,27 @@ pub(super) fn requested(config: &Value) -> Result<Option<(&str, bool)>, Rejected
             }
         }
     }
-    Ok(Some((name, read_only)))
+    Ok(Some(Mount {
+        name,
+        target,
+        read_only,
+    }))
 }
 
-fn named_bind(value: &Value) -> Result<(&str, bool), Rejected> {
+fn named_bind(value: &Value) -> Result<Mount<'_>, Rejected> {
     let Some([binding]) = value.as_array().map(Vec::as_slice) else {
         return Err(Rejected::bad("only one native named volume is supported"));
     };
-    let invalid =
-        || Rejected::bad("HostConfig Binds supports only NAME:/data with optional ro or rw");
+    let invalid = || Rejected::bad("HostConfig Binds requires a named volume and supported target");
     let mut parts = binding.as_str().ok_or_else(invalid)?.split(':');
     let name = parts
         .next()
         .filter(|name| valid_name(name))
         .ok_or_else(invalid)?;
-    if parts.next() != Some(VOLUME_TARGET) {
-        return Err(invalid());
-    }
+    let target = parts
+        .next()
+        .filter(|target| valid_volume_target(target))
+        .ok_or_else(invalid)?;
     let read_only = match parts.next() {
         None | Some("rw") => false,
         Some("ro") => true,
@@ -79,7 +93,11 @@ fn named_bind(value: &Value) -> Result<(&str, bool), Rejected> {
     if parts.next().is_some() {
         return Err(invalid());
     }
-    Ok((name, read_only))
+    Ok(Mount {
+        name,
+        target,
+        read_only,
+    })
 }
 
 #[cfg(test)]
@@ -90,7 +108,11 @@ mod tests {
     fn short_mount_syntax_keeps_host_paths_and_flags_out() {
         assert_eq!(
             named_bind(&json!(["owned:/data:ro"])).unwrap(),
-            ("owned", true)
+            Mount {
+                name: "owned",
+                target: "/data",
+                read_only: true
+            }
         );
         for input in [
             "/host/path:/data",
@@ -196,6 +218,6 @@ pub(super) fn create(owner: &Owner, body: &Value) -> Result<Value, Rejected> {
 
 pub(super) fn mount_metadata(volume: &VolumeMount) -> Value {
     json!({"Type":"volume","Name":volume.name,"Source":guest_path(&volume.name),
-           "Destination":VOLUME_TARGET,"Driver":"local","RW":!volume.read_only,
+           "Destination":volume.target,"Driver":"local","RW":!volume.read_only,
            "Mode":if volume.read_only {"ro"} else {"rw"},"Propagation":""})
 }

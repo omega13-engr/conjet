@@ -660,7 +660,7 @@ def native_session(args, root):
             elif args.diagnostics == 'mounted-volume':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-volumes.py'))
                 diagnostic['collect'](endpoint, bridge.pid, directory, vm.pid,
-                                      output, args.volume_phase, docker, env)
+                                      output, args.volume_phase, docker, env, target=args.volume_target or '/data')
             elif args.diagnostics == 'compose':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-compose.py'))
                 diagnostic['collect'](endpoint, bridge.pid, output, docker, env, args.native_compose_cli)
@@ -809,6 +809,7 @@ def main():
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--volume-phase', choices=('create', 'inspect', 'remove'))
+    parser.add_argument('--volume-target', choices=('/data', '/dataset', '/var/lib/registry'))
     parser.add_argument('--native-admission-wake', choices=('poll', 'event'))
     parser.add_argument('--native-latency-trace', action='store_true')
     parser.add_argument('--native-latency-lane', choices=('api', 'cli'))
@@ -885,6 +886,8 @@ def main():
         native_assets += ('native_volume_disk',)
     elif args.native_volume_disk or args.volume_phase:
         parser.error('a private volume disk and phase require volume diagnostics')
+    if args.volume_target and args.diagnostics != 'mounted-volume':
+        parser.error('select a target only for the owned mounted-volume diagnostic')
     if args.diagnostics == 'compose':
         if not args.native_compose_cli:
             parser.error('Compose diagnostics require the pinned CLI on ExternalSSD')

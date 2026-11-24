@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use crate::security::{self, WorkloadFilter};
 use crate::spec::{
-    GID_BASE, ID_MAP_WIDTH, LaunchSpec, UID_BASE, VOLUME_TARGET, VolumeMount, WORKLOAD_GID,
-    WORKLOAD_UID,
+    GID_BASE, ID_MAP_WIDTH, LaunchSpec, UID_BASE, VolumeMount, WORKLOAD_GID, WORKLOAD_UID,
+    valid_volume_target,
 };
 
 const BASE: &str = "/run/conjet/workload-probe";
@@ -99,34 +99,44 @@ fn mount_standard_devices(root: &CStr, devices: [File; 2]) -> io::Result<()> {
 
 struct VolumeBinding {
     spec: VolumeMount,
-    target_path: PathBuf,
+    root: PathBuf,
     target: CString,
 }
 
 impl VolumeBinding {
     fn prepare(name: &VolumeMount, root: &Path) -> io::Result<Self> {
-        let target_path = root.join(VOLUME_TARGET.trim_start_matches('/'));
+        if !valid_volume_target(&name.target) {
+            return Err(io::Error::other("unsupported native named volume target"));
+        }
+        let target_path = root.join(name.target.trim_start_matches('/'));
         Ok(Self {
             spec: name.clone(),
             target: CString::new(target_path.as_os_str().as_bytes())?,
-            target_path,
+            root: root.to_owned(),
         })
     }
 
     fn mount(&self, source: File) -> io::Result<()> {
         let source_path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
-        match fs::create_dir(&self.target_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                if !self.target_path.symlink_metadata()?.is_dir()
-                    || fs::read_dir(&self.target_path)?.next().is_some()
-                {
-                    return Err(io::Error::other(
-                        "native volume target must be an empty directory",
-                    ));
+        // The overlay is private and has no running workload during setup.
+        // Inspect each image ancestor before following it.
+        let mut target = self.root.clone();
+        for segment in self.spec.target.trim_start_matches('/').split('/') {
+            target.push(segment);
+            match fs::create_dir(&target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    if !target.symlink_metadata()?.is_dir() {
+                        return Err(io::Error::other(
+                            "native volume path must contain only directories",
+                        ));
+                    }
                 }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
+        }
+        if fs::read_dir(&target)?.next().is_some() {
+            return Err(io::Error::other("native volume target must be empty"));
         }
         security::checked(unsafe {
             libc::mount(

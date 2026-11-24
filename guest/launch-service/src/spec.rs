@@ -68,6 +68,23 @@ pub struct VolumeMount {
     pub name: String,
     pub inode: u64,
     pub read_only: bool,
+    #[serde(
+        default = "default_volume_target",
+        skip_serializing_if = "is_data_target"
+    )]
+    pub target: String,
+}
+
+fn default_volume_target() -> String {
+    VOLUME_TARGET.into()
+}
+
+fn is_data_target(target: &str) -> bool {
+    target == VOLUME_TARGET
+}
+
+pub fn valid_volume_target(target: &str) -> bool {
+    matches!(target, VOLUME_TARGET | "/dataset" | "/var/lib/registry")
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -251,7 +268,9 @@ impl LaunchSpec {
             return Err(SpecError::BuildSnapshot);
         }
         if spec.volume.as_ref().is_some_and(|volume| {
-            volume.inode == 0 || !crate::volume_disk::valid_name(&volume.name)
+            volume.inode == 0
+                || !crate::volume_disk::valid_name(&volume.name)
+                || !valid_volume_target(&volume.target)
         }) {
             return Err(SpecError::Volume);
         }
