@@ -24,7 +24,8 @@ SCRATCH = SSD / 'dev_workspace/tmp'
 REPO = Path(__file__).resolve().parents[1]
 CONTEXT = 'conjet-speedup'
 DOCKER = Path('/opt/homebrew/bin/docker')
-CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'volume-disk', 'mounted-volume', 'admission-trace')
+VOLUME_DIAGNOSTICS = ('volume-disk', 'mounted-volume', 'compose')
+CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'admission-trace', *VOLUME_DIAGNOSTICS)
 
 
 class SessionInterrupted(KeyboardInterrupt):
@@ -462,6 +463,8 @@ def native_session(args, root):
                   args.native_receipt, DOCKER, *helpers]
         if python_owner:
             assets.append(adapter)
+        if args.native_compose_cli:
+            assets.append(args.native_compose_cli)
         report['binary_sha256'] = {str(path): fingerprint(path.resolve(strict=True))['sha256'] for path in assets}
         kernel_hash = args.native_kernel.with_name(args.native_kernel.name + '.sha512sum').read_text().split()[0]
         vm_command = [cli, 'native', 'docker-boot', '--scratch', SCRATCH,
@@ -535,6 +538,8 @@ def native_session(args, root):
             report['registry'] = registry.authority
         if args.diagnostics == 'trace':
             bridge_command += ['--trace', output / 'adapter-trace.json']
+        if args.diagnostics == 'compose':
+            bridge_command.append('--trace-requests')
         report['adapter_command'] = list(map(str, bridge_command))
         report['docker_owner'] = args.docker_owner
         with (output / 'adapter.stderr').open('w') as log:
@@ -596,6 +601,9 @@ def native_session(args, root):
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-volumes.py'))
                 diagnostic['collect'](endpoint, bridge.pid, directory, vm.pid,
                                       output, args.volume_phase, docker, env)
+            elif args.diagnostics == 'compose':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-compose.py'))
+                diagnostic['collect'](endpoint, bridge.pid, output, docker, env, args.native_compose_cli)
             elif args.diagnostics in ('oci', 'oci-import'):
                 oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
                 oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
@@ -694,7 +702,7 @@ def main():
     parser.add_argument('--legacy-baseline', action='store_true', help='explicit historical Docker/containerd lane')
     parser.add_argument('--network-helper', type=Path)
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output',
-                 'native-memd', 'native-reclaimd', 'native-volume-disk',
+                 'native-memd', 'native-reclaimd', 'native-volume-disk', 'native-compose-cli',
                  'import-package', 'import-receipt', 'registry-fixtures'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
@@ -702,7 +710,7 @@ def main():
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
-                                                  'volume-disk', 'mounted-volume', 'admission-trace'),
+                                                  'volume-disk', 'mounted-volume', 'admission-trace', 'compose'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
@@ -738,15 +746,23 @@ def main():
         parser.error('Core memory helpers require a native memory canary')
     if args.native_admission_wake and not (args.matched_output or args.diagnostics in CORE_DIAGNOSTICS):
         parser.error('admission wake comparison requires the native Core governor')
-    if args.diagnostics in ('volume-disk', 'mounted-volume'):
-        if (not args.native_volume_disk or not args.volume_phase
+    if args.diagnostics in VOLUME_DIAGNOSTICS:
+        if (not args.native_volume_disk
                 or args.native_volume_disk.resolve(strict=True) != args.native_volume_disk):
-            parser.error('volume diagnostics require a canonical private disk path and a phase')
+            parser.error('volume diagnostics require a canonical private disk path')
+        if (args.diagnostics == 'compose') == bool(args.volume_phase):
+            parser.error('only volume disk and mount diagnostics require a phase')
         if args.diagnostics == 'mounted-volume' and args.volume_phase == 'remove':
             parser.error('mounted volume diagnostics recover and remove in the inspect phase')
         native_assets += ('native_volume_disk',)
     elif args.native_volume_disk or args.volume_phase:
         parser.error('a private volume disk and phase require volume diagnostics')
+    if args.diagnostics == 'compose':
+        if not args.native_compose_cli:
+            parser.error('Compose diagnostics require the pinned CLI on ExternalSSD')
+        native_assets += ('native_compose_cli',)
+    elif args.native_compose_cli:
+        parser.error('a Compose CLI requires Compose diagnostics')
     if args.diagnostics == 'oci-import':
         if not (args.import_package and args.import_receipt and args.docker_owner == 'rust'):
             parser.error('OCI import diagnostics require the Rust owner and a staged package and receipt')

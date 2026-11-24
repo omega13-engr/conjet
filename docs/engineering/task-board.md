@@ -406,8 +406,8 @@ Title: Qualify a two-service Compose lifecycle on the native engine
 
 Description: Run a pinned two-service Compose project using private bridge DNS, health checks, a named volume and one loopback published port.
 
-Is blocked by task: SPEED-072 Docker discovery and the subsequent Compose
-lifecycle checks. SPEED-060 and SPEED-062 are complete in isolation.
+Is blocked by task: SPEED-073 multiple endpoint aliases and subsequent
+health and lifecycle checks. SPEED-060, SPEED-062 and SPEED-072 passed.
 
 Acceptance Criteria:
 
@@ -417,15 +417,16 @@ Problem and Evidence: Individual container fixtures do not establish Compose beh
 
 Approach: Use existing network/port research and native owner state; preserve lifecycle ordering and explicit feature errors.
 
-Evidence: Compose 5.8.0 accepted the frozen two-service fixture. Live trace
-showed `GET /networks?filters=…` as the first unsupported call. The
-external private network and volume setup passed.
+Evidence: Compose 5.8.0 accepted the frozen fixture and passed filtered
+network, container and volume discovery. It reached writer creation, which
+stopped at the one-alias endpoint constraint.
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
 Review: Pending implementation, validation and independent evidence review.
 
-Next Action: Complete the scoped discovery surface and rerun the real CLI.
+Next Action: Support the two endpoint aliases emitted by the pinned
+Compose client, then qualify its health dependency.
 
 ### SPEED-072
 
@@ -436,6 +437,21 @@ Acceptance Criteria:
 - Accept the pinned client's name and label filters on discovery. Reject
   unsupported filters explicitly. Verify that real Compose advances beyond
   discovery without mistaking another project's resources for this one.
+
+Evidence: Release trace progressed through filtered networks, containers
+and volumes to the writer create request. The filter regression covers
+exact project label matches, missing labels, other projects and unsupported
+keys. Transcripts are in SPEED-064 under `compose-volume-discovery`.
+
+### SPEED-073
+
+Title: Preserve two validated native bridge DNS aliases for Compose
+
+Acceptance Criteria:
+
+- A native endpoint can own its instance and service names on the same
+  private address, with case-insensitive duplicate rejection, bounded
+  aliases and complete removal at guest cleanup.
 
 ### SPEED-065
 

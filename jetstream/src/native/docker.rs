@@ -1,4 +1,5 @@
 //! Bounded Docker compatibility endpoint for the isolated OCI candidate.
+mod discovery;
 mod exec;
 mod http;
 mod image;
@@ -57,6 +58,9 @@ pub(super) struct Options {
     image_store: Option<PathBuf>,
     #[arg(long, requires = "image_store")]
     registry: Option<SocketAddr>,
+    /// Record methods, paths and parameter names in the isolated diagnostic.
+    #[arg(long)]
+    trace_requests: bool,
 }
 
 extern "C" fn stop_signal(_: libc::c_int) {
@@ -181,7 +185,13 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         pending: BTreeMap::new(),
         broken: false,
     };
-    serve_endpoint(options.socket, metadata, native, store)
+    serve_endpoint(
+        options.socket,
+        metadata,
+        native,
+        store,
+        options.trace_requests,
+    )
 }
 
 fn admission_lock(directory: &Path) -> anyhow::Result<fs::File> {
@@ -197,6 +207,7 @@ fn serve_endpoint(
     metadata: request::Image,
     native: Native,
     store: Option<registry::Store>,
+    trace_requests: bool,
 ) -> anyhow::Result<()> {
     let boot = &native.boot;
     signal_handlers()?;
@@ -223,7 +234,7 @@ fn serve_endpoint(
             Ok((stream, _)) if handlers.len() < CONNECTIONS => {
                 let owner = owner.clone();
                 match thread::Builder::new().spawn(move || {
-                    let _ = http::serve(stream, &owner);
+                    let _ = http::serve(stream, &owner, trace_requests);
                 }) {
                     Ok(handler) => handlers.push(handler),
                     Err(error) => break Err(error),
@@ -541,6 +552,7 @@ struct Container {
     config: Value,
     spec: Value,
     volume: Option<conjet_launch_service::spec::VolumeMount>,
+    created: u64,
     auto_remove: bool,
     cancel: AtomicU8,
 }
@@ -560,6 +572,16 @@ struct Lifecycle {
 }
 
 impl Lifecycle {
+    fn status(&self) -> &'static str {
+        if self.terminal.is_some() || self.error.is_some() {
+            "exited"
+        } else if self.started {
+            "running"
+        } else {
+            "created"
+        }
+    }
+
     fn terminal_for(&self, generation: u64) -> Option<&Arc<Terminal>> {
         if self.generation == generation {
             self.terminal.as_ref()
@@ -768,13 +790,38 @@ impl Owner {
         Ok(json!({"Id":id,"Warning":""}))
     }
 
-    fn list_networks(&self) -> Value {
+    fn list_networks(&self, filters: &discovery::Filters) -> Value {
         let ledger = self.ledger.lock().unwrap();
         json!(ledger
             .network
             .iter()
+            .filter(|network| filters.matches(&network.name, &network.labels))
             .map(|network| network.inspect(json!({})))
             .collect::<Vec<_>>())
+    }
+
+    fn list_containers(&self, filters: &discovery::Filters, all: bool) -> Value {
+        let ledger = self.ledger.lock().unwrap();
+        let selected = ledger.active.iter().filter_map(|item| {
+            let state = item.state();
+            let container = &item.container;
+            let labels = &container.config["Labels"];
+            if (!all && state.status() != "running") || !filters.matches(&container.name, labels) {
+                return None;
+            }
+            let command = container.spec["argv"].as_array().expect("validated native argv")
+                .iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
+            let networks = state.network.as_ref().map_or_else(|| json!({}), |attachment| {
+                json!({(attachment.network.name.as_str()):attachment.inspect(state.network_address.as_deref())})
+            });
+            Some(json!({"Id":container.id,"Names":[format!("/{}",container.name)],
+                        "Image":container.config["Image"],"ImageID":container.spec["image_digest"],
+                        "Command":command,"Created":container.created,"Labels":labels,
+                        "State":state.status(),"Status":state.status(),
+                        "NetworkSettings":{"Networks":networks},
+                        "Mounts":container.volume.iter().map(volume::mount_metadata).collect::<Vec<_>>() }))
+        }).collect::<Vec<_>>();
+        json!(selected)
     }
 
     fn inspect_network(&self, reference: &str) -> Result<Value, Rejected> {
@@ -1163,6 +1210,10 @@ impl Owner {
                 config,
                 spec,
                 volume,
+                created: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
                 auto_remove,
                 cancel: AtomicU8::new(0),
             },

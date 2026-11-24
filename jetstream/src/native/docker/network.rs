@@ -7,7 +7,7 @@ use super::{Owner, Rejected};
 pub(super) struct Network {
     pub id: String,
     pub name: String,
-    labels: Value,
+    pub(super) labels: Value,
 }
 
 #[derive(Clone)]

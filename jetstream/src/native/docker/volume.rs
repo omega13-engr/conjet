@@ -103,7 +103,7 @@ fn guest_path(name: &str) -> String {
     format!("/run/conjet/volume-disk/volumes/{name}")
 }
 
-pub(super) fn list(owner: &Owner) -> Result<Value, Rejected> {
+pub(super) fn list(owner: &Owner, filters: &super::discovery::Filters) -> Result<Value, Rejected> {
     let names = ask(owner, "list", None)?;
     let volumes = names["volumes"]
         .as_array()
@@ -112,10 +112,13 @@ pub(super) fn list(owner: &Owner) -> Result<Value, Rejected> {
         .map(|name| {
             name.as_str()
                 .filter(|name| valid_name(name))
-                .map(describe)
                 .ok_or_else(|| Rejected::internal("invalid native volume inventory name"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|name| filters.matches(name, &Value::Null))
+        .map(describe)
+        .collect::<Vec<_>>();
     Ok(json!({"Volumes":volumes,"Warnings":[]}))
 }
 

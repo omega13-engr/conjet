@@ -331,6 +331,19 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             let item = owner.create(query.get("name").map(String::as_str), config)?;
             Reply::json(201, json!({"Id":item.container.id,"Warnings":[]}))
         }
+        ("GET", "/containers/json")
+            if query
+                .keys()
+                .all(|key| matches!(key.as_str(), "filters" | "all")) =>
+        {
+            let all = match query.get("all").map(String::as_str) {
+                None | Some("false" | "0") => false,
+                Some("true" | "1") => true,
+                _ => return Err(Rejected::bad("invalid Docker container discovery scope")),
+            };
+            let filters = super::discovery::Filters::parse(query.get("filters"))?;
+            Reply::json(200, owner.list_containers(&filters, all))
+        }
         ("GET", "/events") if query.is_empty() => {
             let ledger = owner.ledger.lock().unwrap();
             let mut reply = Reply::empty(200);
@@ -341,13 +354,19 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             }
             reply
         }
-        ("GET", "/networks") if query.is_empty() => Reply::json(200, owner.list_networks()),
+        ("GET", "/networks") if query.keys().all(|key| key == "filters") => {
+            let filters = super::discovery::Filters::parse(query.get("filters"))?;
+            Reply::json(200, owner.list_networks(&filters))
+        }
         ("POST", "/networks/create") if query.is_empty() => {
             let body = serde_json::from_slice(&request.body)
                 .map_err(|_| Rejected::bad("invalid Docker network request"))?;
             Reply::json(201, owner.create_network(body)?)
         }
-        ("GET", "/volumes") if query.is_empty() => Reply::json(200, super::volume::list(owner)?),
+        ("GET", "/volumes") if query.keys().all(|key| key == "filters") => {
+            let filters = super::discovery::Filters::parse(query.get("filters"))?;
+            Reply::json(200, super::volume::list(owner, &filters)?)
+        }
         ("POST", "/volumes/create") if query.is_empty() => {
             let body = serde_json::from_slice(&request.body)
                 .map_err(|_| Rejected::bad("invalid Docker volume request"))?;
@@ -583,13 +602,7 @@ fn container(
             if state.removed {
                 return Err(Rejected(404, "container was removed".into()));
             }
-            let status = if state.terminal.is_some() || state.error.is_some() {
-                "exited"
-            } else if state.started {
-                "running"
-            } else {
-                "created"
-            };
+            let status = state.status();
             let code = state.terminal.as_ref().map_or_else(
                 || if state.error.is_some() { 125 } else { 0 },
                 |terminal| terminal.code,
@@ -806,7 +819,11 @@ fn await_request(reader: &BufReader<UnixStream>) -> io::Result<bool> {
     Ok(false)
 }
 
-pub(super) fn serve(mut stream: UnixStream, owner: &Arc<Owner>) -> io::Result<()> {
+pub(super) fn serve(
+    mut stream: UnixStream,
+    owner: &Arc<Owner>,
+    trace_requests: bool,
+) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -820,6 +837,15 @@ pub(super) fn serve(mut stream: UnixStream, owner: &Arc<Owner>) -> io::Result<()
             }
         };
         let close = request.close || super::STOP.load(std::sync::atomic::Ordering::Acquire);
+        if trace_requests {
+            eprintln!(
+                "{}",
+                json!({
+                    "method": request.method, "path": request.path,
+                    "query_keys": request.query.keys().collect::<Vec<_>>(),
+                })
+            );
+        }
         match dispatch(owner, &request) {
             Ok(Action::Reply(reply)) => reply.send(&mut stream, request.method == "HEAD", close)?,
             Err(Rejected(status, message)) => Reply::json(status, json!({"message":message}))
