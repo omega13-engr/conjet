@@ -391,6 +391,7 @@ fn execute(
         docker_resource_defaults: false,
         memory_swap_disabled: false,
         open_stdin: false,
+        redis_bootstrap: false,
         image_digest: identity.image_digest.clone(),
         argv: vec!["/bin/probe".into()],
         cwd: "/work".into(),

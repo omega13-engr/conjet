@@ -47,6 +47,7 @@ pub(crate) struct Sandbox {
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
     uid: u32,
     gid: u32,
+    redis_bootstrap: bool,
 }
 
 enum RootMode {
@@ -153,6 +154,26 @@ fn mount_cgroup(root: &CStr, source: File) -> io::Result<()> {
                 | libc::MS_NOSUID
                 | libc::MS_NOEXEC,
             std::ptr::null(),
+        )
+    })
+}
+
+fn mount_workload_proc(root: &CStr) -> io::Result<()> {
+    let target = Path::new(std::ffi::OsStr::from_bytes(root.to_bytes())).join("proc");
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(io::Error::other("invalid workload /proc directory")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&target)?,
+        Err(error) => return Err(error),
+    }
+    let target = CString::new(target.as_os_str().as_bytes())?;
+    security::checked(unsafe {
+        libc::mount(
+            c"proc".as_ptr(),
+            target.as_ptr(),
+            c"proc".as_ptr(),
+            libc::MS_RDONLY | libc::MS_NODEV | libc::MS_NOSUID | libc::MS_NOEXEC,
+            c"subset=pid".as_ptr().cast(),
         )
     })
 }
@@ -344,6 +365,7 @@ impl Sandbox {
                 filter: WorkloadFilter::new(
                     bridge,
                     oci.is_some_and(|spec| spec.build_snapshot.is_none()),
+                    oci.is_some_and(|spec| spec.redis_bootstrap),
                 ),
                 resolver: oci
                     .and_then(|spec| spec.bridge_scope())
@@ -360,6 +382,7 @@ impl Sandbox {
                 worker_mounts,
                 uid: oci.map_or(WORKLOAD_UID, |spec| spec.uid),
                 gid: oci.map_or(WORKLOAD_GID, |spec| spec.gid),
+                redis_bootstrap: oci.is_some_and(|spec| spec.redis_bootstrap),
             })
         })();
         if setup.is_err() {
@@ -370,7 +393,9 @@ impl Sandbox {
 
     pub(crate) fn mappings(&self, pid: libc::pid_t) -> io::Result<()> {
         let process = Path::new("/proc").join(pid.to_string());
-        std::fs::write(process.join("setgroups"), "deny")?;
+        if !self.redis_bootstrap {
+            std::fs::write(process.join("setgroups"), "deny")?;
+        }
         std::fs::write(
             process.join("uid_map"),
             format!("0 {UID_BASE} {ID_MAP_WIDTH}\n"),
@@ -484,6 +509,9 @@ impl Sandbox {
         if let Some(cgroup) = cgroup {
             step("workload cgroup view", mount_cgroup(&self.new_root, cgroup))?;
         }
+        if self.redis_bootstrap {
+            step("workload PID view", mount_workload_proc(&self.new_root))?;
+        }
         if let Some(devices) = devices {
             step(
                 "native standard devices",
@@ -534,10 +562,20 @@ impl Sandbox {
                 io::Error::last_os_error()
             )));
         }
-        step("resource limits", security::set_process_limits())?;
+        let open_files = if self.redis_bootstrap {
+            security::REDIS_OPEN_FILES
+        } else {
+            security::DEFAULT_OPEN_FILES
+        };
+        step("resource limits", security::set_process_limits(open_files))?;
         step(
             "credentials and capabilities",
-            security::drop_workload_identity(self.uid, self.gid, self.worker_mounts.is_some()),
+            security::drop_workload_identity(
+                self.uid,
+                self.gid,
+                self.worker_mounts.is_some(),
+                self.redis_bootstrap,
+            ),
         )?;
         before_filter()?;
         step("seccomp", self.filter.install())

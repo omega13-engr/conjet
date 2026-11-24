@@ -12,13 +12,14 @@ the warm API tail. SPEED-063 passed its bounded direct BuildKit RUN
 fixture. SPEED-065 tracks release comparison, and SPEED-089 tracks the
 Docker builder gateway needed for the frozen build rows.
 
-The user now authorizes replacing dockerd/containerd/runc in the candidate
-with Conjet's native Rust engine. Preserve Core dynamic memory in full.
-SPEED-057–065 are the active sequence. Reuse verified SPEED-027–036 research
-only after current-build validation. Prior retained-engine plans and the
-SPEED-051/055 blockers remain historical evidence and do not gate native
-implementation. Their failures must not be erased or reported as fixed.
-No production migration or superiority claim is authorized without evidence.
+The candidate uses Conjet's native Rust engine with full Core dynamic
+memory. The current release gate is the 71-case frozen compatibility
+manifest on exact optimized artifacts. SPEED-089 and SPEED-092 cover the
+Docker builder path, and SPEED-145–148 cover the identified service
+startup, publication, DNS and stats work. The full SPEED-065 comparison
+follows a complete compatibility pass. The retained-engine SPEED-051/055
+failures remain historical evidence. Production remains isolated from
+qualification.
 
 ## Working rules
 
@@ -1438,8 +1439,8 @@ inherit the resolved identity on exec, and reject unknown or
 unmapped identities without adding capabilities.
 
 Evidence: The optimized Alpine canary resolved named user and group
-selectors, numeric primary groups and an unmapped account-file entry
-fallback for an otherwise valid numeric ID. Exec inherited the real
+selectors and numeric primary groups. An otherwise valid numeric ID
+absent from the account file used group zero. Exec inherited the real
 resolved UID and GID. Unknown names and unmapped numeric IDs were
 rejected before launch. See `SPEED-141/credentials/`.
 
@@ -1489,6 +1490,63 @@ Acceptance: The original Redis entrypoint can transfer its private
 data directory and drop to the pinned Redis account. Limit any
 additional authority to the verified fixture image and startup
 arguments. Preserve the ordinary no-capabilities profile.
+
+Evidence: The isolated optimized release ran the exact entrypoint,
+passed the ARM64 copy-on-write self-test, installed the real append-only
+journal and became healthy in all six original Compose projects. Four
+live PID status reads showed UID 999, GID 1000, empty supplementary and
+effective capability sets, and no-new-privileges. Two status probes
+collided with the existing health exec slot. Each project completed the
+first two persisted transactions before Compose recreation reached its
+duplicate-alias gate. Compose's resource observer also requires exec
+stdin support. All projects tore down and the launcher reported
+complete guest cleanup, zero reclaim failures and unchanged production.
+See `SPEED-145/compose-redis-journal/` on ExternalSSD. The public image
+downloads were replaced by verified offline seeds for this diagnostic.
+
+### SPEED-146
+
+Title: Publish independent loopback ports for concurrent service replicas
+
+Acceptance: Bind one separately owned loopback endpoint per native
+container within the existing workload limit. Verify both serve their
+own response, an explicit bind conflict fails, and removing either
+replica leaves the other reachable.
+
+### SPEED-147
+
+Title: Resolve shared Compose service aliases within one project network
+
+Acceptance: Return each running replica's real IPv4 address for its
+service name and a single response for each unique instance name.
+Reject unrelated duplicate aliases and remove answers when backing
+ports detach.
+
+### SPEED-148
+
+Title: Report actual cgroup counters for the frozen service stats check
+
+Acceptance: Read the selected running generation's own CPU, memory and
+task counters and expose them through Docker's one-shot stats operation.
+Preserve the resource limits and verify the original sustained-service
+window, counts and teardown.
+
+### SPEED-149
+
+Title: Support Compose's staged replacement and rename
+
+Acceptance: Admit an owned replacement for the exact existing service
+generation. Prevent alias reuse while the old container can serve,
+then support the original stop, remove, rename and start sequence.
+
+### SPEED-150
+
+Title: Preserve stdin for native Docker exec without a terminal
+
+Acceptance: Round-trip bounded stdin and EOF through the Docker exec
+stream without modifying the caller or treating an attached stream as
+empty. Qualify the original Compose cgroup observer and retain the
+input and output integrity checks for the Buildx worker gateway.
 
 ### SPEED-091
 

@@ -349,6 +349,9 @@ fn clone_and_reap(
     if controlled && cancellation_ready()? {
         return Ok(None);
     }
+    if process.is_some_and(|spec| spec.redis_bootstrap) {
+        security::prepare_redis_open_files()?;
+    }
     let executable = if mode == "missing-executable" {
         c"/bin/absent"
     } else {

@@ -12,6 +12,8 @@ pub const GID_BASE: u32 = 100_000;
 pub const ID_MAP_WIDTH: u32 = 65_536;
 pub const MAPPED_IDS_CAPABILITY: &str = "native_oci_mapped_ids_v1";
 pub const VOLUME_TARGET: &str = "/data";
+pub const REDIS_CONFIG: &str =
+    "sha256:eab78b9649d5ca8b91192621c91136c9c1465a81338fb686fbc02bac4dd851ae";
 pub const MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIDS: u32 = 64;
@@ -67,6 +69,8 @@ pub struct LaunchSpec {
     pub memory_swap_disabled: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub open_stdin: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub redis_bootstrap: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -282,6 +286,33 @@ impl LaunchRequest {
 }
 
 impl LaunchSpec {
+    pub fn can_bootstrap_redis(&self) -> bool {
+        let args = self.argv.iter().map(String::as_str);
+        self.image_digest == REDIS_CONFIG
+            && self.uid == 0
+            && self.gid == 0
+            && self.cwd == "/data"
+            && self.build_snapshot.is_none()
+            && self.bind.is_none()
+            && self
+                .volume
+                .as_ref()
+                .is_some_and(|volume| volume.target == "/data" && !volume.read_only)
+            && args.eq([
+                "docker-entrypoint.sh",
+                "redis-server",
+                "--appendonly",
+                "yes",
+                "--appendfsync",
+                "always",
+            ])
+            && self.env.len() == 2
+            && self.env.iter().any(|value| {
+                value == "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            })
+            && self.env.iter().any(|value| value == "REDIS_VERSION=7.4.12")
+    }
+
     pub fn bridge_scope(&self) -> Option<BridgeScope> {
         match self.network.as_str() {
             "bridge" => Some(BridgeScope::Custom),
@@ -394,6 +425,7 @@ impl LaunchSpec {
                     || spec.gid != 0
                     || !account.valid()
             })
+            || (spec.redis_bootstrap && (!search_path || !spec.can_bootstrap_redis()))
         {
             return Err(SpecError::Identity);
         }
@@ -477,6 +509,7 @@ mod tests {
                 docker_resource_defaults: false,
                 memory_swap_disabled: false,
                 open_stdin: false,
+                redis_bootstrap: false,
             },
         }
     }
@@ -564,6 +597,54 @@ mod tests {
             bundle_policy: true,
         });
         assert_eq!(request.spec.validate().err(), Some(SpecError::Identity));
+    }
+
+    #[test]
+    fn redis_bootstrap_requires_the_pinned_process_and_owned_writable_volume() {
+        let mut request = valid();
+        request.spec.image_digest = REDIS_CONFIG.into();
+        request.spec.argv = [
+            "docker-entrypoint.sh",
+            "redis-server",
+            "--appendonly",
+            "yes",
+            "--appendfsync",
+            "always",
+        ]
+        .map(String::from)
+        .to_vec();
+        request.spec.env = vec![
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into(),
+            "REDIS_VERSION=7.4.12".into(),
+        ];
+        request.spec.cwd = "/data".into();
+        request.spec.uid = 0;
+        request.spec.gid = 0;
+        request.spec.volume = Some(VolumeMount {
+            name: "redis-cache".into(),
+            target: "/data".into(),
+            inode: 14,
+            read_only: false,
+        });
+        request.spec.redis_bootstrap = true;
+        assert!(request.spec.validate_exec().is_ok());
+
+        let mut different_entrypoint = request.spec.clone();
+        different_entrypoint.argv[0] = "/bin/sh".into();
+        assert_eq!(
+            different_entrypoint.validate_exec().err(),
+            Some(SpecError::Identity)
+        );
+
+        let mut different_image = request.spec.clone();
+        different_image.image_digest = valid().spec.image_digest;
+        assert_eq!(
+            different_image.validate_exec().err(),
+            Some(SpecError::Identity)
+        );
+
+        request.spec.volume.as_mut().unwrap().read_only = true;
+        assert_eq!(request.validate_oci().err(), Some(SpecError::Identity));
     }
 
     #[test]

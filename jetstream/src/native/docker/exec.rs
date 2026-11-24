@@ -56,6 +56,7 @@ fn apply_defaults(value: &Value, config: &Value) -> std::result::Result<Vec<Stri
     }
     let mut spec: LaunchSpec = serde_json::from_value(config.clone())
         .map_err(|_| Rejected::internal("could not read container process defaults"))?;
+    spec.redis_bootstrap = false;
     spec.argv = serde_json::from_value(value["Cmd"].clone())
         .map_err(|_| Rejected::bad("exec requires an argv array"))?;
     spec.validate_exec()

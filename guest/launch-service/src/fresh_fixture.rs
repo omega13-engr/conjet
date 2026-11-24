@@ -2130,6 +2130,7 @@ impl FreshFixture {
                     .filter(|_| record.phase == Phase::Running)
                     .ok_or(("not_running", "native exec requires a live OCI process"))?;
                 let mut spec = spec.clone();
+                spec.redis_bootstrap = false;
                 spec.argv = request.argv;
                 spec.validate_exec()
                     .map_err(|_| ("invalid_spec", "invalid native exec argv"))?;

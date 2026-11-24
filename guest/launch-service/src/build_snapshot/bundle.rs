@@ -76,6 +76,7 @@ pub(crate) fn parse(
         docker_resource_defaults: false,
         memory_swap_disabled: false,
         open_stdin: false,
+        redis_bootstrap: false,
         image_digest: image_digest.to_owned(),
         argv: serde_json::from_value(field("args")?).map_err(|_| "invalid build argv")?,
         env: serde_json::from_value(field("env")?).map_err(|_| "invalid build environment")?,

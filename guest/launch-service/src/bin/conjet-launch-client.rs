@@ -43,6 +43,7 @@ fn launch(
             docker_resource_defaults: false,
             memory_swap_disabled: false,
             open_stdin: false,
+            redis_bootstrap: false,
             image_digest,
             argv: vec!["/bin/probe".into()],
             env: Vec::new(),

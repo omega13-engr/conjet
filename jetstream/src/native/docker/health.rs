@@ -38,6 +38,7 @@ impl Config {
         }
         let mut spec: LaunchSpec = serde_json::from_value(process.clone())
             .map_err(|_| Rejected::internal("cannot read native healthcheck process defaults"))?;
+        spec.redis_bootstrap = false;
         spec.argv = argv
             .iter()
             .map(|part| {

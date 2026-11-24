@@ -8,6 +8,9 @@ const BPF_LOAD_WORD: u16 = 0x20;
 const BPF_JUMP_EQUAL: u16 = 0x15;
 const BPF_RETURN: u16 = 0x06;
 const BPF_AND: u16 = 0x54;
+const SYS_FADVISE64_AARCH64: u32 = 223;
+// Linux capability numbers for CHOWN, DAC_OVERRIDE, SETGID, and SETUID.
+const REDIS_CAPABILITIES: u32 = (1 << 0) | (1 << 1) | (1 << 6) | (1 << 7);
 
 pub(crate) fn clear_supplementary_groups() -> io::Result<()> {
     checked(unsafe { libc::setgroups(0, std::ptr::null()) })
@@ -17,6 +20,7 @@ pub(crate) fn drop_workload_identity(
     uid: u32,
     gid: u32,
     supplementary_primary_gid: bool,
+    redis_bootstrap: bool,
 ) -> io::Result<()> {
     let mut group = 0;
     let count = unsafe { libc::getgroups(1, &mut group) };
@@ -39,6 +43,11 @@ pub(crate) fn drop_workload_identity(
             0,
         )
     })?;
+    let allowed = if redis_bootstrap {
+        REDIS_CAPABILITIES
+    } else {
+        0
+    };
     for capability in 0..64 {
         let supported = unsafe { libc::prctl(libc::PR_CAPBSET_READ, capability, 0, 0, 0) };
         if supported < 0 {
@@ -48,20 +57,22 @@ pub(crate) fn drop_workload_identity(
             }
             return Err(error);
         }
-        checked(unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) })?;
+        if (u64::from(allowed) & (1 << capability)) == 0 {
+            checked(unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) })?;
+        }
     }
     checked(unsafe { libc::setresgid(gid, gid, gid) })?;
     checked(unsafe { libc::setresuid(uid, uid, uid) })?;
 
     let header = CapabilityHeader::current();
-    let empty = [0u32; 6]; // Two Linux capability data entries, three masks each.
+    let capabilities = [allowed, allowed, 0, 0, 0, 0];
     // The kernel reads exactly the versioned C header and two data entries.
-    if unsafe { libc::syscall(libc::SYS_capset, &header, empty.as_ptr()) } != 0 {
+    if unsafe { libc::syscall(libc::SYS_capset, &header, capabilities.as_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
     checked(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })?;
     // Namespace root must enter exec with the same empty capability state.
-    if uid == 0 {
+    if uid == 0 && !redis_bootstrap {
         verify_empty_capabilities()?;
     }
     Ok(())
@@ -95,10 +106,30 @@ pub(crate) fn verify_empty_capabilities() -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn set_process_limits() -> io::Result<()> {
+pub(crate) const DEFAULT_OPEN_FILES: u64 = 32;
+// The pinned Redis server's default client limit requires this many
+// descriptors. Its cgroup still bounds memory, CPU and tasks.
+pub(crate) const REDIS_OPEN_FILES: u64 = 10_032;
+
+pub(crate) fn prepare_redis_open_files() -> io::Result<()> {
+    let mut bounds = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    checked(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut bounds) })?;
+    if bounds.rlim_max < REDIS_OPEN_FILES {
+        // Raise the ceiling in the private helper before entering the user
+        // namespace, where the child cannot raise an inherited hard limit.
+        bounds.rlim_max = REDIS_OPEN_FILES;
+        checked(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &bounds) })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn set_process_limits(open_files: u64) -> io::Result<()> {
     for (resource, maximum) in [
         (libc::RLIMIT_CORE, 0),
-        (libc::RLIMIT_NOFILE, 32),
+        (libc::RLIMIT_NOFILE, open_files),
         (libc::RLIMIT_FSIZE, 16 * 1024 * 1024),
     ] {
         let bounds = libc::rlimit {
@@ -115,7 +146,7 @@ pub(crate) struct WorkloadFilter {
 }
 
 impl WorkloadFilter {
-    pub(crate) fn new(bridge: bool, ordinary_oci: bool) -> Self {
+    pub(crate) fn new(bridge: bool, ordinary_oci: bool, redis_bootstrap: bool) -> Self {
         fn statement(code: u16, k: u32) -> libc::sock_filter {
             libc::sock_filter {
                 code,
@@ -297,9 +328,11 @@ impl WorkloadFilter {
                 libc::SYS_getdents64,
                 libc::SYS_unlinkat,
                 libc::SYS_mkdirat,
+                libc::SYS_renameat,
                 libc::SYS_pread64,
                 libc::SYS_pwrite64,
                 libc::SYS_fsync,
+                libc::SYS_fdatasync,
                 libc::SYS_epoll_create1,
                 libc::SYS_epoll_ctl,
                 libc::SYS_epoll_pwait,
@@ -308,6 +341,66 @@ impl WorkloadFilter {
                 program.push(next_or_skip(syscall as u32));
                 program.push(statement(BPF_RETURN, RET_ALLOW));
             }
+            let cache_advice = [
+                statement(BPF_LOAD_WORD, 16 + 3 * 8),
+                next_or_skip(libc::POSIX_FADV_DONTNEED as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, RET_ERRNO | libc::EPERM as u32),
+            ];
+            program.push(libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                k: SYS_FADVISE64_AARCH64,
+                jt: 0,
+                jf: cache_advice.len() as u8,
+            });
+            program.extend(cache_advice);
+        }
+        if redis_bootstrap {
+            for syscall in [
+                libc::SYS_fchownat,
+                libc::SYS_getresuid,
+                libc::SYS_getresgid,
+                libc::SYS_setgroups,
+                libc::SYS_setresuid,
+                libc::SYS_setresgid,
+                libc::SYS_setuid,
+                libc::SYS_setgid,
+                libc::SYS_capset,
+            ] {
+                program.push(next_or_skip(syscall as u32));
+                program.push(statement(BPF_RETURN, RET_ALLOW));
+            }
+            let controls = [
+                statement(BPF_LOAD_WORD, 16),
+                // util-linux setpriv retains the bounded permitted mask
+                // across its UID/GID transition. Exec clears KEEPCAPS.
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: libc::PR_SET_KEEPCAPS as u32,
+                    jt: 0,
+                    jf: 4,
+                },
+                statement(BPF_LOAD_WORD, 24),
+                next_or_skip(1),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, RET_ERRNO | libc::EPERM as u32),
+                next_or_skip(libc::PR_GET_NO_NEW_PRIVS as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                next_or_skip(libc::PR_SET_NO_NEW_PRIVS as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                next_or_skip(libc::PR_GET_SECUREBITS as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                next_or_skip(libc::PR_CAPBSET_READ as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, RET_ERRNO | libc::EPERM as u32),
+            ];
+            program.push(libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                k: libc::SYS_prctl as u32,
+                jt: 0,
+                jf: controls.len() as u8,
+            });
+            program.extend(controls);
         }
         if bridge {
             let denied = RET_ERRNO | libc::EPERM as u32;
@@ -316,26 +409,41 @@ impl WorkloadFilter {
                 libc::sock_filter {
                     code: BPF_JUMP_EQUAL,
                     k: libc::AF_INET as u32,
-                    jt: 1,
+                    jt: 3,
                     jf: 0,
                 },
-                statement(BPF_RETURN, denied),
-                statement(BPF_LOAD_WORD, 32), // args[2]: protocol (automatic selection)
-                libc::sock_filter {
-                    code: BPF_JUMP_EQUAL,
-                    k: 0,
-                    jt: 1,
-                    jf: 0,
-                },
+                next_or_skip(libc::AF_INET6 as u32),
+                statement(BPF_RETURN, RET_ERRNO | libc::EAFNOSUPPORT as u32),
                 statement(BPF_RETURN, denied),
                 statement(BPF_LOAD_WORD, 24), // args[1]: type and socket flags
                 statement(
                     BPF_AND,
                     !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
                 ),
-                next_or_skip(libc::SOCK_STREAM as u32),
+                // libc's getaddrinfo returns the explicit protocol that the
+                // kernel would select for the corresponding socket type.
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: libc::SOCK_STREAM as u32,
+                    jt: 0,
+                    jf: 6,
+                },
+                statement(BPF_LOAD_WORD, 32), // args[2]: protocol
+                next_or_skip(0),
                 statement(BPF_RETURN, RET_ALLOW),
-                next_or_skip(libc::SOCK_DGRAM as u32),
+                next_or_skip(libc::IPPROTO_TCP as u32),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, denied),
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: libc::SOCK_DGRAM as u32,
+                    jt: 0,
+                    jf: 5,
+                },
+                statement(BPF_LOAD_WORD, 32),
+                next_or_skip(0),
+                statement(BPF_RETURN, RET_ALLOW),
+                next_or_skip(libc::IPPROTO_UDP as u32),
                 statement(BPF_RETURN, RET_ALLOW),
                 statement(BPF_RETURN, denied),
             ];

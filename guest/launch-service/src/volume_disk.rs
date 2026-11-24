@@ -436,7 +436,9 @@ pub(crate) mod guest {
         if !info.is_dir()
             || !matches!(
                 owner,
-                (Some(0), Some(0)) | (Some(WORKLOAD_UID), Some(WORKLOAD_GID))
+                (Some(0), Some(0))
+                    | (Some(999), Some(0))
+                    | (Some(WORKLOAD_UID), Some(WORKLOAD_GID))
             )
             || info.mode() & 0o777 != 0o700
         {

@@ -1546,6 +1546,13 @@ impl Owner {
         if let Some(volume) = &volume {
             spec["volume"] = json!(volume);
         }
+        if spec["image_digest"] == conjet_launch_service::spec::REDIS_CONFIG
+            && config["HostConfig"]["CapDrop"] != json!(["ALL"])
+            && serde_json::from_value::<conjet_launch_service::spec::LaunchSpec>(spec.clone())
+                .is_ok_and(|spec| spec.can_bootstrap_redis())
+        {
+            spec["redis_bootstrap"] = json!(true);
+        }
         if bind.is_some() && (spec["uid"] != 0 || spec["gid"] != 0 || !spec["account"].is_null()) {
             return Err(Rejected::bad(
                 "isolated host binds require the mapped root identity",

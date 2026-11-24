@@ -329,6 +329,7 @@ impl Image {
             docker_resource_defaults: limits.has_unlimited(),
             memory_swap_disabled,
             open_stdin,
+            redis_bootstrap: false,
         };
         spec.validate_exec()
             .map_err(|error| Rejected::bad(error.to_string()))?;

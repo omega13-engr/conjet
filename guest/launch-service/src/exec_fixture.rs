@@ -390,8 +390,11 @@ pub fn run_helper(
     checked(unsafe { libc::fchdir(TARGET_ROOT) })?;
     checked(unsafe { libc::chroot(c".".as_ptr()) })?;
     checked(unsafe { libc::chdir(cwd.as_ptr()) })?;
-    let filter =
-        security::WorkloadFilter::new(spec.bridge_scope().is_some(), spec.build_snapshot.is_none());
+    let filter = security::WorkloadFilter::new(
+        spec.bridge_scope().is_some(),
+        spec.build_snapshot.is_none(),
+        false,
+    );
     let mut lifeline = [-1; 2];
     checked(unsafe { libc::pipe2(lifeline.as_mut_ptr(), libc::O_CLOEXEC) })?;
     let child = unsafe { libc::fork() };
@@ -403,8 +406,8 @@ pub fn run_helper(
             libc::close(lifeline[1]);
         }
         let setup = (|| -> io::Result<()> {
-            security::set_process_limits()?;
-            security::drop_workload_identity(spec.uid, spec.gid, false)?;
+            security::set_process_limits(security::DEFAULT_OPEN_FILES)?;
+            security::drop_workload_identity(spec.uid, spec.gid, false, false)?;
             checked(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;
             let mut poll = libc::pollfd {
                 fd: lifeline[0],
