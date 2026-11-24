@@ -248,6 +248,16 @@ samples and ten warmups. Evaluating that partial evidence attributed
 one passing case and left the 71-case release gate failed. Evidence is
 under `SPEED-117/` on ExternalSSD.
 
+## SPEED-118 pinned application event loops
+
+The pinned Registry binary reported v2.8.3 after epoll and eventfd
+were admitted for ordinary OCI workloads. Node moved past libuv loop
+initialization and then failed opening its stdout pipe. A filter for
+`FIONBIO` on an owned descriptor let the original Node output canary
+run from the reloaded archive with verified teardown. [Pinned Node pipe implementation](https://raw.githubusercontent.com/nodejs/node/v22.23.5/deps/uv/src/unix/pipe.c) · [Pinned libuv descriptor implementation](https://raw.githubusercontent.com/nodejs/node/v22.23.5/deps/uv/src/unix/core.c)
+
+Evidence is under `SPEED-118/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

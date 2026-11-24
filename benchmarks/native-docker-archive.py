@@ -86,6 +86,12 @@ def collect(endpoint, peer, docker, env, output, store, *, node_roundtrip=False)
             if 'Operation not permitted' not in cases['node_namespace_denied']['stderr']:
                 raise RuntimeError('the node workload did not report the namespace rejection')
             cases['node_namespace_cleanup'] = MATCHED['native_terminal'](connection, name, handles, code=1)
+            name = 'cj-archive-node-runtime'
+            value = call('node_runtime', ['run', '--rm', '--pull', 'never', '--network', 'none',
+                                          '--name', name, tag, 'node', '-e', 'console.log("image-node")'])
+            if value != b'image-node\n':
+                raise RuntimeError('the archived Node workload returned different output')
+            cases['node_runtime_cleanup'] = MATCHED['native_terminal'](connection, name, handles)
             call('node_final_remove_tag', ['image', 'rm', tag])
             call('node_remove_source', ['image', 'rm', fixture['ref']])
             if call('node_final_absent', ['image', 'ls', '--quiet', tag]):

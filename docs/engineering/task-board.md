@@ -1116,6 +1116,13 @@ through their event-loop initialization. Admit the required event
 descriptor and poll operations for ordinary OCI only. Preserve existing
 resource limits, I/O ownership, seccomp and cleanup.
 
+Evidence: Registry returned its pinned v2.8.3 version. The Node workload
+advanced from libuv startup failure to a nonblocking stdout failure.
+After adding the descriptor-specific operation, the original
+`node -e 'console.log("image-node")'` command returned its exact
+output from the reloaded archive with verified guest cleanup. Logs
+are under `SPEED-118/` on ExternalSSD.
+
 ### SPEED-119
 
 Title: Retain and transfer the full frozen exec output
@@ -1125,6 +1132,15 @@ through authenticated chunks. Preserve ordering, exit status,
 connection and workload ownership, overflow handling and cleanup.
 Exercise the original 128 KiB output case once the approved workload
 devices are available.
+
+### SPEED-120
+
+Title: Expose the native null and zero devices through the private workload root
+
+Acceptance: Provide the standard null and zero devices to ordinary OCI
+with individually verified device identities and no broader device tree.
+Run the frozen Docker exec case that reads 128 KiB from `/dev/zero` and
+verify output, teardown and continued workload operation.
 
 ### SPEED-091
 
