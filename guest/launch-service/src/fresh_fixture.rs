@@ -1468,6 +1468,7 @@ impl FreshFixture {
         });
         let mut removed = false;
         let mut exit_received = false;
+        let mut oom_killed = false;
         let mut network_removed = !bridge;
         let result = (|| -> io::Result<()> {
             while let Some((event, mut descriptors)) =
@@ -1565,6 +1566,9 @@ impl FreshFixture {
                             }
                         });
                     }
+                    b'O' if !exit_received && !oom_killed && oci_process.is_some() => {
+                        oom_killed = true
+                    }
                     b'X' => {
                         peer.set_read_timeout(Some(TRANSITION_TIMEOUT))?;
                         let mut status = [0; 4];
@@ -1578,7 +1582,12 @@ impl FreshFixture {
                             record.exit = if libc::WIFEXITED(status) {
                                 Some(json!({"code": libc::WEXITSTATUS(status)}))
                             } else if libc::WIFSIGNALED(status) {
-                                Some(json!({"signal": libc::WTERMSIG(status)}))
+                                let signal = libc::WTERMSIG(status);
+                                Some(if signal == libc::SIGKILL && oom_killed {
+                                    json!({"signal":signal,"oom_killed":true})
+                                } else {
+                                    json!({"signal":signal})
+                                })
                             } else {
                                 None
                             };

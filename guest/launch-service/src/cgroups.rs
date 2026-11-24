@@ -20,6 +20,7 @@ impl WorkloadCgroup {
         parent: &Path,
         workload_id: [u8; 16],
         limits: ResourceLimits,
+        disable_swap: bool,
     ) -> io::Result<Self> {
         let parent_descriptor = OpenOptions::new()
             .read(true)
@@ -48,6 +49,9 @@ impl WorkloadCgroup {
                 }
             };
             write_control(&path, "memory.max", &maximum(limits.memory_bytes))?;
+            if disable_swap {
+                write_control(&path, "memory.swap.max", "0")?;
+            }
             write_control(&path, "pids.max", &maximum(u64::from(limits.pids)))?;
             let quota = u64::from(limits.cpu_millicores) * CPU_PERIOD_US / 1_000;
             write_control(
@@ -82,6 +86,16 @@ impl WorkloadCgroup {
 
     pub(crate) fn memory_events(&self) -> io::Result<String> {
         std::fs::read_to_string(self.path.join("memory.events"))
+    }
+
+    pub(crate) fn oom_killed(&self) -> io::Result<bool> {
+        let events = self.memory_events()?;
+        events
+            .lines()
+            .find_map(|line| line.strip_prefix("oom_kill "))
+            .and_then(|count| count.parse::<u64>().ok())
+            .map(|count| count != 0)
+            .ok_or_else(|| io::Error::other("invalid cgroup OOM counter"))
     }
 
     pub fn populated(&self) -> io::Result<bool> {

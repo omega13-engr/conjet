@@ -1394,6 +1394,20 @@ zero-swap controls, exits 137 after a kernel OOM kill, and reports
 OOMKilled. The other workload keeps its data and the survivor and
 recovery starts retain their original controls.
 
+Evidence: The frozen stress preflight passed all 400 samples and
+40 warmups. The Node process read `67108864 0`, exited 137, and had
+`OOMKilled=true` from the kernel counter. The survivor preserved its
+bytes and the recovery launch passed. See `SPEED-138/stress-and-oom/`.
+
+### SPEED-139
+
+Title: Create the frozen Compose bridge with a routed guest gateway
+
+Acceptance: Preserve the requested internal flag and install the
+private guest default route for a non-internal bridge. Keep the
+release preflight VM air-gapped, retain DNS and host loopback
+publication, and verify network teardown.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

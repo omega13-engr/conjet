@@ -199,6 +199,7 @@ impl Image {
             &[
                 "NetworkMode",
                 "Memory",
+                "MemorySwap",
                 "NanoCpus",
                 "PidsLimit",
                 "AutoRemove",
@@ -294,6 +295,16 @@ impl Image {
             return Err(Rejected::bad("invalid native stdin options"));
         }
         let limits = resources(host)?;
+        let memory_swap_disabled = match &host["MemorySwap"] {
+            Value::Null => false,
+            value if value.as_u64() == Some(0) => false,
+            value if value.as_u64() == Some(limits.memory_bytes) => true,
+            _ => {
+                return Err(Rejected::bad(
+                    "native MemorySwap must equal the requested memory limit",
+                ))
+            }
+        };
         let spec = LaunchSpec {
             image_digest: self.config_digest.clone(),
             argv,
@@ -312,6 +323,7 @@ impl Image {
             build_snapshot: None,
             limits,
             docker_resource_defaults: limits.has_unlimited(),
+            memory_swap_disabled,
             open_stdin,
         };
         spec.validate_exec()

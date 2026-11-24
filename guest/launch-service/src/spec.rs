@@ -62,6 +62,8 @@ pub struct LaunchSpec {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub docker_resource_defaults: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_swap_disabled: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub open_stdin: bool,
 }
 
@@ -361,6 +363,8 @@ impl LaunchSpec {
         if !spec
             .limits
             .validate(spec.docker_resource_defaults && spec.build_snapshot.is_none())
+            || (spec.memory_swap_disabled
+                && (!search_path || spec.build_snapshot.is_some() || spec.limits.memory_bytes == 0))
         {
             return Err(SpecError::Resources);
         }
@@ -420,6 +424,7 @@ mod tests {
                     cpu_millicores: 500,
                 },
                 docker_resource_defaults: false,
+                memory_swap_disabled: false,
                 open_stdin: false,
             },
         }

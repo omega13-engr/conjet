@@ -259,7 +259,12 @@ fn run(
         std::fs::create_dir(directory)?;
         write_control(directory, "cgroup.subtree_control", CONTROLLERS)?;
     }
-    let cgroup = WorkloadCgroup::create(&scope, id, limits)?;
+    let cgroup = WorkloadCgroup::create(
+        &scope,
+        id,
+        limits,
+        process.is_some_and(|spec| spec.memory_swap_disabled),
+    )?;
     inject(mode, "fault-cgroup");
     let mut bridge = (network && process.is_none())
         .then(Bridge::create)
@@ -276,6 +281,13 @@ fn run(
     );
     if mode == "exhaust-memory" {
         eprintln!("workload memory.events: {}", cgroup.memory_events()?);
+    }
+    if controlled
+        && process.is_some()
+        && matches!(probe, Ok(Some(status)) if libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL)
+        && cgroup.oom_killed()?
+    {
+        notify_control(b'O', &[])?;
     }
     let exit_report = match &probe {
         Ok(Some(wait_status)) if controlled => notify_control(b'X', &wait_status.to_le_bytes()),

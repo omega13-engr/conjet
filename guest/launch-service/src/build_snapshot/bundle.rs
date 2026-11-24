@@ -74,6 +74,7 @@ pub(crate) fn parse(
     selected.bundle_policy = true;
     let spec = LaunchSpec {
         docker_resource_defaults: false,
+        memory_swap_disabled: false,
         open_stdin: false,
         image_digest: image_digest.to_owned(),
         argv: serde_json::from_value(field("args")?).map_err(|_| "invalid build argv")?,

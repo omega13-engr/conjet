@@ -968,6 +968,8 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             let specs = container.spec["argv"].as_array().expect("validated args");
             let mut lifecycle = json!({
                 "Status":status,"Running":status=="running","ExitCode":code,
+                "OOMKilled":state.terminal.as_ref().is_some_and(|terminal|
+                    terminal.witness["exit"]["oom_killed"] == true),
                 "Error":state.error.as_deref().unwrap_or("")
             });
             if let Some(health) = &state.health {
