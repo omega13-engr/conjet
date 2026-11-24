@@ -123,7 +123,10 @@ Problem and Evidence: Native memory RPCs are not proof of complete Core controll
 
 Approach: Map native workload/cgroup lifecycle to existing memory inputs; use actual Core policy and ownership ledger. Start the growth fixture below full capacity.
 
-Evidence: Pending; no new candidate result.
+Evidence: Core admission and the data canary passed reduced capacity,
+full-capacity convergence and a second idle shrink with ownership evidence.
+Independent service pressure is tracked in SPEED-068. See
+[SPEED-067 evidence](native-engine-validation.md#speed-067).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
@@ -175,6 +178,32 @@ Acceptance Criteria:
 - Core activates only with the memory bridge and an authenticated admission
   authority. Keep admission and guest cleanup authoritative over idle shrink.
   Run the SPEED-058 memory qualification before comparative timing.
+
+Evidence: Release canary verified the 448 → 2,048 → 448 MiB policy path, a
+4 MiB payload through 12 launches, old boot and workload-sequence rejection,
+and duplicate grant rejection. See
+[SPEED-067 evidence](native-engine-validation.md#speed-067).
+
+Review: Self-review and isolated validation complete. Independent review pending.
+
+### SPEED-068
+
+Title: Qualify Core response to independent native guest memory pressure
+
+Description: Use a disposable, bounded guest service cgroup to produce
+kernel-observed pressure independently of native launch admission. Verify
+the restored target, reclaim ownership, live canary integrity during churn,
+and idle shrink once both the service and the workloads are gone.
+
+Is blocked by task: SPEED-067 implementation and live admission canary.
+
+Acceptance Criteria:
+
+- Record pressure counters or PSI and configured-capacity convergence after
+  starting at a reduced target. Keep the pressure fixture confined to the
+  diagnostic boot and preserve production and launch fixture limits.
+- A pressure-only run must observe a Core target transition before submitting
+  Docker launches. Preserve raw samples and cleanup results.
 
 ### SPEED-059
 

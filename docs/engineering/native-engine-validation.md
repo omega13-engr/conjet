@@ -60,3 +60,33 @@ existing 32-bit PSCI enum and raw-pointer FFI lint errors. This increment
 keeps Core policy activation gated pending generation-scoped admission. It
 verifies telemetry transport and native ownership classification. Balloon
 growth, pressure-time integrity and idle shrink remain SPEED-058 work.
+
+## SPEED-067
+
+The isolated native Core governor starts with a private authenticated guest
+ledger. A launch stays pending until the exact boot, workload ID and
+sequence receive a capacity grant. The VMM grants after the Core target and
+actual balloon converge at configured capacity. Loss or expiry of the
+observation keeps the controller in its active policy. A workload with
+unresolved cleanup continues to count as owned. The matched timing entry
+point now requires this dynamic-memory path and both Core helpers.
+
+The live canary shrank from 2,048 MiB to 448 MiB, grew to 2,048 MiB from
+that reduced state to launch the canary, then shrank again. It observed
+409,600 balloon pages at the reduced target and zero after growth. About
+1.56 GiB of balloon-owned backing was released at the first idle target.
+A nonzero 4 MiB payload matched its expected SHA-256 before and after 12
+independent guest lifecycles. The stale boot, reused workload ID with the
+wrong sequence, and duplicate grant each received an explicit rejection.
+A 10 ms admission from the reduced target expired without executing or
+retaining guest resources.
+Workspace tests passed (173 passed, three ignored), including the
+missing, invalid and stale observation tests. Earlier canary scripts tried
+a shell pipeline that the current syscall policy rejects. The final fixture
+uses shell builtins and the supported exec subset at the same limits.
+
+Raw samples and launcher identity are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-057/core-dynamic-final/`.
+Independent service pressure and a live fault at the unresolved cleanup
+boundary have separate acceptance evidence. Growth from workload demand
+alone does not meet the pressure gate.

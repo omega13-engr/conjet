@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, ensure, Context};
 use clap::Args;
 use conjet_launch_service::handshake::{hex, random, unhex};
+use conjet_launch_service::{core_admission, wire::Kind};
+use jetstream::hvf::native_memory::NativeMemoryAdmission;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256, Sha512};
@@ -57,9 +59,18 @@ pub(super) struct Options {
     /// Trusted static Core reclaim helper paired with the memory service.
     #[arg(long, requires = "guest_memd")]
     guest_reclaimd: Option<PathBuf>,
+    /// Enable the Core controller and require its per-workload admission grant.
+    #[arg(long, requires = "guest_memd")]
+    core_dynamic_memory: bool,
     /// Maximum lifetime of the disposable VM.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(30..=1800))]
     lifetime_seconds: u64,
+}
+
+struct MemoryHelpers {
+    memd: Vec<u8>,
+    reclaimd: Vec<u8>,
+    core_admission: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -117,7 +128,11 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             let reclaimd = read_regular(&reclaimd, WORKLOAD_LIMIT)?;
             validate_executable(&memd).context("invalid Core memory service")?;
             validate_executable(&reclaimd).context("invalid Core reclaim helper")?;
-            Ok((memd, reclaimd))
+            Ok(MemoryHelpers {
+                memd,
+                reclaimd,
+                core_admission: options.core_dynamic_memory,
+            })
         })
         .transpose()?;
     let kernel = read_regular(&options.kernel, 64 * 1024 * 1024)?;
@@ -184,11 +199,16 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         }
     }
     let force_stop = Arc::new(AtomicBool::new(false));
+    let admission = options
+        .core_dynamic_memory
+        .then(|| Arc::new(NativeMemoryAdmission::default()));
     let finished = AtomicBool::new(false);
     let orderly = std::thread::scope(|scope| -> anyhow::Result<bool> {
         let control_stop = Arc::clone(&force_stop);
         let finished_signal = &finished;
         let session_identity = &identity;
+        let admission_gate = admission.as_deref();
+        let boot_gate = admission.clone();
         let control = scope.spawn(move || {
             manage_session(
                 directory,
@@ -197,6 +217,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
                 finished_signal,
                 &control_stop,
                 options.lifetime_seconds,
+                admission_gate,
             )
         });
         let report = machine.run(HvfBootOptions {
@@ -207,6 +228,10 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             enable_native_launch: true,
             native_airgap: true,
             enable_native_memory_bridge: memory_helpers.is_some(),
+            native_memory_admission: boot_gate,
+            memory_control_socket: options
+                .core_dynamic_memory
+                .then(|| directory.join("memory-control.sock")),
             external_stop: Some(force_stop),
             ..Default::default()
         });
@@ -263,13 +288,40 @@ fn manage_session(
     finished: &AtomicBool,
     force_stop: &AtomicBool,
     lifetime: u64,
+    admission: Option<&NativeMemoryAdmission>,
 ) -> anyhow::Result<bool> {
     let start = Instant::now();
     let startup = start + Duration::from_secs(15);
     let deadline = start + Duration::from_secs(lifetime);
     let mut ready = false;
+    let mut admission_boot = None;
+    let mut admission_peer = None;
     while !finished.load(Ordering::Acquire) {
-        if !ready && client::Connection::open(directory, identity, key).is_ok() {
+        let mut authenticated = false;
+        let connect = !ready || (admission.is_some() && admission_peer.is_none());
+        if let Some(mut peer) = connect
+            .then(|| client::Connection::open(directory, identity, key).ok())
+            .flatten()
+        {
+            if let Some(gate) = admission {
+                if admission_boot
+                    .as_ref()
+                    .is_some_and(|boot| boot != &peer.boot)
+                {
+                    gate.invalidate();
+                    force_stop.store(true, Ordering::Release);
+                    bail!("native admission supervisor generation changed");
+                }
+                if poll_native_admission(&mut peer, gate).is_ok() {
+                    admission_boot = Some(peer.boot.clone());
+                    admission_peer = Some(peer);
+                    authenticated = true;
+                }
+            } else {
+                authenticated = true;
+            }
+        }
+        if !ready && authenticated {
             let mut output = std::io::stdout().lock();
             if let Err(error) = writeln!(
                 output,
@@ -302,9 +354,56 @@ fn manage_session(
             }
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        if let (Some(gate), Some(peer)) = (admission, admission_peer.as_mut()) {
+            if poll_native_admission(peer, gate).is_err() {
+                gate.invalidate();
+                admission_peer = None;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(if admission.is_some() {
+            30
+        } else {
+            100
+        }));
     }
     Ok(ready)
+}
+
+fn poll_native_admission(
+    peer: &mut client::Connection,
+    gate: &NativeMemoryAdmission,
+) -> anyhow::Result<()> {
+    let request = |grant: Option<&core_admission::Admission>, boot: &str| {
+        json!({
+            "boot_id": boot, "budget_ms": 150, "core_only": true, "core_grant": grant,
+        })
+    };
+    let timeout = Duration::from_millis(150);
+    for grant in gate.take_grants(Instant::now()) {
+        // Cancellation or deadline can win after the observation. Only the
+        // guest authority can grant the exact live ID.
+        match peer.exchange(
+            Kind::Memory,
+            Kind::Memory,
+            &request(Some(&grant), &peer.boot),
+            timeout,
+        ) {
+            Ok(_) | Err(conjet_launch_service::wire::WireError::PeerError(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let value = peer.exchange(
+        Kind::Memory,
+        Kind::Memory,
+        &request(None, &peer.boot),
+        timeout,
+    )?;
+    let report = serde_json::from_value(value["core_admission"].clone())?;
+    ensure!(
+        gate.publish(report, Instant::now()),
+        "invalid native admission observation"
+    );
+    Ok(())
 }
 
 fn read_regular(path: &Path, limit: u64) -> anyhow::Result<Vec<u8>> {
@@ -394,7 +493,7 @@ fn build_archive(
     descriptor: &[u8],
     key: &[u8],
     oci: Option<&super::oci::Root>,
-    memory_helpers: Option<&(Vec<u8>, Vec<u8>)>,
+    memory_helpers: Option<&MemoryHelpers>,
 ) -> anyhow::Result<()> {
     let mut archive = OpenOptions::new()
         .write(true)
@@ -440,9 +539,36 @@ fn build_archive(
     append("dev/null", 0o020666, &[], 1, 3, 0, 0)?;
     append("init", 0o100755, guest, 0, 0, 0, 0)?;
     append("etc/conjet/launch.key", 0o100600, key, 0, 0, 0, 0)?;
-    if let Some((memd, reclaimd)) = memory_helpers {
-        append("etc/conjet/conjet-memd", 0o100500, memd, 0, 0, 0, 0)?;
-        append("etc/conjet/conjet-reclaimd", 0o100500, reclaimd, 0, 0, 0, 0)?;
+    if let Some(helpers) = memory_helpers {
+        append(
+            "etc/conjet/conjet-memd",
+            0o100500,
+            &helpers.memd,
+            0,
+            0,
+            0,
+            0,
+        )?;
+        append(
+            "etc/conjet/conjet-reclaimd",
+            0o100500,
+            &helpers.reclaimd,
+            0,
+            0,
+            0,
+            0,
+        )?;
+        if helpers.core_admission {
+            append(
+                core_admission::MARKER.trim_start_matches('/'),
+                0o100400,
+                &[],
+                0,
+                0,
+                0,
+                0,
+            )?;
+        }
     }
     if let Some(root) = oci {
         append(

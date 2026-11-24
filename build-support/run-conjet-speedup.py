@@ -364,7 +364,7 @@ def stop_child(process, timeout):
     return process.returncode
 
 
-def audit_native_boot(directory, guest, helpers=()):
+def audit_native_boot(directory, guest, helpers=(), dynamic_memory=False):
     """Read the boot archive manifest without recording its private payloads."""
     root = 'etc/conjet/oci-root'
     allowed_top_level = {
@@ -378,6 +378,8 @@ def audit_native_boot(directory, guest, helpers=()):
         ('etc/conjet/conjet-memd', 'etc/conjet/conjet-reclaimd'), helpers))}
     observed_executables = {}
     allowed_top_level.update(expected_executables)
+    if dynamic_memory:
+        allowed_top_level.add('etc/conjet/native-core-admission')
     with (directory / 'init.cpio').open('rb') as archive:
         while True:
             header = archive.read(110)
@@ -412,7 +414,8 @@ def audit_native_boot(directory, guest, helpers=()):
             archive.seek(-archive.tell() % 4, os.SEEK_CUR)
     if (observed_executables != {name: fingerprint(source)['sha256']
                                 for name, source in expected_executables.items()}
-            or root not in entries):
+            or root not in entries
+            or (dynamic_memory and 'etc/conjet/native-core-admission' not in entries)):
         raise RuntimeError('native boot archive does not match the trusted guest and OCI fixture')
     disk = directory / 'blank.raw'
     if disk.stat().st_size != 16 * 1024 * 1024:
@@ -447,6 +450,7 @@ def native_session(args, root):
     registry_scope = ExitStack()
     registry = None
     helpers = (args.native_memd, args.native_reclaimd) if args.native_memd else ()
+    dynamic_memory = args.diagnostics == 'dynamic-memory' or args.matched_output is not None
     try:
         if host == before['endpoint']:
             raise RuntimeError('candidate endpoint overlaps production')
@@ -462,6 +466,8 @@ def native_session(args, root):
                       '--sha256', report['binary_sha256'][str(args.native_package)]]
         if helpers:
             vm_command += ['--guest-memd', helpers[0], '--guest-reclaimd', helpers[1]]
+        if dynamic_memory:
+            vm_command.append('--core-dynamic-memory')
         report['vm_command'] = list(map(str, vm_command))
         with (output / 'vmm.stderr').open('w') as log:
             vm = subprocess.Popen(vm_command, env=env, stdin=subprocess.DEVNULL,
@@ -475,8 +481,9 @@ def native_session(args, root):
         directory = candidate
         report['vmm_pid'] = vm.pid
         report['native_session'] = str(directory)
-        if args.diagnostics in ('control', 'memory-telemetry'):
-            report['native_boot_audit'] = audit_native_boot(directory, args.native_guest, helpers)
+        if dynamic_memory or args.diagnostics in ('control', 'memory-telemetry'):
+            report['native_boot_audit'] = audit_native_boot(
+                directory, args.native_guest, helpers, dynamic_memory)
         if args.diagnostics == 'oci-import':
             diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-live-install.py'))
             config_digest = json.loads(args.import_receipt.read_text())['config_digest']
@@ -558,9 +565,12 @@ def native_session(args, root):
             elif args.diagnostics == 'published-port':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-published-port.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
-            elif args.diagnostics == 'memory-telemetry':
+            elif args.diagnostics in ('memory-telemetry', 'dynamic-memory'):
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-core-memory.py'))
-                diagnostic['collect'](endpoint, bridge.pid, directory, vm.pid, output)
+                if dynamic_memory:
+                    diagnostic['check_growth'](endpoint, bridge.pid, directory, vm.pid, output, docker, env)
+                else:
+                    diagnostic['collect'](endpoint, bridge.pid, directory, vm.pid, output)
             elif args.diagnostics in ('oci', 'oci-import'):
                 oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
                 oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
@@ -653,7 +663,7 @@ def main():
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
-                                                  'memory-telemetry'),
+                                                  'memory-telemetry', 'dynamic-memory'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
@@ -679,12 +689,12 @@ def main():
     if args.docker_args[:1] == ['--']:
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
-    if args.diagnostics == 'memory-telemetry':
+    if args.matched_output or args.diagnostics in ('memory-telemetry', 'dynamic-memory'):
         if not (args.native_memd and args.native_reclaimd and args.docker_owner == 'rust'):
-            parser.error('memory telemetry requires the two static Core helpers and the Rust owner')
+            parser.error('native timing and memory canaries require both static Core helpers and the Rust owner')
         native_assets += ('native_memd', 'native_reclaimd')
     elif args.native_memd or args.native_reclaimd:
-        parser.error('Core memory helpers require the memory-telemetry canary')
+        parser.error('Core memory helpers require a native memory canary')
     if args.diagnostics == 'oci-import':
         if not (args.import_package and args.import_receipt and args.docker_owner == 'rust'):
             parser.error('OCI import diagnostics require the Rust owner and a staged package and receipt')

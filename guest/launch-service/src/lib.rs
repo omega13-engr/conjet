@@ -3,6 +3,7 @@ mod bridge_dns;
 pub mod bridge_fixture;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 mod cgroups;
+pub mod core_admission;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub mod exec_fixture;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]

@@ -69,6 +69,9 @@ struct MemoryRequest {
     boot_id: String,
     budget_ms: u64,
     pressure: Option<bool>,
+    core_grant: Option<crate::core_admission::Admission>,
+    #[serde(default)]
+    core_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -134,7 +137,7 @@ struct Dial {
 }
 
 const OUTPUT_CHUNK_LIMIT: usize = 8192;
-const OCI_CONCURRENCY: usize = 8;
+const OCI_CONCURRENCY: usize = crate::core_admission::CAPACITY;
 const OCI_RECORDS: usize = 24;
 
 fn output_chunk(output: &Capture, offset: usize, limit: usize, terminal: bool) -> Value {
@@ -209,6 +212,7 @@ struct Record {
     slot_expires: Option<Instant>,
     slot_expired: bool,
     memory_limit_bytes: u64,
+    core_admission_deadline: Option<Instant>,
     cancelled: bool,
     terminate_requested: bool,
     control: Option<UnixStream>,
@@ -374,6 +378,49 @@ impl Ledger {
         snapshot
     }
 
+    fn core_admission(&self, now: Instant) -> crate::core_admission::Observation {
+        let pending = self
+            .active()
+            .filter(|record| {
+                record.phase == Phase::Accepted
+                    && !record.terminate_requested
+                    && record
+                        .core_admission_deadline
+                        .is_some_and(|deadline| now < deadline)
+            })
+            .map(|record| crate::core_admission::Admission {
+                workload_id: record.handle.workload_id.clone(),
+                sequence: record.sequence,
+            })
+            .collect();
+        crate::core_admission::Observation {
+            owned: self.active().count(),
+            pending,
+        }
+    }
+
+    fn grant_core_admission(
+        &mut self,
+        grant: crate::core_admission::Admission,
+        boot: &str,
+        now: Instant,
+    ) -> Result<(), Failure> {
+        let record = self
+            .record_mut(&grant.workload_id)
+            .filter(|record| record.handle.boot_id == boot && record.sequence == grant.sequence)
+            .ok_or(("stale_generation", "Core admission identity changed"))?;
+        if record.phase != Phase::Accepted
+            || record.terminate_requested
+            || record
+                .core_admission_deadline
+                .is_none_or(|deadline| now >= deadline)
+        {
+            return Err(("not_pending", "workload has no live Core admission"));
+        }
+        record.core_admission_deadline = None;
+        Ok(())
+    }
+
     fn set_pressure(&mut self, pressure: bool) {
         self.pressure = pressure;
         if pressure
@@ -393,6 +440,7 @@ pub(crate) struct FreshFixture {
     benchmark_digest: Option<String>,
     native: bool,
     oci: bool,
+    core_admission: bool,
     trace_benchmark: bool,
     bridge_available: bool,
     allow_crash: bool,
@@ -482,6 +530,7 @@ impl FreshFixture {
             None
         };
         let oci = oci_marker.is_some();
+        let core_admission = oci && Path::new(crate::core_admission::MARKER).try_exists()?;
         let image_digest = if let Some(digest) = oci_marker {
             let hex = digest
                 .strip_prefix("sha256:")
@@ -555,6 +604,7 @@ impl FreshFixture {
             benchmark_digest,
             native,
             oci,
+            core_admission,
             trace_benchmark,
             bridge_available,
             allow_crash,
@@ -773,6 +823,7 @@ impl FreshFixture {
             slot_expires: prepared.then(|| Instant::now() + SLOT_TTL),
             slot_expired: false,
             memory_limit_bytes: spec.limits.memory_bytes,
+            core_admission_deadline: self.core_admission.then_some(deadline),
             cancelled: false,
             terminate_requested: false,
             control: None,
@@ -828,15 +879,31 @@ impl FreshFixture {
         let workload = hex(&id);
         {
             let mut ledger = self.ledger.lock().expect("fresh ledger");
-            let record = ledger.record_mut(&workload).expect("admitted workload");
-            if record.cancelled {
-                record.exec = "failed";
-                if bridge {
-                    record.network_cleanup = "complete";
+            loop {
+                let record = ledger.record_mut(&workload).expect("admitted workload");
+                let now = Instant::now();
+                let expired = record
+                    .core_admission_deadline
+                    .is_some_and(|deadline| now >= deadline);
+                if record.cancelled
+                    || (self.core_admission && (expired || record.terminate_requested))
+                {
+                    record.exec = "failed";
+                    if bridge {
+                        record.network_cleanup = "complete";
+                    }
+                    record.change(Phase::Removed);
+                    self.changed.notify_all();
+                    return;
                 }
-                record.change(Phase::Removed);
-                self.changed.notify_all();
-                return;
+                let Some(deadline) = record.core_admission_deadline else {
+                    break;
+                };
+                ledger = self
+                    .changed
+                    .wait_timeout(ledger, deadline - now)
+                    .expect("fresh ledger")
+                    .0;
             }
         }
         let scoped;
@@ -1419,11 +1486,26 @@ impl FreshFixture {
                 if Instant::now() >= expires {
                     return Err(("deadline_exceeded", "memory operation budget elapsed"));
                 }
+                if (request.core_only || request.core_grant.is_some()) && !self.core_admission {
+                    return Err(("unsupported_option", "Core admission is disabled"));
+                }
                 if let Some(pressure) = request.pressure {
                     guard.set_pressure(pressure);
                     self.changed.notify_all();
                 }
-                Ok((Kind::Memory, guard.memory_snapshot(self.oci)))
+                if let Some(grant) = request.core_grant {
+                    guard.grant_core_admission(grant, boot, Instant::now())?;
+                    self.changed.notify_all();
+                }
+                let mut snapshot = if request.core_only {
+                    json!({})
+                } else {
+                    guard.memory_snapshot(self.oci)
+                };
+                if self.core_admission {
+                    snapshot["core_admission"] = json!(guard.core_admission(Instant::now()));
+                }
+                Ok((Kind::Memory, snapshot))
             }
             Kind::Network if self.oci => {
                 let request: NetworkRequest = parse(frame)?;
@@ -1494,6 +1576,9 @@ impl FreshFixture {
                         record
                             .terminate()
                             .map_err(|_| ("control_failed", "native termination channel failed"))?;
+                        if self.core_admission {
+                            self.changed.notify_all();
+                        }
                     }
                     (Kind::Status, None) => {}
                     _ => return Err(("unsupported_option", "unsupported native control signal")),

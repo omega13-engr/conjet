@@ -34,6 +34,7 @@ use crate::hvf::ffi::{
     HV_REG_PC, HV_REG_X0, HV_REG_X1, HV_REG_X2, HV_REG_X3, HV_SYS_REG_MPIDR_EL1,
 };
 use crate::hvf::gic::{Gic, GicLayout, GicMmio};
+use crate::hvf::native_memory::NativeMemoryAdmission;
 use crate::hvf::reclaim::{release_owned, ReleaseError, ReleaseOperations};
 use crate::vmm::boot::{load_boot_artifacts, BootArtifacts, BootPlan};
 use crate::vmm::config::JetstreamConfig;
@@ -124,6 +125,7 @@ pub struct HvfBootOptions {
     pub enable_native_launch: bool,
     pub native_airgap: bool,
     pub enable_native_memory_bridge: bool,
+    pub native_memory_admission: Option<Arc<NativeMemoryAdmission>>,
     pub external_stop: Option<Arc<AtomicBool>>,
 }
 
@@ -144,6 +146,7 @@ impl Default for HvfBootOptions {
             enable_native_launch: false,
             native_airgap: false,
             enable_native_memory_bridge: false,
+            native_memory_admission: None,
             external_stop: None,
         }
     }
@@ -2309,6 +2312,22 @@ impl HvfBootRunner {
         let mut stages = Vec::new();
         let mut exit_count = 0u64;
         let mut console_output = String::new();
+        let mut core_memory_policy = CoreMemoryPolicy::from_environment(self.config.memory_mib);
+        if self.options.native_memory_admission.is_some()
+            && (!self.options.enable_native_launch
+                || !self.options.native_airgap
+                || !self.options.enable_native_memory_bridge
+                || !core_memory_policy.enabled)
+        {
+            return self.finish(
+                false,
+                "native admission requires the isolated Core memory bridge and an enabled governor",
+                None,
+                exit_count,
+                console_output,
+                stages,
+            );
+        }
 
         let memory = match GuestMemory::anonymous(self.plan.ram_size_bytes as usize) {
             Ok(memory) => {
@@ -2592,8 +2611,7 @@ impl HvfBootRunner {
             .balloon_target_mib
             .unwrap_or(self.config.memory_mib)
             .min(self.config.memory_mib);
-        let mut core_memory_policy = CoreMemoryPolicy::from_environment(self.config.memory_mib);
-        if self.options.enable_native_launch {
+        if self.options.enable_native_launch && self.options.native_memory_admission.is_none() {
             // Docker-only workload telemetry cannot classify a native
             // workload's lifetime. Guest-owned page reporting still runs.
             core_memory_policy.enabled = false;
@@ -2863,6 +2881,8 @@ impl HvfBootRunner {
         let mut last_docker_completed_workload_streams = 0u64;
         let mut last_active_docker_workload_streams = 0u64;
         let mut last_docker_transport_bytes = 0u64;
+        let mut last_native_active = None;
+        let mut native_workload_seen = false;
         let memory_reclaim_socket_path =
             memory_socket_path(&self.config.boot_source.docker_socket_path);
         while exit_count < self.options.max_exits {
@@ -2955,6 +2975,45 @@ impl HvfBootRunner {
             }
             let docker_phase_metrics = docker_phase_metrics(&shared);
             let now = Instant::now();
+            let native_memory = self.options.native_memory_admission.as_ref();
+            let native_observation = native_memory.and_then(|gate| gate.observe(now));
+            if native_memory.is_some() {
+                if native_observation.is_some() {
+                    core_memory_controller.note_runtime_ready(now, &shared);
+                }
+                // Missing or expired observations keep the VM in the active
+                // policy. Only an authenticated empty ledger can arm shrink.
+                let active = native_observation.is_none_or(|(_, owned, _)| owned > 0);
+                native_workload_seen |= native_observation.is_some_and(|(_, owned, _)| owned > 0);
+                if last_native_active != Some(active) {
+                    last_native_active = Some(active);
+                    if active {
+                        if let Some(transition) =
+                            core_memory_controller.note_workload_started(now, &shared)
+                        {
+                            let _ = apply_core_memory_target_transition(
+                                &mut core_memory_controller,
+                                transition,
+                                now,
+                                &shared,
+                                &gic,
+                                &vcpu_ids,
+                                &self.virtio_devices,
+                                self.config.memory_mib,
+                            );
+                        }
+                    } else {
+                        core_memory_controller.note_workload_finished(now, false, &shared);
+                        if std::mem::take(&mut native_workload_seen) {
+                            schedule_guest_memory_reclaim(
+                                memory_reclaim_socket_path.clone(),
+                                "native.workloadFinished",
+                                shared.clone(),
+                            );
+                        }
+                    }
+                }
+            }
             let docker_transport_bytes = docker_transport_bytes(&docker_phase_metrics);
             let transport_activity = docker_transport_bytes > last_docker_transport_bytes;
             let workload_started =
@@ -3064,6 +3123,14 @@ impl HvfBootRunner {
                     }
                     Err(error) => core_memory_controller
                         .record_idle_backing_compaction_error(now, error, &shared),
+                }
+            }
+            if let (Some(gate), Some((seen, _, true))) = (native_memory, native_observation) {
+                if core_memory_controller.policy.enabled
+                    && core_memory_controller.requested_target_mib == self.config.memory_mib
+                    && core_balloon_target_converged(&shared)
+                {
+                    gate.allow(seen);
                 }
             }
             if let Err(error) =
