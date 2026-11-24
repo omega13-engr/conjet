@@ -76,6 +76,11 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
     let _core_cgroups = (oci && Path::new(MEMD).try_exists()?)
         .then(core_cgroups)
         .transpose()?;
+    let volume = if oci {
+        crate::volume_disk::guest::Store::open()?
+    } else {
+        None
+    };
     for attempt in 0..2 {
         let mut service = Command::new("/init")
             .arg(match profile {
@@ -95,6 +100,9 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
             }
             kernel_fixture::assert_cgroup_absent()?;
             sandbox_fixture::assert_absent()?;
+            if let Some(volume) = volume {
+                volume.close()?;
+            }
             return Ok(());
         }
         if oci {

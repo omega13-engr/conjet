@@ -126,6 +126,7 @@ pub struct HvfBootOptions {
     pub native_airgap: bool,
     pub enable_native_memory_bridge: bool,
     pub native_memory_admission: Option<Arc<NativeMemoryAdmission>>,
+    pub leased_data_disk: Option<Arc<std::fs::File>>,
     pub external_stop: Option<Arc<AtomicBool>>,
 }
 
@@ -147,6 +148,7 @@ impl Default for HvfBootOptions {
             native_airgap: false,
             enable_native_memory_bridge: false,
             native_memory_admission: None,
+            leased_data_disk: None,
             external_stop: None,
         }
     }
@@ -3947,8 +3949,15 @@ fn configure_virtio_runtime(
                 let path = block_paths.get(next_block).ok_or_else(|| {
                     "missing block backing path for virtio-blk device".to_string()
                 })?;
-                let raw = RawBlockDevice::open(path, format!("conjet-blk{next_block}"), false)
-                    .map_err(|error| error.to_string())?;
+                let identifier = format!("conjet-blk{next_block}");
+                let raw = match (next_block, options.leased_data_disk.as_ref()) {
+                    (1, Some(disk)) if config.boot_source.data_disk_path.is_some() => {
+                        let file = disk.try_clone().map_err(|error| error.to_string())?;
+                        RawBlockDevice::from_file(file, path.clone(), identifier, false)
+                    }
+                    _ => RawBlockDevice::open(path, identifier, false),
+                }
+                .map_err(|error| error.to_string())?;
                 vm_state
                     .devices
                     .block

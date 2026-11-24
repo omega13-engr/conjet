@@ -16,6 +16,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256, Sha512};
 
 use super::client;
+use super::volume_disk::VolumeDisk;
 use crate::{HvfBootOptions, JetstreamConfig, MachineBuilder};
 use jetstream::vmm::config::BootSource;
 
@@ -65,6 +66,13 @@ pub(super) struct Options {
     /// Enable the bounded service pressure fixture on this diagnostic boot.
     #[arg(long, requires = "core_dynamic_memory")]
     core_pressure_fixture: bool,
+    /// Exclusively leased ext4 disk for the isolated native Core guest.
+    #[arg(
+        long,
+        requires = "core_dynamic_memory",
+        conflicts_with = "core_pressure_fixture"
+    )]
+    volume_disk: Option<PathBuf>,
     /// Maximum lifetime of the disposable VM.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(30..=1800))]
     lifetime_seconds: u64,
@@ -147,6 +155,10 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     );
     let scratch = options.scratch.canonicalize()?;
     ensure!(scratch.is_dir(), "scratch must be a directory");
+    let volume = options
+        .volume_disk
+        .map(|path| VolumeDisk::lease(path, &scratch))
+        .transpose()?;
     let session = tempfile::Builder::new()
         .prefix("cn-")
         .permissions(Permissions::from_mode(0o700))
@@ -177,6 +189,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         &key,
         oci.as_ref(),
         memory_helpers.as_ref(),
+        volume.as_ref().map(|disk| disk.identity.encode()).as_ref(),
     )?;
     let machine = MachineBuilder::new(JetstreamConfig {
         memory_mib: 2048,
@@ -186,7 +199,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             kernel_path: directory.join("Image"),
             initrd_path: Some(directory.join("init.cpio")),
             root_disk_path: directory.join("blank.raw"),
-            data_disk_path: None,
+            data_disk_path: volume.as_ref().map(|disk| disk.path.clone()),
             swap_disk_path: None,
             serial_log_path: directory.join("serial.log"),
             docker_socket_path: directory.join("unused.sock"),
@@ -234,6 +247,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             native_airgap: true,
             enable_native_memory_bridge: memory_helpers.is_some(),
             native_memory_admission: boot_gate,
+            leased_data_disk: volume.as_ref().map(|disk| Arc::clone(&disk.file)),
             memory_control_socket: options
                 .core_dynamic_memory
                 .then(|| directory.join("memory-control.sock")),
@@ -260,6 +274,12 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             );
         }
         let orderly = manager?;
+        if let Some(volume) = &volume {
+            volume
+                .file
+                .sync_all()
+                .context("flush leased volume after guest shutdown")?;
+        }
         let mut output = std::io::stdout().lock();
         writeln!(
             output,
@@ -499,6 +519,7 @@ fn build_archive(
     key: &[u8],
     oci: Option<&super::oci::Root>,
     memory_helpers: Option<&MemoryHelpers>,
+    volume: Option<&[u8; 24]>,
 ) -> anyhow::Result<()> {
     let mut archive = OpenOptions::new()
         .write(true)
@@ -587,6 +608,17 @@ fn build_archive(
         }
     }
     if let Some(root) = oci {
+        if let Some(volume) = volume {
+            append(
+                conjet_launch_service::volume_disk::MARKER.trim_start_matches('/'),
+                0o100400,
+                volume,
+                0,
+                0,
+                0,
+                0,
+            )?;
+        }
         append(
             "etc/conjet/native-oci-image",
             0o100400,

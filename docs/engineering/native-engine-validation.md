@@ -157,3 +157,30 @@ preservation. Independent-host and privileged energy results remain open.
 Raw samples, stage data, host observations, launcher commands and hashes
 are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-059/`.
+
+## SPEED-061
+
+Read-only `e2fsck -fn` on a disposable copy of the archived ext4 disk
+reproduced eight zero deletion timestamps and exit 4. The archived guest's
+readiness fix required a host time parameter that the recorded boot command
+and host boot configuration never supplied. The current initramfs carries a
+fixed-size filesystem UUID and trusted host time. PID 1 sets the time before
+mounting, then unmounts the verified disk after draining workloads. The VMM
+uses a duplicate of the leased descriptor and flushes it before releasing
+the lease.
+
+Four dynamic-memory boots used the same private 128 MiB host inode. The first
+created eight volumes, two later boots observed the same eight guest inode
+and ownership records, and the fourth removed all eight. An offline-seeded
+payload retained its SHA-256 after each of the two recovery boots. Offline
+`e2fsck -fn` exited 0 after all four boots, including after deletion. Each
+launcher verified cleanup, unlocked disk access and unchanged production.
+The candidate rejected a second lease, a symlink and an invalid filesystem
+before boot. The authenticated registry rejected traversal, a ninth volume
+and a stale boot generation.
+
+Workspace tests passed (175 passed, three ignored). Logs, exact commands,
+hashes and registry replies are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-061/`.
+Container writes, read-only mounts and deletion while a mount is live remain
+SPEED-062.

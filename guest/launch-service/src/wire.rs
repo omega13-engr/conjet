@@ -37,6 +37,7 @@ pub enum Kind {
     Exec = 22,
     Network = 23,
     Dial = 24,
+    Volume = 25,
 }
 
 impl TryFrom<u8> for Kind {
@@ -69,6 +70,7 @@ impl TryFrom<u8> for Kind {
             22 => Ok(Exec),
             23 => Ok(Network),
             24 => Ok(Dial),
+            25 => Ok(Volume),
             _ => Err(WireError::BadHeader),
         }
     }

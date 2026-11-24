@@ -136,6 +136,48 @@ struct Dial {
     port: u16,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VolumeRequest {
+    boot_id: String,
+    budget_ms: u64,
+    operation: VolumeOperation,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum VolumeOperation {
+    List,
+    Create { name: String },
+    Inspect { name: String },
+    Remove { name: String },
+}
+
+impl VolumeOperation {
+    fn execute(self) -> Reply {
+        use crate::volume_disk::guest as volumes;
+        if !volumes::available() {
+            return Err(("unsupported_option", "native volume disk is not configured"));
+        }
+        let error = |error: io::Error| match error.kind() {
+            io::ErrorKind::InvalidInput => ("malformed", "invalid native volume name"),
+            io::ErrorKind::NotFound => ("not_found", "native volume is absent"),
+            io::ErrorKind::StorageFull => ("capacity", "native volume storage is full"),
+            _ => ("storage_failed", "native volume operation failed"),
+        };
+        let response = match self {
+            Self::List => json!({"volumes": volumes::names().map_err(error)?}),
+            Self::Create { name } => json!(volumes::create(&name).map_err(error)?),
+            Self::Inspect { name } => json!(volumes::inspect(&name).map_err(error)?),
+            Self::Remove { name } => {
+                volumes::remove(&name).map_err(error)?;
+                json!({"removed": true})
+            }
+        };
+        Ok((Kind::Volume, response))
+    }
+}
+
 const OUTPUT_CHUNK_LIMIT: usize = 8192;
 const OCI_CONCURRENCY: usize = crate::core_admission::CAPACITY;
 const OCI_RECORDS: usize = 24;
@@ -1537,6 +1579,18 @@ impl FreshFixture {
                     snapshot["core_admission"] = json!(guard.core_admission(Instant::now()));
                 }
                 Ok((Kind::Memory, snapshot))
+            }
+            Kind::Volume if self.oci => {
+                let request: VolumeRequest = parse(frame)?;
+                if request.boot_id != boot {
+                    return Err(("stale_generation", "unexpected native volume boot ID"));
+                }
+                let expires = deadline(request.budget_ms)?;
+                if guard.closing || Instant::now() >= expires {
+                    return Err(("busy", "native volume registry is draining"));
+                }
+                // Keep the request serialized with shutdown through its last fsync.
+                request.operation.execute()
             }
             Kind::Network if self.oci => {
                 let request: NetworkRequest = parse(frame)?;

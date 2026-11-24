@@ -8,6 +8,7 @@ mod docker;
 mod oci;
 mod oci_stage;
 mod session;
+mod volume_disk;
 
 #[derive(Debug, Args)]
 pub struct Arguments {

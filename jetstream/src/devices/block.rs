@@ -71,6 +71,15 @@ impl RawBlockDevice {
             .read(true)
             .write(!read_only)
             .open(&path)?;
+        Self::from_file(file, path, identifier, read_only)
+    }
+
+    pub fn from_file(
+        file: File,
+        path: PathBuf,
+        identifier: impl Into<String>,
+        read_only: bool,
+    ) -> Result<Self, BlockError> {
         let capacity_bytes = file.metadata()?.len();
         if capacity_bytes < SECTOR_SIZE {
             return Err(BlockError::InvalidCapacity {

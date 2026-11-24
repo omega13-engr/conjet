@@ -275,7 +275,7 @@ Title: Repair native volume disk shutdown and filesystem recovery
 
 Description: Recover only the useful volume checkpoint design and fix its documented shutdown/readiness defects.
 
-Is blocked by task: SPEED-058.
+Is blocked by task: SPEED-058 isolated qualification, complete.
 
 Acceptance Criteria:
 
@@ -285,13 +285,16 @@ Problem and Evidence: Archived c60304f failed fsck/readiness acceptance.
 
 Approach: Inspect the archived diff and raw failures; implement a minimal current-tree disk lifecycle with orderly unmount and verified readiness.
 
-Evidence: Pending; no new candidate result.
+Evidence: Four release boots kept the same leased host inode and eight
+guest volume identities through two reboots and cleanup. A payload seeded
+offline survived both reboots. All offline filesystem checks and lease,
+path, capacity and generation negatives passed. See [SPEED-061 evidence](native-engine-validation.md#speed-061).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
-Review: Pending implementation, validation and independent evidence review.
+Review: Self-review and isolated validation passed. Independent review pending.
 
-Next Action: Reproduce the archived failure on a disposable disk before selecting the correction.
+Next Action: Attach volumes to containers with generation-scoped ownership in SPEED-062.
 
 ### SPEED-062
 

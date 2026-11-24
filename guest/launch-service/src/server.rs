@@ -188,6 +188,7 @@ impl Server {
                         | Kind::Image
                         | Kind::Exec
                         | Kind::Network
+                        | Kind::Volume
                 )
             {
                 fresh.dispatch(

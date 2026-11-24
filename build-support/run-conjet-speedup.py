@@ -2,6 +2,7 @@
 """Run the isolated Conjet native Docker candidate in the foreground."""
 import argparse
 from contextlib import ExitStack
+import fcntl
 import hashlib
 import json
 import os
@@ -450,7 +451,8 @@ def native_session(args, root):
     registry = None
     helpers = (args.native_memd, args.native_reclaimd) if args.native_memd else ()
     pressure_fixture = args.diagnostics == 'dynamic-pressure'
-    dynamic_memory = (args.diagnostics in ('dynamic-memory', 'dynamic-pressure')
+    volume_disk = args.native_volume_disk
+    dynamic_memory = (args.diagnostics in ('dynamic-memory', 'dynamic-pressure', 'volume-disk')
                       or args.matched_output is not None)
     markers = []
     try:
@@ -474,6 +476,11 @@ def native_session(args, root):
         if pressure_fixture:
             vm_command.append('--core-pressure-fixture')
             markers.append('etc/conjet/native-core-pressure-fixture')
+        if volume_disk:
+            vm_command += ['--volume-disk', volume_disk]
+            markers.append('etc/conjet/native-volume')
+            info = volume_disk.stat()
+            report['volume_disk'] = {'path': str(volume_disk), 'device': info.st_dev, 'inode': info.st_ino}
         report['vm_command'] = list(map(str, vm_command))
         with (output / 'vmm.stderr').open('w') as log:
             vm = subprocess.Popen(vm_command, env=env, stdin=subprocess.DEVNULL,
@@ -578,6 +585,9 @@ def native_session(args, root):
                         endpoint, bridge.pid, directory, vm.pid, output, docker, env, pressure_fixture)
                 else:
                     diagnostic['collect'](endpoint, bridge.pid, directory, vm.pid, output)
+            elif args.diagnostics == 'volume-disk':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-volume-disk.py'))
+                diagnostic['collect'](directory, vm.pid, output, args.volume_phase)
             elif args.diagnostics in ('oci', 'oci-import'):
                 oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
                 oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
@@ -639,6 +649,16 @@ def native_session(args, root):
                 process.stdout.close()
         report['native_session_removed'] = directory is None or not directory.exists()
         report['adapter_socket_removed'] = not os.path.lexists(endpoint)
+        if volume_disk and report.get('volume_disk'):
+            try:
+                with volume_disk.open('rb') as disk:
+                    info = os.fstat(disk.fileno())
+                    if (info.st_dev, info.st_ino) != (report['volume_disk']['device'], report['volume_disk']['inode']):
+                        raise RuntimeError('native volume disk identity changed')
+                    fcntl.flock(disk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    report['volume_lease_released'] = True
+            except (OSError, RuntimeError) as error:
+                cleanup.append(f'volume lease: {error}')
         try:
             registry_scope.close()
             if registry is not None:
@@ -666,17 +686,19 @@ def main():
     parser.add_argument('--legacy-baseline', action='store_true', help='explicit historical Docker/containerd lane')
     parser.add_argument('--network-helper', type=Path)
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output',
-                 'native-memd', 'native-reclaimd',
+                 'native-memd', 'native-reclaimd', 'native-volume-disk',
                  'import-package', 'import-receipt', 'registry-fixtures'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
-                                                  'memory-telemetry', 'dynamic-memory', 'dynamic-pressure'),
+                                                  'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
+                                                  'volume-disk'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
+    parser.add_argument('--volume-phase', choices=('create', 'inspect', 'remove'))
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
@@ -699,12 +721,19 @@ def main():
     if args.docker_args[:1] == ['--']:
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
-    if args.matched_output or args.diagnostics in ('memory-telemetry', 'dynamic-memory', 'dynamic-pressure'):
+    if args.matched_output or args.diagnostics in ('memory-telemetry', 'dynamic-memory', 'dynamic-pressure', 'volume-disk'):
         if not (args.native_memd and args.native_reclaimd and args.docker_owner == 'rust'):
             parser.error('native timing and memory canaries require both static Core helpers and the Rust owner')
         native_assets += ('native_memd', 'native_reclaimd')
     elif args.native_memd or args.native_reclaimd:
         parser.error('Core memory helpers require a native memory canary')
+    if args.diagnostics == 'volume-disk':
+        if (not args.native_volume_disk or not args.volume_phase
+                or args.native_volume_disk.resolve(strict=True) != args.native_volume_disk):
+            parser.error('volume diagnostics require a canonical private disk path and a phase')
+        native_assets += ('native_volume_disk',)
+    elif args.native_volume_disk or args.volume_phase:
+        parser.error('a private volume disk and phase require volume-disk diagnostics')
     if args.diagnostics == 'oci-import':
         if not (args.import_package and args.import_receipt and args.docker_owner == 'rust'):
             parser.error('OCI import diagnostics require the Rust owner and a staged package and receipt')

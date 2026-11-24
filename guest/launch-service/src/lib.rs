@@ -28,6 +28,7 @@ mod security;
 pub mod server;
 pub mod socket;
 pub mod spec;
+pub mod volume_disk;
 pub mod wire;
 
 #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
