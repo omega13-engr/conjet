@@ -1217,8 +1217,9 @@ impl FreshFixture {
         prepared: bool,
         oci_process: Option<&str>,
     ) -> io::Result<bool> {
+        const TRANSITION_TIMEOUT: Duration = Duration::from_secs(32);
         let (mut peer, helper) = UnixStream::pair()?;
-        peer.set_read_timeout(Some(Duration::from_secs(32)))?;
+        peer.set_read_timeout(Some(TRANSITION_TIMEOUT))?;
         let owner = peer.try_clone()?;
         let workload = hex(&id);
         let mut command = Command::new("/init");
@@ -1377,6 +1378,9 @@ impl FreshFixture {
                                 io::Error::last_os_error()
                             });
                         }
+                        if oci_process.is_some() {
+                            peer.set_read_timeout(None)?;
+                        }
                         self.update(&workload, |record| {
                             if let (Some(spec), Some(target)) = (oci_process, descriptors.pop())
                                 && let Ok(spec) = serde_json::from_str(spec)
@@ -1391,6 +1395,7 @@ impl FreshFixture {
                         });
                     }
                     b'X' => {
+                        peer.set_read_timeout(Some(TRANSITION_TIMEOUT))?;
                         let mut status = [0; 4];
                         peer.read_exact(&mut status)?;
                         let status = i32::from_le_bytes(status);
@@ -1410,6 +1415,7 @@ impl FreshFixture {
                         });
                     }
                     b'N' if !exit_received => {
+                        peer.set_read_timeout(Some(TRANSITION_TIMEOUT))?;
                         exit_received = true;
                         self.update(&workload, |record| record.change(Phase::Cleaning));
                     }

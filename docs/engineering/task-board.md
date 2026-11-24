@@ -1000,6 +1000,10 @@ limits were rejected before admission. The first run exposed the relative
 launch command restriction tracked in SPEED-113. Logs are under
 `SPEED-111/` on ExternalSSD.
 
+Core evidence: Workload demand and independent zero-workload pressure
+each restored the target from 448 MiB to 2,048 MiB. The active-data and
+ownership checks passed and both sessions returned to 448 MiB.
+
 ### SPEED-112
 
 Title: Keep admitted Docker services alive through bounded control waits
@@ -1008,6 +1012,12 @@ Acceptance: Verify a detached native service remains available beyond
 the current setup tracking deadline. Separate startup, running and
 teardown waits. Preserve service cancellation, output draining,
 generation ownership and release cleanup.
+
+Evidence: The baseline lost its running guest generation by 36 seconds.
+The corrected release kept the same generation, retained its marker data
+and returned the original logs at 36 seconds. Forced removal then gave a
+verified guest cleanup witness and an empty workload inventory. Logs are
+under `SPEED-112/` on ExternalSSD.
 
 ### SPEED-113
 
@@ -1018,6 +1028,24 @@ entrypoints through the workload's configured PATH. Reuse the existing
 bounded exec search after chroot and identity setup. Preserve absolute
 command behavior, reject ambiguous paths and keep the static guest
 fixture restriction.
+
+### SPEED-114
+
+Title: Stream the frozen Node Docker image archive round trip
+
+Acceptance: Save and reload the original Node image tag through the
+private disk-profile Docker API with bounded archive reads and verified
+layer extents. Preserve the original config and executable contents,
+archive framing, rollback and removal. Keep the existing archive profile
+limits for boots without the disk-backed store.
+
+### SPEED-115
+
+Title: Apply inherited cgroup semantics to native exec
+
+Acceptance: Exercise exec in a workload with omitted Docker resources
+and in a workload with the frozen service limits. Join the existing
+owned cgroup and retain its credentials and exit behavior.
 
 ### SPEED-091
 

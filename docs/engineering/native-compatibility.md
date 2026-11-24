@@ -165,6 +165,21 @@ used an absolute sleep executable to isolate resource handling after
 the first run surfaced the separate relative-command limitation.
 Evidence is under `SPEED-111/` on ExternalSSD.
 
+In the same release profile, the Core memory diagnostics grew from
+448 MiB to 2,048 MiB on demand and under independent pressure with no
+active workloads. The active-data checksum and ownership checks passed,
+and the guest returned to 448 MiB in both runs.
+
+## SPEED-112 sustained native service
+
+The original guest killed or lost a detached workload around its 30-second
+running timeout, and the Docker endpoint later reported unresolved cleanup.
+The corrected release bounds startup and teardown independently. It kept
+the same guest handle for 36 seconds and preserved both the file marker
+and the logs. Forced removal verified output drain and guest teardown.
+The canary used the frozen explicit lifecycle resource settings.
+Evidence is under `SPEED-112/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

@@ -431,6 +431,8 @@ fn wait_for_native(
     item: &Item,
     generation: u64,
 ) -> anyhow::Result<Terminal> {
+    const TRANSITION_TIMEOUT: Duration = Duration::from_secs(32);
+    const OBSERVE_INTERVAL: Duration = Duration::from_secs(2);
     let mut state = std::mem::take(&mut admission.state);
     let peer = &mut admission.peer;
     let began = admission.began;
@@ -440,12 +442,24 @@ fn wait_for_native(
     let mut waits = 0;
     let mut awaiting_address = item.state().network.is_some();
     let mut awaiting_health = item.container.healthcheck.is_some();
+    let mut next_observation = admitted + OBSERVE_INTERVAL;
+    let mut teardown_deadline = None;
     while state["cleanup"] != "complete" {
+        let now = Instant::now();
+        let requested = item.container.cancel.load(Ordering::Acquire);
+        if requested != 0 || matches!(state["phase"].as_str(), Some("exiting" | "cleaning")) {
+            teardown_deadline.get_or_insert(now + TRANSITION_TIMEOUT);
+        }
         ensure!(
-            state["cleanup"] != "failed" && admitted.elapsed() < Duration::from_secs(32),
+            state["cleanup"] != "failed" && teardown_deadline.is_none_or(|deadline| now < deadline),
             "native guest cleanup remains unresolved"
         );
-        let requested = item.container.cancel.load(Ordering::Acquire);
+        ensure!(
+            teardown_deadline.is_some()
+                || state["exec"] == "confirmed"
+                || now < admitted + TRANSITION_TIMEOUT,
+            "native guest startup remained unresolved"
+        );
         if requested == 0 && item.container.healthcheck.is_some() && state["phase"] == "running" {
             awaiting_health = false;
             health::probe(owner, item, generation, &handle);
@@ -460,13 +474,25 @@ fn wait_for_native(
             )
         } else {
             waits += 1;
+            // Probe intermediary states only for longer-running workloads so
+            // short operations can keep using the terminal-output fast path.
+            let after_revision = if now >= next_observation {
+                next_observation = now + OBSERVE_INTERVAL;
+                0
+            } else if awaiting_address || awaiting_health {
+                state["revision"]
+                    .as_u64()
+                    .context("invalid workload revision")?
+            } else {
+                u64::MAX
+            };
             let (stdout, stderr) = {
                 let status = item.state();
                 (status.live[0].len(), status.live[1].len())
             };
             peer.exchange(
                 Kind::Wait, Kind::State,
-                &json!({"handle":handle,"after_revision":if awaiting_address || awaiting_health { state["revision"].as_u64().context("invalid workload revision")? } else { u64::MAX },"budget_ms":100,"terminal_output":true,
+                &json!({"handle":handle,"after_revision":after_revision,"budget_ms":100,"terminal_output":true,
                         "live_output":{"stdout":stdout,"stderr":stderr}}),
                 Duration::from_secs(2),
             )

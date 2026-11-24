@@ -75,3 +75,61 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
             raise RuntimeError('rejected resource tests entered the guest')
     finally:
         (output / 'resource-checks.json').write_text(json.dumps(records, indent=2) + '\n')
+
+
+def collect_sustained(endpoint, peer, docker, env, output, session, vm_pid):
+    name = 'cj-sustained-service'
+    image = FROZEN['images']['alpine']['ref']
+    report = {'commands': {}}
+
+    def call(label, *args):
+        result = subprocess.run([*docker, *args], env=env, capture_output=True, text=True, timeout=12)
+        report['commands'][label] = {'argv': args, 'exit': result.returncode,
+                                     'stdout': result.stdout, 'stderr': result.stderr}
+        if result.returncode:
+            raise RuntimeError(f'{label} failed: {result.stderr}')
+        return result.stdout
+
+    def snapshot():
+        with GUEST['channel'](session, vm_pid) as (guest, _boot):
+            return GUEST['inspect'](guest)['active_workloads']
+
+    try:
+        started = time.monotonic()
+        limits = FROZEN['lifecycle_limits']
+        call('start', 'run', '--detach', '--name', name, '--network', 'none', '--pull', 'never',
+             '--memory', str(limits['memory_bytes']), '--pids-limit', str(limits['pids']),
+             '--cpus', str(limits['cpu_millicores'] / 1000), image,
+             '/bin/sh', '-c', "printf 'sustained\n' >/tmp/marker; printf 'ready\n'; exec /bin/sleep 1800")
+        try:
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                active = snapshot()
+                if len(active) == 1 and active[0]['phase'] == 'running':
+                    break
+                time.sleep(0.025)
+            else:
+                raise RuntimeError('the service never entered its running guest generation')
+            report['before'] = active[0]
+            if call('initial_data', 'exec', name, '/bin/cat', '/tmp/marker') != 'sustained\n':
+                raise RuntimeError('the initial service data differs')
+            while time.monotonic() - started < 36:
+                time.sleep(0.1)
+            report['elapsed_seconds'] = time.monotonic() - started
+            report['after'] = snapshot()
+            if (len(report['after']) != 1 or report['after'][0]['phase'] != 'running'
+                    or report['after'][0]['handle'] != active[0]['handle']):
+                raise RuntimeError('the original guest generation stopped before the service check')
+            if call('late_data', 'exec', name, '/bin/cat', '/tmp/marker') != 'sustained\n':
+                raise RuntimeError('the late service data differs')
+            if call('late_logs', 'logs', name) != 'ready\n':
+                raise RuntimeError('the service logs differ after the former timeout')
+        finally:
+            call('cancel', 'rm', '--force', name)
+        with closing(MATCHED['TOOLS']['UnixHTTP'](endpoint, peer)) as connection:
+            report['cleanup'] = MATCHED['native_terminal'](connection, name, set(), code=137)
+        report['remaining'] = snapshot()
+        if report['remaining']:
+            raise RuntimeError('the canceled service still owns guest resources')
+    finally:
+        (output / 'sustained-service.json').write_text(json.dumps(report, indent=2) + '\n')

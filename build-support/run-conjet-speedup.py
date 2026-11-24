@@ -27,7 +27,7 @@ CONTEXT = 'conjet-speedup'
 DOCKER = Path('/opt/homebrew/bin/docker')
 VOLUME_DIAGNOSTICS = ('volume-disk', 'mounted-volume', 'compose', 'build-snapshot', 'build-bundle')
 CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'admission-trace', 'pending-watch',
-                    'resources', *VOLUME_DIAGNOSTICS)
+                    'resources', 'sustained-service', *VOLUME_DIAGNOSTICS)
 
 
 class SessionInterrupted(KeyboardInterrupt):
@@ -617,6 +617,9 @@ def native_session(args, root):
             elif args.diagnostics == 'resources':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-resources.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
+            elif args.diagnostics == 'sustained-service':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-resources.py'))
+                diagnostic['collect_sustained'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
             elif args.diagnostics == 'archive':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-archive.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, store)
@@ -787,7 +790,7 @@ def main():
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec', 'credentials', 'archive',
-                                                  'public-images', 'resources',
+                                                  'public-images', 'resources', 'sustained-service',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
                                                   'volume-disk', 'mounted-volume', 'admission-trace', 'compose',

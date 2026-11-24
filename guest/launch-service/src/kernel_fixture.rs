@@ -546,7 +546,12 @@ fn clone_and_reap(
         }
     }
     let ready = if controlled {
-        poll_controlled_child(pidfd.as_raw_fd(), cgroup, bridge.as_deref())
+        poll_controlled_child(
+            pidfd.as_raw_fd(),
+            cgroup,
+            bridge.as_deref(),
+            process.is_some(),
+        )
     } else {
         wait(
             pidfd.as_raw_fd(),
@@ -696,8 +701,9 @@ fn poll_controlled_child(
     pidfd: i32,
     cgroup: &WorkloadCgroup,
     bridge: Option<&Bridge>,
+    native_oci: bool,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = (!native_oci).then(|| Instant::now() + Duration::from_secs(30));
     let mut pollfds = [
         libc::pollfd {
             fd: pidfd,
@@ -724,18 +730,18 @@ fn poll_controlled_child(
         pollfds[2..].copy_from_slice(&bridge.poll_fds());
     }
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
-        // Both descriptors belong to this single-threaded helper.
-        let ready = unsafe {
-            libc::poll(
-                pollfds.as_mut_ptr(),
-                pollfds.len() as libc::nfds_t,
-                remaining.as_millis() as i32 + 1,
-            )
+        let timeout = if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            remaining.as_millis() as i32 + 1
+        } else {
+            -1
         };
+        // Both descriptors belong to this single-threaded helper.
+        let ready =
+            unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, timeout) };
         if ready < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
