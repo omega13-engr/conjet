@@ -406,8 +406,8 @@ Title: Qualify a two-service Compose lifecycle on the native engine
 
 Description: Run a pinned two-service Compose project using private bridge DNS, health checks, a named volume and one loopback published port.
 
-Is blocked by task: SPEED-073 multiple endpoint aliases and subsequent
-health and lifecycle checks. SPEED-060, SPEED-062 and SPEED-072 passed.
+Is blocked by task: SPEED-074 health checks and subsequent lifecycle
+qualification. SPEED-060, SPEED-062, SPEED-072 and SPEED-073 passed.
 
 Acceptance Criteria:
 
@@ -418,15 +418,16 @@ Problem and Evidence: Individual container fixtures do not establish Compose beh
 Approach: Use existing network/port research and native owner state; preserve lifecycle ordering and explicit feature errors.
 
 Evidence: Compose 5.8.0 accepted the frozen fixture and passed filtered
-network, container and volume discovery. It reached writer creation, which
-stopped at the one-alias endpoint constraint.
+network, container and volume discovery. The release two-alias DNS canary
+passed. Compose writer creation then reached the unsupported Healthcheck
+field.
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
 Review: Pending implementation, validation and independent evidence review.
 
-Next Action: Support the two endpoint aliases emitted by the pinned
-Compose client, then qualify its health dependency.
+Next Action: Qualify its health dependency through the authenticated
+guest exec path.
 
 ### SPEED-072
 
@@ -452,6 +453,21 @@ Acceptance Criteria:
 - A native endpoint can own its instance and service names on the same
   private address, with case-insensitive duplicate rejection, bounded
   aliases and complete removal at guest cleanup.
+
+Evidence: Docker inspected both aliases, resolved the secondary name to
+the primary address, completed TCP through the primary name, rejected a
+case-insensitive duplicate and observed NXDOMAIN for both names after
+removal. See SPEED-064 evidence `network-aliases`.
+
+### SPEED-074
+
+Title: Expose real generation-scoped Docker health checks for Compose
+
+Acceptance Criteria:
+
+- Run the fixture's bounded direct-command health check through guest exec.
+  Reflect health in inspect, gate the dependent service, and reset on
+  restart. Reject unsupported modes and preserve cancellation.
 
 ### SPEED-065
 

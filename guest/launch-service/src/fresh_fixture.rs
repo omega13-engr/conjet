@@ -247,7 +247,7 @@ struct Record {
     exit: Option<Value>,
     helper_failed: bool,
     network_cleanup: &'static str,
-    network_alias: Option<String>,
+    network_aliases: Vec<String>,
     network_address: Option<std::net::Ipv4Addr>,
     trace: Option<Trace>,
     slot: Option<Slot>,
@@ -844,15 +844,15 @@ impl FreshFixture {
         if ledger.closing {
             return Err(("busy", "fresh fixture is draining"));
         }
-        if let Some(alias) = &spec.network_alias
-            && (!self.oci
+        if spec.aliases().any(|alias| {
+            !self.oci
                 || ledger.active().any(|record| {
                     record
-                        .network_alias
-                        .as_ref()
-                        .is_some_and(|active| active.eq_ignore_ascii_case(alias))
-                }))
-        {
+                        .network_aliases
+                        .iter()
+                        .any(|active| active.eq_ignore_ascii_case(alias))
+                })
+        }) {
             return Err(("unsupported_option", "private network alias is unavailable"));
         }
         if prepared
@@ -892,7 +892,7 @@ impl FreshFixture {
             exit: None,
             helper_failed: false,
             network_cleanup: if bridge { "pending" } else { "not_applicable" },
-            network_alias: spec.network_alias.clone(),
+            network_aliases: spec.aliases().cloned().collect(),
             network_address: None,
             trace: (benchmark && self.trace_benchmark).then(|| Trace {
                 admitted: Instant::now(),
@@ -1164,15 +1164,14 @@ impl FreshFixture {
                         let mut response =
                             UnixStream::from(descriptors.pop().expect("bridge response"));
                         let target = fs::File::from(descriptors.pop().expect("bridge target"));
-                        let alias = self
+                        let aliases = self
                             .ledger
                             .lock()
                             .expect("fresh ledger")
                             .record(&workload)
                             .expect("owned workload")
-                            .network_alias
-                            .clone()
-                            .ok_or_else(|| io::Error::other("missing bridge alias"))?;
+                            .network_aliases
+                            .clone();
                         let mut private = self.private_network.lock().expect("private bridge");
                         if private.is_none() {
                             *private = Some(crate::bridge_fixture::NetworkOwner::new()?);
@@ -1180,7 +1179,7 @@ impl FreshFixture {
                         let address = private
                             .as_mut()
                             .expect("private bridge")
-                            .attach(id, target, &alias)?;
+                            .attach(id, target, &aliases)?;
                         self.update(&workload, |record| {
                             record.network_address = Some(address);
                             record.revision += 1;
@@ -1303,7 +1302,10 @@ impl FreshFixture {
         }
         let (handle, alias) = match operation {
             NetworkOperation::Remove => {
-                if ledger.active().any(|record| record.network_alias.is_some()) {
+                if ledger
+                    .active()
+                    .any(|record| !record.network_aliases.is_empty())
+                {
                     return Err(("busy", "private bridge still owns workloads"));
                 }
                 if let Some(owned) = network.take() {
@@ -1319,9 +1321,9 @@ impl FreshFixture {
                 }
                 if ledger.active().any(|record| {
                     record
-                        .network_alias
-                        .as_ref()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(&alias))
+                        .network_aliases
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&alias))
                 }) {
                     return Err(("busy", "private network alias is already owned"));
                 }
@@ -1364,10 +1366,10 @@ impl FreshFixture {
             let address = network
                 .as_mut()
                 .expect("private bridge")
-                .attach(id, target, &alias)
+                .attach(id, target, std::slice::from_ref(&alias))
                 .map_err(|_| ("network_failed", "private bridge peer attachment failed"))?;
             record.network_address = Some(address);
-            record.network_alias = Some(alias);
+            record.network_aliases = vec![alias];
         } else {
             if record.network_address.is_none() {
                 return Err(("not_found", "workload has no bridge port"));
@@ -1378,7 +1380,7 @@ impl FreshFixture {
                 .detach(id)
                 .map_err(|_| ("cleanup_failed", "cannot verify peer removal"))?;
             record.network_address = None;
-            record.network_alias = None;
+            record.network_aliases.clear();
         }
         record.revision += 1;
         let response = json!({"network_address":record.network_address});

@@ -454,7 +454,7 @@ def native_session(args, root):
     helpers = (args.native_memd, args.native_reclaimd) if args.native_memd else ()
     pressure_fixture = args.diagnostics == 'dynamic-pressure'
     volume_disk = args.native_volume_disk
-    dynamic_memory = args.diagnostics in CORE_DIAGNOSTICS or args.matched_output is not None
+    dynamic_memory = bool(helpers) and args.diagnostics != 'memory-telemetry'
     markers = []
     try:
         if host == before['endpoint']:
@@ -738,13 +738,12 @@ def main():
     if args.docker_args[:1] == ['--']:
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
-    if args.matched_output or args.diagnostics in (*CORE_DIAGNOSTICS, 'memory-telemetry'):
+    if (args.matched_output or args.diagnostics in (*CORE_DIAGNOSTICS, 'memory-telemetry')
+            or args.native_memd or args.native_reclaimd):
         if not (args.native_memd and args.native_reclaimd and args.docker_owner == 'rust'):
             parser.error('native timing and memory canaries require both static Core helpers and the Rust owner')
         native_assets += ('native_memd', 'native_reclaimd')
-    elif args.native_memd or args.native_reclaimd:
-        parser.error('Core memory helpers require a native memory canary')
-    if args.native_admission_wake and not (args.matched_output or args.diagnostics in CORE_DIAGNOSTICS):
+    if args.native_admission_wake and (not args.native_memd or args.diagnostics == 'memory-telemetry'):
         parser.error('admission wake comparison requires the native Core governor')
     if args.diagnostics in VOLUME_DIAGNOSTICS:
         if (not args.native_volume_disk

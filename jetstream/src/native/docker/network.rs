@@ -13,7 +13,7 @@ pub(super) struct Network {
 #[derive(Clone)]
 pub(super) struct Attachment {
     pub network: Network,
-    pub alias: String,
+    pub aliases: Vec<String>,
 }
 
 impl Network {
@@ -90,29 +90,39 @@ impl Attachment {
                 return Err(Rejected::bad("network identity mismatch"));
             }
         }
-        let alias = match &endpoint["Aliases"] {
-            Value::Null => default,
-            Value::Array(names) if names.is_empty() => default,
-            Value::Array(names) if names.len() == 1 => names[0]
-                .as_str()
-                .ok_or_else(|| Rejected::bad("invalid endpoint alias"))?,
+        let aliases = match &endpoint["Aliases"] {
+            Value::Null => vec![default.to_owned()],
+            Value::Array(names) if names.is_empty() => vec![default.to_owned()],
+            Value::Array(names) if names.len() <= 2 => names
+                .iter()
+                .map(|name| {
+                    name.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| Rejected::bad("invalid endpoint alias"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
             _ => {
                 return Err(Rejected::bad(
-                    "one private DNS alias per endpoint is supported",
+                    "at most two private DNS aliases per endpoint are supported",
                 ))
             }
         };
-        if !conjet_launch_service::spec::valid_network_alias(alias) {
+        if aliases.iter().enumerate().any(|(index, alias)| {
+            !conjet_launch_service::spec::valid_network_alias(alias)
+                || aliases[..index]
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(alias))
+        }) {
             return Err(Rejected::bad("invalid private DNS alias"));
         }
         Ok(Self {
             network: network.clone(),
-            alias: alias.to_owned(),
+            aliases,
         })
     }
 
     pub(super) fn inspect(&self, address: Option<&str>) -> Value {
-        json!({"NetworkID":self.network.id, "Aliases":[self.alias],
+        json!({"NetworkID":self.network.id, "Aliases":self.aliases,
                "Gateway":address.map_or("", |_| "198.18.0.1"), "IPAddress":address.unwrap_or(""),
                "IPPrefixLen":address.map_or(0, |_| 28)})
     }
@@ -213,13 +223,19 @@ mod tests {
         let entry = configured(&request, Some(&network), "default")
             .unwrap()
             .unwrap();
-        assert_eq!(entry.alias, "service");
+        assert_eq!(entry.aliases, ["service"]);
         assert!(configured(&request, None, "default").is_err());
         request["NetworkingConfig"]["EndpointsConfig"][&id] = json!({});
         assert!(configured(&request, Some(&network), "default").is_err());
-        assert!(
-            Attachment::new(&network, &json!({"Aliases":["first","second"]}), "default").is_err()
-        );
+        let two =
+            Attachment::new(&network, &json!({"Aliases":["first","second"]}), "default").unwrap();
+        assert_eq!(two.aliases, ["first", "second"]);
+        for names in [
+            json!(["first", "FIRST"]),
+            json!(["first", "second", "third"]),
+        ] {
+            assert!(Attachment::new(&network, &json!({"Aliases":names}), "default").is_err());
+        }
         assert!(Attachment::new(&network, &json!({"Aliases":["../outside"]}), "default").is_err());
     }
 }

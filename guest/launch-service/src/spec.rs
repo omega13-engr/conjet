@@ -49,6 +49,8 @@ pub struct LaunchSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_alias: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_network_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<VolumeMount>,
     pub limits: ResourceLimits,
 }
@@ -152,6 +154,12 @@ impl LaunchRequest {
 }
 
 impl LaunchSpec {
+    pub(crate) fn aliases(&self) -> impl Iterator<Item = &String> {
+        self.network_alias
+            .iter()
+            .chain(&self.secondary_network_alias)
+    }
+
     pub fn validate(&self) -> Result<[u8; 32], SpecError> {
         self.validate_process(false)
     }
@@ -207,9 +215,13 @@ impl LaunchSpec {
         }
         if !matches!(spec.network.as_str(), "none" | "bridge")
             || spec
-                .network_alias
-                .as_ref()
-                .is_some_and(|alias| spec.network != "bridge" || !valid_network_alias(alias))
+                .aliases()
+                .any(|alias| spec.network != "bridge" || !valid_network_alias(alias))
+            || spec.secondary_network_alias.as_ref().is_some_and(|second| {
+                spec.network_alias
+                    .as_ref()
+                    .is_none_or(|first| first.eq_ignore_ascii_case(second))
+            })
         {
             return Err(SpecError::Network);
         }
@@ -266,6 +278,7 @@ mod tests {
                 gid: WORKLOAD_GID,
                 network: "none".into(),
                 network_alias: None,
+                secondary_network_alias: None,
                 volume: None,
                 limits: ResourceLimits {
                     memory_bytes: MIN_MEMORY_BYTES,

@@ -372,6 +372,7 @@ fn execute(
         gid: WORKLOAD_GID,
         network: "none".into(),
         network_alias: None,
+        secondary_network_alias: None,
         volume: None,
         limits: NATIVE_LIMITS,
     };

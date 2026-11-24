@@ -55,21 +55,32 @@ def collect(endpoint, peer, docker, env, output, session, pid):
              code=1, stderr=b'occupied')
         server = 'cj-server'
         call('create_server', ['create', *base, '--name', server, '--network-alias', 'service',
+                               '--network-alias', 'instance',
                                image, '/bin/sh', '-c', 'exec /bin/busybox nc -l -p 8080 -e /bin/sh -c '
                                '\'printf "HTTP/1.1 200 OK\\r\\nContent-Length: 16\\r\\n'
                                'Connection: close\\r\\n\\r\\nprivate-oci-http"\''])
-        call('reject_duplicate_alias', ['create', *base, '--network-alias', 'SERVICE',
+        call('reject_duplicate_alias', ['create', *base, '--network-alias', 'INSTANCE',
                                         image, '/bin/true'], code=1, stderr=b'already owned')
         call('start_server', ['start', server], stdout=b'cj-server\n')
         server_address = attached(server)
-        if server_address['Aliases'] != ['service'] or server_address['NetworkID'] != identifier:
+        if server_address['Aliases'] != ['service', 'instance'] or server_address['NetworkID'] != identifier:
             raise RuntimeError(f'missing server alias or network identity: {server_address}')
+        call('secondary_dns_alias', ['run', '--rm', *base, '--network-alias', 'probe',
+                                    image, '/bin/busybox', 'nslookup', 'instance', '198.18.0.1'])
+        if server_address['IPAddress'] not in cases['secondary_dns_alias']['stdout']:
+            raise RuntimeError('secondary alias resolved to a different endpoint')
         call('reject_remove_busy', ['network', 'rm', net], code=1, stderr=b'attached')
         call('application_transaction', ['run', '--rm', *base, '--network-alias', 'client',
                                          image, '/bin/busybox', 'wget', '-qO-', 'http://service:8080/proof'],
              stdout=b'private-oci-http')
         call('wait_server', ['wait', server], stdout=b'0\n')
         call('remove_server', ['rm', server], stdout=b'cj-server\n')
+        for alias in ('service', 'instance'):
+            call(f'removed_{alias}_dns', ['run', '--rm', *base, '--network-alias', 'probe',
+                                        image, '/bin/busybox', 'nslookup', alias, '198.18.0.1'],
+                 code=1)
+            if 'NXDOMAIN' not in cases[f'removed_{alias}_dns']['stdout']:
+                raise RuntimeError(f'removed alias still resolves: {alias}')
         no_network = ['none' if value == net else value for value in base]
         observer = 'cj-observer'
         call('create_observer', ['create', *no_network, '--name', observer, image,

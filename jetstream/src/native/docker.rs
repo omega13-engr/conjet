@@ -763,12 +763,14 @@ impl Owner {
         Ok(spec)
     }
 
-    fn check_network_alias(ledger: &Ledger, alias: &str) -> Result<(), Rejected> {
+    fn check_network_aliases(ledger: &Ledger, aliases: &[String]) -> Result<(), Rejected> {
         if ledger.active.iter().any(|item| {
-            item.state()
-                .network
-                .as_ref()
-                .is_some_and(|entry| entry.alias.eq_ignore_ascii_case(alias))
+            item.state().network.as_ref().is_some_and(|entry| {
+                entry
+                    .aliases
+                    .iter()
+                    .any(|old| aliases.iter().any(|alias| old.eq_ignore_ascii_case(alias)))
+            })
         }) {
             return Err(Rejected(409, "private DNS alias is already owned".into()));
         }
@@ -895,7 +897,7 @@ impl Owner {
             .map(|endpoint| network::Attachment::new(network, endpoint, &item.container.name))
             .transpose()?;
         if let Some(entry) = &attachment {
-            Self::check_network_alias(&ledger, &entry.alias)?;
+            Self::check_network_aliases(&ledger, &entry.aliases)?;
         }
         let mut state = item.state();
         if state.removed || state.error.is_some() {
@@ -911,13 +913,21 @@ impl Owner {
             ));
         }
         if state.started && state.terminal.is_none() {
+            if attachment
+                .as_ref()
+                .is_some_and(|entry| entry.aliases.len() != 1)
+            {
+                return Err(Rejected::bad(
+                    "live bridge attachment supports one private DNS alias",
+                ));
+            }
             let handle = state
                 .native_handle
                 .as_ref()
                 .ok_or_else(|| Rejected(409, "container launch is still pending".into()))?;
             let operation = attachment.as_ref().map_or_else(
                 || json!({"action":"disconnect","handle":handle}),
-                |entry| json!({"action":"connect","handle":handle,"alias":entry.alias}),
+                |entry| json!({"action":"connect","handle":handle,"alias":entry.aliases[0]}),
             );
             let reply = self.exchange_network(operation)?;
             let address = reply["network_address"]
@@ -1139,7 +1149,7 @@ impl Owner {
             .transpose()?;
         let network = network::configured(&config, ledger.network.as_ref(), &name)?;
         if let Some(attachment) = &network {
-            Self::check_network_alias(&ledger, &attachment.alias)?;
+            Self::check_network_aliases(&ledger, &attachment.aliases)?;
         }
         let publication = port::RequestedPort::parse(&config)?;
         if publication.is_some() {
@@ -1298,7 +1308,10 @@ impl Owner {
         let spec = state.network.as_ref().map(|attachment| {
             let mut spec = item.container.spec.clone();
             spec["network"] = json!("bridge");
-            spec["network_alias"] = json!(attachment.alias);
+            spec["network_alias"] = json!(attachment.aliases[0]);
+            if let Some(alias) = attachment.aliases.get(1) {
+                spec["secondary_network_alias"] = json!(alias);
+            }
             spec
         });
         let owner = self.clone();
