@@ -10,6 +10,7 @@ pub const WORKLOAD_GID: u32 = 65_532;
 pub const UID_BASE: u32 = 100_000;
 pub const GID_BASE: u32 = 100_000;
 pub const ID_MAP_WIDTH: u32 = 65_536;
+pub const VOLUME_TARGET: &str = "/data";
 pub const MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIDS: u32 = 64;
@@ -47,7 +48,17 @@ pub struct LaunchSpec {
     pub network: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<VolumeMount>,
     pub limits: ResourceLimits,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeMount {
+    pub name: String,
+    pub inode: u64,
+    pub read_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -84,6 +95,8 @@ pub enum SpecError {
     Identity,
     #[error("this launch profile supports only none and bridge networking")]
     Network,
+    #[error("requested native volume identity is invalid")]
+    Volume,
     #[error("resource limits exceed the native launch profile")]
     Resources,
 }
@@ -149,6 +162,11 @@ impl LaunchSpec {
 
     fn validate_process(&self, search_path: bool) -> Result<[u8; 32], SpecError> {
         let spec = self;
+        if spec.volume.as_ref().is_some_and(|volume| {
+            volume.inode == 0 || !crate::volume_disk::valid_name(&volume.name)
+        }) {
+            return Err(SpecError::Volume);
+        }
         let digest = spec
             .image_digest
             .strip_prefix("sha256:")
@@ -248,6 +266,7 @@ mod tests {
                 gid: WORKLOAD_GID,
                 network: "none".into(),
                 network_alias: None,
+                volume: None,
                 limits: ResourceLimits {
                     memory_bytes: MIN_MEMORY_BYTES,
                     pids: 4,

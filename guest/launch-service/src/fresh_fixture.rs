@@ -254,6 +254,7 @@ struct Record {
     slot_expires: Option<Instant>,
     slot_expired: bool,
     memory_limit_bytes: u64,
+    volume: Option<crate::spec::VolumeMount>,
     core_admission_deadline: Option<Instant>,
     cancelled: bool,
     terminate_requested: bool,
@@ -806,6 +807,16 @@ impl FreshFixture {
         hash.update(serde_json::to_vec(request).expect("typed request"));
         let body: [u8; 32] = hash.finalize().into();
         let mut ledger = self.ledger.lock().expect("fresh ledger");
+        if let Some(volume) = &spec.volume {
+            if !self.oci || !crate::volume_disk::guest::available() {
+                return Err(("unsupported_option", "native volume disk is not configured"));
+            }
+            let info = crate::volume_disk::guest::inspect(&volume.name)
+                .map_err(|_| ("not_found", "native volume is unavailable"))?;
+            if info.inode != volume.inode {
+                return Err(("stale_generation", "native volume inode changed"));
+            }
+        }
         if mode != "benchmark"
             && spec.image_digest != self.image_digest
             && !(self.oci && ledger.images.contains(&spec.image_digest))
@@ -891,6 +902,7 @@ impl FreshFixture {
             slot_expires: prepared.then(|| Instant::now() + SLOT_TTL),
             slot_expired: false,
             memory_limit_bytes: spec.limits.memory_bytes,
+            volume: spec.volume.clone(),
             core_admission_deadline: self.core_admission.then_some(deadline),
             cancelled: false,
             terminate_requested: false,
@@ -1588,6 +1600,16 @@ impl FreshFixture {
                 let expires = deadline(request.budget_ms)?;
                 if guard.closing || Instant::now() >= expires {
                     return Err(("busy", "native volume registry is draining"));
+                }
+                if let VolumeOperation::Remove { name } = &request.operation
+                    && guard.active().any(|record| {
+                        record
+                            .volume
+                            .as_ref()
+                            .is_some_and(|volume| &volume.name == name)
+                    })
+                {
+                    return Err(("in_use", "native volume is owned by a workload"));
                 }
                 // Keep the request serialized with shutdown through its last fsync.
                 request.operation.execute()

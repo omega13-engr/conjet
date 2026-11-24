@@ -347,6 +347,28 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 .map_err(|_| Rejected::bad("invalid Docker network request"))?;
             Reply::json(201, owner.create_network(body)?)
         }
+        ("GET", "/volumes") if query.is_empty() => Reply::json(200, super::volume::list(owner)?),
+        ("POST", "/volumes/create") if query.is_empty() => {
+            let body = serde_json::from_slice(&request.body)
+                .map_err(|_| Rejected::bad("invalid Docker volume request"))?;
+            Reply::json(201, super::volume::create(owner, &body)?)
+        }
+        (_, _) if path.starts_with("/volumes/") => {
+            let name = decode(&path["/volumes/".len()..])?;
+            match method {
+                "GET" if query.is_empty() => {
+                    super::volume::ask(owner, "inspect", Some(&name))?;
+                    Reply::json(200, super::volume::describe(&name))
+                }
+                "DELETE"
+                    if query.keys().all(|key| key == "force") && disabled(query.get("force")) =>
+                {
+                    owner.remove_volume(&name)?;
+                    Reply::empty(204)
+                }
+                _ => return Err(Rejected::bad("unsupported Docker volume operation")),
+            }
+        }
         (_, _) if path.starts_with("/networks/") => {
             let route = &path["/networks/".len()..];
             let (reference, operation) = route.split_once('/').unwrap_or((route, ""));
@@ -589,6 +611,7 @@ fn container(
                 json!({
                     "Id":container.id,"Name":format!("/{}",container.name),"Image":container.spec["image_digest"],
                     "Driver":BACKEND,"Platform":"linux","Path":specs[0],"Args":specs[1..],
+                    "Mounts": container.volume.iter().map(super::volume::mount_metadata).collect::<Vec<_>>(),
                     "RestartCount":state.generation,
                     "State":{"Status":status,"Running":status=="running","ExitCode":code,
                              "Error":state.error.as_deref().unwrap_or("")},

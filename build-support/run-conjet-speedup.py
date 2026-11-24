@@ -24,7 +24,7 @@ SCRATCH = SSD / 'dev_workspace/tmp'
 REPO = Path(__file__).resolve().parents[1]
 CONTEXT = 'conjet-speedup'
 DOCKER = Path('/opt/homebrew/bin/docker')
-CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'volume-disk', 'admission-trace')
+CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'volume-disk', 'mounted-volume', 'admission-trace')
 
 
 class SessionInterrupted(KeyboardInterrupt):
@@ -592,6 +592,10 @@ def native_session(args, root):
             elif args.diagnostics == 'volume-disk':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-volume-disk.py'))
                 diagnostic['collect'](directory, vm.pid, output, args.volume_phase)
+            elif args.diagnostics == 'mounted-volume':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-volumes.py'))
+                diagnostic['collect'](endpoint, bridge.pid, directory, vm.pid,
+                                      output, args.volume_phase, docker, env)
             elif args.diagnostics in ('oci', 'oci-import'):
                 oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
                 oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
@@ -698,7 +702,7 @@ def main():
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
-                                                  'volume-disk', 'admission-trace'),
+                                                  'volume-disk', 'mounted-volume', 'admission-trace'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
@@ -734,13 +738,15 @@ def main():
         parser.error('Core memory helpers require a native memory canary')
     if args.native_admission_wake and not (args.matched_output or args.diagnostics in CORE_DIAGNOSTICS):
         parser.error('admission wake comparison requires the native Core governor')
-    if args.diagnostics == 'volume-disk':
+    if args.diagnostics in ('volume-disk', 'mounted-volume'):
         if (not args.native_volume_disk or not args.volume_phase
                 or args.native_volume_disk.resolve(strict=True) != args.native_volume_disk):
             parser.error('volume diagnostics require a canonical private disk path and a phase')
+        if args.diagnostics == 'mounted-volume' and args.volume_phase == 'remove':
+            parser.error('mounted volume diagnostics recover and remove in the inspect phase')
         native_assets += ('native_volume_disk',)
     elif args.native_volume_disk or args.volume_phase:
-        parser.error('a private volume disk and phase require volume-disk diagnostics')
+        parser.error('a private volume disk and phase require volume diagnostics')
     if args.diagnostics == 'oci-import':
         if not (args.import_package and args.import_receipt and args.docker_owner == 'rust'):
             parser.error('OCI import diagnostics require the Rust owner and a staged package and receipt')

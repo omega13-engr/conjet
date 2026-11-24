@@ -61,9 +61,9 @@ pub fn valid_name(name: &str) -> bool {
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub(crate) mod guest {
     use std::ffi::CStr;
-    use std::fs::{self, DirBuilder, File};
+    use std::fs::{self, DirBuilder, File, Metadata, OpenOptions};
     use std::io;
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
     use std::path::Path;
     use std::time::{Duration, Instant};
 
@@ -71,7 +71,7 @@ pub(crate) mod guest {
 
     use super::{MARKER, VolumeIdentity, filesystem_uuid, valid_name};
     use crate::security::checked;
-    use crate::spec::{GID_BASE, UID_BASE, WORKLOAD_GID, WORKLOAD_UID};
+    use crate::spec::{GID_BASE, UID_BASE, VolumeMount, WORKLOAD_GID, WORKLOAD_UID};
 
     const DEVICES: &CStr = c"/run/conjet/volume-devices";
     const ROOT: &CStr = c"/run/conjet/volume-disk";
@@ -270,7 +270,7 @@ pub(crate) mod guest {
         guest_uid: u32,
         guest_gid: u32,
         mode: u32,
-        inode: u64,
+        pub(crate) inode: u64,
     }
 
     pub(crate) fn inspect(name: &str) -> io::Result<VolumeInfo> {
@@ -281,11 +281,37 @@ pub(crate) mod guest {
             ));
         }
         let info = fs::symlink_metadata(Path::new(VOLUMES).join(name))?;
-        if !info.is_dir()
-            || info.uid() != UID_BASE + WORKLOAD_UID
-            || info.gid() != GID_BASE + WORKLOAD_GID
-            || info.mode() & 0o777 != 0o700
-        {
+        checked_info(
+            name,
+            &info,
+            (UID_BASE + WORKLOAD_UID, GID_BASE + WORKLOAD_GID),
+        )
+    }
+
+    pub(crate) fn mount_source(request: &VolumeMount) -> io::Result<File> {
+        if !valid_name(&request.name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid native volume name",
+            ));
+        }
+        let source = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
+            .open(Path::new(VOLUMES).join(&request.name))?;
+        let info = checked_info(
+            &request.name,
+            &source.metadata()?,
+            (WORKLOAD_UID, WORKLOAD_GID),
+        )?;
+        if info.inode != request.inode {
+            return Err(io::Error::other("stale native volume identity"));
+        }
+        Ok(source)
+    }
+
+    fn checked_info(name: &str, info: &Metadata, owner: (u32, u32)) -> io::Result<VolumeInfo> {
+        if !info.is_dir() || (info.uid(), info.gid()) != owner || info.mode() & 0o777 != 0o700 {
             return Err(io::Error::other(
                 "unexpected native volume directory identity",
             ));

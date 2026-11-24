@@ -216,3 +216,29 @@ hashes and registry replies are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-061/`.
 Container writes, read-only mounts and deletion while a mount is live remain
 SPEED-062.
+
+## SPEED-062
+
+The Docker API can create, list, inspect and delete local named volumes on
+the leased disk. A container may attach one existing volume to `/data`.
+The host refuses removal while a container references it, and the guest
+refuses removal while a native workload still owns it. The guest checks
+the inode in the workload mount namespace before binding and retains the
+workload lease through cgroup and sandbox cleanup.
+
+Release boots passed writable data, replacement container reads, read-only
+failure with unchanged bytes, mapped 65532:65532 ownership, mode 0700,
+Docker and guest busy-delete rejection, and forced cancellation with exit
+137 and complete guest cleanup. The second boot read the guest-written
+payload from the same private disk, removed the volume and passed offline
+`e2fsck -fn`. Both boots released the disk lease and preserved production.
+The saved failure cases show the old cross-namespace bind returning
+`EINVAL` and the intermediate identity check using outer IDs in the child.
+
+The supported Docker form is `--mount type=volume,source=NAME,target=/data`
+with optional `readonly`. The destination must be absent or empty in the
+image. Bind propagation, host binds, anonymous volumes, additional mounts
+and custom drivers remain outside this fixture.
+
+Evidence is under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-062/`.

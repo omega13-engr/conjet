@@ -6,6 +6,7 @@ mod network;
 mod port;
 mod registry;
 mod request;
+mod volume;
 
 pub(super) use image::{install, InstallOptions};
 
@@ -539,6 +540,7 @@ struct Container {
     name: String,
     config: Value,
     spec: Value,
+    volume: Option<conjet_launch_service::spec::VolumeMount>,
     auto_remove: bool,
     cancel: AtomicU8,
 }
@@ -1074,6 +1076,20 @@ impl Owner {
         let id = hex(&random::<32>()
             .map_err(|_| Rejected::internal("cannot allocate container identity"))?);
         let name = name.unwrap_or(&id[..12]).to_owned();
+        let volume = volume::requested(&config)?
+            .map(|(name, read_only)| {
+                let info = volume::ask(self, "inspect", Some(name))?;
+                let inode = info["inode"]
+                    .as_u64()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| Rejected::internal("native volume has no inode identity"))?;
+                Ok::<_, Rejected>(conjet_launch_service::spec::VolumeMount {
+                    name: name.into(),
+                    read_only,
+                    inode,
+                })
+            })
+            .transpose()?;
         let network = network::configured(&config, ledger.network.as_ref(), &name)?;
         if let Some(attachment) = &network {
             Self::check_network_alias(&ledger, &attachment.alias)?;
@@ -1096,10 +1112,18 @@ impl Owner {
                 ));
             }
         }
-        let spec = if network.is_some() {
+        let mut spec = if network.is_some() || volume.is_some() {
             let mut process = config.clone();
-            process["HostConfig"]["NetworkMode"] = json!("none");
-            process["NetworkingConfig"] = Value::Null;
+            if network.is_some() {
+                process["HostConfig"]["NetworkMode"] = json!("none");
+                process["NetworkingConfig"] = Value::Null;
+            }
+            if volume.is_some() {
+                process["HostConfig"]
+                    .as_object_mut()
+                    .expect("Docker host config")
+                    .remove("Mounts");
+            }
             if publication.is_some() {
                 process["HostConfig"]
                     .as_object_mut()
@@ -1114,6 +1138,9 @@ impl Owner {
         } else {
             self.process(&config)?
         };
+        if let Some(volume) = &volume {
+            spec["volume"] = json!(volume);
+        }
         let published = publication
             .map(|request| {
                 let endpoint = {
@@ -1135,6 +1162,7 @@ impl Owner {
                 name,
                 config,
                 spec,
+                volume,
                 auto_remove,
                 cancel: AtomicU8::new(0),
             },
@@ -1149,6 +1177,22 @@ impl Owner {
         ledger.active.push(item.clone());
         self.event(&mut ledger, "create", &item, None);
         Ok(item)
+    }
+
+    fn remove_volume(&self, name: &str) -> Result<(), Rejected> {
+        let ledger = self.ledger.lock().unwrap();
+        if ledger.active.iter().any(|item| {
+            item.container
+                .volume
+                .as_ref()
+                .is_some_and(|volume| volume.name == name)
+        }) {
+            return Err(Rejected(
+                409,
+                "native volume is referenced by a container".into(),
+            ));
+        }
+        volume::ask(self, "remove", Some(name)).map(|_| ())
     }
 
     fn lookup(&self, id: &str) -> Result<Arc<Item>, Rejected> {

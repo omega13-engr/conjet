@@ -307,7 +307,7 @@ Title: Attach and release native named volumes with container ownership
 
 Description: Support one named-volume mount per container through the native Docker API.
 
-Is blocked by task: SPEED-061 and SPEED-057.
+Is blocked by task: SPEED-057, SPEED-061 and SPEED-069 isolated validation, complete.
 
 Acceptance Criteria:
 
@@ -317,13 +317,35 @@ Problem and Evidence: Disk registry alone does not implement container mounts.
 
 Approach: Bind verified guest volume identity into the launch spec; hold ownership through verified cleanup and release it once.
 
-Evidence: Pending; no new candidate result.
+Evidence: Two release boots passed the Docker writable and read-only
+mounts, payload persistence, mapped identity, busy deletion, forced
+cancellation and clean ext4 recovery. See [SPEED-062 evidence](native-engine-validation.md#speed-062).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
-Review: Pending implementation, validation and independent evidence review.
+Review: Isolated validation and self-review passed. Independent review pending.
 
-Next Action: Add one mount fixture and typed volume lease; validate error paths.
+Next Action: Use the qualified named-volume path in the Compose fixture.
+
+### SPEED-069
+
+Title: Bind verified native volume in the workload mount namespace
+
+Description: Open the owned source after namespace creation while using the
+inherited guest identity. Validate its inode, bind it to the fixed destination,
+then close the source before workload execution.
+
+Acceptance Criteria:
+
+- The workload sees one owned volume and its declared read-only mode.
+  A cancelled workload leaves no guest mount or host disk holder. Preserve
+  native sandbox credentials and syscall policy.
+
+Evidence: Opening the verified inode in the child mount namespace fixed
+the earlier `EINVAL`. The child sees mapped UID/GID while the storage
+registry sees the outer IDs. Both live boots passed.
+
+Review: Isolated validation and self-review passed. Independent review pending.
 
 ### SPEED-063
 

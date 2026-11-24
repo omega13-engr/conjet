@@ -8,7 +8,10 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::security::{self, WorkloadFilter};
-use crate::spec::{GID_BASE, ID_MAP_WIDTH, LaunchSpec, UID_BASE, WORKLOAD_GID, WORKLOAD_UID};
+use crate::spec::{
+    GID_BASE, ID_MAP_WIDTH, LaunchSpec, UID_BASE, VOLUME_TARGET, VolumeMount, WORKLOAD_GID,
+    WORKLOAD_UID,
+};
 
 const BASE: &str = "/run/conjet/workload-probe";
 pub(crate) const BENCHMARK_EXECUTABLE: &str = "/etc/conjet/benchmark-executable";
@@ -25,6 +28,67 @@ pub(crate) struct Sandbox {
     filter: WorkloadFilter,
     configure_resolver: bool,
     stdin: File,
+    volume: Option<VolumeBinding>,
+}
+
+struct VolumeBinding {
+    spec: VolumeMount,
+    target_path: PathBuf,
+    target: CString,
+}
+
+impl VolumeBinding {
+    fn prepare(name: &VolumeMount, root: &Path) -> io::Result<Self> {
+        let target_path = root.join(VOLUME_TARGET.trim_start_matches('/'));
+        Ok(Self {
+            spec: name.clone(),
+            target: CString::new(target_path.as_os_str().as_bytes())?,
+            target_path,
+        })
+    }
+
+    fn mount(&self, source: File) -> io::Result<()> {
+        let source_path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
+        match fs::create_dir(&self.target_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if !self.target_path.symlink_metadata()?.is_dir()
+                    || fs::read_dir(&self.target_path)?.next().is_some()
+                {
+                    return Err(io::Error::other(
+                        "native volume target must be an empty directory",
+                    ));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        security::checked(unsafe {
+            libc::mount(
+                source_path.as_ptr(),
+                self.target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        })?;
+        if self.spec.read_only {
+            security::checked(unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    self.target.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND
+                        | libc::MS_REMOUNT
+                        | libc::MS_RDONLY
+                        | libc::MS_NODEV
+                        | libc::MS_NOEXEC
+                        | libc::MS_NOSUID,
+                    std::ptr::null(),
+                )
+            })?;
+        }
+        Ok(())
+    }
 }
 
 impl Sandbox {
@@ -110,6 +174,10 @@ impl Sandbox {
                 filter: WorkloadFilter::new(bridge),
                 configure_resolver: bridge && oci.is_some(),
                 stdin: File::open("/dev/null")?,
+                volume: oci
+                    .and_then(|spec| spec.volume.as_ref())
+                    .map(|volume| VolumeBinding::prepare(volume, &base.join("root")))
+                    .transpose()?,
             })
         })();
         if setup.is_err() {
@@ -135,6 +203,18 @@ impl Sandbox {
         fn step(name: &str, result: io::Result<()>) -> io::Result<()> {
             result.map_err(|error| io::Error::other(format!("{name}: {error}")))
         }
+        // Open the trusted inode in the child's mount namespace. A descriptor
+        // opened before clone refers to the parent's mount and cannot be used
+        // for a bind here. The child still owns its inherited guest UID when
+        // opening the registry; only stdio survives into the workload.
+        let volume_source = self
+            .volume
+            .as_ref()
+            .map(|volume| {
+                crate::volume_disk::guest::mount_source(&volume.spec)
+                    .map_err(|error| io::Error::other(format!("open named volume: {error}")))
+            })
+            .transpose()?;
         // The child inherited the helper's outer guest IDs. Enter the mapped
         // namespace-root identity before accessing the owned upper/work dirs.
         step(
@@ -169,6 +249,9 @@ impl Sandbox {
                 )
             }),
         )?;
+        if let Some((volume, source)) = self.volume.as_ref().zip(volume_source) {
+            step("private named volume", volume.mount(source))?;
+        }
         if unsafe { libc::dup2(self.stdin.as_raw_fd(), libc::STDIN_FILENO) } < 0 {
             return Err(io::Error::other(format!(
                 "closed stdin: {}",
