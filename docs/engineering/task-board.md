@@ -1786,7 +1786,11 @@ The host and guest must select the same worker-control policy.
 
 Evidence: All 18 cgroup probes in the nine-builder preload run failed
 at host validation because ordinary argv inherited the daemon-only
-authority. See `SPEED-161/frozen-native-extraction/`.
+authority. The host and guest now use the same argv replacement logic.
+`SPEED-163/build-worker-observations/` verified all 18 original
+observer calls, including the worker's CPU, memory and I/O counters.
+Those shell observers use the ordinary exec policy, which verifies an
+empty capability set before process exec.
 
 ### SPEED-091
 

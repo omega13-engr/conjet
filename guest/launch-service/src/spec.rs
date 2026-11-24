@@ -442,6 +442,12 @@ impl LaunchSpec {
         self.validate_process(true)
     }
 
+    pub fn set_exec_argv(&mut self, argv: Vec<String>) {
+        self.redis_bootstrap = false;
+        self.buildkit_worker &= buildkit_control_exec(&self.image_digest, &argv);
+        self.argv = argv;
+    }
+
     fn validate_process(&self, search_path: bool) -> Result<[u8; 32], SpecError> {
         let spec = self;
         if spec.build_snapshot.as_ref().is_some_and(|snapshot| {
@@ -786,6 +792,20 @@ mod tests {
         });
         let validate = |spec| LaunchRequest { spec, ..valid() }.validate_oci();
         assert!(validate(spec.clone()).is_ok());
+
+        let mut control = spec.clone();
+        control.set_exec_argv(["buildctl", "debug", "workers"].map(String::from).to_vec());
+        assert!(control.buildkit_worker);
+        assert!(control.validate_exec().is_ok());
+
+        let mut observer = spec.clone();
+        observer.set_exec_argv(
+            ["/bin/sh", "-c", "cat /sys/fs/cgroup/cpu.stat"]
+                .map(String::from)
+                .to_vec(),
+        );
+        assert!(!observer.buildkit_worker);
+        assert!(observer.validate_exec().is_ok());
 
         let mut changed = spec.clone();
         changed.argv.push("--oci-worker-binary=runc".into());

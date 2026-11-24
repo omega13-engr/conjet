@@ -539,9 +539,7 @@ impl Ledger {
             .filter(|_| record.phase == Phase::Running)
             .ok_or(("not_running", "native exec requires a live OCI process"))?;
         let mut spec = spec.clone();
-        spec.redis_bootstrap = false;
-        spec.argv = argv;
-        spec.buildkit_worker &= crate::spec::buildkit_control_exec(&spec.image_digest, &spec.argv);
+        spec.set_exec_argv(argv);
         spec.validate_exec()
             .map_err(|_| ("invalid_spec", "invalid native exec argv"))?;
         let pidfd = pidfd
