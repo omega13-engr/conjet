@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use conjet_launch_service::handshake::{hex, random};
+use conjet_launch_service::handshake::{hex, random, unhex};
 use conjet_launch_service::spec::LaunchSpec;
-use conjet_launch_service::wire::{Kind, WireError};
+use conjet_launch_service::wire::{Kind, WireError, EXEC_OUTPUT_LIMIT};
 use serde_json::{json, Value};
 
 use super::{client, Item, Owner, Rejected, CHUNK};
@@ -190,6 +190,18 @@ pub(super) fn execute(
             return Err(format!("native exec outcome is unresolved: {error}"));
         }
     };
+    let result = decode_output(connected, reply, enabled);
+    if result.is_err() {
+        *control = None;
+    }
+    result
+}
+
+fn decode_output(
+    peer: &mut client::Connection,
+    reply: Value,
+    enabled: [bool; 2],
+) -> std::result::Result<(i64, Result), String> {
     let code = reply["exit_code"]
         .as_i64()
         .filter(|code| (0..=255).contains(code))
@@ -197,16 +209,31 @@ pub(super) fn execute(
     let mut output: [Vec<u8>; 2] = Default::default();
     let mut overflow = false;
     let mut bytes = 0;
+    let output_id = match reply.get("output_id") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|value| unhex::<16>(value).is_ok())
+                .ok_or("invalid native exec output identity")?,
+        ),
+        None => None,
+    };
     for (index, stream) in ["stdout", "stderr"].iter().enumerate() {
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(
-                reply[*stream]["data"]
-                    .as_str()
-                    .ok_or("missing native exec output")?,
-            )
-            .map_err(|_| "invalid native exec encoding")?;
+        let decoded = if let Some(output_id) = output_id {
+            let size = reply[*stream]["bytes"]
+                .as_u64()
+                .filter(|size| *size <= EXEC_OUTPUT_LIMIT as u64)
+                .ok_or("native exec output exceeds its retained limit")?
+                as usize;
+            let dropped = reply[*stream]["dropped_bytes"]
+                .as_u64()
+                .ok_or("missing exec drop count")?;
+            read_exec_chunks(peer, output_id, stream, size, dropped)?
+        } else {
+            decode_chunk(&reply[*stream])?
+        };
         bytes += decoded.len();
-        if bytes > CHUNK {
+        if output_id.is_none() && bytes > CHUNK {
             return Err("native exec output exceeds its wire bound".into());
         }
         overflow |= reply[*stream]["dropped_bytes"]
@@ -224,6 +251,48 @@ pub(super) fn execute(
             error: overflow.then(|| "native exec output exceeds the retained limit".into()),
         },
     ))
+}
+
+fn decode_chunk(reply: &Value) -> std::result::Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(reply["data"].as_str().ok_or("missing native exec output")?)
+        .map_err(|_| "invalid native exec encoding".into())
+}
+
+fn read_exec_chunks(
+    peer: &mut client::Connection,
+    output_id: &str,
+    stream: &str,
+    size: usize,
+    dropped: u64,
+) -> std::result::Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(size);
+    while output.len() < size {
+        let offset = output.len();
+        let reply = peer
+            .exchange(
+                Kind::ExecOutput,
+                Kind::ExecOutput,
+                &json!({"boot_id":peer.boot,"budget_ms":1000,"output_id":output_id,
+                    "stream":stream,"offset":offset}),
+                Duration::from_secs(2),
+            )
+            .map_err(|error| format!("native exec output transfer failed: {error}"))?;
+        let chunk = decode_chunk(&reply)?;
+        let next = offset + chunk.len();
+        if chunk.is_empty()
+            || chunk.len() > CHUNK
+            || next > size
+            || reply["offset"].as_u64() != Some(offset as u64)
+            || reply["next_offset"].as_u64() != Some(next as u64)
+            || reply["dropped_bytes"].as_u64() != Some(dropped)
+            || reply["eof"].as_bool() != Some(next == size)
+        {
+            return Err("invalid native exec output chunk".into());
+        }
+        output.extend_from_slice(&chunk);
+    }
+    Ok(output)
 }
 
 impl Owner {

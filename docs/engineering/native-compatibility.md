@@ -258,6 +258,15 @@ run from the reloaded archive with verified teardown. [Pinned Node pipe implemen
 
 Evidence is under `SPEED-118/` on ExternalSSD.
 
+## SPEED-119 large exec output
+
+Small exec results retain their inline reply. Larger results use
+authenticated chunks with a short, connection-owned lease and
+256 KiB retention per stream. The release verified both streams,
+exit status, bounded overflow, rejected cursors and release on
+disconnect. The frozen device-backed exec still requires its
+`/dev/zero` check. Evidence is under `SPEED-119/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

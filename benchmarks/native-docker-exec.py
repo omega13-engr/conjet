@@ -80,8 +80,29 @@ def collect(endpoint, peer, docker, env, output, session, vmm_pid):
             cases['duplicate_exec_start'] = tools['api'](api, 'POST', exec_path + '/start', (409,),
                                                         {'Detach': False, 'Tty': False})
             call('exec_ran_once', ['exec', name, '/bin/busybox', 'cat', '/tmp/cj-exec-once'], stdout=b'a')
-            call('exec_output_bound', ['exec', name, '/bin/sh', '-c', 'printf "%09000d" 0'],
-                 expected=1, stdout=b'0' * 8192, stderr=b'native exec output exceeds the retained limit')
+            call('exec_large_streams', ['exec', name, '/bin/sh', '-c',
+                 'printf "%0131072d" 0; printf "%08200d" 1 >&2; exit 23'],
+                 expected=23, stdout=b'0' * (128 * 1024), stderr=b'0' * 8199 + b'1')
+            call('exec_output_bound', ['exec', name, '/bin/sh', '-c', 'printf "%0270000d" 0'],
+                 expected=1, stdout=b'0' * (256 * 1024), stderr=b'native exec output exceeds the retained limit')
+            request = {'handle': active, 'budget_ms': 1000,
+                       'argv': ['/bin/sh', '-c', 'printf "%09000d" 0']}
+            with INSTALL['channel'](session, vmm_pid) as (output_owner, _):
+                lease = INSTALL['exchange'](output_owner, 22, request, 22)
+                chunk = {'boot_id': boot, 'budget_ms': 1000, 'output_id': lease['output_id'],
+                         'stream': 'stdout', 'offset': 0}
+                cases['foreign_output_denied'] = INSTALL['exchange'](guest, 28, chunk, 15, 'not_found')
+                cases['output_offset_denied'] = INSTALL['exchange'](
+                    output_owner, 28, {**chunk, 'offset': 1}, 15, 'malformed')
+            recovery = {**request, 'argv': ['/bin/true']}
+            deadline = time.monotonic() + 2
+            while True:
+                kind, reply = INSTALL['WIRE']['call'](guest, 22, recovery)
+                if kind == 22 and reply['exit_code'] == 0:
+                    cases['output_disconnect_released'] = True
+                    break
+                if kind != 15 or reply.get('code') != 'busy' or time.monotonic() >= deadline:
+                    raise RuntimeError(f'old exec output lease did not release: {reply}')
             if [row['handle'] for row in INSTALL['inspect'](guest)['active_workloads']] != [active]:
                 raise RuntimeError('failed exec changed the native container identity')
             cases['native_handle'] = active

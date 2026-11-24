@@ -1133,6 +1133,12 @@ connection and workload ownership, overflow handling and cleanup.
 Exercise the original 128 KiB output case once the approved workload
 devices are available.
 
+Evidence: The release returned the exact 128 KiB stdout and 8,200-byte
+stderr canary with exit 23. A separate case reached the new bounded
+256 KiB retention limit and reported overflow. Foreign and out-of-order
+reads failed, connection loss released the transfer and the original
+workload remained usable. Logs are under `SPEED-119/` on ExternalSSD.
+
 ### SPEED-120
 
 Title: Expose the native null and zero devices through the private workload root

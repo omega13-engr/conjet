@@ -10,7 +10,11 @@ pub(crate) struct Capture {
 
 impl Capture {
     pub(crate) fn append(&mut self, data: &[u8]) {
-        let kept = data.len().min(OUTPUT_CAPACITY - self.bytes.len());
+        self.append_bounded(data, OUTPUT_CAPACITY);
+    }
+
+    pub(crate) fn append_bounded(&mut self, data: &[u8], capacity: usize) {
+        let kept = data.len().min(capacity.saturating_sub(self.bytes.len()));
         self.bytes.extend_from_slice(&data[..kept]);
         self.dropped = self.dropped.saturating_add((data.len() - kept) as u64);
     }

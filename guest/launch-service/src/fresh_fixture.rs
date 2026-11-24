@@ -116,6 +116,16 @@ struct Exec {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ExecOutput {
+    boot_id: String,
+    budget_ms: u64,
+    output_id: String,
+    stream: String,
+    offset: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NetworkRequest {
     boot_id: String,
     budget_ms: u64,
@@ -425,9 +435,80 @@ struct Ledger {
     pressure_helper: Option<std::process::Child>,
     evictions: u64,
     exec_active: bool,
+    exec_output: Option<PendingExecOutput>,
+}
+
+struct PendingExecOutput {
+    id: String,
+    owner: ConnectionId,
+    streams: [Capture; 2],
+    offsets: [usize; 2],
+    expires: Instant,
 }
 
 impl Ledger {
+    fn complete_exec(
+        &mut self,
+        result: crate::exec_fixture::ExecResult,
+        connection: ConnectionId,
+    ) -> Reply {
+        let [stdout, stderr] = &result.streams;
+        let exit = result.code;
+        if stdout.bytes.len() + stderr.bytes.len() <= OUTPUT_CHUNK_LIMIT {
+            return Ok((
+                Kind::Exec,
+                json!({
+                    "exit_code":exit,
+                    "stdout":output_chunk(stdout, 0, OUTPUT_CHUNK_LIMIT, true),
+                    "stderr":output_chunk(stderr, 0, OUTPUT_CHUNK_LIMIT, true),
+                }),
+            ));
+        }
+        let id = hex(&random::<16>().map_err(|_| ("busy", "secure exec output ID unavailable"))?);
+        let sizes =
+            |stream: &Capture| json!({"bytes":stream.bytes.len(),"dropped_bytes":stream.dropped});
+        let reply = json!({"exit_code":exit, "output_id":id, "stdout":sizes(stdout), "stderr":sizes(stderr)});
+        self.exec_output = Some(PendingExecOutput {
+            id,
+            owner: connection,
+            streams: result.streams,
+            offsets: [0; 2],
+            expires: Instant::now() + Duration::from_secs(5),
+        });
+        Ok((Kind::Exec, reply))
+    }
+
+    fn read_exec_output(&mut self, request: ExecOutput, connection: ConnectionId) -> Reply {
+        let stream = match request.stream.as_str() {
+            "stdout" => 0,
+            "stderr" => 1,
+            _ => return Err(("malformed", "invalid exec output stream")),
+        };
+        let output = self
+            .exec_output
+            .as_mut()
+            .filter(|output| output.owner == connection && output.id == request.output_id)
+            .ok_or((
+                "not_found",
+                "exec output does not belong to this connection",
+            ))?;
+        let data = &output.streams[stream];
+        if request.offset != output.offsets[stream] || request.offset >= data.bytes.len() {
+            return Err(("malformed", "invalid exec output offset"));
+        }
+        let reply = output_chunk(data, request.offset, OUTPUT_CHUNK_LIMIT, true);
+        output.offsets[stream] = (request.offset + OUTPUT_CHUNK_LIMIT).min(data.bytes.len());
+        if output
+            .streams
+            .iter()
+            .zip(output.offsets)
+            .all(|(data, offset)| data.bytes.len() == offset)
+        {
+            self.exec_output = None;
+        }
+        Ok((Kind::ExecOutput, reply))
+    }
+
     fn record(&self, id: &str) -> Option<&Record> {
         self.records
             .iter()
@@ -613,12 +694,15 @@ pub(crate) struct ConnectionLease<'a> {
 
 impl Drop for ConnectionLease<'_> {
     fn drop(&mut self) {
-        self.fresh
-            .ledger
-            .lock()
-            .expect("fresh ledger")
-            .images
-            .disconnect(self.id);
+        let mut ledger = self.fresh.ledger.lock().expect("fresh ledger");
+        ledger.images.disconnect(self.id);
+        if ledger
+            .exec_output
+            .as_ref()
+            .is_some_and(|output| output.owner == self.id)
+        {
+            ledger.exec_output = None;
+        }
     }
 }
 
@@ -1657,6 +1741,13 @@ impl FreshFixture {
             }
         };
         let mut guard = self.ledger.lock().expect("fresh ledger");
+        if guard
+            .exec_output
+            .as_ref()
+            .is_some_and(|output| arrival >= output.expires)
+        {
+            guard.exec_output = None;
+        }
         let check = |ledger: &Ledger, handle: &Handle| {
             if handle.boot_id != boot {
                 return Err(("stale_generation", "unexpected boot ID"));
@@ -1896,7 +1987,7 @@ impl FreshFixture {
                 let request: Exec = parse(frame)?;
                 let expires = deadline(request.budget_ms)?;
                 check(&guard, &request.handle)?;
-                if guard.closing || guard.exec_active {
+                if guard.closing || guard.exec_active || guard.exec_output.is_some() {
                     return Err(("busy", "the native exec slot is already owned"));
                 }
                 let record = guard
@@ -1923,7 +2014,7 @@ impl FreshFixture {
                 guard.exec_active = false;
                 self.changed.notify_all();
                 match result {
-                    Ok(reply) => Ok((Kind::Exec, reply)),
+                    Ok(result) => guard.complete_exec(result, connection),
                     Err(error) if error.kind() == io::ErrorKind::TimedOut => {
                         Err(("deadline_exceeded", "native exec exceeded its deadline"))
                     }
@@ -1935,6 +2026,19 @@ impl FreshFixture {
                         ))
                     }
                 }
+            }
+            Kind::ExecOutput if self.oci => {
+                let request: ExecOutput = parse(frame)?;
+                if request.boot_id != boot {
+                    return Err(("stale_generation", "unexpected native exec output boot ID"));
+                }
+                if guard.closing || Instant::now() >= deadline(request.budget_ms)? {
+                    return Err((
+                        "busy",
+                        "native exec output request expired or guest is draining",
+                    ));
+                }
+                guard.read_exec_output(request, connection)
             }
             Kind::Status | Kind::Cancel => {
                 let request: Control = parse(frame)?;

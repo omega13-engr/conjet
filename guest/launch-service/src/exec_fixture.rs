@@ -8,8 +8,6 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
-
 use crate::handshake::{hex, unhex};
 use crate::output::{Capture, drain};
 use crate::security::{self, checked};
@@ -18,7 +16,10 @@ use crate::spec::LaunchSpec;
 const TARGET_PIDFD: libc::c_int = 3;
 const TARGET_ROOT: libc::c_int = 4;
 const RESULT_PIPE: libc::c_int = 5;
-const INLINE_OUTPUT_CAP: usize = 8192;
+pub(crate) struct ExecResult {
+    pub(crate) code: i32,
+    pub(crate) streams: [Capture; 2],
+}
 
 pub(crate) fn send_descriptors(socket: i32, mut event: u8, descriptors: &[i32]) -> io::Result<()> {
     let mut vector = libc::iovec {
@@ -158,7 +159,9 @@ fn dup_high(fd: i32) -> io::Result<OwnedFd> {
 
 fn capture(reader: impl Read) -> io::Result<Capture> {
     let mut buffer = Capture::default();
-    drain(reader, |bytes| buffer.append(bytes))?;
+    drain(reader, |bytes| {
+        buffer.append_bounded(bytes, crate::wire::EXEC_OUTPUT_LIMIT);
+    })?;
     Ok(buffer)
 }
 
@@ -167,7 +170,7 @@ pub(crate) fn execute(
     id: [u8; 16],
     spec: LaunchSpec,
     deadline: Instant,
-) -> io::Result<Value> {
+) -> io::Result<ExecResult> {
     let root = target_root(&pidfd)?;
     let pidfd = dup_high(pidfd.as_raw_fd())?;
     let root = dup_high(root.as_raw_fd())?;
@@ -262,19 +265,12 @@ pub(crate) fn execute(
             "native exec helper lost its result channel",
         ));
     }
-    use base64::Engine;
-    let cap = INLINE_OUTPUT_CAP.min(output.bytes.len());
-    let err_cap = (INLINE_OUTPUT_CAP - cap).min(error.bytes.len());
-    let encode = |stream: Capture, cap: usize| {
-        json!({
-            "data":base64::engine::general_purpose::STANDARD.encode(&stream.bytes[..cap]),
-            "dropped_bytes":stream.dropped + (stream.bytes.len() - cap) as u64,
-        })
-    };
-    Ok(json!({
-       "exit_code":status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
-       "stdout":encode(output,cap), "stderr":encode(error,err_cap),
-    }))
+    Ok(ExecResult {
+        code: status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
+        streams: [output, error],
+    })
 }
 
 pub(crate) fn program_paths(spec: &LaunchSpec) -> io::Result<Vec<CString>> {

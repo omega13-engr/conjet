@@ -5,6 +5,7 @@ use thiserror::Error;
 
 pub const VERSION: u8 = 1;
 pub const MAX_PAYLOAD: usize = 16_384;
+pub const EXEC_OUTPUT_LIMIT: usize = 256 * 1024;
 const HEADER_SIZE: usize = 28;
 const MAGIC: [u8; 4] = *b"CJLS";
 
@@ -40,6 +41,7 @@ pub enum Kind {
     Volume = 25,
     BuildSnapshot = 26,
     BuildRuntime = 27,
+    ExecOutput = 28,
 }
 
 impl TryFrom<u8> for Kind {
@@ -75,6 +77,7 @@ impl TryFrom<u8> for Kind {
             25 => Ok(Volume),
             26 => Ok(BuildSnapshot),
             27 => Ok(BuildRuntime),
+            28 => Ok(ExecOutput),
             _ => Err(WireError::BadHeader),
         }
     }

@@ -249,6 +249,7 @@ impl Server {
                         | Kind::Inspect
                         | Kind::Image
                         | Kind::Exec
+                        | Kind::ExecOutput
                         | Kind::Network
                         | Kind::Volume
                         | Kind::BuildSnapshot
