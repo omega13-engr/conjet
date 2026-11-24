@@ -353,7 +353,8 @@ Title: Prove one BuildKit RUN through the native executor
 
 Description: Establish the supported BuildKit OCI-worker execution boundary and run one pinned Dockerfile with one RUN instruction.
 
-Is blocked by task: SPEED-062 and SPEED-060 decision.
+Is blocked by task: SPEED-070 writable snapshot lease and SPEED-071 native
+runtime lifecycle. SPEED-060 and SPEED-062 are complete in isolation.
 
 Acceptance Criteria:
 
@@ -363,13 +364,41 @@ Problem and Evidence: The candidate cannot claim native builds by falling back t
 
 Approach: Keep BuildKit as build frontend/cache owner; implement the minimum compatible Conjet executor contract with tests, not a new Dockerfile engine.
 
-Evidence: Pending; no new candidate result.
+Evidence: Pinned BuildKit 0.23.2 and go-runc 1.1.0 sources establish the CLI
+verbs, snapshot lifetime, I/O and cancellation contract. The current native
+container overlay discards writes, so it cannot serve as the writable
+BuildKit snapshot. See [the executor boundary](native-buildkit-executor.md).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
 Review: Pending implementation, validation and independent evidence review.
 
-Next Action: Inspect BuildKit executor requirements and create narrow verb tasks if required.
+Next Action: Implement the authenticated writable snapshot lease and qualify
+the first runtime verbs before running the pinned worker.
+
+### SPEED-070
+
+Title: Lease a BuildKit writable snapshot to the native launch authority
+
+Acceptance Criteria:
+
+- Verify one task-owned guest-mounted snapshot by identity and retain it
+  through cancellation, output and teardown. Return the same writable
+  snapshot to BuildKit, preserving data and rejecting unsupported mounts
+  before launch.
+
+### SPEED-071
+
+Title: Implement the minimum pinned BuildKit runtime lifecycle
+
+Is blocked by task: SPEED-070.
+
+Acceptance Criteria:
+
+- Route the first standalone RUN, kill and delete to the same guest
+  generation and return stdout, stderr and status without a retained
+  runtime. Check stale IDs and cancellation. Qualify additional exec
+  verbs separately before advertising them.
 
 ### SPEED-064
 
@@ -377,7 +406,8 @@ Title: Qualify a two-service Compose lifecycle on the native engine
 
 Description: Run a pinned two-service Compose project using private bridge DNS, health checks, a named volume and one loopback published port.
 
-Is blocked by task: SPEED-062 and SPEED-060 decision.
+Is blocked by task: SPEED-072 Docker discovery and the subsequent Compose
+lifecycle checks. SPEED-060 and SPEED-062 are complete in isolation.
 
 Acceptance Criteria:
 
@@ -387,13 +417,25 @@ Problem and Evidence: Individual container fixtures do not establish Compose beh
 
 Approach: Use existing network/port research and native owner state; preserve lifecycle ordering and explicit feature errors.
 
-Evidence: Pending; no new candidate result.
+Evidence: Compose 5.8.0 accepted the frozen two-service fixture. Live trace
+showed `GET /networks?filters=…` as the first unsupported call. The
+external private network and volume setup passed.
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
 Review: Pending implementation, validation and independent evidence review.
 
-Next Action: Freeze the project fixture and test required Docker API calls.
+Next Action: Complete the scoped discovery surface and rerun the real CLI.
+
+### SPEED-072
+
+Title: Support bounded Docker discovery for the pinned Compose project
+
+Acceptance Criteria:
+
+- Accept the pinned client's name and label filters on discovery. Reject
+  unsupported filters explicitly. Verify that real Compose advances beyond
+  discovery without mistaking another project's resources for this one.
 
 ### SPEED-065
 
