@@ -1224,7 +1224,8 @@ impl Owner {
             ));
         }
         let store = self.image_store()?;
-        let archive = archive::read(file).map_err(|error| Rejected::bad(format!("{error:#}")))?;
+        let archive = archive::read(file, store.archive_layer_limit())
+            .map_err(|error| Rejected::bad(format!("{error:#}")))?;
         let reference = archive.reference();
         let mut tags = ledger.tags.clone();
         let mut response = Vec::new();
@@ -1279,7 +1280,7 @@ impl Owner {
         } else {
             vec![image::Tags::key(name).into_owned()]
         };
-        archive::export(store.root(), manifest, &tags)
+        archive::export(store.root(), manifest, &tags, store.archive_layer_limit())
             .map_err(|error| Rejected(404, format!("image archive source unavailable: {error:#}")))
     }
 

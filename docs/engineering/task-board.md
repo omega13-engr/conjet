@@ -1047,6 +1047,13 @@ layer extents. Preserve the original config and executable contents,
 archive framing, rollback and removal. Keep the existing archive profile
 limits for boots without the disk-backed store.
 
+Evidence: The frozen Node pin saved a 61,165,568-byte archive. The release
+removed the alias, reloaded the archive, confirmed the original config
+ID and native executable contents, then removed the alias and source.
+The common/Alpine and corrupt archive regressions passed on both
+profiles, and the leased disk passed offline ext4 checks. Logs are
+under `SPEED-114/` on ExternalSSD.
+
 ### SPEED-115
 
 Title: Apply inherited cgroup semantics to native exec

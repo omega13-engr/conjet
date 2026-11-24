@@ -195,6 +195,18 @@ That verifies dispatch to the original script. The original Redis
 service still requires shell and process support. Evidence is under
 `SPEED-113/` on ExternalSSD.
 
+## SPEED-114 Node Docker archive
+
+The disk profile streams archive layer extents between verification,
+the local blob store and the Docker tar stream. The pinned Node image
+saved 61,165,568 bytes, reloaded with config
+`sha256:fd6e7c5e242aaf648004a761573a2b930792eb46b1be852862b595dfdaa11b36`
+and exposed the executable in a native workload. The diagnostic removed
+the tag and source. Common and Alpine archive round trips and the corrupt
+layer regression passed on both profiles. The reloaded Node application
+still needs its original execution case. Evidence is under
+`SPEED-114/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

@@ -622,7 +622,8 @@ def native_session(args, root):
                 diagnostic['collect_sustained'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
             elif args.diagnostics == 'archive':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-archive.py'))
-                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, store)
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, store,
+                                      node_roundtrip=args.native_disk_images and args.native_public_images)
             elif args.diagnostics == 'public-images':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-public-images.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output,

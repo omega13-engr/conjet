@@ -13,7 +13,7 @@ MANIFEST = json.loads((HERE / 'scenarios/docker-comparison-v1.json').read_text()
 FIXTURE = Path('/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-008/common-image/image')
 
 
-def collect(endpoint, peer, docker, env, output, store):
+def collect(endpoint, peer, docker, env, output, store, *, node_roundtrip=False):
     scenario = json.loads((FIXTURE / 'scenario.json').read_text())
     original = FIXTURE / 'image.tar'
     if hashlib.sha256(original.read_bytes()).hexdigest() != MANIFEST['common_static_fixture']['archive_sha256']:
@@ -50,6 +50,37 @@ def collect(endpoint, peer, docker, env, output, store):
         call(label + '_reload', ['image', 'load'], input_file=archive_path.read_bytes())
         prove(label + '_reloaded', tag, image_id, command)
 
+    def node():
+        fixture = MANIFEST['images']['node']
+        tag = 'cj-archive-node:canary'
+        saved = output / 'node.tar'
+        call('node_pull', ['pull', '--platform', 'linux/arm64', fixture['ref']])
+        call('node_tag', ['image', 'tag', fixture['ref'], tag])
+        call('node_save', ['image', 'save', '--output', saved, tag])
+        with saved.open('rb') as body:
+            cases['node_archive'] = {'bytes': saved.stat().st_size,
+                                     'sha256': hashlib.file_digest(body, 'sha256').hexdigest()}
+        try:
+            call('node_remove_tag', ['image', 'rm', tag])
+            if call('node_tag_absent', ['image', 'ls', '--quiet', tag]):
+                raise RuntimeError('Node image tag remained after removal')
+            call('node_load', ['image', 'load', '--input', saved])
+            config = call('node_loaded_inspect', ['image', 'inspect', '--format', '{{.Id}}', tag])
+            if config.decode().strip() != fixture['config_digest']:
+                raise RuntimeError('the loaded Node archive changed image identity')
+            name = 'cj-archive-node-content'
+            call('node_loaded_contents', ['run', *MATCHED['FLAGS'], '--name', name,
+                                          '--entrypoint', '/bin/busybox', tag,
+                                          'test', '-x', '/usr/local/bin/node'])
+            connection.close()
+            cases['node_cleanup'] = MATCHED['native_terminal'](connection, name, handles)
+            call('node_final_remove_tag', ['image', 'rm', tag])
+            call('node_remove_source', ['image', 'rm', fixture['ref']])
+            if call('node_final_absent', ['image', 'ls', '--quiet', tag]):
+                raise RuntimeError('the Node archive tag remained after final removal')
+        finally:
+            saved.unlink()
+
     try:
         tag = scenario['image']
         call('common_load', ['image', 'load', '--input', original])
@@ -74,6 +105,8 @@ def collect(endpoint, peer, docker, env, output, store):
         call('alpine_tag', ['image', 'tag', alpine['ref'], alpine_tag])
         roundtrip('alpine', alpine_tag, alpine['config_digest'], ['/bin/true'], output / 'alpine.tar')
         call('alpine_final_remove', ['image', 'rm', alpine_tag])
+        if node_roundtrip:
+            node()
     finally:
         connection.close()
         (output / 'archive-checks.json').write_text(json.dumps(cases, indent=2) + '\n')

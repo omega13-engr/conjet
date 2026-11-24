@@ -344,7 +344,14 @@ impl Store {
         &self.root
     }
 
-    pub(super) fn import(&self, archive: archive::Import) -> anyhow::Result<()> {
+    pub(super) fn archive_layer_limit(&self) -> u64 {
+        match self.encoding {
+            PackageEncoding::Json => LAYERS as u64,
+            PackageEncoding::DiskV2 => archive::LIMIT as u64,
+        }
+    }
+
+    pub(super) fn import(&self, archive: archive::Import<'_>) -> anyhow::Result<()> {
         self.publish_blobs(&archive.manifest, archive.blobs)
     }
 
@@ -366,11 +373,11 @@ impl Store {
         let mut blobs = BTreeMap::from([
             (
                 manifest.to_owned(),
-                oci_stage::blob(layout, manifest, METADATA)?,
+                archive::Blob::Inline(oci_stage::blob(layout, manifest, METADATA)?),
             ),
             (
                 config.to_owned(),
-                oci_stage::blob(layout, config, METADATA)?,
+                archive::Blob::Inline(oci_stage::blob(layout, config, METADATA)?),
             ),
         ]);
         let mut budget = LAYERS;
@@ -379,7 +386,7 @@ impl Store {
             let bytes = oci_stage::blob(layout, &layer.digest, layer.size)?;
             ensure!(bytes.len() == layer.size, "boot layout layer size differs");
             budget -= bytes.len();
-            blobs.insert(layer.digest, bytes);
+            blobs.insert(layer.digest, archive::Blob::Inline(bytes));
         }
         self.publish_blobs(manifest, blobs)
     }
@@ -387,7 +394,7 @@ impl Store {
     fn publish_blobs(
         &self,
         manifest: &str,
-        blobs: BTreeMap<String, Vec<u8>>,
+        blobs: BTreeMap<String, archive::Blob<'_>>,
     ) -> anyhow::Result<()> {
         let target = self.path(manifest)?;
         if target.try_exists()? {
@@ -401,18 +408,27 @@ impl Store {
         let mut free = self.free_bytes()?;
         let mut created = Vec::new();
         let result = (|| {
-            for (digest, bytes) in blobs {
-                let path = self.root.join("blobs/sha256").join(suffix(&digest)?);
+            for (digest, blob) in blobs {
+                let expected = suffix(&digest)?;
+                let path = self.root.join("blobs/sha256").join(expected);
                 if path.try_exists()? {
-                    oci_stage::blob(&self.root, &digest, bytes.len())?;
+                    let mut file = oci_stage::open_bounded(&self.root, &path, blob.len())?;
+                    ensure!(
+                        oci_stage::digest_file(&mut file, blob.len())? == expected,
+                        "cached Docker archive blob digest differs"
+                    );
                     continue;
                 }
                 free = free
-                    .checked_sub(bytes.len() as u64)
+                    .checked_sub(blob.len())
                     .context("ExternalSSD OCI image capacity exceeded")?;
                 let mut pending =
                     tempfile::NamedTempFile::new_in(path.parent().expect("blob parent"))?;
-                pending.write_all(&bytes)?;
+                blob.copy_to(&mut pending)?;
+                ensure!(
+                    oci_stage::digest_file(pending.as_file_mut(), blob.len())? == expected,
+                    "Docker archive blob changed before publication"
+                );
                 pending.as_file().sync_all()?;
                 pending.persist_noclobber(&path)?;
                 created.push(path);
