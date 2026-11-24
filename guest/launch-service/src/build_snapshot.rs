@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 mod bundle;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub(crate) mod mounts;
 
 pub const MARKER: &str = "/etc/conjet/native-build-snapshot";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -15,6 +17,18 @@ pub struct Snapshot {
     pub id: String,
     pub device: u64,
     pub inode: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bundle_policy: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl Snapshot {
+    pub fn same_mount(&self, other: &Self) -> bool {
+        self.id == other.id && self.device == other.device && self.inode == other.inode
+    }
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -46,7 +60,14 @@ pub(crate) mod guest {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    fn open(id: &str) -> io::Result<(File, Snapshot, File)> {
+    struct OpenSnapshot {
+        root: File,
+        identity: Snapshot,
+        bundle: File,
+        private_worker: bool,
+    }
+
+    fn open(id: &str) -> io::Result<OpenSnapshot> {
         if !valid_id(id) || !Path::new(MARKER).try_exists()? {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -59,6 +80,7 @@ pub(crate) mod guest {
             .open(ROOT.to_str().expect("static build root"))?;
         let worker = open_directory(&store, "worker")?;
         let native = open_directory(&worker, "runc-native")?;
+        let native_info = native.metadata()?;
         let executor = open_directory(&native, "executor")?;
         let bundle = open_directory(&executor, id)?;
         let rootfs = open_directory(&bundle, "rootfs")?;
@@ -83,22 +105,50 @@ pub(crate) mod guest {
             id: id.into(),
             device: info.dev(),
             inode: info.ino(),
+            bundle_policy: false,
         };
-        Ok((rootfs, snapshot, bundle))
+        Ok(OpenSnapshot {
+            root: rootfs,
+            identity: snapshot,
+            bundle,
+            private_worker: native_info.uid() == 0 && native_info.mode() & 0o077 == 0,
+        })
     }
 
     pub(crate) fn inspect(id: &str) -> io::Result<Snapshot> {
-        open(id).map(|(_, identity, _)| identity)
+        open(id).map(|open| open.identity)
     }
 
     pub(crate) fn inspect_bundle(
         id: &str,
         image_digest: &str,
     ) -> Result<super::bundle::BundleWitness, &'static str> {
-        let (_, snapshot, bundle) = open(id).map_err(|_| "native build snapshot is unavailable")?;
+        load_bundle(id, image_digest).map(|bundle| bundle.witness)
+    }
+
+    pub(crate) fn load_bundle(
+        id: &str,
+        image_digest: &str,
+    ) -> Result<super::bundle::WorkerBundle, &'static str> {
+        read_bundle(id, image_digest, false)
+    }
+
+    pub(crate) fn seal_worker_bundle(
+        id: &str,
+        image_digest: &str,
+    ) -> Result<super::bundle::WorkerBundle, &'static str> {
+        read_bundle(id, image_digest, true)
+    }
+
+    fn read_bundle(
+        id: &str,
+        image_digest: &str,
+        seal: bool,
+    ) -> Result<super::bundle::WorkerBundle, &'static str> {
+        let open = open(id).map_err(|_| "native build snapshot is unavailable")?;
         let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
         // The bundle descriptor pins the verified worker directory.
-        let fd = unsafe { libc::openat(bundle.as_raw_fd(), c"config.json".as_ptr(), flags) };
+        let fd = unsafe { libc::openat(open.bundle.as_raw_fd(), c"config.json".as_ptr(), flags) };
         if fd < 0 {
             return Err("native build config is unavailable");
         }
@@ -108,29 +158,42 @@ pub(crate) mod guest {
             .map_err(|_| "unreadable native build config")?;
         if !metadata.is_file()
             || metadata.uid() != 0
-            || metadata.mode() & 0o022 != 0
-            || metadata.dev() != snapshot.device
+            || metadata.dev() != open.identity.device
             || metadata.len() > super::bundle::MAX_CONFIG_BYTES
         {
             return Err("native build config has invalid ownership, location, or size");
+        }
+        if metadata.mode() & 0o022 != 0 {
+            // The pinned worker creates config.json with mode 0666 in
+            // its root-only worker directory. Seal that descriptor before
+            // the runtime reads it. Read-only inspection still fails closed.
+            if !seal
+                || !open.private_worker
+                || metadata.mode() & 0o777 != 0o666
+                || metadata.nlink() != 1
+            {
+                return Err("native build config has invalid ownership, location, or size");
+            }
+            crate::security::checked(unsafe { libc::fchmod(file.as_raw_fd(), 0o600) })
+                .map_err(|_| "could not secure the pinned worker config")?;
         }
         let mut bytes = Vec::new();
         file.take(super::bundle::MAX_CONFIG_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| "unreadable native build config")?;
-        super::bundle::inspect(&bytes, snapshot, image_digest)
+        super::bundle::parse(&bytes, open.identity, image_digest)
     }
 
     pub(crate) fn mapped_mount(snapshot: &Snapshot, user: &File) -> io::Result<OwnedFd> {
-        let (file, identity, _) = open(&snapshot.id)?;
-        if *snapshot != identity {
+        let open = open(&snapshot.id)?;
+        if !snapshot.same_mount(&open.identity) {
             return Err(io::Error::other("stale native build snapshot identity"));
         }
         // Clone a detached mount of only the verified root, without child mounts.
         let tree = unsafe {
             libc::syscall(
                 libc::SYS_open_tree,
-                file.as_raw_fd(),
+                open.root.as_raw_fd(),
                 c"".as_ptr(),
                 libc::AT_EMPTY_PATH | libc::OPEN_TREE_CLONE as i32 | libc::O_CLOEXEC,
             )

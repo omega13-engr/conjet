@@ -157,6 +157,32 @@ struct BuildSnapshotRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildRuntimeRequest {
+    boot_id: String,
+    id: String,
+    operation: BuildOperation,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum BuildOperation {
+    Run,
+    Status { stdout: usize, stderr: usize },
+    Kill,
+    Delete,
+}
+
+#[derive(Default)]
+struct BuildRuntime {
+    active: Option<(String, Handle)>,
+    deleted: Vec<String>,
+}
+
+const BUILD_GENERATIONS: usize = 256;
+const BUILD_SEQUENCE_BASE: u64 = 1 << 63;
+
+#[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum VolumeOperation {
     List,
@@ -268,6 +294,7 @@ struct Record {
     memory_limit_bytes: u64,
     volume: Option<crate::spec::VolumeMount>,
     build_snapshot: Option<crate::build_snapshot::Snapshot>,
+    build_runtime_owned: bool,
     core_admission_deadline: Option<Instant>,
     cancelled: bool,
     terminate_requested: bool,
@@ -560,6 +587,7 @@ pub(crate) struct FreshFixture {
     allow_crash: bool,
     intent: Intent,
     ledger: Mutex<Ledger>,
+    build_runtime: Mutex<BuildRuntime>,
     private_network: Mutex<Option<crate::bridge_fixture::NetworkOwner>>,
     changed: Condvar,
 }
@@ -730,6 +758,7 @@ impl FreshFixture {
             allow_crash,
             intent,
             ledger: Mutex::new(Ledger::default()),
+            build_runtime: Mutex::default(),
             private_network: Mutex::new(None),
             changed: Condvar::new(),
         }))
@@ -765,6 +794,7 @@ impl FreshFixture {
         boot: &str,
         deadline: Instant,
         prepared: bool,
+        build: bool,
     ) -> Reply {
         if ready.request().boot_id != boot {
             return Err(("stale_generation", "unexpected boot ID"));
@@ -772,7 +802,18 @@ impl FreshFixture {
         if self.native && ready.request().operation_id.is_none() {
             return Err(("invalid_spec", "native admission requires an operation ID"));
         }
+        if (ready.request().sequence >= BUILD_SEQUENCE_BASE) != build {
+            return Err(("invalid_spec", "invalid launch sequence domain"));
+        }
         let spec = &ready.request().spec;
+        if spec
+            .build_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.bundle_policy)
+            != build
+        {
+            return Err(("invalid_spec", "invalid build bundle authority"));
+        }
         let argv = spec.argv.iter().map(String::as_str).collect::<Vec<_>>();
         let benchmark = self.benchmark_digest.as_ref() == Some(&spec.image_digest);
         let mode = match argv.as_slice() {
@@ -897,8 +938,19 @@ impl FreshFixture {
             }
             let current = crate::build_snapshot::guest::inspect(&snapshot.id)
                 .map_err(|_| ("not_found", "native build snapshot is unavailable"))?;
-            if current != *snapshot {
+            if !current.same_mount(snapshot) {
                 return Err(("stale_generation", "native build snapshot identity changed"));
+            }
+            if snapshot.bundle_policy {
+                let bundle =
+                    crate::build_snapshot::guest::load_bundle(&snapshot.id, &spec.image_digest)
+                        .map_err(|error| ("unsupported_option", error))?;
+                if spec_digest(&bundle.spec) != spec_digest(spec) {
+                    return Err((
+                        "spec_mismatch",
+                        "native build request differs from the verified bundle",
+                    ));
+                }
             }
             if ledger.active().any(|record| {
                 record.build_snapshot.as_ref().is_some_and(|owned| {
@@ -939,7 +991,7 @@ impl FreshFixture {
                 "prepared admission paused under pressure",
             ));
         }
-        if request.sequence <= ledger.highest_sequence {
+        if !build && request.sequence <= ledger.highest_sequence {
             return Err((
                 "stale_sequence",
                 "sequence was previously admitted or superseded",
@@ -982,6 +1034,7 @@ impl FreshFixture {
             memory_limit_bytes: spec.limits.memory_bytes,
             volume: spec.volume.clone(),
             build_snapshot: spec.build_snapshot.clone(),
+            build_runtime_owned: build,
             core_admission_deadline: self.core_admission.then_some(deadline),
             cancelled: false,
             terminate_requested: false,
@@ -990,14 +1043,16 @@ impl FreshFixture {
             stderr: Capture::default(),
         };
         let reply = record.state();
-        ledger.highest_sequence = request.sequence;
+        if !build {
+            ledger.highest_sequence = request.sequence;
+        }
         if !self.oci {
             ledger.records.clear();
         } else if ledger.records.len() >= OCI_RECORDS {
             let index = ledger
                 .records
                 .iter()
-                .position(|record| record.phase == Phase::Removed)
+                .position(|record| record.phase == Phase::Removed && !record.build_runtime_owned)
                 .expect("bounded OCI history contains a terminal record");
             ledger.records.remove(index);
         }
@@ -1183,6 +1238,9 @@ impl FreshFixture {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        // The command retains its configured stdin. Close the helper-side
+        // control descriptor here so an early helper exit yields EOF.
+        drop(command);
         let helper_spawned = self.trace_core_latency.then(Instant::now);
         let process_group = -(child.id() as libc::pid_t);
         let out = child.stdout.take().expect("piped stdout");
@@ -1570,7 +1628,7 @@ impl FreshFixture {
                     .validate()
                     .map_err(|err| (err.code(), "invalid native launch spec"))?;
                 let expires = deadline(ready.request().budget_ms)?;
-                self.admit(ready, boot, expires, frame.kind == Kind::Prepare)
+                self.admit(ready, boot, expires, frame.kind == Kind::Prepare, false)
             }
             Kind::Claim => {
                 let request: Claim = parse(frame)?;
@@ -1981,6 +2039,115 @@ impl FreshFixture {
         match reply {
             Ok((kind, reply)) => Frame::write(stream, kind, frame.id, &reply),
             Err((code, message)) => write_error(stream, frame.id, code, message),
+        }
+    }
+
+    pub(crate) fn dispatch_build(
+        self: &Arc<Self>,
+        frame: Frame,
+        stream: &mut Stream,
+        boot: &str,
+    ) -> Result<(), WireError> {
+        stream.deadline(Some(Instant::now() + Duration::from_secs(2)));
+        let reply = frame
+            .decode()
+            .map_err(|_| ("malformed", "invalid build runtime request"))
+            .and_then(|request| self.build_operation(request, boot));
+        match reply {
+            Ok(body) => Frame::write(stream, Kind::BuildRuntime, frame.id, &body),
+            Err((code, detail)) => write_error(stream, frame.id, code, detail),
+        }
+    }
+
+    fn build_operation(
+        self: &Arc<Self>,
+        request: BuildRuntimeRequest,
+        boot: &str,
+    ) -> Result<Value, Failure> {
+        if !self.oci || !self.core_admission {
+            return Err(("unsupported_option", "build runtime requires native Core"));
+        }
+        if request.boot_id != boot {
+            return Err(("stale_generation", "unexpected build runtime boot"));
+        }
+        if !crate::build_snapshot::valid_id(&request.id) {
+            return Err(("malformed", "invalid build runtime ID"));
+        }
+        let mut runtime = self.build_runtime.lock().expect("build runtime");
+        if runtime.deleted.contains(&request.id) {
+            return match request.operation {
+                BuildOperation::Delete => Ok(json!({"deleted": true})),
+                _ => Err(("stale_generation", "build runtime was already deleted")),
+            };
+        }
+        if matches!(request.operation, BuildOperation::Run) && runtime.active.is_none() {
+            if runtime.deleted.len() >= BUILD_GENERATIONS {
+                return Err(("busy", "build runtime boot generation budget is exhausted"));
+            }
+            let bundle =
+                crate::build_snapshot::guest::seal_worker_bundle(&request.id, &self.image_digest)
+                    .map_err(|reason| ("unsupported_option", reason))?;
+            let intent: [u8; 16] = random().map_err(|_| ("busy", "unavailable build identity"))?;
+            let expires = Instant::now() + Duration::from_secs(3);
+            // A locally allocated sequence must not consume the host
+            // adapter's authenticated request sequence.
+            let launch = LaunchRequest {
+                boot_id: boot.to_owned(),
+                sequence: BUILD_SEQUENCE_BASE + runtime.deleted.len() as u64 + 1,
+                operation_id: Some(hex(&intent)),
+                budget_ms: 3000,
+                spec: bundle.spec,
+            };
+            let launch = launch
+                .validate()
+                .map_err(|error| (error.code(), "invalid build launch"))?;
+            let (_, state) = self.admit(launch, boot, expires, false, true)?;
+            let handle = serde_json::from_value(state["handle"].clone())
+                .expect("typed build workload handle");
+            runtime.active = Some((request.id, handle));
+            return Ok(state);
+        }
+        let (runtime_id, handle) = runtime
+            .active
+            .as_ref()
+            .ok_or(("not_found", "unknown build runtime ID"))?;
+        if runtime_id != &request.id {
+            return Err(("busy", "another build runtime owns this worker"));
+        }
+        let mut ledger = self.ledger.lock().expect("fresh ledger");
+        let record = ledger
+            .record_mut(&handle.workload_id)
+            .filter(|record| record.handle == *handle)
+            .ok_or((
+                "cleanup_failed",
+                "build runtime ownership could not be reconciled",
+            ))?;
+        match request.operation {
+            BuildOperation::Run => Ok(record.state()),
+            BuildOperation::Status { stdout, stderr } => {
+                if stdout > record.stdout.bytes.len() || stderr > record.stderr.bytes.len() {
+                    return Err(("malformed", "invalid build output cursor"));
+                }
+                let mut state = record.state();
+                state["cancelled"] = json!(record.cancelled);
+                state["build_output"] =
+                    output_bundle(record, stdout, stderr, record.phase.terminal());
+                Ok(state)
+            }
+            BuildOperation::Kill => {
+                record.cancel();
+                self.changed.notify_all();
+                Ok(record.state())
+            }
+            BuildOperation::Delete => {
+                if record.phase != Phase::Removed {
+                    return Err(("busy", "build runtime cleanup has not been verified"));
+                }
+                record.build_runtime_owned = false;
+                runtime.active = None;
+                runtime.deleted.push(request.id);
+                Ok(json!({"deleted": true}))
+            }
         }
     }
 

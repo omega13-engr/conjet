@@ -8,6 +8,15 @@ fn main() {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use conjet_launch_service::guest::Profile;
     use std::path::Path;
+    #[cfg(target_arch = "aarch64")]
+    if std::env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+        == Some(std::ffi::OsStr::new("conjet-buildkit-runtime"))
+    {
+        std::process::exit(conjet_launch_service::build_runtime::run()?);
+    }
     let mut args = std::env::args_os().skip(1);
     match args.next() {
         None => {

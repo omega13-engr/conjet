@@ -30,6 +30,7 @@ pub(crate) struct Sandbox {
     configure_resolver: bool,
     stdin: File,
     volume: Option<VolumeBinding>,
+    worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
 }
 
 enum RootMode {
@@ -111,6 +112,20 @@ impl Sandbox {
                 std::fs::create_dir(base.join(entry))?;
             }
             let snapshot = oci.and_then(|spec| spec.build_snapshot.as_ref());
+            let worker_mounts = match (oci, snapshot) {
+                (Some(spec), Some(snapshot)) if snapshot.bundle_policy => {
+                    let bundle =
+                        crate::build_snapshot::guest::load_bundle(&snapshot.id, &spec.image_digest)
+                            .map_err(io::Error::other)?;
+                    if serde_json::to_vec(&bundle.spec)? != serde_json::to_vec(spec)? {
+                        return Err(io::Error::other("build bundle changed before setup"));
+                    }
+                    Some(crate::build_snapshot::mounts::MountPlan::verify(
+                        &bundle.hosts_file,
+                    )?)
+                }
+                _ => None,
+            };
             let lower = if snapshot.is_some() {
                 base.join("lower")
             } else if let Some(spec) = oci {
@@ -190,6 +205,7 @@ impl Sandbox {
                     .and_then(|spec| spec.volume.as_ref())
                     .map(|volume| VolumeBinding::prepare(volume, &base.join("root")))
                     .transpose()?,
+                worker_mounts,
             })
         })();
         if setup.is_err() {
@@ -225,6 +241,7 @@ impl Sandbox {
     pub(crate) fn enter(
         &self,
         snapshot_mount: Option<OwnedFd>,
+        sysfs: Option<OwnedFd>,
         before_filter: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
         fn step(name: &str, result: io::Result<()>) -> io::Result<()> {
@@ -241,6 +258,11 @@ impl Sandbox {
                 crate::volume_disk::guest::mount_source(&volume.spec)
                     .map_err(|error| io::Error::other(format!("open named volume: {error}")))
             })
+            .transpose()?;
+        let worker = self
+            .worker_mounts
+            .as_ref()
+            .map(crate::build_snapshot::mounts::MountPlan::open)
             .transpose()?;
         // The child inherited the helper's outer guest IDs. Enter the mapped
         // namespace-root identity before accessing the owned upper/work dirs.
@@ -298,6 +320,11 @@ impl Sandbox {
         if let Some((volume, source)) = self.volume.as_ref().zip(volume_source) {
             step("private named volume", volume.mount(source))?;
         }
+        if let Some(worker) = worker {
+            let sysfs = sysfs.ok_or_else(|| io::Error::other("missing worker sysfs mount"))?;
+            let root = Path::new(std::ffi::OsStr::from_bytes(self.new_root.as_bytes()));
+            worker.mount(root, sysfs)?;
+        }
         if unsafe { libc::dup2(self.stdin.as_raw_fd(), libc::STDIN_FILENO) } < 0 {
             return Err(io::Error::other(format!(
                 "closed stdin: {}",
@@ -337,7 +364,7 @@ impl Sandbox {
         step("resource limits", security::set_process_limits())?;
         step(
             "credentials and capabilities",
-            security::drop_workload_identity(),
+            security::drop_workload_identity(self.worker_mounts.is_some()),
         )?;
         before_filter()?;
         step("seccomp", self.filter.install())

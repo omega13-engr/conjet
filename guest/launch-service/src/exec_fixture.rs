@@ -95,7 +95,7 @@ pub(crate) fn receive_event(socket: i32) -> io::Result<Option<(u8, Vec<OwnedFd>)
     }
     let valid = match event {
         b'E' => received.len() <= 1,
-        b'M' => received.len() == 1,
+        b'M' => (1..=2).contains(&received.len()),
         b'V' => received.len() == 2,
         _ => received.is_empty(),
     };
@@ -388,7 +388,7 @@ pub fn run_helper(
         }
         let setup = (|| -> io::Result<()> {
             security::set_process_limits()?;
-            security::drop_workload_identity()?;
+            security::drop_workload_identity(false)?;
             checked(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;
             let mut poll = libc::pollfd {
                 fd: lifeline[0],

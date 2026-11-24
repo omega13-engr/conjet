@@ -22,11 +22,17 @@ pub(crate) struct BundleWitness {
     mount_count: usize,
 }
 
-pub(crate) fn inspect(
+pub(crate) struct WorkerBundle {
+    pub(crate) witness: BundleWitness,
+    pub(crate) spec: LaunchSpec,
+    pub(crate) hosts_file: String,
+}
+
+pub(crate) fn parse(
     bytes: &[u8],
     snapshot: Snapshot,
     image_digest: &str,
-) -> Result<BundleWitness, &'static str> {
+) -> Result<WorkerBundle, &'static str> {
     if bytes.len() as u64 > MAX_CONFIG_BYTES || !valid_id(&snapshot.id) {
         return Err("invalid build bundle bounds");
     }
@@ -44,6 +50,7 @@ pub(crate) fn inspect(
     let mounts = bundle["mounts"]
         .as_array_mut()
         .ok_or("missing build mounts")?;
+    let mut hosts_file = None;
     for mount in mounts.iter_mut() {
         if mount["destination"] == "/etc/hosts" {
             let suffix = mount["source"]
@@ -54,6 +61,7 @@ pub(crate) fn inspect(
             if suffix.is_none() {
                 return Err("hosts file is outside the pinned worker");
             }
+            hosts_file = mount["source"].as_str().map(str::to_owned);
             mount["source"] = "".into();
         }
     }
@@ -62,6 +70,8 @@ pub(crate) fn inspect(
         .as_object_mut()
         .ok_or("missing build process")?;
     let mut field = |name| process.remove(name).ok_or("missing build process field");
+    let mut selected = snapshot.clone();
+    selected.bundle_policy = true;
     let spec = LaunchSpec {
         image_digest: image_digest.to_owned(),
         argv: serde_json::from_value(field("args")?).map_err(|_| "invalid build argv")?,
@@ -74,7 +84,7 @@ pub(crate) fn inspect(
         network_alias: None,
         secondary_network_alias: None,
         volume: None,
-        build_snapshot: Some(snapshot.clone()),
+        build_snapshot: Some(selected),
         limits: NATIVE_LIMITS,
     };
     spec.validate()
@@ -87,9 +97,13 @@ pub(crate) fn inspect(
     if hex(&Sha256::digest(policy)) != POLICY {
         return Err("unsupported BuildKit OCI preset");
     }
-    Ok(BundleWitness {
-        snapshot,
-        policy_sha256: POLICY,
-        mount_count,
+    Ok(WorkerBundle {
+        witness: BundleWitness {
+            snapshot,
+            policy_sha256: POLICY,
+            mount_count,
+        },
+        spec,
+        hosts_file: hosts_file.ok_or("missing worker hosts file")?,
     })
 }

@@ -119,7 +119,11 @@ impl Server {
         let capabilities = if scope == Scope::Host {
             self.capabilities()
         } else {
-            &["ping", "native_build_snapshot_v1"]
+            &[
+                "ping",
+                "native_build_snapshot_v1",
+                "native_build_runtime_v1",
+            ]
         };
         handshake::guest(&mut stream, &self.key, self.boot_id, capabilities)?;
         let boot_id = hex(&self.boot_id);
@@ -162,6 +166,14 @@ impl Server {
                 }
                 Err(error) => return Err(error),
             };
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            if scope != Scope::Host
+                && frame.kind == Kind::BuildRuntime
+                && let Some(fresh) = &self.fresh
+            {
+                fresh.dispatch_build(frame, &mut stream, &boot_id)?;
+                continue;
+            }
             if scope != Scope::Host && !matches!(frame.kind, Kind::Ping | Kind::BuildSnapshot) {
                 write_error(
                     &mut stream,
@@ -558,6 +570,26 @@ mod tests {
         let (mut host, host_worker) = endpoint(&server);
         let control = handshake::host(&mut host, &key).unwrap();
         assert_eq!(hello.boot_id, control.boot_id);
+        assert!(
+            hello
+                .capabilities
+                .iter()
+                .any(|cap| cap == "native_build_runtime_v1")
+        );
+        assert!(
+            !control
+                .capabilities
+                .iter()
+                .any(|cap| cap == "native_build_runtime_v1")
+        );
+        send(
+            &mut host,
+            Kind::BuildRuntime,
+            6,
+            json!({"boot_id":control.boot_id,
+             "id":"fixture1","operation":{"action":"run"}}),
+        );
+        expect_error(&mut host, 6, "unsupported_option");
         for (id, operation) in [(1, Kind::Launch), (2, Kind::Cancel), (3, Kind::Shutdown)] {
             send(&mut stream, operation, id, json!({"budget_ms": 500}));
             expect_error(&mut stream, id, "unsupported_option");

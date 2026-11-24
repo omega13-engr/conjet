@@ -7,8 +7,10 @@ Current iteration: [native engine implementation plan](native-engine-v2-plan.md)
 ## Current Docker performance priority
 
 Latency investigation: [native diagnostic plan](native-latency-diagnostic-plan.md).
-SPEED-081–083 met the isolated warm median target. SPEED-084–085 address
-the remaining warm API tail before BuildKit and full comparison qualification.
+SPEED-081–083 met the isolated warm median target. SPEED-084–085 reduced
+the warm API tail. SPEED-063 passed its bounded direct BuildKit RUN
+fixture. SPEED-065 tracks release comparison, and SPEED-089 tracks the
+Docker builder gateway needed for the frozen build rows.
 
 The user now authorizes replacing dockerd/containerd/runc in the candidate
 with Conjet's native Rust engine. Preserve Core dynamic memory in full.
@@ -486,35 +488,6 @@ registry sees the outer IDs. Both live boots passed.
 
 Review: Isolated validation and self-review passed. Independent review pending.
 
-### SPEED-063
-
-Title: Prove one BuildKit RUN through the native executor
-
-Description: Establish the supported BuildKit OCI-worker execution boundary and run one pinned Dockerfile with one RUN instruction.
-
-Is blocked by task: SPEED-071 native runtime lifecycle and SPEED-079
-generated OCI process and mount policy. SPEED-060, SPEED-062, and the
-SPEED-070/078 snapshot evidence are complete in isolation.
-
-Acceptance Criteria:
-
-- Document the exact BuildKit runtime interface from primary source before implementation; split missing runtime verbs into narrow tasks. Prove native execution identity, output/exit, build cancellation and cache-hit behavior. No hidden retained-runtime fallback; unsupported operations fail explicitly.
-
-Problem and Evidence: The candidate cannot claim native builds by falling back to runc/containerd.
-
-Approach: Keep BuildKit as build frontend/cache owner; implement the minimum compatible Conjet executor contract with tests, not a new Dockerfile engine.
-
-Evidence: Pinned BuildKit 0.23.2 and go-runc 1.1.0 sources establish the CLI
-verbs, snapshot lifetime, I/O and cancellation contract. The current native
-container overlay discards writes, so it cannot serve as the writable
-BuildKit snapshot. See [the executor boundary](native-buildkit-executor.md).
-
-Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
-
-Review: Pending implementation, validation and independent evidence review.
-
-Next Action: Qualify the runtime verbs and generated OCI process and mount
-policy before a BuildKit RUN.
 
 ### SPEED-070
 
@@ -535,21 +508,6 @@ canary](native-buildkit-executor.md#speed-070-snapshot-canary).
 Review: Isolated pre-staged snapshot validation passed. See SPEED-078 for
 the live BuildKit mount and the ID-mapped read/write canary.
 
-### SPEED-071
-
-Title: Implement the minimum pinned BuildKit runtime lifecycle
-
-Evidence: SPEED-080 established guest-local authenticated lookup of the
-actual worker snapshot. Launch, output forwarding, kill and delete
-implementation remain open. See [the guest-local
-boundary](native-buildkit-executor.md#speed-080-guest-local-authentication-boundary).
-
-Acceptance Criteria:
-
-- Route the first standalone RUN, kill and delete to the same guest
-  generation and return stdout, stderr and status without a retained
-  runtime. Check stale IDs and cancellation. Qualify additional exec
-  verbs separately before advertising them.
 
 ### SPEED-078
 
@@ -563,19 +521,6 @@ snapshot evidence](native-buildkit-executor.md#speed-078-actual-native-snapshot-
 
 Review: Isolated validation passed. Independent review pending.
 
-### SPEED-079
-
-Title: Qualify BuildKit's generated OCI process and mount policy
-
-Acceptance Criteria:
-
-- Admit the pinned worker bundle and enforce the declared process and
-  mount policy within the existing workload isolation and Core memory
-  gates. Verify the supported mounts, ownership, and cleanup. Reject
-  unsupported requests explicitly and keep cache, RUN, and lifecycle
-  results scoped to observed behavior.
-
-Depends on task: SPEED-086 bundle intake, passed in isolation.
 
 ### SPEED-086
 
@@ -598,6 +543,7 @@ was clean before and after the boot. See [the bundle intake
 evidence](native-buildkit-executor.md#speed-086-verified-bundle-intake).
 
 Review: Isolated validation passed. Independent review pending.
+
 
 ### SPEED-080
 
@@ -729,8 +675,10 @@ Title: Qualify native speed and memory against official Kiri
 
 Description: Run the existing full comparison matrix on frozen native release artifacts.
 
-Is blocked by task: SPEED-063. SPEED-058, SPEED-060 and SPEED-064 passed
-their isolated gates.
+Dependencies: SPEED-058, SPEED-060, SPEED-063 and SPEED-064 passed
+their isolated gates. Standalone API/CLI lifecycle can proceed.
+The full comparison needs the Docker builder path in SPEED-089 and
+matching fixtures for the remaining surfaces.
 
 Acceptance Criteria:
 
@@ -757,37 +705,6 @@ Next Action: Freeze only reviewed candidate code; do not promote on pilot result
 
 
 
-### SPEED-055
-
-Title: Requalify retained Docker lifecycle with dynamic memory enabled
-
-Description: Freeze accepted changes and repeat the existing API and CLI comparison against official pinned Kiri.
-
-Is blocked by task: SPEED-051 fixed; SPEED-050 complete; SPEED-052–054 accepted or rejected with evidence.
-
-Acceptance Criteria:
-
-- Run five independent alternating boot pairs per lane, 2,000 timed operations and ten warmups per engine/boot. Preserve frozen fixture limits and all failures.
-- Run normal dynamic memory; pass pressure, active-data, idle-convergence and backing-release gates before timing. No benchmark-only fixed-memory configuration.
-- Publish the existing detailed report tables: hashes/resources, per-boot p50/p95/p99, throughput, stage timings, paired 95% intervals, correctness, coverage and cleanup.
-- Apply existing CLI parity and API advantage criteria; explicitly report API parity using the declared 1.05 upper-bound rule for both percentiles. Report the below-5-ms median target separately; do not claim a p99 or CLI 5-ms result.
-- Leave SPEED-049 historical failure intact. Mark build, Compose and other lanes unqualified for this candidate until their existing matrix tasks are rerun; no release or global superiority claim from this task alone.
-
-Problem and Evidence: [SPEED-055 qualification status](docker-benchmark-results.md#speed-055-qualification-status).
-The private retained-engine probe passed 26 compatibility probes
-and four API/CLI output canaries. The five-pair candidate series and
-full benchmark matrix were held behind the open SPEED-051 gate.
-
-Source: `benchmarks/docker-comparison.py`, the
-[benchmark protocol](docker-benchmark-plan.md) and the
-[architecture plan](retained-docker-latency-architecture.md).
-
-Review: Formal requalification remains blocked. Historical SPEED-049
-API parity failed and CLI parity was inconclusive. The new guest-local
-diagnostic missed the below-5-ms target.
-
-Next Action: Resolve and verify the four-PID correctness issue before
-freezing a candidate.
 
 ### SPEED-014
 
@@ -848,43 +765,24 @@ Next Action: Set matching version metadata and release notes for the reviewed pa
 
 ## INPROGRESS
 
-### SPEED-051
+### SPEED-089
 
-Title: Diagnose and correct the retained Docker four-PID CLI failure
-
-Description: Isolate the intermittent CLI exit 127 on the pinned
-no-network Alpine true fixture with four PIDs.
-
-Is blocked by task: None. SPEED-049 records the failed operation.
+Title: Qualify the Docker builder gateway for the frozen matrix
 
 Acceptance Criteria:
 
-- Attribute the thread-creation failure to a guest process or runtime
-  stage using the fixed fixture and a bounded diagnostic boot. Preserve
-  the four-PID workload, operation output and error on failure.
-- Validate a narrow correction at the same effective cgroup limits
-  and check cleanup after failure and success.
-- Keep this diagnostic separate from the five-pair CLI requalification.
+- Verify the pinned Buildx driver, builder identity, cache ownership,
+  allowed Docker API and resulting OCI export under native isolation.
+- Qualify the frozen Rust, Go and Node RUN cases and cache treatments
+  without widening the existing native fixture limits or restoring a
+  retained runtime. Record unsupported combinations explicitly.
 
-Problem and Evidence: SPEED-049 `cli/pair-5/conjet/session.json`, measured sample
-139, and [SPEED-051 live diagnostics](docker-benchmark-results.md#speed-051-four-pid-cli-failure-capture).
-The traced boot ran 550 clean launches. The cgroup-observer boot ran
-2,000 clean launches and observed runc init inside the intended
-four-PID workload scopes. Neither boot reproduced the exit-127
-signature. The SPEED-056 allocation-held capture added 256 clean CLI
-launches with runc init observed in each workload scope and no
-PID event increase. Raw captures are under
-`conjet-speedup-evidence/SPEED-051` and `SPEED-056/pid-witness-pressure`.
-Production and owned host cleanup checks passed.
+Evidence: The direct RUN canary in SPEED-063 uses a guest-local pinned
+BuildKit worker. The frozen comparison uses the Docker API to create a
+separate privileged Buildx worker container and its cache volume. The
+current API has no compatible worker provisioning or BuildKit session
+route. The constrained native OCI profile has no privileged worker mode.
 
-Source: [SPEED-049](#speed-049).
-
-Review: Runtime stage narrowed. No failing process was captured and
-no fix was validated. The historical failure remains a blocker for
-CLI requalification.
-
-Next Action: Capture a failing launch with its process and PID
-controller event using the unchanged limits before selecting a fix.
 
 
 ### SPEED-025
@@ -1353,6 +1251,88 @@ acceptance without changing the SPEED-008 verdict.
 
 ## UNDERREVIEW
 
+### SPEED-063
+
+Title: Prove one BuildKit RUN through the native executor
+
+Description: Establish the supported BuildKit OCI-worker execution boundary and run one pinned Dockerfile with one RUN instruction.
+
+Dependencies: SPEED-071, SPEED-079 and the SPEED-070/078 snapshot
+ownership work passed in isolation.
+
+Acceptance Criteria:
+
+- Document the exact BuildKit runtime interface from primary source before implementation; split missing runtime verbs into narrow tasks. Prove native execution identity, output/exit, build cancellation and cache-hit behavior. No hidden retained-runtime fallback; unsupported operations fail explicitly.
+
+Problem and Evidence: The candidate cannot claim native builds by falling back to runc/containerd.
+
+Approach: Keep BuildKit as build frontend/cache owner; implement the minimum compatible Conjet executor contract with tests, not a new Dockerfile engine.
+
+Evidence: The pinned worker completed an uncached RUN, exported its
+native write, reused that result without launching again, and cancelled
+a second RUN through signal 9 and verified deletion. Two isolated release
+boots passed. See [the executor evidence](native-buildkit-executor.md#speed-087-and-speed-071079-native-run).
+
+Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
+
+Review: Isolated validation and diff review passed. Independent review pending.
+
+Next Action: Qualify the public Docker builder path under SPEED-089.
+
+### SPEED-071
+
+Title: Implement the minimum pinned BuildKit runtime lifecycle
+
+Evidence: Two workers invoked the native run/delete path and the
+kill/delete cancellation path. The release guest reported confirmed
+exec, exit 0 for the fresh build, and signal 9 with complete cleanup for
+cancellation. See [the executor evidence](native-buildkit-executor.md#speed-087-and-speed-071079-native-run).
+
+Review: Isolated validation passed. Independent review pending.
+
+Acceptance Criteria:
+
+- Route the first standalone RUN, kill and delete to the same guest
+  generation and return stdout, stderr and status without a retained
+  runtime. Check stale IDs and cancellation. Qualify additional exec
+  verbs separately before advertising them.
+
+### SPEED-079
+
+Title: Qualify BuildKit's generated OCI process and mount policy
+
+Acceptance Criteria:
+
+- Admit the pinned worker bundle and enforce the declared process and
+  mount policy within the existing workload isolation and Core memory
+  gates. Verify the supported mounts, ownership, and cleanup. Reject
+  unsupported requests explicitly and keep cache, RUN, and lifecycle
+  results scoped to observed behavior.
+
+Evidence: The fresh and interrupted builds observed the mapped UID/GID,
+primary supplementary GID, empty capabilities, no-new-privileges,
+seccomp, private proc, read-only sysfs, and local cgroup mounts.
+SPEED-086 passed incompatible bundle rejection, and SPEED-087 passed
+the actual mount enforcement. Independent review pending.
+
+### SPEED-087
+
+Title: Apply the pinned mount policy inside the native build sandbox
+
+Evidence: The release Core kernel supported all pseudo-filesystems in the
+nested workload probe. Direct sysfs creation under mapped credentials
+returned EPERM. A detached read-only sysfs mount created in the child's
+network namespace under the single-threaded helper's trusted credentials
+attached successfully in the same workload. Both probes preserved the
+borrowed disk, data, Core and shutdown boundaries.
+
+Acceptance Criteria:
+
+- Apply only the verified ordered mount recipe to the exact snapshot.
+  Keep source and destination resolution beneath owned directories and
+  reject symlink and policy changes. Verify the read-only sysfs and
+  namespace-local cgroup, process restrictions, and cleanup.
+
 ### SPEED-056
 
 Title: Attribute and reduce retained Docker guest start latency
@@ -1708,6 +1688,78 @@ and review requirements before merge.
 Next Action: Collect required CI and independent review before merging.
 
 ## SUPERSEDED
+
+The following retained-engine tasks remain unresolved historical evidence.
+
+### SPEED-051
+
+Title: Diagnose and correct the retained Docker four-PID CLI failure
+
+Description: Isolate the intermittent CLI exit 127 on the pinned
+no-network Alpine true fixture with four PIDs.
+
+Is blocked by task: None. SPEED-049 records the failed operation.
+
+Acceptance Criteria:
+
+- Attribute the thread-creation failure to a guest process or runtime
+  stage using the fixed fixture and a bounded diagnostic boot. Preserve
+  the four-PID workload, operation output and error on failure.
+- Validate a narrow correction at the same effective cgroup limits
+  and check cleanup after failure and success.
+- Keep this diagnostic separate from the five-pair CLI requalification.
+
+Problem and Evidence: SPEED-049 `cli/pair-5/conjet/session.json`, measured sample
+139, and [SPEED-051 live diagnostics](docker-benchmark-results.md#speed-051-four-pid-cli-failure-capture).
+The traced boot ran 550 clean launches. The cgroup-observer boot ran
+2,000 clean launches and observed runc init inside the intended
+four-PID workload scopes. Neither boot reproduced the exit-127
+signature. The SPEED-056 allocation-held capture added 256 clean CLI
+launches with runc init observed in each workload scope and no
+PID event increase. Raw captures are under
+`conjet-speedup-evidence/SPEED-051` and `SPEED-056/pid-witness-pressure`.
+Production and owned host cleanup checks passed.
+
+Source: [SPEED-049](#speed-049).
+
+Review: Runtime stage narrowed. No failing process was captured and
+no fix was validated. The historical failure remains a blocker for
+CLI requalification.
+
+Next Action: Capture a failing launch with its process and PID
+controller event using the unchanged limits before selecting a fix.
+
+### SPEED-055
+
+Title: Requalify retained Docker lifecycle with dynamic memory enabled
+
+Description: Freeze accepted changes and repeat the existing API and CLI comparison against official pinned Kiri.
+
+Is blocked by task: SPEED-051 fixed; SPEED-050 complete; SPEED-052–054 accepted or rejected with evidence.
+
+Acceptance Criteria:
+
+- Run five independent alternating boot pairs per lane, 2,000 timed operations and ten warmups per engine/boot. Preserve frozen fixture limits and all failures.
+- Run normal dynamic memory; pass pressure, active-data, idle-convergence and backing-release gates before timing. No benchmark-only fixed-memory configuration.
+- Publish the existing detailed report tables: hashes/resources, per-boot p50/p95/p99, throughput, stage timings, paired 95% intervals, correctness, coverage and cleanup.
+- Apply existing CLI parity and API advantage criteria; explicitly report API parity using the declared 1.05 upper-bound rule for both percentiles. Report the below-5-ms median target separately; do not claim a p99 or CLI 5-ms result.
+- Leave SPEED-049 historical failure intact. Mark build, Compose and other lanes unqualified for this candidate until their existing matrix tasks are rerun; no release or global superiority claim from this task alone.
+
+Problem and Evidence: [SPEED-055 qualification status](docker-benchmark-results.md#speed-055-qualification-status).
+The private retained-engine probe passed 26 compatibility probes
+and four API/CLI output canaries. The five-pair candidate series and
+full benchmark matrix were held behind the open SPEED-051 gate.
+
+Source: `benchmarks/docker-comparison.py`, the
+[benchmark protocol](docker-benchmark-plan.md) and the
+[architecture plan](retained-docker-latency-architecture.md).
+
+Review: Formal requalification remains blocked. Historical SPEED-049
+API parity failed and CLI parity was inconclusive. The new guest-local
+diagnostic missed the below-5-ms target.
+
+Next Action: Resolve and verify the four-PID correctness issue before
+freezing a candidate.
 
 ### SPEED-037
 

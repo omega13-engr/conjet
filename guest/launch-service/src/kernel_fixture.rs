@@ -228,7 +228,15 @@ fn run(
     let proc_mount = (with_sandbox && !controlled)
         .then(ProcMount::new)
         .transpose()?;
-    security::clear_supplementary_groups()?;
+    if process
+        .and_then(|spec| spec.build_snapshot.as_ref())
+        .is_some_and(|snapshot| snapshot.bundle_policy)
+    {
+        let group = crate::spec::GID_BASE + crate::spec::WORKLOAD_GID;
+        security::checked(unsafe { libc::setgroups(1, &group) })?;
+    } else {
+        security::clear_supplementary_groups()?;
+    }
     let (mount_path, root_name) = cgroup_paths(&handshake::hex(&id), process.is_some());
     let mount = CgroupMount::new(&mount_path)?;
     inject(mode, "fault-mount");
@@ -397,13 +405,16 @@ fn clone_and_reap(
             unsafe { libc::_exit(125) }
         }
         drop(child_ready);
-        let snapshot_mount = if let Some(socket) = child_mount {
+        let (snapshot_mount, sysfs_mount) = if let Some(socket) = child_mount {
             match crate::exec_fixture::receive_event(socket.as_raw_fd()) {
-                Ok(Some((b'M', mut descriptors))) => descriptors.pop(),
+                Ok(Some((b'M', mut descriptors))) => {
+                    let root = descriptors.remove(0);
+                    (Some(root), descriptors.pop())
+                }
                 _ => unsafe { libc::_exit(125) },
             }
         } else {
-            None
+            (None, None)
         };
         if let Some(sandbox) = sandbox {
             let traced = unsafe {
@@ -425,7 +436,7 @@ fn clone_and_reap(
                 eprintln!("workload trace stop failed: {error}");
                 unsafe { libc::_exit(124) }
             }
-            if let Err(error) = sandbox.enter(snapshot_mount, || {
+            if let Err(error) = sandbox.enter(snapshot_mount, sysfs_mount, || {
                 if prepared {
                     stop_for_tracer()?;
                 }
@@ -488,11 +499,14 @@ fn clone_and_reap(
                     .ok_or_else(|| io::Error::other("missing build snapshot sandbox"))?
                     .snapshot_mount(pid)?
                     .ok_or_else(|| io::Error::other("missing detached build snapshot"))?;
-                crate::exec_fixture::send_descriptors(
-                    socket.as_raw_fd(),
-                    b'M',
-                    &[mount.as_raw_fd()],
-                )?;
+                let sysfs = process
+                    .and_then(|spec| spec.build_snapshot.as_ref())
+                    .filter(|snapshot| snapshot.bundle_policy)
+                    .map(|_| crate::build_snapshot::mounts::detached_sysfs(&pidfd))
+                    .transpose()?;
+                let mut descriptors = vec![mount.as_raw_fd()];
+                descriptors.extend(sysfs.as_ref().map(AsRawFd::as_raw_fd));
+                crate::exec_fixture::send_descriptors(socket.as_raw_fd(), b'M', &descriptors)?;
             }
             parent_ready.write_all(&[1])?;
             Ok(true)

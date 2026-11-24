@@ -15,10 +15,17 @@ pub(crate) fn clear_supplementary_groups() -> io::Result<()> {
     checked(unsafe { libc::setgroups(0, std::ptr::null()) })
 }
 
-pub(crate) fn drop_workload_identity() -> io::Result<()> {
-    if unsafe { libc::getgroups(0, std::ptr::null_mut()) } != 0 {
+pub(crate) fn drop_workload_identity(supplementary_primary_gid: bool) -> io::Result<()> {
+    let mut group = 0;
+    let count = unsafe { libc::getgroups(1, &mut group) };
+    let valid = if supplementary_primary_gid {
+        count == 1 && group == WORKLOAD_GID
+    } else {
+        count == 0
+    };
+    if !valid {
         return Err(io::Error::other(
-            "supplementary groups were not cleared before clone",
+            "unexpected supplementary groups after clone",
         ));
     }
     checked(unsafe {

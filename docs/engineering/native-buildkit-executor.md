@@ -124,3 +124,62 @@ The disk lease was released and both offline filesystem checks passed.
 
 This evidence qualifies bounded config intake. Mount and process
 enforcement, runtime verbs and actual BuildKit RUN remain separate gates.
+
+## SPEED-087 and SPEED-071/079 native RUN
+
+The opt-in build-snapshot guest profile now accepts a boot-bound runtime
+request over its root-only local control socket. The standalone runtime
+alias implements the pinned noninteractive `run --bundle … --keep ID`,
+`kill ID 9` and `delete ID` forms. Core authorizes the workload under
+the same native resource limits and generation ledger used by Docker
+workloads. The service retains the build record through output EOF and
+verified removal. Delete releases that ownership, and a bounded
+boot-local tombstone rejects reuse of the ID.
+
+Stock BuildKit emitted mode `0666` for `config.json` even with the fixture's
+`022` umask. The authenticated RUN path can seal an exact `0666`, root-owned,
+single-link regular file on the leased filesystem to `0600`, through the
+opened descriptor and under the verified root-only worker directory.
+Read-only config intake still rejects a writable config. Source file and
+socket descriptors are checked by device and inode before mounting. On the
+release kernel, direct sysfs creation under mapped user credentials returned
+`EPERM`. The single-threaded helper created a detached read-only sysfs in the
+child network namespace, restored its own namespace, and passed only the
+mount descriptor. The workload created its own read-only cgroup mount and
+retained zero effective capabilities, no-new-privileges and the native
+seccomp filter. The extra group is limited to the workload's own primary GID.
+
+Two isolated release boots ran the pinned Linux ARM64 BuildKit 0.23.2
+`buildkitd` and `buildctl` from archive SHA-256
+`6385ff70b2fb4134b50ac3183eea3a0b06c6f6129173940d73178ae0477368f1`.
+The fixture ran the OCI worker with the native snapshotter, the containerd
+worker disabled, and the Conjet alias as the single runtime. It used
+`FROM scratch`, copied a static ARM64 probe and a UID/GID 65532 output
+directory, then invoked `RUN --network=none ["/bin/probe", "write"]`
+under UID/GID 65532. The probe checked its credentials, proc, devpts,
+mqueue, sysfs, cgroup2 and the read-only hosts bind. The worker received
+both output streams and exported the probe's write. Fresh and cached
+exports both hashed to
+`02c2c58c93b103acf14d4d57c17131585ea2baa4a47ce1672cd8d8e55b7e4643`.
+The repeat reported the RUN as cached and did not invoke the runtime.
+Interrupting a separate build after workload output led to worker
+`kill ID 9` and `delete ID`, with signal 9 and complete cleanup on the
+exact guest workload. The two solves that executed issued two runs,
+two deletes and one kill.
+
+The boots used a temporary supervised test fixture and separate ext4 disks.
+Offline checks, lease release, guest cleanup, launcher removal, zero reclaim
+failures and unchanged production fingerprints passed. The earlier setup
+failure also reached verified removal after closing the parent's copied
+helper control descriptor. Evidence is under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-088/`
+in `worker-mapped-group`, `worker-final` and `worker-helper-owner`.
+The guest staging hook and the fixture wrapper were test scaffolding.
+
+This qualifies the bounded direct RUN milestone in SPEED-063. Worker
+provisioning in the native Docker API and the frozen
+`buildx --driver docker-container` matrix are still open. The native
+profile supports one active build per boot at a time, closes stdin and
+rejects interactive exec, extra mounts and policy variants. BuildKit's
+stock OOM monitor looks for its original cgroup path, which differs from
+the native Core-owned cgroup namespace.
