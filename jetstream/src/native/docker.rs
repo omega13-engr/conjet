@@ -1499,22 +1499,10 @@ impl Owner {
             Self::check_network_aliases(&ledger, attachment)?;
         }
         let publication = port::RequestedPort::parse(&config)?;
-        if publication.is_some() {
-            if network.is_none() {
-                return Err(Rejected::bad(
-                    "loopback port publication requires an internal bridge",
-                ));
-            }
-            if ledger
-                .active
-                .iter()
-                .any(|entry| entry.published.lock().unwrap().is_some())
-            {
-                return Err(Rejected(
-                    409,
-                    "the native loopback binding is already owned".into(),
-                ));
-            }
+        if publication.is_some() && network.is_none() {
+            return Err(Rejected::bad(
+                "loopback port publication requires a private bridge",
+            ));
         }
         let mut spec = if network.is_some() || volume.is_some() || bind.is_some() {
             let mut process = config.clone();

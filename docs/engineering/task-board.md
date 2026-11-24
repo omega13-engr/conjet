@@ -1513,6 +1513,12 @@ container within the existing workload limit. Verify both serve their
 own response, an explicit bind conflict fails, and removing either
 replica leaves the other reachable.
 
+Evidence: The isolated optimized published-port diagnostic confirmed
+two distinct live loopback listeners, separate response payloads and
+explicit conflict rejection. Removing the first listener left the
+second serving. Both sockets closed on removal and the guest had zero
+active workloads. See `SPEED-146/multi-publish/` on ExternalSSD.
+
 ### SPEED-147
 
 Title: Resolve shared Compose service aliases within one project network

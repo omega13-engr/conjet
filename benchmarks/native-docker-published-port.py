@@ -132,6 +132,24 @@ def collect(endpoint, peer, docker, env, output, session, pid):
             raise RuntimeError('the prior port could not be reused for a new workload')
         call('remove_replacement', ['rm', '--force', 'replacement'])
         cases['replacement_listener_closed'] = verify_closed(port)
+        create('create_first_replica', 'first')
+        alternate = [*SERVICE[:-1], SERVICE[-1].replace('native-published', 'native-replica-2')]
+        create('create_second_replica', 'second', command=alternate)
+        call('start_replicas', ['start', 'first', 'second'])
+        first = mapped('first', 'inspect_first_replica')
+        second = mapped('second', 'inspect_second_replica')
+        if first == second:
+            raise RuntimeError('different workloads shared one loopback port')
+        create('conflict_with_replica', 'conflict', first, code=1,
+               stderr=b'loopback port is already in use')
+        if response(first) != RESPONSE:
+            raise RuntimeError('first published replica lost its response')
+        call('remove_first_replica', ['rm', '--force', 'first'])
+        cases['first_replica_closed'] = verify_closed(first)
+        if response(second) != RESPONSE.replace(b'native-published', b'native-replica-2'):
+            raise RuntimeError('second published replica lost its response')
+        call('remove_second_replica', ['rm', '--force', 'second'])
+        cases['second_replica_closed'] = verify_closed(second)
         call('network_remove', ['network', 'rm', network])
         with INSTALL['channel'](session, pid) as (guest, _):
             cases['guest_after'] = INSTALL['inspect'](guest)['active_workloads']
