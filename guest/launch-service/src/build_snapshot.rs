@@ -21,7 +21,7 @@ pub(crate) mod guest {
     use std::ffi::CString;
     use std::fs::{File, OpenOptions};
     use std::io;
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::path::Path;
 
@@ -52,7 +52,9 @@ pub(crate) mod guest {
             .read(true)
             .custom_flags(OPEN_TREE)
             .open(ROOT.to_str().expect("static build root"))?;
-        let executor = open_directory(&store, "executor")?;
+        let worker = open_directory(&store, "worker")?;
+        let native = open_directory(&worker, "runc-native")?;
+        let executor = open_directory(&native, "executor")?;
         let bundle = open_directory(&executor, id)?;
         let rootfs = open_directory(&bundle, "rootfs")?;
         let info = rootfs.metadata()?;
@@ -60,6 +62,17 @@ pub(crate) mod guest {
             return Err(io::Error::other(
                 "build root does not belong to the leased disk",
             ));
+        }
+        let mut flags = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // The root descriptor is live and fstatvfs writes the whole record on success.
+        if unsafe { libc::fstatvfs(rootfs.as_raw_fd(), flags.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let flags = unsafe { flags.assume_init() }.f_flag;
+        let required = libc::ST_NOSUID | libc::ST_NODEV;
+        let rejected = libc::ST_RDONLY | libc::ST_NOEXEC;
+        if flags & required != required || flags & rejected != 0 {
+            return Err(io::Error::other("invalid build snapshot mount flags"));
         }
         let snapshot = Snapshot {
             id: id.into(),
@@ -73,12 +86,42 @@ pub(crate) mod guest {
         open(id).map(|(_, identity)| identity)
     }
 
-    pub(crate) fn source(snapshot: &Snapshot) -> io::Result<File> {
+    pub(crate) fn mapped_mount(snapshot: &Snapshot, user: &File) -> io::Result<OwnedFd> {
         let (file, identity) = open(&snapshot.id)?;
         if *snapshot != identity {
             return Err(io::Error::other("stale native build snapshot identity"));
         }
-        Ok(file)
+        // Clone a detached mount of only the verified root, without child mounts.
+        let tree = unsafe {
+            libc::syscall(
+                libc::SYS_open_tree,
+                file.as_raw_fd(),
+                c"".as_ptr(),
+                libc::AT_EMPTY_PATH | libc::OPEN_TREE_CLONE as i32 | libc::O_CLOEXEC,
+            )
+        };
+        if tree < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let tree = unsafe { OwnedFd::from_raw_fd(tree as i32) };
+        let attributes = libc::mount_attr {
+            attr_set: libc::MOUNT_ATTR_IDMAP,
+            attr_clr: 0,
+            propagation: 0,
+            userns_fd: user.as_raw_fd() as u64,
+        };
+        // Both descriptors remain open until the kernel copies the attributes.
+        crate::security::checked(unsafe {
+            libc::syscall(
+                libc::SYS_mount_setattr,
+                tree.as_raw_fd(),
+                c"".as_ptr(),
+                libc::AT_EMPTY_PATH,
+                &attributes,
+                size_of::<libc::mount_attr>(),
+            ) as i32
+        })?;
+        Ok(tree)
     }
 }
 

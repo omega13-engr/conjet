@@ -355,6 +355,12 @@ fn clone_and_reap(
     security::checked(unsafe { libc::pipe2(barrier.as_mut_ptr(), libc::O_CLOEXEC) })?;
     let mut child_ready = unsafe { File::from_raw_fd(barrier[0]) };
     let mut parent_ready = unsafe { File::from_raw_fd(barrier[1]) };
+    let (child_mount, parent_mount) = if process.is_some_and(|spec| spec.build_snapshot.is_some()) {
+        let (child, parent) = std::os::unix::net::UnixStream::pair()?;
+        (Some(child), Some(parent))
+    } else {
+        (None, None)
+    };
     let mut descriptor = -1i32;
     let flags = libc::CLONE_PIDFD
         | libc::CLONE_NEWUSER
@@ -385,11 +391,20 @@ fn clone_and_reap(
     }
     if pid == 0 {
         drop(parent_ready);
+        drop(parent_mount);
         let mut permitted = [0];
         if child_ready.read_exact(&mut permitted).is_err() || permitted != [1] {
             unsafe { libc::_exit(125) }
         }
         drop(child_ready);
+        let snapshot_mount = if let Some(socket) = child_mount {
+            match crate::exec_fixture::receive_event(socket.as_raw_fd()) {
+                Ok(Some((b'M', mut descriptors))) => descriptors.pop(),
+                _ => unsafe { libc::_exit(125) },
+            }
+        } else {
+            None
+        };
         if let Some(sandbox) = sandbox {
             let traced = unsafe {
                 libc::ptrace(
@@ -410,7 +425,7 @@ fn clone_and_reap(
                 eprintln!("workload trace stop failed: {error}");
                 unsafe { libc::_exit(124) }
             }
-            if let Err(error) = sandbox.enter(|| {
+            if let Err(error) = sandbox.enter(snapshot_mount, || {
                 if prepared {
                     stop_for_tracer()?;
                 }
@@ -441,6 +456,7 @@ fn clone_and_reap(
     }
     let pid = pid as libc::pid_t;
     drop(child_ready);
+    drop(child_mount);
     inject(mode, "fault-child");
     if descriptor < 0 {
         drop(parent_ready);
@@ -466,6 +482,17 @@ fn clone_and_reap(
                 if cancellation_ready()? {
                     return Ok(false);
                 }
+            }
+            if let Some(socket) = parent_mount {
+                let mount = sandbox
+                    .ok_or_else(|| io::Error::other("missing build snapshot sandbox"))?
+                    .snapshot_mount(pid)?
+                    .ok_or_else(|| io::Error::other("missing detached build snapshot"))?;
+                crate::exec_fixture::send_descriptors(
+                    socket.as_raw_fd(),
+                    b'M',
+                    &[mount.as_raw_fd()],
+                )?;
             }
             parent_ready.write_all(&[1])?;
             Ok(true)

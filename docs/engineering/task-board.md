@@ -353,8 +353,9 @@ Title: Prove one BuildKit RUN through the native executor
 
 Description: Establish the supported BuildKit OCI-worker execution boundary and run one pinned Dockerfile with one RUN instruction.
 
-Is blocked by task: SPEED-071 native runtime lifecycle. SPEED-060,
-SPEED-062 and the SPEED-070 isolated snapshot canary are complete.
+Is blocked by task: SPEED-071 native runtime lifecycle and SPEED-079
+generated OCI process and mount policy. SPEED-060, SPEED-062, and the
+SPEED-070/078 snapshot evidence are complete in isolation.
 
 Acceptance Criteria:
 
@@ -373,8 +374,8 @@ Source: [Native engine plan](native-engine-v2-plan.md) and current native host/g
 
 Review: Pending implementation, validation and independent evidence review.
 
-Next Action: Qualify the first runtime verbs and the pinned worker's mounted
-snapshot handoff.
+Next Action: Qualify the runtime verbs and generated OCI process and mount
+policy before a BuildKit RUN.
 
 ### SPEED-070
 
@@ -392,8 +393,8 @@ reopened the same writable inode after cancellation and verified cleanup.
 Offline filesystem checks and data readback passed. See [the snapshot
 canary](native-buildkit-executor.md#speed-070-snapshot-canary).
 
-Review: Isolated pre-staged snapshot validation passed. The actual BuildKit
-mounted snapshot handoff remains part of SPEED-071/063.
+Review: Isolated pre-staged snapshot validation passed. See SPEED-078 for
+the live BuildKit mount and the ID-mapped read/write canary.
 
 ### SPEED-071
 
@@ -405,6 +406,30 @@ Acceptance Criteria:
   generation and return stdout, stderr and status without a retained
   runtime. Check stale IDs and cancellation. Qualify additional exec
   verbs separately before advertising them.
+
+### SPEED-078
+
+Title: Qualify the pinned BuildKit filesystem layout and snapshot ownership
+
+Evidence: A live BuildKit 0.23.2 invocation gave the native resolver the
+same ext4 device and inode as the pinned worker mount. A native release
+canary proved writable UID/GID mapping across cancellation and cleanup,
+with clean offline filesystem checks and stable production. See [the
+snapshot evidence](native-buildkit-executor.md#speed-078-actual-native-snapshot-and-ownership).
+
+Review: Isolated validation passed. Independent review pending.
+
+### SPEED-079
+
+Title: Qualify BuildKit's generated OCI process and mount policy
+
+Acceptance Criteria:
+
+- Admit the pinned worker bundle and enforce the declared process and
+  mount policy within the existing workload isolation and Core memory
+  gates. Verify the supported mounts, ownership, and cleanup. Reject
+  unsupported requests explicitly and keep cache, RUN, and lifecycle
+  results scoped to observed behavior.
 
 ### SPEED-064
 
@@ -525,7 +550,8 @@ Title: Qualify native speed and memory against official Kiri
 
 Description: Run the existing full comparison matrix on frozen native release artifacts.
 
-Is blocked by task: SPEED-058, SPEED-060 decision, SPEED-063 and SPEED-064.
+Is blocked by task: SPEED-063. SPEED-058, SPEED-060 and SPEED-064 passed
+their isolated gates.
 
 Acceptance Criteria:
 
@@ -535,7 +561,11 @@ Problem and Evidence: Parity and superiority remain unproven for the new candida
 
 Approach: Keep native API, Docker API and CLI timers separate; record hashes, p50/p95/p99, throughput, confidence intervals, resource data and exact cleanup boundaries.
 
-Evidence: Pending; no new candidate result.
+Evidence: A fresh two-pair release pilot passed lifecycle and cleanup
+probes with zero failures. Native median API latency was 39.53–40.35 ms
+versus Kiri 3.82–3.87 ms. Native median CLI latency was 37.94–38.80 ms
+versus Kiri 20.75–20.88 ms. The below-5-ms gate remains unmet. See
+[the current comparison](native-engine-validation.md#speed-065-current-release-pilot).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 

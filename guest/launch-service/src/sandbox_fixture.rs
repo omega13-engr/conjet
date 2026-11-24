@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::CString;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,7 @@ pub(crate) const OCI_ROOT: &str = "/etc/conjet/oci-root";
 pub(crate) const OCI_MARKER: &str = "/etc/conjet/native-oci-image";
 const OCI_LINKS: &str = "/etc/conjet/native-oci-hardlinks.json";
 pub(crate) const NATIVE_EXECUTABLE: &str = "/etc/conjet/native-executable";
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x04; // Linux mount UAPI.
 
 pub(crate) struct Sandbox {
     base: PathBuf,
@@ -210,7 +211,22 @@ impl Sandbox {
         )
     }
 
-    pub(crate) fn enter(&self, before_filter: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    pub(crate) fn snapshot_mount(&self, pid: libc::pid_t) -> io::Result<Option<OwnedFd>> {
+        let RootMode::BuildSnapshot(snapshot) = &self.root else {
+            return Ok(None);
+        };
+        // The helper owns this child PID and has yet to open its startup gate.
+        let user = File::open(format!("/proc/{pid}/ns/user"))?;
+        crate::build_snapshot::guest::mapped_mount(snapshot, &user)
+            .map(Some)
+            .map_err(|error| io::Error::other(format!("map build snapshot IDs: {error}")))
+    }
+
+    pub(crate) fn enter(
+        &self,
+        snapshot_mount: Option<OwnedFd>,
+        before_filter: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
         fn step(name: &str, result: io::Result<()>) -> io::Result<()> {
             result.map_err(|error| io::Error::other(format!("{name}: {error}")))
         }
@@ -226,13 +242,6 @@ impl Sandbox {
                     .map_err(|error| io::Error::other(format!("open named volume: {error}")))
             })
             .transpose()?;
-        let snapshot = match &self.root {
-            RootMode::BuildSnapshot(snapshot) => Some(
-                crate::build_snapshot::guest::source(snapshot)
-                    .map_err(|error| io::Error::other(format!("open build snapshot: {error}")))?,
-            ),
-            RootMode::Overlay(_) => None,
-        };
         // The child inherited the helper's outer guest IDs. Enter the mapped
         // namespace-root identity before accessing the owned upper/work dirs.
         step(
@@ -269,18 +278,19 @@ impl Sandbox {
                 }),
             )?,
             RootMode::BuildSnapshot(_) => {
-                let source = snapshot.expect("verified BuildKit snapshot");
-                let path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
+                let source = snapshot_mount
+                    .ok_or_else(|| io::Error::other("missing mapped build snapshot"))?;
                 step(
                     "private build snapshot",
                     security::checked(unsafe {
-                        libc::mount(
-                            path.as_ptr(),
+                        libc::syscall(
+                            libc::SYS_move_mount,
+                            source.as_raw_fd(),
+                            c"".as_ptr(),
+                            libc::AT_FDCWD,
                             self.new_root.as_ptr(),
-                            std::ptr::null(),
-                            libc::MS_BIND,
-                            std::ptr::null(),
-                        )
+                            MOVE_MOUNT_F_EMPTY_PATH,
+                        ) as i32
                     }),
                 )?;
             }

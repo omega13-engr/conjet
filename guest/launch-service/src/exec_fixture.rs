@@ -95,6 +95,7 @@ pub(crate) fn receive_event(socket: i32) -> io::Result<Option<(u8, Vec<OwnedFd>)
     }
     let valid = match event {
         b'E' => received.len() <= 1,
+        b'M' => received.len() == 1,
         b'V' => received.len() == 2,
         _ => received.is_empty(),
     };

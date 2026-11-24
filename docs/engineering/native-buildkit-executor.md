@@ -49,5 +49,38 @@ The guest rejected symlinks, traversal, a stale boot, a stale inode, and
 combining the snapshot with a named volume. After shutdown the launcher
 verified lease release and unchanged production state. Offline `e2fsck -fn`
 passed, and `debugfs` read the expected file from the original inode tree.
-The canary used a pre-staged BuildKit layout. The pinned worker's runtime
-invocation, uncached RUN, cancellation, and cache hit remain SPEED-071/063.
+The canary initially used a pre-staged layout. The actual worker handoff
+was captured separately in SPEED-078.
+
+## SPEED-078 actual native snapshot and ownership
+
+The verified BuildKit 0.23.2 Linux ARM64 release binaries ran in a disposable
+Core guest with the OCI worker enabled, the containerd worker disabled,
+and the native snapshotter. A private capture executable was the sole
+runtime candidate. A scratch Dockerfile loaded local content and reached
+its noninteractive `RUN --network=none`. The capture executable recorded
+the actual `run --bundle … --keep ID` and `delete ID` invocations, then
+returned exit 97 before execution. No retained runtime was present.
+
+The live bundle's root was a writable bind from the private ext4 disk at
+`worker/runc-native/executor/ID/rootfs`. The same device and inode returned
+by the native identity resolver appeared in the worker's mount capture.
+The root carried `nosuid,nodev` and allowed execution. Snapshot admission
+now checks the pinned layout, exact inode and those mount flags.
+
+A separate Core release canary placed UID/GID 65532 on the disk, which
+matches the ownership recorded by a rootful BuildKit worker. Conjet mounted
+that inode through the existing workload user namespace's ID map. The
+native process saw directory UID/GID 65532, wrote the proof before
+cancellation, and a replacement process reopened it after teardown.
+Offline `debugfs` confirmed the resulting file on the same disk with
+UID/GID 65532. The volume lease was released, `e2fsck -fn` passed and
+production was unchanged. [Linux mount ID mappings](https://www.kernel.org/doc/html/latest/filesystems/idmappings.html)
+
+The capture also recorded OCI 1.2.1 process requirements, including
+supplementary groups and capability sets, and ten mounts. These include
+pseudo-filesystems, worker-owned hosts and resolver files and a tracing
+socket. The current native build sandbox can mount the root with the
+correct ownership. The generated OCI process and mount contract still
+needs handling or explicit rejection in SPEED-079. BuildKit RUN,
+BuildKit-driven cancellation and cache hits remain unqualified.

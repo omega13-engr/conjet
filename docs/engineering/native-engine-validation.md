@@ -267,3 +267,29 @@ health, the named-volume short form, filtered event streaming and active
 port metadata. Those failures and the successful Compose and Docker API
 transcripts are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-064/`.
+
+## SPEED-065 current release pilot
+
+Two independent release pairs alternated native-first and Kiri-first.
+Each VM ran ten warmups and 200 measured operations per API and CLI lane,
+for 80 warmups and 1,600 measured operations overall. All operations and
+the UID and stream probes passed. The native runs used Core dynamic memory
+and were at the 2,048 MiB target before and after timing. Native guest
+cleanup and isolated launcher cleanup passed. Kiri guest teardown was
+unobservable.
+
+| Pair | Engine | API p50 / p95 / p99 (ms) | CLI p50 / p95 / p99 (ms) |
+| --- | --- | --- | --- |
+| 1 | Conjet native | 40.35 / 67.77 / 73.13 | 38.80 / 60.06 / 69.01 |
+| 1 | Kiri 0.2.2 | 3.82 / 4.48 / 4.88 | 20.75 / 21.86 / 22.39 |
+| 2 | Conjet native | 39.53 / 67.13 / 75.10 | 37.94 / 56.64 / 62.93 |
+| 2 | Kiri 0.2.2 | 3.87 / 4.51 / 4.80 | 20.88 / 21.83 / 22.17 |
+
+The native API median was 10.2–10.6 times Kiri's. The below-5-ms
+native API target failed. The pilot does not satisfy the five-pair
+statistical and workload coverage requirements for parity. SPEED-063
+blocks the full matrix. The measured OCI lifecycle excluded build
+snapshots and preceded the isolated snapshot ID mapping change.
+
+Raw samples, artifact hashes and cleanup reports are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-065/`.
