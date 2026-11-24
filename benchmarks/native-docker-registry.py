@@ -156,6 +156,17 @@ def collect(endpoint, peer, docker, env, evidence, registry, store):
         if hits[lower]:
             raise RuntimeError('shared layer was downloaded twice')
         OCI['collect'](endpoint, peer, docker, env, evidence, multi)
+        tag = 'cj-native-registry:qualified'
+        check('tag', 'image', 'tag', multi, tag)
+        tagged = json.loads(check('tag_inspect', 'image', 'inspect', tag))[0]
+        if tagged['Id'] != resolved or tag not in tagged['RepoTags'] or multi not in tagged['RepoDigests']:
+            raise RuntimeError('tag did not resolve to the immutable source image')
+        check('tag_protects_manifest', 'image', 'rm', multi, exit_code=1, message='image has local tags')
+        name = 'cj-pull-tag'
+        MATCHED['invoke'](docker, env, ['run', *MATCHED['FLAGS'], '--name', name, tag, '/bin/true'])
+        cases['tag_run'] = MATCHED['native_terminal'](connection, name, set())
+        check('untag', 'image', 'rm', tag)
+        check('untagged_inspect', 'image', 'inspect', tag, exit_code=1)
         name = 'cj-pull-use'
         check('in_use_create', 'create', *MATCHED['FLAGS'], '--name', name, multi, '/bin/busybox', 'sleep', '30')
         check('in_use_start', 'start', name)

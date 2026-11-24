@@ -803,6 +803,12 @@ tag and digest resolution, inspect, load/save, shared layer accounting,
 and interrupted/corrupt transfer cleanup. An image referenced by a
 container must not be destructively removed.
 
+Evidence: Boot-local Docker tags, inspection, launch by alias, untag
+and manifest protection passed with the pinned client on the isolated
+release path. The loopback registry's integrity and ownership checks
+also passed. Public provisioning, registry tag resolution and
+archive save/load remain open. [Compatibility evidence](native-compatibility.md#speed-090-local-image-tags)
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

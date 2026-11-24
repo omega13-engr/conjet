@@ -563,7 +563,7 @@ def native_session(args, root):
             report['registry'] = registry.authority
         if args.diagnostics == 'trace':
             bridge_command += ['--trace', output / 'adapter-trace.json']
-        if args.diagnostics == 'compose':
+        if args.diagnostics in ('compose', 'registry'):
             bridge_command.append('--trace-requests')
         report['adapter_command'] = list(map(str, bridge_command))
         report['docker_owner'] = args.docker_owner

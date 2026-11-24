@@ -46,6 +46,15 @@ fn decode(value: &str) -> Result<String> {
     String::from_utf8(bytes).map_err(|_| Rejected::bad("invalid URL encoding"))
 }
 
+fn image_reference(path: &str, suffix: &str) -> Result<String> {
+    let name = path
+        .strip_prefix("/images/")
+        .and_then(|path| path.strip_suffix(suffix))
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| Rejected::bad("missing Docker image reference"))?;
+    decode(name)
+}
+
 fn line(
     reader: &mut BufReader<UnixStream>,
     left: &mut usize,
@@ -429,8 +438,27 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             }
         }
         ("GET", _) if path.starts_with("/images/") && path.ends_with("/json") => {
-            let reference = decode(&path["/images/".len()..path.len() - "/json".len()])?;
+            let reference = image_reference(path, "/json")?;
             Reply::json(200, owner.inspect_image(&reference)?)
+        }
+        ("POST", _) if path.starts_with("/images/") && path.ends_with("/tag") => {
+            let reference = image_reference(path, "/tag")?;
+            if query
+                .keys()
+                .any(|key| !matches!(key.as_str(), "repo" | "tag"))
+                || !request.body.is_empty()
+            {
+                return Err(Rejected::bad("invalid Docker tag request"));
+            }
+            let repository = query
+                .get("repo")
+                .ok_or_else(|| Rejected::bad("missing Docker tag repository"))?;
+            owner.tag_image(
+                &reference,
+                repository,
+                query.get("tag").map_or("", String::as_str),
+            )?;
+            Reply::empty(201)
         }
         ("POST", "/images/create") => {
             if query

@@ -682,6 +682,7 @@ impl Item {
 #[derive(Default)]
 struct Ledger {
     active: Vec<Arc<Item>>,
+    tags: image::Tags,
     history: VecDeque<Arc<Item>>,
     events: VecDeque<Value>,
     discarded_events: usize,
@@ -760,11 +761,25 @@ impl Owner {
         result.map_err(|error| Rejected::internal(format!("{error:#}")))
     }
 
-    fn process(&self, config: &Value) -> Result<Value, Rejected> {
-        let reference = config["Image"]
+    fn process(&self, tags: &image::Tags, config: &Value) -> Result<Value, Rejected> {
+        let requested = config["Image"]
             .as_str()
-            .ok_or_else(|| Rejected::bad("require an immutable image reference"))?;
-        if reference == self.image.reference || self.store.is_none() {
+            .ok_or_else(|| Rejected::bad("missing Docker image reference"))?;
+        let reference = tags.resolve(requested);
+        let process = |image: &request::Image| {
+            if requested == image.reference {
+                image.process(config)
+            } else {
+                let mut canonical = config.clone();
+                canonical["Image"] = json!(image.reference);
+                image.process(&canonical)
+            }
+        };
+        if self.boot_reference(reference) {
+            return process(&self.image);
+        }
+        if self.store.is_none() {
+            // Preserve the existing request validation on the boot-only route.
             return self.image.process(config);
         }
         let mut store = self.image_store()?;
@@ -772,7 +787,7 @@ impl Owner {
             .get(reference)
             .map_err(|error| Rejected::bad(error.to_string()))?
             .ok_or_else(|| Rejected(404, "image is not staged".into()))?;
-        let spec = image.metadata.process(config)?;
+        let spec = process(&image.metadata)?;
         if !store
             .installed(&image)
             .map_err(|error| Rejected::internal(error.to_string()))?
@@ -1034,10 +1049,13 @@ impl Owner {
     }
 
     fn inspect_image(&self, reference: &str) -> Result<Value, Rejected> {
+        let ledger = self.ledger.lock().unwrap();
+        let reference = ledger.tags.resolve(reference);
         let info = |image: &request::Image| {
             json!({
                 "Id":image.config_digest,"Os":"linux","Architecture":"arm64",
                 "Config":image.defaults,"RepoDigests":[image.reference],
+                "RepoTags":ledger.tags.names_for(&image.reference).collect::<Vec<_>>(),
             })
         };
         if self.boot_reference(reference) {
@@ -1051,6 +1069,29 @@ impl Owner {
             .as_ref()
             .map(|image| info(&image.metadata))
             .ok_or_else(missing)
+    }
+
+    fn tag_image(&self, source: &str, repository: &str, tag: &str) -> Result<(), Rejected> {
+        let mut ledger = self.ledger.lock().unwrap();
+        if ledger.poisoned || ledger.closing {
+            return Err(Rejected(409, "native OCI state is unresolved".into()));
+        }
+        let reference = ledger.tags.resolve(source);
+        let target = if self.boot_reference(reference) {
+            self.image.reference.clone()
+        } else {
+            self.store
+                .as_ref()
+                .ok_or_else(|| Rejected(404, "image is not staged".into()))?
+                .lock()
+                .unwrap()
+                .get(reference)
+                .map_err(|_| Rejected(404, "image is not staged".into()))?
+                .ok_or_else(|| Rejected(404, "image is not staged".into()))?
+                .metadata
+                .reference
+        };
+        ledger.tags.insert(repository, tag, target)
     }
 
     fn pull_image(&self, reference: &str) -> Result<Value, Rejected> {
@@ -1076,12 +1117,14 @@ impl Owner {
     }
 
     fn remove_image(&self, reference: &str) -> Result<Value, Rejected> {
-        let ledger = self.ledger.lock().unwrap();
-        if !ledger.active.is_empty()
-            || ledger.poisoned
-            || ledger.closing
-            || self.boot_reference(reference)
-        {
+        let mut ledger = self.ledger.lock().unwrap();
+        if ledger.poisoned || ledger.closing {
+            return Err(Rejected(409, "native OCI state is unresolved".into()));
+        }
+        if let Some(tag) = ledger.tags.remove(reference) {
+            return Ok(json!([{"Untagged":tag}]));
+        }
+        if !ledger.active.is_empty() || self.boot_reference(reference) {
             return Err(Rejected(
                 409,
                 "image is referenced by the boot or a container".into(),
@@ -1092,6 +1135,9 @@ impl Owner {
             .get(reference)
             .map_err(|error| Rejected::bad(error.to_string()))?
             .ok_or_else(|| Rejected(404, "image is not staged".into()))?;
+        if ledger.tags.references_manifest(&image.metadata.reference) {
+            return Err(Rejected(409, "image has local tags".into()));
+        }
         let config = image.metadata.config_digest.clone();
         self.with_guest(|peer| store.remove(peer, image))?;
         Ok(json!([{"Untagged":reference},{"Deleted":config}]))
@@ -1231,9 +1277,9 @@ impl Owner {
                     .expect("Docker config")
                     .remove("ExposedPorts");
             }
-            self.process(&process)?
+            self.process(&ledger.tags, &process)?
         } else {
-            self.process(&config)?
+            self.process(&ledger.tags, &config)?
         };
         if let Some(volume) = &volume {
             spec["volume"] = json!(volume);

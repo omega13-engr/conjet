@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -11,7 +12,137 @@ use conjet_launch_service::wire::Kind;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::{admission_lock, client, private_scratch, CHUNK, SCRATCH};
+use super::{admission_lock, client, private_scratch, Rejected, CHUNK, SCRATCH};
+
+const MAX_TAGS: usize = 64;
+
+#[derive(Default)]
+pub(super) struct Tags(BTreeMap<String, String>);
+
+impl Tags {
+    pub(super) fn insert(
+        &mut self,
+        repository: &str,
+        tag: &str,
+        target: String,
+    ) -> Result<(), Rejected> {
+        let tag = if tag.is_empty() { "latest" } else { tag };
+        let repository = Self::familiar(repository);
+        let valid_repository = !repository.is_empty()
+            && repository.len() <= 200
+            && repository != "sha256"
+            && repository.split('/').all(|part| {
+                part.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    && part.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b)
+                    })
+            });
+        let valid_tag = tag.len() <= 128
+            && tag.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            && tag
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b));
+        if !valid_repository || !valid_tag {
+            return Err(Rejected::bad("invalid local Docker image tag"));
+        }
+        let name = format!("{repository}:{tag}");
+        if self.0.len() >= MAX_TAGS && !self.0.contains_key(&name) {
+            return Err(Rejected(409, "native image tag capacity exceeded".into()));
+        }
+        self.0.insert(name, target);
+        Ok(())
+    }
+
+    fn familiar(reference: &str) -> &str {
+        reference
+            .strip_prefix("docker.io/")
+            .or_else(|| reference.strip_prefix("index.docker.io/"))
+            .map_or(reference, |name| {
+                name.strip_prefix("library/").unwrap_or(name)
+            })
+    }
+
+    fn key(reference: &str) -> std::borrow::Cow<'_, str> {
+        if reference.contains('@') {
+            return reference.into();
+        }
+        let reference = Self::familiar(reference);
+        let last = reference.rsplit('/').next().expect("reference component");
+        if last.contains(':') {
+            reference.into()
+        } else {
+            format!("{reference}:latest").into()
+        }
+    }
+
+    pub(super) fn resolve<'a>(&'a self, reference: &'a str) -> &'a str {
+        if self.0.is_empty() {
+            return reference;
+        }
+        self.0
+            .get(Self::key(reference).as_ref())
+            .map_or(reference, String::as_str)
+    }
+
+    pub(super) fn names_for<'a>(&'a self, reference: &'a str) -> impl Iterator<Item = &'a str> {
+        self.0
+            .iter()
+            .filter_map(move |(name, target)| (target == reference).then_some(name.as_str()))
+    }
+
+    pub(super) fn remove(&mut self, reference: &str) -> Option<String> {
+        let key = Self::key(reference);
+        self.0.remove(key.as_ref()).map(|_| key.into_owned())
+    }
+
+    pub(super) fn references_manifest(&self, reference: &str) -> bool {
+        let digest = reference.rsplit_once('@').map(|(_, digest)| digest);
+        self.0.values().any(|target| {
+            target
+                .rsplit_once('@')
+                .is_some_and(|(_, target)| Some(target) == digest)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tags_resolve_retarget_and_remove_without_network_access() {
+        let mut tags = Tags::default();
+        let first = "localhost/one@sha256:1";
+        let second = "localhost/two@sha256:2";
+        assert_eq!(tags.resolve("local"), "local");
+        tags.insert("docker.io/library/local", "", first.into())
+            .unwrap();
+        assert_eq!(tags.resolve("local"), first);
+        assert_eq!(tags.resolve("docker.io/library/local:latest"), first);
+        assert!(tags.references_manifest("localhost/other@sha256:1"));
+        tags.insert("local", "latest", second.into()).unwrap();
+        assert_eq!(tags.resolve("local:latest"), second);
+        assert!(!tags.references_manifest(first));
+        assert_eq!(tags.names_for(second).collect::<Vec<_>>(), ["local:latest"]);
+        assert_eq!(tags.remove("local").as_deref(), Some("local:latest"));
+        assert_eq!(tags.resolve("local"), "local");
+    }
+
+    #[test]
+    fn tag_namespace_is_bounded_and_cannot_shadow_digests() {
+        let mut tags = Tags::default();
+        for repository in ["", "a//b", "../a", "CAPS", "sha256", "repo@sha256:abc"] {
+            assert!(tags.insert(repository, "latest", "target".into()).is_err());
+        }
+        assert!(tags.insert("local", ".bad", "target".into()).is_err());
+        for index in 0..MAX_TAGS {
+            tags.insert("local", &format!("tag{index}"), "target".into())
+                .unwrap();
+        }
+        assert!(tags.insert("another", "latest", "target".into()).is_err());
+        assert!(tags.insert("local", "tag0", "replacement".into()).is_ok());
+    }
+}
 
 #[derive(Debug, Args)]
 pub(in crate::native) struct InstallOptions {
