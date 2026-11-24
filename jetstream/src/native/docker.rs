@@ -1023,7 +1023,7 @@ impl Owner {
             item.state()
                 .network
                 .as_ref()
-                .is_some_and(|entry| entry.network.scope == BridgeScope::Custom)
+                .is_some_and(|entry| entry.network.scope.subnet() == 0)
         }) {
             return Err(Rejected(
                 409,

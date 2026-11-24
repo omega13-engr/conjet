@@ -50,13 +50,16 @@ impl Network {
             .filter(|value| name(value))
             .filter(|value| !matches!(*value, "none" | "host" | "bridge" | "default"))
             .ok_or_else(|| Rejected::bad("invalid private bridge name"))?;
-        if data["Internal"] != true
-            || (!data["Driver"].is_null() && data["Driver"] != "" && data["Driver"] != "bridge")
-        {
+        if !data["Driver"].is_null() && data["Driver"] != "" && data["Driver"] != "bridge" {
             return Err(Rejected::bad(
-                "native networking requires an internal bridge",
+                "native networking requires the bridge driver",
             ));
         }
+        let scope = match &data["Internal"] {
+            Value::Bool(true) => BridgeScope::Custom,
+            Value::Null | Value::Bool(false) => BridgeScope::CustomRouted,
+            _ => return Err(Rejected::bad("invalid bridge Internal option")),
+        };
         if let Some(ipam) = object(&data["IPAM"], "IPAM")? {
             options(ipam, &["Driver"], "IPAM ")?;
             if !matches!(data["IPAM"]["Driver"].as_str(), None | Some("" | "default")) {
@@ -73,7 +76,7 @@ impl Network {
         Ok(Self {
             id,
             name: name.to_owned(),
-            scope: BridgeScope::Custom,
+            scope,
             labels,
         })
     }
@@ -85,7 +88,8 @@ impl Network {
     pub(super) fn inspect(&self, endpoints: Value) -> Value {
         json!({
             "Name": self.name, "Id": self.id, "Scope":"local", "Driver":"bridge",
-            "EnableIPv4":true, "EnableIPv6":false, "Internal":true, "Attachable":false,
+            "EnableIPv4":true, "EnableIPv6":false,
+            "Internal":self.scope != BridgeScope::CustomRouted, "Attachable":false,
             "IPAM":{"Driver":"default","Config":[
                 {"Subnet":format!("198.18.{}.0/28", self.scope.subnet()),"Gateway":self.scope.gateway().to_string()}]},
             "Labels":self.labels, "Containers":endpoints
@@ -224,11 +228,15 @@ mod tests {
         let id = "a".repeat(64);
         let network = Network::new(&body, id.clone()).unwrap();
         assert!(network.matches(&id[..12]));
+        let routed =
+            Network::new(&json!({"Name":"isolated","Internal":false}), id.clone()).unwrap();
+        assert_eq!(routed.scope, BridgeScope::CustomRouted);
+        assert_eq!(routed.inspect(json!({}))["Internal"], false);
         for invalid in [
             json!({"Name":"none","Internal":true}),
             json!({"Name":"isolated","Driver":"host","Internal":true}),
             json!({"Name":"isolated","Internal":true,"IPAM":{"Config":[{"Subnet":"192.0.2.0/24"}]}}),
-            json!({"Name":"isolated","Internal":false}),
+            json!({"Name":"isolated","Internal":"false"}),
         ] {
             assert!(Network::new(&invalid, id.clone()).is_err());
         }

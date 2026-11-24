@@ -1408,6 +1408,20 @@ private guest default route for a non-internal bridge. Keep the
 release preflight VM air-gapped, retain DNS and host loopback
 publication, and verify network teardown.
 
+Evidence: The routed bridge passed real guest DNS, TCP, reconnect and
+teardown, and reported the original `Internal=false` request. The
+isolated VM retained its air gap. Both full Compose preflights stopped
+at a Docker Hub timeout before network creation. See `SPEED-139/`.
+
+### SPEED-140
+
+Title: Seed exact pinned application images for offline runtime diagnosis
+
+Acceptance: Reuse verified local Node and Redis OCI layouts when
+Docker Hub stalls during Compose setup. Authenticate the exact
+manifest, config and layer extents before publishing. Keep public
+registry acquisition as its own required test.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

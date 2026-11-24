@@ -539,7 +539,7 @@ impl SharedLinks {
                 route.configure_link(peer, true, &[])?;
                 route.configure_link(interface_index(c"lo")?, true, &[])?;
                 route.address_with_prefix(peer, address, SHARED_PREFIX)?;
-                if self.scope == crate::spec::BridgeScope::BuiltIn {
+                if self.scope.has_default_route() {
                     route.default_route(peer, self.scope.gateway())?;
                 }
                 Ok(())

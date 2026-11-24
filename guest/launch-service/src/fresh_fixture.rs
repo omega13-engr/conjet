@@ -1670,7 +1670,10 @@ impl FreshFixture {
         let (handle, requested) = match operation {
             NetworkOperation::Remove => {
                 if ledger.active().any(|record| {
-                    record.network_scope == Some(BridgeScope::Custom)
+                    record
+                        .network_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.subnet() == 0)
                         && !record.network_aliases.is_empty()
                 }) {
                     return Err(("busy", "private bridge still owns workloads"));

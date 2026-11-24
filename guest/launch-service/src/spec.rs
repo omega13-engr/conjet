@@ -125,13 +125,14 @@ impl ResourceLimits {
 #[serde(rename_all = "snake_case")]
 pub enum BridgeScope {
     Custom,
+    CustomRouted,
     BuiltIn,
 }
 
 impl BridgeScope {
     pub const fn subnet(self) -> u8 {
         match self {
-            Self::Custom => 0,
+            Self::Custom | Self::CustomRouted => 0,
             Self::BuiltIn => 1,
         }
     }
@@ -143,8 +144,13 @@ impl BridgeScope {
     pub const fn wire_mode(self) -> &'static str {
         match self {
             Self::Custom => "bridge",
+            Self::CustomRouted => "routed_bridge",
             Self::BuiltIn => "default_bridge",
         }
+    }
+
+    pub const fn has_default_route(self) -> bool {
+        matches!(self, Self::CustomRouted | Self::BuiltIn)
     }
 }
 
@@ -244,6 +250,7 @@ impl LaunchSpec {
     pub fn bridge_scope(&self) -> Option<BridgeScope> {
         match self.network.as_str() {
             "bridge" => Some(BridgeScope::Custom),
+            "routed_bridge" => Some(BridgeScope::CustomRouted),
             "default_bridge" => Some(BridgeScope::BuiltIn),
             _ => None,
         }

@@ -17,10 +17,11 @@ WORKLOAD = runpy.run_path(str(HERE / 'docker-comparison-workloads.py'))
 FROZEN = json.loads((HERE / 'scenarios/docker-comparison-v1.json').read_text())
 
 
-def collect(endpoint, peer, docker, env, output, session, pid):
+def collect(endpoint, peer, docker, env, output, session, pid, *, routed=False):
     tools = MATCHED['TOOLS']
     image = MATCHED['IMAGE']['ref']
     net = 'cj-private'
+    network_mode = [] if routed else ['--internal']
     base = [net if value == 'none' else value for value in MATCHED['FLAGS'][1:]]
     cases = {}
 
@@ -53,11 +54,11 @@ def collect(endpoint, peer, docker, env, output, session, pid):
                 or builtin['IPAM']['Config'] != [{'Subnet': '198.18.1.0/28', 'Gateway': '198.18.1.1'}]):
             raise RuntimeError(f'wrong built-in bridge metadata: {builtin}')
         call('reject_remove_builtin', ['network', 'rm', 'bridge'], code=1, stderr=b'cannot be removed')
-        call('reject_non_internal', ['network', 'create', 'invalid-network'],
-             code=1, stderr=b'native networking requires an internal bridge')
-        identifier = call('create_bridge', ['network', 'create', '--internal', net]).decode().strip()
+        call('reject_non_bridge_driver', ['network', 'create', '--driver', 'host', 'invalid-network'],
+             code=1, stderr=b'native networking requires the bridge driver')
+        identifier = call('create_bridge', ['network', 'create', *network_mode, net]).decode().strip()
         inspected = json.loads(call('inspect_bridge', ['network', 'inspect', identifier]))[0]
-        if inspected['Id'] != identifier or not inspected['Internal'] or inspected['Driver'] != 'bridge':
+        if inspected['Id'] != identifier or inspected['Internal'] == routed or inspected['Driver'] != 'bridge':
             raise RuntimeError(f'wrong bridge metadata: {inspected}')
         call('reject_second_bridge', ['network', 'create', '--internal', 'other-net'],
              code=1, stderr=b'occupied')
@@ -154,7 +155,7 @@ def collect(endpoint, peer, docker, env, output, session, pid):
                 removal.result()
         call('remove_bridge', ['network', 'rm', net], stdout=b'cj-private\n')
         call('inspect_removed', ['network', 'inspect', net], code=1, stderr=b'not found')
-        second = call('recreate_bridge', ['network', 'create', '--internal', net]).decode().strip()
+        second = call('recreate_bridge', ['network', 'create', *network_mode, net]).decode().strip()
         if second == identifier:
             raise RuntimeError('new bridge reused the old network identity')
         call('run_on_recreated_bridge', ['run', '--rm', *base, image, '/bin/true'], stdout=b'')

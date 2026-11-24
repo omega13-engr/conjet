@@ -647,7 +647,8 @@ def native_session(args, root):
                 diagnostic['collect'](directory, vm.pid, output)
             elif args.diagnostics == 'docker-network':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-network.py'))
-                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid,
+                                      routed=args.native_routed_bridge)
             elif args.diagnostics == 'tcp-relay':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-tcp-relay.py'))
                 diagnostic['collect'](directory, vm.pid, output)
@@ -814,6 +815,7 @@ def main():
     parser.add_argument('--compatibility-lifecycle-group',
                         help='run one complete frozen lifecycle group in its own Core boot')
     parser.add_argument('--native-bind-storage', action='store_true')
+    parser.add_argument('--native-routed-bridge', action='store_true')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--volume-phase', choices=('create', 'inspect', 'remove'))
@@ -849,6 +851,8 @@ def main():
     if args.native_bind_storage and (
             args.compatibility_suite != 'storage_network' or args.docker_owner != 'rust'):
         parser.error('bind storage requires the isolated native storage suite')
+    if args.native_routed_bridge and args.diagnostics != 'docker-network':
+        parser.error('select the routed bridge only for the network diagnostic')
     if args.compatibility_lifecycle_group:
         scenarios = json.loads((REPO / 'benchmarks/scenarios/native-compatibility-v1.json').read_text())
         groups = {case['id'].removeprefix('lifecycle/') for group in scenarios['groups']
