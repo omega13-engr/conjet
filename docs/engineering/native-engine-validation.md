@@ -158,6 +158,38 @@ Raw samples, stage data, host observations, launcher commands and hashes
 are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-059/`.
 
+## SPEED-060
+
+In the host-only admission trace, VMM observation to approval had a
+0.113 ms median. Once approved, the launch grant waited a median 32.99 ms
+for the session manager. The grant exchange itself took 0.375 ms. This
+identified a delay before grant delivery inside the API wait span. Both
+measurements used the VMM's host monotonic clock.
+
+The controller now notifies the session manager when it grants the current
+admission. The manager checks the same predicate under the lock to handle
+approvals sent before it starts waiting. At 185 accepted grants per
+diagnostic, the median approval-to-send interval dropped to 0.012 ms
+and p95 dropped from 39.93 ms to 0.021 ms. Observation cadence, the 25 ms
+safety tick, stale checks and the guest cleanup boundary remain in use.
+
+| Pair | Mode | API p50 / p95 / p99 (ms) | CLI p50 / p95 / p99 (ms) |
+| --- | --- | ---: | ---: |
+| 1 | Poll | 76.08 / 87.03 / 93.43 | 67.53 / 76.24 / 79.81 |
+| 1 | Event | 40.86 / 68.18 / 75.01 | 35.02 / 54.41 / 64.85 |
+| 2 | Event | 39.99 / 65.55 / 77.86 | 35.64 / 51.54 / 57.12 |
+| 2 | Poll | 76.04 / 85.24 / 89.35 | 67.49 / 75.91 / 78.28 |
+
+Both alternating pairs used the same release binary, disabled tracing,
+and passed 200 timed operations plus ten warmups per lane and leg. Event
+mode passed growth, payload, churn, independent pressure, PSI recovery
+and idle shrink canaries. The event path is now the default for native
+Core admission. This comparison isolates the admission change within
+Conjet. Kiri parity and a sub-5-ms API median remain unqualified.
+
+Raw grants, A/B launcher settings, stages and memory evidence are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-060/`.
+
 ## SPEED-061
 
 Read-only `e2fsck -fn` on a disposable copy of the archived ext4 disk

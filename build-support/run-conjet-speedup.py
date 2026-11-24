@@ -24,6 +24,7 @@ SCRATCH = SSD / 'dev_workspace/tmp'
 REPO = Path(__file__).resolve().parents[1]
 CONTEXT = 'conjet-speedup'
 DOCKER = Path('/opt/homebrew/bin/docker')
+CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'volume-disk', 'admission-trace')
 
 
 class SessionInterrupted(KeyboardInterrupt):
@@ -452,8 +453,7 @@ def native_session(args, root):
     helpers = (args.native_memd, args.native_reclaimd) if args.native_memd else ()
     pressure_fixture = args.diagnostics == 'dynamic-pressure'
     volume_disk = args.native_volume_disk
-    dynamic_memory = (args.diagnostics in ('dynamic-memory', 'dynamic-pressure', 'volume-disk')
-                      or args.matched_output is not None)
+    dynamic_memory = args.diagnostics in CORE_DIAGNOSTICS or args.matched_output is not None
     markers = []
     try:
         if host == before['endpoint']:
@@ -473,6 +473,10 @@ def native_session(args, root):
         if dynamic_memory:
             vm_command.append('--core-dynamic-memory')
             markers.append('etc/conjet/native-core-admission')
+        if args.diagnostics == 'admission-trace':
+            vm_command.append('--trace-core-admission')
+        if args.native_admission_wake:
+            vm_command += ['--core-admission-wake', args.native_admission_wake]
         if pressure_fixture:
             vm_command.append('--core-pressure-fixture')
             markers.append('etc/conjet/native-core-pressure-fixture')
@@ -694,11 +698,12 @@ def main():
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
-                                                  'volume-disk'),
+                                                  'volume-disk', 'admission-trace'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--volume-phase', choices=('create', 'inspect', 'remove'))
+    parser.add_argument('--native-admission-wake', choices=('poll', 'event'))
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
@@ -721,12 +726,14 @@ def main():
     if args.docker_args[:1] == ['--']:
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
-    if args.matched_output or args.diagnostics in ('memory-telemetry', 'dynamic-memory', 'dynamic-pressure', 'volume-disk'):
+    if args.matched_output or args.diagnostics in (*CORE_DIAGNOSTICS, 'memory-telemetry'):
         if not (args.native_memd and args.native_reclaimd and args.docker_owner == 'rust'):
             parser.error('native timing and memory canaries require both static Core helpers and the Rust owner')
         native_assets += ('native_memd', 'native_reclaimd')
     elif args.native_memd or args.native_reclaimd:
         parser.error('Core memory helpers require a native memory canary')
+    if args.native_admission_wake and not (args.matched_output or args.diagnostics in CORE_DIAGNOSTICS):
+        parser.error('admission wake comparison requires the native Core governor')
     if args.diagnostics == 'volume-disk':
         if (not args.native_volume_disk or not args.volume_phase
                 or args.native_volume_disk.resolve(strict=True) != args.native_volume_disk):

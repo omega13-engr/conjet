@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use conjet_launch_service::handshake::{hex, random, unhex};
 use conjet_launch_service::{core_admission, wire::Kind};
 use jetstream::hvf::native_memory::NativeMemoryAdmission;
@@ -63,6 +63,17 @@ pub(super) struct Options {
     /// Enable the Core controller and require its per-workload admission grant.
     #[arg(long, requires = "guest_memd")]
     core_dynamic_memory: bool,
+    /// Emit host-monotonic Core admission spans to stderr for diagnostics.
+    #[arg(long, requires = "core_dynamic_memory")]
+    trace_core_admission: bool,
+    /// Select the admission delivery mechanism for isolated comparison.
+    #[arg(
+        long,
+        value_enum,
+        default_value = "event",
+        requires = "core_dynamic_memory"
+    )]
+    core_admission_wake: AdmissionWake,
     /// Enable the bounded service pressure fixture on this diagnostic boot.
     #[arg(long, requires = "core_dynamic_memory")]
     core_pressure_fixture: bool,
@@ -83,6 +94,18 @@ struct MemoryHelpers {
     reclaimd: Vec<u8>,
     core_admission: bool,
     core_pressure_fixture: bool,
+}
+
+struct AdmissionControl<'a> {
+    gate: &'a NativeMemoryAdmission,
+    trace: bool,
+    wake: AdmissionWake,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AdmissionWake {
+    Poll,
+    Event,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -225,7 +248,11 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         let control_stop = Arc::clone(&force_stop);
         let finished_signal = &finished;
         let session_identity = &identity;
-        let admission_gate = admission.as_deref();
+        let admission_control = admission.as_deref().map(|gate| AdmissionControl {
+            gate,
+            trace: options.trace_core_admission,
+            wake: options.core_admission_wake,
+        });
         let boot_gate = admission.clone();
         let control = scope.spawn(move || {
             manage_session(
@@ -235,7 +262,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
                 finished_signal,
                 &control_stop,
                 options.lifetime_seconds,
-                admission_gate,
+                admission_control,
             )
         });
         let report = machine.run(HvfBootOptions {
@@ -313,7 +340,7 @@ fn manage_session(
     finished: &AtomicBool,
     force_stop: &AtomicBool,
     lifetime: u64,
-    admission: Option<&NativeMemoryAdmission>,
+    admission: Option<AdmissionControl<'_>>,
 ) -> anyhow::Result<bool> {
     let start = Instant::now();
     let startup = start + Duration::from_secs(15);
@@ -328,16 +355,16 @@ fn manage_session(
             .then(|| client::Connection::open(directory, identity, key).ok())
             .flatten()
         {
-            if let Some(gate) = admission {
+            if let Some(control) = &admission {
                 if admission_boot
                     .as_ref()
                     .is_some_and(|boot| boot != &peer.boot)
                 {
-                    gate.invalidate();
+                    control.gate.invalidate();
                     force_stop.store(true, Ordering::Release);
                     bail!("native admission supervisor generation changed");
                 }
-                if poll_native_admission(&mut peer, gate).is_ok() {
+                if poll_native_admission(&mut peer, control).is_ok() {
                     admission_boot = Some(peer.boot.clone());
                     admission_peer = Some(peer);
                     authenticated = true;
@@ -379,24 +406,26 @@ fn manage_session(
             }
             break;
         }
-        if let (Some(gate), Some(peer)) = (admission, admission_peer.as_mut()) {
-            if poll_native_admission(peer, gate).is_err() {
-                gate.invalidate();
+        if let (Some(control), Some(peer)) = (&admission, admission_peer.as_mut()) {
+            if poll_native_admission(peer, control).is_err() {
+                control.gate.invalidate();
                 admission_peer = None;
             }
         }
-        std::thread::sleep(Duration::from_millis(if admission.is_some() {
-            30
-        } else {
-            100
-        }));
+        match &admission {
+            Some(control) if matches!(control.wake, AdmissionWake::Event) => {
+                control.gate.wait_for_approval(Duration::from_millis(30));
+            }
+            Some(_) => std::thread::sleep(Duration::from_millis(30)),
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
     }
     Ok(ready)
 }
 
 fn poll_native_admission(
     peer: &mut client::Connection,
-    gate: &NativeMemoryAdmission,
+    control: &AdmissionControl<'_>,
 ) -> anyhow::Result<()> {
     let request = |grant: Option<&core_admission::Admission>, boot: &str| {
         json!({
@@ -404,15 +433,30 @@ fn poll_native_admission(
         })
     };
     let timeout = Duration::from_millis(150);
-    for grant in gate.take_grants(Instant::now()) {
+    for grant in control.gate.take_grants(Instant::now()) {
         // Cancellation or deadline can win after the observation. Only the
         // guest authority can grant the exact live ID.
-        match peer.exchange(
+        let sent = Instant::now();
+        let result = peer.exchange(
             Kind::Memory,
             Kind::Memory,
-            &request(Some(&grant), &peer.boot),
+            &request(Some(&grant.admission), &peer.boot),
             timeout,
-        ) {
+        );
+        if control.trace {
+            eprintln!(
+                "{}",
+                json!({
+                    "event": "core_admission",
+                    "id": grant.admission.workload_id,
+                    "observed_to_approval_ns": grant.approved_at.saturating_duration_since(grant.observed_at).as_nanos(),
+                    "approval_to_send_ns": sent.saturating_duration_since(grant.approved_at).as_nanos(),
+                    "reply_ns": sent.elapsed().as_nanos(),
+                    "accepted": result.is_ok(),
+                })
+            );
+        }
+        match result {
             Ok(_) | Err(conjet_launch_service::wire::WireError::PeerError(_)) => {}
             Err(error) => return Err(error.into()),
         }
@@ -425,7 +469,7 @@ fn poll_native_admission(
     )?;
     let report = serde_json::from_value(value["core_admission"].clone())?;
     ensure!(
-        gate.publish(report, Instant::now()),
+        control.gate.publish(report, Instant::now()),
         "invalid native admission observation"
     );
     Ok(())

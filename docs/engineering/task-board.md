@@ -260,14 +260,19 @@ accounted for less than 2 ms of per-stage medians.
 
 Approach: Prefer event completion over measured polling. Use typed ownership, bounded queues and a clone-safe launch boundary; do not perform broad cosmetic rewrites.
 
-Evidence: Pending; no new candidate result.
+Evidence: Host tracing measured 32.99 ms median between Core approval and
+grant send. Direct notification reduced it to 0.012 ms. Two alternating
+release A/B pairs lowered API p50 from 76.04–76.08 ms to 39.99–40.86 ms
+and CLI p50 from 67.49–67.53 ms to 35.02–35.64 ms. Pressure and idle
+qualification passed in event mode. See [SPEED-060 evidence](native-engine-validation.md#speed-060).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
-Review: Pending implementation, validation and independent evidence review.
+Review: Event wake accepted for the isolated candidate. Independent review
+and comparative qualification remain required.
 
-Next Action: Split wait into authenticated admission observation and grant,
-guest execution and teardown, and terminal reply delivery.
+Next Action: Keep the 25 ms safety tick, and profile the remaining wait
+before changing another mechanism.
 
 ### SPEED-061
 

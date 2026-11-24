@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use conjet_launch_service::core_admission::{Admission, Observation, CAPACITY};
@@ -11,12 +11,21 @@ struct Sample {
     seen: Instant,
     owned: usize,
     pending: Vec<Admission>,
-    allowed: bool,
+    approved_at: Option<Instant>,
+}
+
+pub struct Grant {
+    pub admission: Admission,
+    pub observed_at: Instant,
+    pub approved_at: Instant,
 }
 
 /// Connects a boot-scoped authenticated guest poller to the VMM's Core policy.
 #[derive(Debug, Default)]
-pub struct NativeMemoryAdmission(Mutex<Option<Sample>>);
+pub struct NativeMemoryAdmission {
+    sample: Mutex<Option<Sample>>,
+    approval: Condvar,
+}
 
 impl NativeMemoryAdmission {
     pub fn publish(&self, report: Observation, now: Instant) -> bool {
@@ -30,7 +39,7 @@ impl NativeMemoryAdmission {
                             || earlier.workload_id == admission.workload_id
                     })
             });
-        let mut sample = self.0.lock().expect("native memory admission");
+        let mut sample = self.sample.lock().expect("native memory admission");
         if sample.as_ref().is_some_and(|last| now <= last.seen) {
             return false;
         }
@@ -38,41 +47,72 @@ impl NativeMemoryAdmission {
             seen: now,
             owned: report.owned,
             pending: report.pending,
-            allowed: false,
+            approved_at: None,
         });
         valid
     }
 
     pub fn invalidate(&self) {
-        *self.0.lock().expect("native memory admission") = None;
+        *self.sample.lock().expect("native memory admission") = None;
     }
 
     pub(super) fn observe(&self, now: Instant) -> Option<(Instant, usize, bool)> {
-        let sample = self.0.lock().expect("native memory admission");
+        let sample = self.sample.lock().expect("native memory admission");
         let sample = sample
             .as_ref()
             .filter(|sample| now.saturating_duration_since(sample.seen) < MAX_AGE)?;
         Some((
             sample.seen,
             sample.owned,
-            !sample.pending.is_empty() && !sample.allowed,
+            !sample.pending.is_empty() && sample.approved_at.is_none(),
         ))
     }
 
     pub(super) fn allow(&self, seen: Instant) {
-        if let Some(current) = &mut *self.0.lock().expect("native memory admission") {
-            if current.seen == seen {
-                current.allowed = true;
-            }
+        let mut sample = self.sample.lock().expect("native memory admission");
+        let Some(current) = sample.as_mut().filter(|current| current.seen == seen) else {
+            return;
+        };
+        if current.approved_at.is_none() {
+            current.approved_at = Some(Instant::now());
+            self.approval.notify_one();
         }
     }
 
-    pub fn take_grants(&self, now: Instant) -> Vec<Admission> {
-        let mut sample = self.0.lock().expect("native memory admission");
+    pub fn wait_for_approval(&self, interval: Duration) {
+        let sample = self.sample.lock().expect("native memory admission");
+        // With an empty sample this remains the normal observation cadence.
+        // If a grant is already queued, checking the predicate under the lock
+        // prevents losing a notification sent just before this wait.
+        let _ = self
+            .approval
+            .wait_timeout_while(sample, interval, |sample| {
+                !sample
+                    .as_ref()
+                    .is_some_and(|s| s.approved_at.is_some() && !s.pending.is_empty())
+            })
+            .expect("native memory admission");
+    }
+
+    pub fn take_grants(&self, now: Instant) -> Vec<Grant> {
+        let mut sample = self.sample.lock().expect("native memory admission");
         sample
             .as_mut()
-            .filter(|sample| sample.allowed && now.saturating_duration_since(sample.seen) < MAX_AGE)
-            .map(|sample| std::mem::take(&mut sample.pending))
+            .filter(|sample| now.saturating_duration_since(sample.seen) < MAX_AGE)
+            .and_then(|sample| {
+                let approved_at = sample.approved_at?;
+                let observed_at = sample.seen;
+                Some(
+                    std::mem::take(&mut sample.pending)
+                        .into_iter()
+                        .map(|admission| Grant {
+                            admission,
+                            observed_at,
+                            approved_at,
+                        })
+                        .collect(),
+                )
+            })
             .unwrap_or_default()
     }
 }
@@ -104,7 +144,7 @@ mod tests {
         gate.allow(now);
         assert!(gate.take_grants(later).is_empty());
         gate.allow(later);
-        assert_eq!(gate.take_grants(later)[0].sequence, 2);
+        assert_eq!(gate.take_grants(later)[0].admission.sequence, 2);
         assert!(gate.take_grants(later).is_empty());
         assert_eq!(gate.observe(later), Some((later, 1, false)));
         assert!(gate.observe(later + MAX_AGE).is_none());
@@ -127,5 +167,25 @@ mod tests {
         gate.invalidate();
         assert!(gate.take_grants(next).is_empty());
         assert!(gate.observe(next).is_none());
+    }
+
+    #[test]
+    fn approval_wakes_the_consumer_without_waiting_for_the_poll_interval() {
+        let now = Instant::now();
+        let gate = NativeMemoryAdmission::default();
+        assert!(gate.publish(pending(1), now));
+        let (ready, wait) = std::sync::mpsc::channel();
+        let (delivered, result) = std::sync::mpsc::channel();
+        std::thread::scope(|threads| {
+            let gate = &gate;
+            threads.spawn(move || {
+                ready.send(()).unwrap();
+                gate.wait_for_approval(Duration::from_secs(3));
+                delivered.send(gate.take_grants(now).len()).unwrap();
+            });
+            wait.recv().unwrap();
+            gate.allow(now);
+            assert_eq!(result.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        });
     }
 }
