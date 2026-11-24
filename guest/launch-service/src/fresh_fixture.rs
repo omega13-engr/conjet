@@ -258,6 +258,7 @@ struct HelperLaunch {
     spec: String,
     open_stdin: bool,
     live_mounts: Option<LiveMounts>,
+    build_owner: Option<String>,
 }
 
 const BUILD_GENERATIONS: usize = 256;
@@ -417,6 +418,17 @@ struct Trace {
 }
 
 impl Record {
+    fn cgroup_path(&self, oci: bool) -> std::path::PathBuf {
+        let id = &self.handle.workload_id;
+        if let Some(owner) = &self.build_parent {
+            return crate::kernel_fixture::build_cgroup_path(owner).join(id);
+        }
+        if self.buildkit_worker {
+            return crate::kernel_fixture::build_cgroup_path(id);
+        }
+        crate::kernel_fixture::cgroup_scope(id, self.slot.is_some(), oci)
+    }
+
     fn pending_core_admission(&self, now: Instant) -> bool {
         self.phase == Phase::Accepted
             && !self.terminate_requested
@@ -545,7 +557,7 @@ impl Ledger {
                 && record.phase == Phase::Running
                 && !record.cancelled
                 && !record.terminate_requested
-                && cgroup == format!("conjet-native-{id}/workloads/active/{id}")
+                && cgroup == format!("conjet-native-{id}/workloads/active/{id}/{id}")
         })
     }
 
@@ -674,12 +686,8 @@ impl Ledger {
         for record in self.active() {
             let prepared_scope = record.slot.is_some();
             let active = record.slot.as_ref().is_none_or(Slot::claimed);
-            let observed = crate::kernel_fixture::cgroup_observation(
-                &record.handle.workload_id,
-                prepared_scope,
-                oci,
-            )
-            .ok();
+            let path = record.cgroup_path(oci);
+            let observed = crate::cgroups::observation(&path).ok();
             let mut state = json!({
                 "handle": record.handle, "phase": record.phase.name(),
                 "scope": if prepared_scope { "prepared" } else { "active" },
@@ -689,15 +697,24 @@ impl Ledger {
                 "populated": observed.map(|(_, populated)| populated),
             });
             if oci && let Ok(id) = crate::handshake::unhex::<16>(&record.handle.workload_id) {
-                let (mount, scope) =
-                    crate::kernel_fixture::cgroup_paths(&record.handle.workload_id, true);
+                let owner = record
+                    .build_parent
+                    .as_deref()
+                    .unwrap_or(&record.handle.workload_id);
+                let (mut mount, scope) = crate::kernel_fixture::cgroup_paths(owner, true);
+                if record.buildkit_worker || record.build_parent.is_some() {
+                    mount = crate::kernel_fixture::CORE_CGROUP_MOUNT.into();
+                }
                 let overlay = crate::sandbox_fixture::owned_path(id, true);
                 state["paths"] = json!({
                     "cgroup_mount":mount,"cgroup_scope":scope,"overlay":overlay,
-                    "overlay_present":overlay.is_dir(),
+                    "overlay_present":overlay.is_dir(),"cgroup_directory":path,
                 });
+                if let Some(owner) = &record.build_parent {
+                    state["accounted_by"] = json!(owner);
+                }
                 if let Ok((limits, active_pids)) =
-                    crate::kernel_fixture::cgroup_effective_limits(&record.handle.workload_id)
+                    crate::kernel_fixture::cgroup_effective_limits(&path)
                 {
                     state["effective_limits"] = limits;
                     state["active_pids"] = json!(active_pids);
@@ -1395,6 +1412,11 @@ impl FreshFixture {
         let oci_process = self.oci.then(|| HelperLaunch {
             spec: serde_json::to_string(spec).expect("validated OCI spec"),
             open_stdin: spec.open_stdin,
+            build_owner: if spec.buildkit_worker {
+                Some(hex(&id))
+            } else {
+                live.as_ref().map(|build| build.owner.clone())
+            },
             live_mounts: live.map(|build| build.mounts),
         });
         if thread::Builder::new()
@@ -1427,6 +1449,9 @@ impl FreshFixture {
     ) {
         let workload = hex(&id);
         let is_oci = oci_process.is_some();
+        let build_owner = oci_process
+            .as_ref()
+            .and_then(|launch| launch.build_owner.clone());
         let is_worker = {
             let mut ledger = self.ledger.lock().expect("fresh ledger");
             loop {
@@ -1469,14 +1494,35 @@ impl FreshFixture {
         let trace_stamp = || self.trace_core_latency.then(Instant::now);
         let result = intent.record(id).and_then(|()| {
             intent_recorded = trace_stamp();
+            let aggregate = is_worker
+                .then(|| {
+                    let launch = oci_process
+                        .as_ref()
+                        .expect("BuildKit worker has an OCI spec");
+                    let spec: LaunchSpec = serde_json::from_str(&launch.spec)?;
+                    crate::kernel_fixture::BuildAggregate::open(
+                        id,
+                        limits,
+                        spec.memory_swap_disabled,
+                    )
+                })
+                .transpose()?;
             let output = self.run_helper(id, limits, mode, bridge, prepared, oci_process);
-            if is_worker {
+            if let Some(aggregate) = aggregate {
                 self.drain_worker_builds(&workload)?;
+                aggregate.close()?;
             }
             let output = output?;
             output_drained = trace_stamp();
             if is_oci {
                 crate::kernel_fixture::assert_owned_cgroup_absent(id)?;
+                if let Some(owner) = &build_owner
+                    && crate::kernel_fixture::build_cgroup_path(owner)
+                        .join(&workload)
+                        .try_exists()?
+                {
+                    return Err(io::Error::other("BuildKit cgroup child remains"));
+                }
                 crate::sandbox_fixture::assert_owned_absent(id)?;
             }
             intent.complete(id)?;
@@ -1638,6 +1684,12 @@ impl FreshFixture {
                 crate::build_snapshot::mounts::LIVE_FDS,
                 fds.map(|fd| fd.to_string()).join(","),
             );
+        }
+        let build_owner = oci_process
+            .as_ref()
+            .and_then(|launch| launch.build_owner.as_deref());
+        if let Some(owner) = build_owner {
+            command.env(crate::kernel_fixture::BUILD_CGROUP_OWNER, owner);
         }
         let mut child = command
             .args([
@@ -1865,7 +1917,14 @@ impl FreshFixture {
         let finished = child.wait()?;
         let recovered = result.is_err() || !finished.success() || !removed;
         if recovered {
-            crate::kernel_fixture::recover_cgroup(id, oci_process.is_some())?;
+            if let Some(owner) = oci_process
+                .as_ref()
+                .and_then(|launch| launch.build_owner.as_deref())
+            {
+                crate::kernel_fixture::recover_build_child(owner, &workload)?;
+            } else {
+                crate::kernel_fixture::recover_cgroup(id, oci_process.is_some())?;
+            }
             crate::recovery_fixture::reap_owned_children(if oci_process.is_some() {
                 process_group
             } else {
@@ -2243,7 +2302,11 @@ impl FreshFixture {
                             "native statistics require a running workload",
                         ));
                     }
-                    let usage = crate::cgroups::usage(&handle.workload_id).map_err(|_| {
+                    let path = guard
+                        .record(&handle.workload_id)
+                        .expect("checked workload")
+                        .cgroup_path(true);
+                    let usage = crate::cgroups::usage(&path).map_err(|_| {
                         (
                             "stats_unavailable",
                             "workload cgroup statistics are unavailable",

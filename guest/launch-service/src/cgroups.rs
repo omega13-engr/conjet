@@ -17,7 +17,7 @@ pub struct WorkloadCgroup {
     path: PathBuf,
 }
 
-pub(crate) fn usage(workload: &str) -> io::Result<CgroupUsage> {
+pub(crate) fn usage(directory: &Path) -> io::Result<CgroupUsage> {
     fn read(path: &Path) -> io::Result<String> {
         let mut value = String::new();
         File::open(path)?.take(16_385).read_to_string(&mut value)?;
@@ -41,8 +41,6 @@ pub(crate) fn usage(workload: &str) -> io::Result<CgroupUsage> {
             .ok_or_else(|| io::Error::other(format!("missing kernel statistic {key}")))
     }
 
-    let (root, scope) = crate::kernel_fixture::cgroup_paths(workload, true);
-    let directory = root.join(scope).join("workloads/active").join(workload);
     let cpu = read(&directory.join("cpu.stat"))?;
     let memory = read(&directory.join("memory.stat"))?;
     let memory_limit = read(&directory.join("memory.max"))?;

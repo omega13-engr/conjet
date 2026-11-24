@@ -16,7 +16,7 @@ const RECLAIMD: &str = "/etc/conjet/conjet-reclaimd";
 
 fn core_cgroups() -> io::Result<kernel_fixture::CgroupMount> {
     std::fs::create_dir("/sys/fs")?;
-    let root = Path::new("/sys/fs/cgroup");
+    let root = Path::new(kernel_fixture::CORE_CGROUP_MOUNT);
     let mount = kernel_fixture::CgroupMount::new(root)?;
     let conjet = root.join("conjet.slice");
     write_control(root, "cgroup.subtree_control", "+memory")?;
@@ -153,6 +153,7 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
 
 fn recover_oci(id: [u8; 16]) -> io::Result<()> {
     kernel_fixture::recover_cgroup(id, true)?;
+    kernel_fixture::recover_build_aggregate(id)?;
     sandbox_fixture::recover(id, true)?;
     kernel_fixture::assert_owned_cgroup_absent(id)?;
     sandbox_fixture::assert_owned_absent(id)?;

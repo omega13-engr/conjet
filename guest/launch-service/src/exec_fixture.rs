@@ -538,8 +538,13 @@ pub fn run_helper(
         .collect();
     let cwd = CString::new(spec.cwd.as_bytes())?;
     let executables = program_paths(&spec)?;
-    let (mount, scope) = crate::kernel_fixture::cgroup_paths(&workload, true);
-    let cgroup = mount.join(scope).join("workloads/active").join(&workload);
+    let aggregate = crate::kernel_fixture::build_cgroup_path(&workload);
+    let worker = aggregate.join(&workload);
+    let cgroup = if worker.is_dir() {
+        worker
+    } else {
+        crate::kernel_fixture::cgroup_scope(&workload, false, true)
+    };
     crate::cgroups::write_control(&cgroup, "cgroup.procs", "0")?;
     security::clear_supplementary_groups()?;
     let flags = libc::CLONE_NEWUSER

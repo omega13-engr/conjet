@@ -17,6 +17,8 @@ use crate::spec::{MIN_MEMORY_BYTES, ResourceLimits};
 const CONTROLLERS: &str = "+cpu +memory +pids";
 const CGROUP_MOUNT: &str = "/run/conjet/probe-cgroup";
 const CGROUP_ROOT: &str = "conjet-native";
+pub(crate) const CORE_CGROUP_MOUNT: &str = "/sys/fs/cgroup";
+pub(crate) const BUILD_CGROUP_OWNER: &str = "CONJET_NATIVE_BUILD_CGROUP_OWNER";
 
 pub(crate) fn cgroup_paths(id: &str, oci: bool) -> (PathBuf, String) {
     if oci {
@@ -27,6 +29,80 @@ pub(crate) fn cgroup_paths(id: &str, oci: bool) -> (PathBuf, String) {
     } else {
         (PathBuf::from(CGROUP_MOUNT), CGROUP_ROOT.into())
     }
+}
+
+pub(crate) fn build_cgroup_path(owner: &str) -> PathBuf {
+    Path::new(CORE_CGROUP_MOUNT)
+        .join(format!("{CGROUP_ROOT}-{owner}"))
+        .join("workloads/active")
+        .join(owner)
+}
+
+fn prepare_cgroup_scope(
+    root: &Path,
+    name: &str,
+    scope: &str,
+    controllers: &str,
+) -> io::Result<PathBuf> {
+    let group = root.join(name);
+    let workloads = group.join("workloads");
+    let scope = workloads.join(scope);
+    write_control(root, "cgroup.subtree_control", controllers)?;
+    for directory in [&group, &workloads, &scope] {
+        std::fs::create_dir(directory)?;
+        write_control(directory, "cgroup.subtree_control", controllers)?;
+    }
+    Ok(scope)
+}
+
+pub(crate) struct BuildAggregate(WorkloadCgroup);
+
+impl BuildAggregate {
+    pub(crate) fn open(
+        id: [u8; 16],
+        limits: ResourceLimits,
+        disable_swap: bool,
+    ) -> io::Result<Self> {
+        let owner = handshake::hex(&id);
+        let root = Path::new(CORE_CGROUP_MOUNT);
+        let controllers = std::fs::read_to_string(root.join("cgroup.controllers"))?;
+        let controllers = if controllers
+            .split_ascii_whitespace()
+            .any(|name| name == "io")
+        {
+            "+cpu +memory +pids +io"
+        } else {
+            CONTROLLERS
+        };
+        let group = format!("{CGROUP_ROOT}-{owner}");
+        let result = (|| {
+            let scope = prepare_cgroup_scope(root, &group, "active", controllers)?;
+            let aggregate = WorkloadCgroup::create(&scope, id, limits, disable_swap)?;
+            write_control(aggregate.path(), "cgroup.subtree_control", controllers)?;
+            Ok(Self(aggregate))
+        })();
+        if let Err(error) = &result
+            && let Err(cleanup) = recover_build_aggregate(id)
+        {
+            return Err(io::Error::other(format!(
+                "BuildKit cgroup setup failed: {error}; cleanup failed: {cleanup}"
+            )));
+        }
+        result
+    }
+
+    pub(crate) fn close(self) -> io::Result<()> {
+        self.0.remove_empty()?;
+        scope_ancestors(self.0.path().parent().expect("aggregate scope"))
+            .into_iter()
+            .try_for_each(std::fs::remove_dir)
+    }
+}
+
+fn scope_ancestors(scope: &Path) -> [&Path; 3] {
+    let workloads = scope.parent().expect("cgroup scope parent");
+    let root = workloads.parent().expect("cgroup workload parent");
+    [scope, workloads, root]
 }
 
 pub(crate) fn test_mode(mode: &str) -> bool {
@@ -93,6 +169,7 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
             process: None,
             stdin: None,
             live_mounts: None,
+            build_owner: None,
         },
     )
 }
@@ -183,6 +260,16 @@ pub fn run_helper(
             .and_then(|spec| spec.build_snapshot.as_ref())
             .is_some_and(|snapshot| snapshot.live_worker),
     )?;
+    let build_owner = std::env::var(BUILD_CGROUP_OWNER).ok();
+    let worker = process.as_ref().is_some_and(|spec| spec.buildkit_worker);
+    if build_owner.is_some() != (worker || live_mounts.is_some()) {
+        return Err("unexpected BuildKit cgroup ownership".into());
+    }
+    if let Some(owner) = &build_owner
+        && (handshake::unhex::<16>(owner)? == id) != worker
+    {
+        return Err("unexpected BuildKit cgroup generation".into());
+    }
     run(
         id,
         limits,
@@ -195,6 +282,7 @@ pub fn run_helper(
             process: process.as_ref(),
             stdin,
             live_mounts,
+            build_owner: build_owner.as_deref(),
         },
     )
 }
@@ -208,6 +296,7 @@ struct RunProfile<'a> {
     process: Option<&'a crate::spec::LaunchSpec>,
     stdin: Option<std::fs::File>,
     live_mounts: Option<crate::build_snapshot::mounts::LiveMounts>,
+    build_owner: Option<&'a str>,
 }
 
 fn run(
@@ -224,6 +313,7 @@ fn run(
         process,
         stdin,
         live_mounts,
+        build_owner,
     } = profile;
     if controlled {
         notify_control(b'P', &[])?;
@@ -257,21 +347,30 @@ fn run(
         .collect::<Vec<_>>();
     security::checked(unsafe { libc::setgroups(groups.len(), groups.as_ptr()) })?;
     let (mount_path, root_name) = cgroup_paths(&handshake::hex(&id), process.is_some());
-    let mount = CgroupMount::new(&mount_path)?;
+    let mount = build_owner
+        .is_none()
+        .then(|| CgroupMount::new(&mount_path))
+        .transpose()?;
     inject(mode, "fault-mount");
-    let root = mount.path.join(root_name);
-    let workloads = root.join("workloads");
-    let scope = workloads.join(if prepared { "prepared" } else { "active" });
-    write_control(&mount.path, "cgroup.subtree_control", CONTROLLERS)?;
-    for directory in [&root, &workloads, &scope] {
-        std::fs::create_dir(directory)?;
-        write_control(directory, "cgroup.subtree_control", CONTROLLERS)?;
-    }
+    let scope = match build_owner {
+        Some(owner) => build_cgroup_path(owner),
+        None => prepare_cgroup_scope(
+            &mount_path,
+            &root_name,
+            if prepared { "prepared" } else { "active" },
+            CONTROLLERS,
+        )?,
+    };
+    let worker = process.is_some_and(|spec| spec.buildkit_worker);
     let cgroup = WorkloadCgroup::create(
         &scope,
         id,
-        limits,
-        process.is_some_and(|spec| spec.memory_swap_disabled),
+        if worker {
+            ResourceLimits::UNBOUNDED
+        } else {
+            limits
+        },
+        !worker && process.is_some_and(|spec| spec.memory_swap_disabled),
     )?;
     inject(mode, "fault-cgroup");
     let mut bridge = (network && process.is_none())
@@ -317,10 +416,12 @@ fn run(
         cgroup.remove_empty()?;
     }
     drop(cgroup);
-    for path in [&scope, &workloads, &root] {
-        std::fs::remove_dir(path)?;
+    if let Some(mount) = mount {
+        scope_ancestors(&scope)
+            .into_iter()
+            .try_for_each(std::fs::remove_dir)?;
+        mount.unmount()?;
     }
-    mount.unmount()?;
     if let Some(proc_mount) = proc_mount {
         proc_mount.unmount()?;
     }
@@ -482,7 +583,13 @@ fn clone_and_reap(
             }
             let cgroup_view = process
                 .filter(|spec| spec.build_snapshot.is_none())
-                .map(|_| cgroup.path());
+                .map(|spec| {
+                    if spec.buildkit_worker {
+                        cgroup.path().parent().expect("BuildKit aggregate cgroup")
+                    } else {
+                        cgroup.path()
+                    }
+                });
             if let Err(error) = sandbox.enter(snapshot_mount, sysfs_mount, cgroup_view, || {
                 if prepared {
                     stop_for_tracer()?;
@@ -987,22 +1094,7 @@ pub(crate) fn recover_cgroup(id: [u8; 16], oci: bool) -> io::Result<()> {
         for name in ["active", "prepared"] {
             let scope = workloads.join(name);
             let leaf = scope.join(handshake::hex(&id));
-            if leaf.try_exists()? {
-                write_control(&leaf, "cgroup.kill", "1")?;
-                let deadline = Instant::now() + Duration::from_secs(2);
-                loop {
-                    match std::fs::remove_dir(&leaf) {
-                        Ok(()) => break,
-                        Err(error)
-                            if error.raw_os_error() == Some(libc::EBUSY)
-                                && Instant::now() < deadline =>
-                        {
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-            }
+            recover_cgroup_leaf(&leaf)?;
             if scope.try_exists()? {
                 std::fs::remove_dir(scope)?;
             }
@@ -1019,12 +1111,54 @@ pub(crate) fn recover_cgroup(id: [u8; 16], oci: bool) -> io::Result<()> {
     std::fs::remove_dir(mount)
 }
 
-pub(crate) fn cgroup_observation(id: &str, prepared: bool, oci: bool) -> io::Result<(u64, bool)> {
-    crate::cgroups::observation(&cgroup_scope(id, prepared, oci))
+fn recover_cgroup_leaf(path: &Path) -> io::Result<()> {
+    if !path.try_exists()? {
+        return Ok(());
+    }
+    write_control(path, "cgroup.kill", "1")?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::fs::remove_dir(path) {
+            Err(error)
+                if error.raw_os_error() == Some(libc::EBUSY) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
 }
 
-pub(crate) fn cgroup_effective_limits(id: &str) -> io::Result<(serde_json::Value, u64)> {
-    let dir = cgroup_scope(id, false, true);
+pub(crate) fn recover_build_child(owner: &str, child: &str) -> io::Result<()> {
+    recover_cgroup_leaf(&build_cgroup_path(owner).join(child))
+}
+
+pub(crate) fn recover_build_aggregate(id: [u8; 16]) -> io::Result<()> {
+    let owner = handshake::hex(&id);
+    let aggregate = build_cgroup_path(&owner);
+    if aggregate.try_exists()? {
+        for entry in std::fs::read_dir(&aggregate)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            handshake::unhex::<16>(name.to_str().unwrap_or_default()).map_err(io::Error::other)?;
+            recover_cgroup_leaf(&entry.path())?;
+        }
+        recover_cgroup_leaf(&aggregate)?;
+    }
+    for directory in scope_ancestors(aggregate.parent().expect("aggregate scope")) {
+        match std::fs::remove_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn cgroup_effective_limits(dir: &Path) -> io::Result<(serde_json::Value, u64)> {
     let read = |file| std::fs::read_to_string(dir.join(file)).map(|value| value.trim().to_owned());
     let limits = serde_json::json!({
         "memory_max":read("memory.max")?,
@@ -1035,7 +1169,7 @@ pub(crate) fn cgroup_effective_limits(id: &str) -> io::Result<(serde_json::Value
     Ok((limits, active))
 }
 
-fn cgroup_scope(id: &str, prepared: bool, oci: bool) -> std::path::PathBuf {
+pub(crate) fn cgroup_scope(id: &str, prepared: bool, oci: bool) -> PathBuf {
     let (mount, root) = cgroup_paths(id, oci);
     mount
         .join(root)

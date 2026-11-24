@@ -169,11 +169,7 @@ fn process_spec(
         bind: None,
         build_snapshot: Some(snapshot),
         limits: if live {
-            ResourceLimits {
-                memory_bytes: 0,
-                pids: 0,
-                cpu_millicores: 0,
-            }
+            ResourceLimits::UNBOUNDED
         } else {
             NATIVE_LIMITS
         },

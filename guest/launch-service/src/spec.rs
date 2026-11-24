@@ -193,6 +193,13 @@ pub struct ResourceLimits {
 }
 
 impl ResourceLimits {
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) const UNBOUNDED: Self = Self {
+        memory_bytes: 0,
+        pids: 0,
+        cpu_millicores: 0,
+    };
+
     pub fn has_unlimited(self) -> bool {
         self.memory_bytes == 0 || self.pids == 0 || self.cpu_millicores == 0
     }

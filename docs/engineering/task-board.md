@@ -1817,6 +1817,22 @@ the original worker resource semantics, Core admission and memory
 ownership. Verify worker cancellation drains and removes every owned
 RUN before the cache lease is released.
 
+Evidence: A pinned Buildx Node solve allocated 96 MiB inside RUN and
+reported the marker after the allocation. Core observed one populated
+109,809,664-byte RUN child inside the worker's aggregate cgroup. The
+original worker observer read CPU, current and peak memory, and block I/O
+from the aggregate. Docker refused active cache removal. Buildx exited 130
+after SIGINT, the RUN disappeared from the active ledger and the original
+Node solve exported a Docker tarball on that worker. The launcher verified
+shutdown, production fingerprints and disk release. Offline ext4 checks
+passed. See `SPEED-165/cj-compat.tMPK1e-aggregate-live-proof/`.
+
+The replacement-builder run captured exit signal 9 and complete cleanup
+for the exact RUN handle. It removed the first worker and cache, then a
+distinct builder bootstrapped and exported the original Node tarball.
+The Docker image load gate remains open. See
+`SPEED-165/cj-compat.tMPK1e-aggregate-replacement/`.
+
 ### SPEED-161
 
 Title: Preserve frozen Dockerfile and base-layer metadata in the worker
@@ -2006,6 +2022,13 @@ Buildx bootstrap, Docker archives, default bridge, frozen Node/Redis
 workloads, and broader control and OOM coverage remain open. Core
 memory and supported regressions passed. A new full SPEED-065
 comparison remains blocked. [Exact release results](native-compatibility.md#exact-release-gate-result)
+
+The refreshed `a792b4c` baseline returned 41 PASS and 30 FAIL on one
+recorded release artifact set. The shared lifecycle VM reached its 600 s
+lifetime cutoff in the final group. Its original result and cleanup gap
+remain recorded. The twelve independent group boots preserve the 2,000
+samples and ten warmups per case. See the 71-row ledger, launcher reports
+and six binary hashes in `SPEED-098/cj-compat.tMPK1e-a792b4c/`.
 
 
 ### SPEED-025
