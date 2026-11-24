@@ -58,3 +58,24 @@ Raw attempts and binary identities are under `SPEED-091/` on ExternalSSD.
 This increment verifies the pinned Alpine default and numeric mappings.
 Named-account and single-ID resolution against the image's account
 database and the full original lifecycle remain open.
+
+## SPEED-098 fail-closed preflight
+
+The native launcher accepts `--diagnostics compatibility-preflight
+--compatibility-suite <suite>`. Run separate owned boots for
+`lifecycle`, `images`, `builds`, `compose`, `control`,
+`storage_network` and `stress`. It uses the frozen scripts and
+Docker, Buildx and Compose pins, requires the native Rust owner and
+both Core memory helpers, and writes an operation report beside the
+launcher hashes, commands and cleanup. A preflight launcher exit
+confirms capture and cleanup. Required assertions still fail when
+their operations are missing or unsupported.
+
+Record the SHA-256 of the exact release CLI, daemon, VMM, guest and
+two Core helpers in `release-sha256.txt` in the ExternalSSD evidence
+root. Run `python3 benchmarks/native-compatibility-gate.py --evidence
+"$evidence" --revision "$candidate_revision"` after the native
+preflights and regression canaries. Its summary enumerates all 71
+cases. It checks evidence against the release identity, Core policy,
+production fingerprint, guest shutdown and host removal. An unknown
+or unverified case remains failed. A nonzero exit blocks SPEED-065.

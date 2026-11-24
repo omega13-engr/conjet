@@ -603,6 +603,9 @@ def native_session(args, root):
             elif args.diagnostics == 'credentials':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-credentials.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
+            elif args.diagnostics == 'compatibility-preflight':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-compatibility-preflight.py'))
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite)
             elif args.diagnostics == 'guest-bridge':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-bridge.py'))
                 diagnostic['collect'](directory, vm.pid, output)
@@ -760,8 +763,11 @@ def main():
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
                                                   'volume-disk', 'mounted-volume', 'admission-trace', 'compose',
-                                                  'build-snapshot', 'build-bundle', 'pending-watch'),
+                                                  'build-snapshot', 'build-bundle', 'pending-watch', 'compatibility-preflight'),
                         help='run native-only diagnostic canaries')
+    parser.add_argument('--compatibility-suite',
+                        choices=('lifecycle', 'images', 'builds', 'compose', 'control',
+                                 'storage_network', 'stress'))
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--volume-phase', choices=('create', 'inspect', 'remove'))
@@ -791,10 +797,13 @@ def main():
                         metavar='0..600', help='keep the verified VM alive briefly for QA')
     parser.add_argument('docker_args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if bool(args.compatibility_suite) != (args.diagnostics == 'compatibility-preflight'):
+        parser.error('select one frozen suite for the native compatibility preflight')
     if args.docker_args[:1] == ['--']:
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
-    if (args.matched_output or args.diagnostics in (*CORE_DIAGNOSTICS, 'memory-telemetry')
+    if (args.matched_output or args.diagnostics in (*CORE_DIAGNOSTICS, 'memory-telemetry',
+                                                   'compatibility-preflight')
             or args.native_memd or args.native_reclaimd):
         if not (args.native_memd and args.native_reclaimd and args.docker_owner == 'rust'):
             parser.error('native timing and memory canaries require both static Core helpers and the Rust owner')
@@ -882,9 +891,10 @@ def main():
         if args.diagnostics == 'trace' and args.docker_owner != 'python':
             parser.error('request Python reference tracing with --docker-owner python')
         if (args.diagnostics in ('concurrency', 'concurrency-loss', 'streaming', 'exec', 'credentials',
+                                 'compatibility-preflight',
                                  'guest-bridge', 'docker-network', 'tcp-relay', 'published-port')
                 and args.docker_owner != 'rust'):
-            parser.error('Docker overlap and streaming checks require the Rust owner')
+            parser.error('selected native Docker diagnostics require the Rust owner')
         if any((args.network_helper, args.core_assets, args.benchmark_output, args.comparison_output)):
             parser.error('legacy settings require --legacy-baseline')
         if not args.native_evidence or not all(getattr(args, name) for name in native_assets):

@@ -872,6 +872,11 @@ Acceptance: Keep the unchanged concurrency 1/2/4/8 workloads,
 effective limits, cancellation, guest OOM attribution, active-data
 checks and fresh recovery.
 
+Evidence: The original stress runner passed 400 measured fixture
+launches and 40 warmups across concurrency 1, 2, 4 and 8 with the
+mapped Alpine default. The Node prepull failed before the original
+OOM and recovery fixture. Completion remains open.
+
 ### SPEED-098
 
 Title: Gate the full comparison on release compatibility
@@ -880,6 +885,11 @@ Acceptance: Record all 71 frozen required cases against one exact
 native release artifact set, including advertised-feature regressions
 and Core dynamic memory. Verify production and disposable cleanup.
 Only a complete PASS authorizes a new full SPEED-065 matrix.
+
+Evidence: The native launcher can run the unchanged suite scripts as
+isolated preflight canaries and record binary identities and cleanup.
+The gate enumerates every case and fails missing or mismatched release
+evidence. [Compatibility procedure](native-compatibility.md#speed-098-fail-closed-preflight)
 
 
 ### SPEED-025
