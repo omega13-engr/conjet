@@ -136,7 +136,7 @@ impl Entry {
     }
 
     pub(super) fn run(&self, owner: &Owner, handle: Value) -> Result {
-        let result = self.execute(owner, handle);
+        let result = execute(owner, handle, &self.argv, self.output, BUDGET_MS);
         let (status, reply) = match result {
             Ok(result) => result,
             Err(error) => (
@@ -150,72 +150,78 @@ impl Entry {
         *self.state.lock().unwrap() = State::Finished(status);
         reply
     }
+}
 
-    fn execute(&self, owner: &Owner, handle: Value) -> std::result::Result<(i64, Result), String> {
-        let mut control = owner
-            .exec_peer
-            .try_lock()
-            .map_err(|_| "native exec slot is occupied")?;
-        if control.is_none() {
-            let native = owner.native.lock().unwrap();
-            let candidate =
-                client::Connection::open(&native.peer_directory, &native.identity, &native.key)
-                    .map_err(|error| error.to_string())?;
-            if !candidate.oci || candidate.boot != native.boot {
-                return Err("native exec boot generation changed".into());
-            }
-            *control = Some(candidate);
+pub(super) fn execute(
+    owner: &Owner,
+    handle: Value,
+    argv: &[String],
+    enabled: [bool; 2],
+    budget_ms: u64,
+) -> std::result::Result<(i64, Result), String> {
+    let mut control = owner
+        .exec_peer
+        .try_lock()
+        .map_err(|_| "native exec slot is occupied")?;
+    if control.is_none() {
+        let native = owner.native.lock().unwrap();
+        let candidate =
+            client::Connection::open(&native.peer_directory, &native.identity, &native.key)
+                .map_err(|error| error.to_string())?;
+        if !candidate.oci || candidate.boot != native.boot {
+            return Err("native exec boot generation changed".into());
         }
-        let connected = control.as_mut().expect("exec peer");
-        let reply = connected.exchange(
-            Kind::Exec,
-            Kind::Exec,
-            &json!({"handle":handle,"budget_ms":BUDGET_MS,"argv":self.argv}),
-            Duration::from_millis(BUDGET_MS + 1000),
-        );
-        let reply = match reply {
-            Ok(reply) => reply,
-            Err(WireError::PeerError(code)) => return Err(format!("native exec rejected: {code}")),
-            Err(error) => {
-                *control = None;
-                return Err(format!("native exec outcome is unresolved: {error}"));
-            }
-        };
-        let code = reply["exit_code"]
-            .as_i64()
-            .filter(|code| (0..=255).contains(code))
-            .ok_or("invalid native exec exit status")?;
-        let mut output: [Vec<u8>; 2] = Default::default();
-        let mut overflow = false;
-        let mut bytes = 0;
-        for (index, stream) in ["stdout", "stderr"].iter().enumerate() {
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(
-                    reply[*stream]["data"]
-                        .as_str()
-                        .ok_or("missing native exec output")?,
-                )
-                .map_err(|_| "invalid native exec encoding")?;
-            bytes += decoded.len();
-            if bytes > CHUNK {
-                return Err("native exec output exceeds its wire bound".into());
-            }
-            overflow |= reply[*stream]["dropped_bytes"]
-                .as_u64()
-                .ok_or("missing exec drop count")?
-                != 0;
-            if self.output[index] {
-                output[index] = decoded;
-            }
-        }
-        Ok((
-            code,
-            Result {
-                output,
-                error: overflow.then(|| "native exec output exceeds the retained limit".into()),
-            },
-        ))
+        *control = Some(candidate);
     }
+    let connected = control.as_mut().expect("exec peer");
+    let reply = connected.exchange(
+        Kind::Exec,
+        Kind::Exec,
+        &json!({"handle":handle,"budget_ms":budget_ms,"argv":argv}),
+        Duration::from_millis(budget_ms + 1000),
+    );
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(WireError::PeerError(code)) => return Err(format!("native exec rejected: {code}")),
+        Err(error) => {
+            *control = None;
+            return Err(format!("native exec outcome is unresolved: {error}"));
+        }
+    };
+    let code = reply["exit_code"]
+        .as_i64()
+        .filter(|code| (0..=255).contains(code))
+        .ok_or("invalid native exec exit status")?;
+    let mut output: [Vec<u8>; 2] = Default::default();
+    let mut overflow = false;
+    let mut bytes = 0;
+    for (index, stream) in ["stdout", "stderr"].iter().enumerate() {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(
+                reply[*stream]["data"]
+                    .as_str()
+                    .ok_or("missing native exec output")?,
+            )
+            .map_err(|_| "invalid native exec encoding")?;
+        bytes += decoded.len();
+        if bytes > CHUNK {
+            return Err("native exec output exceeds its wire bound".into());
+        }
+        overflow |= reply[*stream]["dropped_bytes"]
+            .as_u64()
+            .ok_or("missing exec drop count")?
+            != 0;
+        if enabled[index] {
+            output[index] = decoded;
+        }
+    }
+    Ok((
+        code,
+        Result {
+            output,
+            error: overflow.then(|| "native exec output exceeds the retained limit".into()),
+        },
+    ))
 }
 
 impl Owner {

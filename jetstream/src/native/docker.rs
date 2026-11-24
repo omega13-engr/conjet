@@ -1,6 +1,7 @@
 //! Bounded Docker compatibility endpoint for the isolated OCI candidate.
 mod discovery;
 mod exec;
+mod health;
 mod http;
 mod image;
 mod network;
@@ -401,6 +402,7 @@ impl Native {
 }
 
 fn wait_for_native(
+    owner: &Owner,
     admission: &mut Admission,
     item: &Item,
     generation: u64,
@@ -413,12 +415,17 @@ fn wait_for_native(
     let mut sent_signal = 0;
     let mut waits = 0;
     let mut awaiting_address = item.state().network.is_some();
+    let mut awaiting_health = item.container.healthcheck.is_some();
     while state["cleanup"] != "complete" {
         ensure!(
             state["cleanup"] != "failed" && admitted.elapsed() < Duration::from_secs(32),
             "native guest cleanup remains unresolved"
         );
         let requested = item.container.cancel.load(Ordering::Acquire);
+        if requested == 0 && item.container.healthcheck.is_some() && state["phase"] == "running" {
+            awaiting_health = false;
+            health::probe(owner, item, generation, &handle);
+        }
         let result = if requested != 0 && requested != sent_signal {
             sent_signal = requested;
             peer.exchange(
@@ -435,7 +442,7 @@ fn wait_for_native(
             };
             peer.exchange(
                 Kind::Wait, Kind::State,
-                &json!({"handle":handle,"after_revision":if awaiting_address { state["revision"].as_u64().context("invalid workload revision")? } else { u64::MAX },"budget_ms":100,"terminal_output":true,
+                &json!({"handle":handle,"after_revision":if awaiting_address || awaiting_health { state["revision"].as_u64().context("invalid workload revision")? } else { u64::MAX },"budget_ms":100,"terminal_output":true,
                         "live_output":{"stdout":stdout,"stderr":stderr}}),
                 Duration::from_secs(2),
             )
@@ -553,6 +560,7 @@ struct Container {
     spec: Value,
     volume: Option<conjet_launch_service::spec::VolumeMount>,
     created: u64,
+    healthcheck: Option<health::Config>,
     auto_remove: bool,
     cancel: AtomicU8,
 }
@@ -569,6 +577,7 @@ struct Lifecycle {
     native_handle: Option<Value>,
     network: Option<network::Attachment>,
     network_address: Option<String>,
+    health: Option<health::State>,
 }
 
 impl Lifecycle {
@@ -1176,10 +1185,11 @@ impl Owner {
                 process["NetworkingConfig"] = Value::Null;
             }
             if volume.is_some() {
-                process["HostConfig"]
+                let host = process["HostConfig"]
                     .as_object_mut()
-                    .expect("Docker host config")
-                    .remove("Mounts");
+                    .expect("Docker host config");
+                host.remove("Mounts");
+                host.remove("Binds");
             }
             if publication.is_some() {
                 process["HostConfig"]
@@ -1198,6 +1208,7 @@ impl Owner {
         if let Some(volume) = &volume {
             spec["volume"] = json!(volume);
         }
+        let healthcheck = health::Config::parse(&config["Healthcheck"], &spec)?;
         let published = publication
             .map(|request| {
                 let endpoint = {
@@ -1224,6 +1235,7 @@ impl Owner {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
+                healthcheck,
                 auto_remove,
                 cancel: AtomicU8::new(0),
             },
@@ -1331,6 +1343,11 @@ impl Owner {
         state.live = Default::default();
         state.native_handle = None;
         state.network_address = None;
+        state.health = item
+            .container
+            .healthcheck
+            .as_ref()
+            .map(|_| health::State::starting(Instant::now()));
         state.started = true;
         if restart {
             self.event(&mut ledger, "restart", item, None);
@@ -1358,7 +1375,7 @@ impl Owner {
                 .begin(spec.unwrap_or(&item.container.spec));
             admitted.and_then(|mut admitted| {
                 item.state().native_handle = Some(admitted.state["handle"].clone());
-                let result = wait_for_native(&mut admitted, &item, generation);
+                let result = wait_for_native(self, &mut admitted, &item, generation);
                 self.native.lock().unwrap().finish(admitted, result.is_ok());
                 result
             })

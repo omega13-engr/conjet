@@ -157,6 +157,7 @@ impl Image {
                 "AttachStdout",
                 "AttachStderr",
                 "Labels",
+                "Healthcheck",
                 "NetworkingConfig",
             ],
             "",

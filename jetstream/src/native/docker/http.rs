@@ -619,6 +619,13 @@ fn container(
                 .as_ref()
                 .map_or("none", |attachment| attachment.network.name.as_str()));
             let specs = container.spec["argv"].as_array().expect("validated args");
+            let mut lifecycle = json!({
+                "Status":status,"Running":status=="running","ExitCode":code,
+                "Error":state.error.as_deref().unwrap_or("")
+            });
+            if let Some(health) = &state.health {
+                lifecycle["Health"] = health.inspect();
+            }
             let mut reply = Reply::json(
                 200,
                 json!({
@@ -626,8 +633,7 @@ fn container(
                     "Driver":BACKEND,"Platform":"linux","Path":specs[0],"Args":specs[1..],
                     "Mounts": container.volume.iter().map(super::volume::mount_metadata).collect::<Vec<_>>(),
                     "RestartCount":state.generation,
-                    "State":{"Status":status,"Running":status=="running","ExitCode":code,
-                             "Error":state.error.as_deref().unwrap_or("")},
+                    "State":lifecycle,
                     "Config":config,"HostConfig":host,"NetworkSettings":{
                         "Networks":networks, "Ports":item.port_metadata(state.network_address.is_some())
                     },

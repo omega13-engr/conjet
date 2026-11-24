@@ -419,15 +419,16 @@ Approach: Use existing network/port research and native owner state; preserve li
 
 Evidence: Compose 5.8.0 accepted the frozen fixture and passed filtered
 network, container and volume discovery. The release two-alias DNS canary
-passed. Compose writer creation then reached the unsupported Healthcheck
-field.
+passed. The writer became healthy before Compose started the reader.
+The CLI then surfaced its missing daemon-time and filtered live event
+subscriptions. See SPEED-076.
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
 Review: Pending implementation, validation and independent evidence review.
 
 Next Action: Qualify its health dependency through the authenticated
-guest exec path.
+guest exec path and complete lifecycle verification with scoped events.
 
 ### SPEED-072
 
@@ -468,6 +469,35 @@ Acceptance Criteria:
 - Run the fixture's bounded direct-command health check through guest exec.
   Reflect health in inspect, gate the dependent service, and reset on
   restart. Reject unsupported modes and preserve cancellation.
+
+Evidence: The writer reported a real healthy state before Compose
+submitted the reader's start. Restart and shutdown verification continue
+with the event subscription in SPEED-076.
+
+### SPEED-075
+
+Title: Accept Compose named-volume short syntax without exposing host binds
+
+Acceptance Criteria:
+
+- Parse one valid named volume at `/data` from HostConfig Binds, with
+  optional read-only mode. Reuse the tested native ownership and mount
+  path. Reject host paths, alternate destinations and unknown mount flags.
+
+Evidence: The unchanged Compose project created the writer using the
+named-volume short form. It started and its guest healthcheck verified
+the file in the mounted destination. Host-path and option negatives passed.
+
+### SPEED-076
+
+Title: Supply daemon time and bounded Compose event subscriptions
+
+Acceptance Criteria:
+
+- Return real server time and stream scoped Docker lifecycle events
+  without changing the existing unfiltered benchmark snapshot. Preserve
+  ordered delivery and stop subscriptions on disconnect or owner drain.
+- Verify Compose up, logs, restart and down through the pinned client.
 
 ### SPEED-065
 

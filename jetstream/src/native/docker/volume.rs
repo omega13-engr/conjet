@@ -9,8 +9,17 @@ use super::{client, request, Owner, Rejected};
 
 pub(super) fn requested(config: &Value) -> Result<Option<(&str, bool)>, Rejected> {
     let value = &config["HostConfig"]["Mounts"];
+    let binds = &config["HostConfig"]["Binds"];
+    let has_binds = !binds.is_null() && !binds.as_array().is_some_and(Vec::is_empty);
     if value.is_null() || value.as_array().is_some_and(Vec::is_empty) {
-        return Ok(None);
+        return if has_binds {
+            named_bind(binds).map(Some)
+        } else {
+            Ok(None)
+        };
+    }
+    if has_binds {
+        return Err(Rejected::bad("only one native named volume is supported"));
     }
     let Some([mount]) = value.as_array().map(Vec::as_slice) else {
         return Err(Rejected::bad("only one native named volume is supported"));
@@ -46,6 +55,53 @@ pub(super) fn requested(config: &Value) -> Result<Option<(&str, bool)>, Rejected
         }
     }
     Ok(Some((name, read_only)))
+}
+
+fn named_bind(value: &Value) -> Result<(&str, bool), Rejected> {
+    let Some([binding]) = value.as_array().map(Vec::as_slice) else {
+        return Err(Rejected::bad("only one native named volume is supported"));
+    };
+    let invalid =
+        || Rejected::bad("HostConfig Binds supports only NAME:/data with optional ro or rw");
+    let mut parts = binding.as_str().ok_or_else(invalid)?.split(':');
+    let name = parts
+        .next()
+        .filter(|name| valid_name(name))
+        .ok_or_else(invalid)?;
+    if parts.next() != Some(VOLUME_TARGET) {
+        return Err(invalid());
+    }
+    let read_only = match parts.next() {
+        None | Some("rw") => false,
+        Some("ro") => true,
+        _ => return Err(invalid()),
+    };
+    if parts.next().is_some() {
+        return Err(invalid());
+    }
+    Ok((name, read_only))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_mount_syntax_keeps_host_paths_and_flags_out() {
+        assert_eq!(
+            named_bind(&json!(["owned:/data:ro"])).unwrap(),
+            ("owned", true)
+        );
+        for input in [
+            "/host/path:/data",
+            "../relative:/data",
+            "owned:/etc",
+            "owned:/data:rw,z",
+            "owned:/data:ro:rw",
+        ] {
+            assert!(named_bind(&json!([input])).is_err(), "{input}");
+        }
+    }
 }
 
 pub(super) fn ask(owner: &Owner, action: &str, name: Option<&str>) -> Result<Value, Rejected> {
