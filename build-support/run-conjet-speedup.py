@@ -26,7 +26,8 @@ REPO = Path(__file__).resolve().parents[1]
 CONTEXT = 'conjet-speedup'
 DOCKER = Path('/opt/homebrew/bin/docker')
 VOLUME_DIAGNOSTICS = ('volume-disk', 'mounted-volume', 'compose', 'build-snapshot')
-CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'admission-trace', *VOLUME_DIAGNOSTICS)
+CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'admission-trace', 'pending-watch',
+                    *VOLUME_DIAGNOSTICS)
 
 
 class SessionInterrupted(KeyboardInterrupt):
@@ -497,6 +498,8 @@ def native_session(args, root):
             vm_command += ['--core-admission-wake', args.native_admission_wake]
         if args.native_discovery_ms:
             vm_command += ['--core-discovery-ms', args.native_discovery_ms]
+        if args.native_discovery_mode:
+            vm_command += ['--core-discovery-mode', args.native_discovery_mode]
         if pressure_fixture:
             vm_command.append('--core-pressure-fixture')
             markers.append('etc/conjet/native-core-pressure-fixture')
@@ -627,6 +630,9 @@ def native_session(args, root):
             elif args.diagnostics == 'build-snapshot':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-build-snapshot.py'))
                 diagnostic['collect'](directory, vm.pid, output)
+            elif args.diagnostics == 'pending-watch':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-core-watch.py'))
+                diagnostic['collect'](directory, vm.pid, output)
             elif args.diagnostics in ('oci', 'oci-import'):
                 oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
                 oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
@@ -746,7 +752,7 @@ def main():
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
                                                   'volume-disk', 'mounted-volume', 'admission-trace', 'compose',
-                                                  'build-snapshot'),
+                                                  'build-snapshot', 'pending-watch'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
@@ -755,6 +761,7 @@ def main():
     parser.add_argument('--native-latency-trace', action='store_true')
     parser.add_argument('--native-latency-lane', choices=('api', 'cli'))
     parser.add_argument('--native-discovery-ms', choices=('30', '5'))
+    parser.add_argument('--native-discovery-mode', choices=('poll', 'watch'))
     parser.add_argument('--native-latency-idle', action='store_true')
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
@@ -792,6 +799,10 @@ def main():
         parser.error('collect native latency traces only with matched timing or Core memory canaries')
     if args.native_discovery_ms and not args.native_latency_trace:
         parser.error('alternate discovery cadence requires the isolated latency tracer')
+    if args.native_discovery_mode and (not args.native_memd or args.diagnostics == 'memory-telemetry'):
+        parser.error('pending discovery mode requires the native Core governor')
+    if args.diagnostics == 'pending-watch' and args.native_discovery_mode != 'poll':
+        parser.error('the wire watch probe needs the private watcher slot free')
     if args.native_latency_idle and not (args.matched_output and args.native_latency_trace):
         parser.error('an idle latency window requires matched traced timing')
     if args.diagnostics in VOLUME_DIAGNOSTICS:

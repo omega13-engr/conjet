@@ -153,17 +153,25 @@ Acceptance Criteria:
 
 - Name the confirmed stage and intervention first. For demand notifications test coalescing, lost wakeups, stale generation, reconnect, cancellation and overload. Preserve memory policy, execution/cleanup boundaries and safety tick. Pass memory gates and two release A/B pairs before accepting; reject non-improving changes.
 
-Problem and Evidence: No sub-5-ms native result exists; notification delay is a hypothesis until measured.
+Problem and Evidence: SPEED-081 and SPEED-082 confirmed pending discovery
+as the largest warm median stage and established the cost of faster polling.
 
 Approach: Use the conditional architecture in the diagnostic plan only if supported; otherwise fix the measured dominant stage. Do not bypass admission or weaken cleanup.
 
-Evidence: Pending; source review only.
+Evidence: The authenticated watch reduced untraced API p50 from
+37.50–40.22 ms to 2.47–2.51 ms in two alternating pairs. Pending
+discovery fell from 24.52 ms to 0.053 ms in the separate trace.
+Protocol overload, reconnect, replay, cancellation, pressure growth,
+data integrity, idle shrink and cleanup passed. See [the watch
+results](native-latency-diagnostic-results.md#speed-083).
 
 Source: [Native latency diagnostic plan](native-latency-diagnostic-plan.md).
 
-Review: Pending.
+Review: Isolated watch validation and self-review passed. Independent
+review pending.
 
-Next Action: Write the concrete implementation acceptance from diagnostic evidence.
+Next Action: The default isolated release uses the authenticated watch
+on capable guests. The full comparison remains in SPEED-065.
 
 
 ### SPEED-057
@@ -664,11 +672,12 @@ Problem and Evidence: Parity and superiority remain unproven for the new candida
 
 Approach: Keep native API, Docker API and CLI timers separate; record hashes, p50/p95/p99, throughput, confidence intervals, resource data and exact cleanup boundaries.
 
-Evidence: A fresh two-pair release pilot passed lifecycle and cleanup
-probes with zero failures. Native median API latency was 39.53–40.35 ms
-versus Kiri 3.82–3.87 ms. Native median CLI latency was 37.94–38.80 ms
-versus Kiri 20.75–20.88 ms. The below-5-ms gate remains unmet. See
-[the current comparison](native-engine-validation.md#speed-065-current-release-pilot).
+Evidence: Two post-SPEED-083 release pilot pairs passed all 1,600
+measured operations. Native API p50 was 2.58–2.65 ms versus Kiri
+3.47–3.88 ms, passing the below-5-ms isolated median target. Native
+API p99 was 18.76–20.13 ms versus Kiri 4.24–5.52 ms. Formal parity
+and the full matrix remain unqualified. See [the post-change
+pilot](native-latency-diagnostic-results.md#post-change-kiri-pilot).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 

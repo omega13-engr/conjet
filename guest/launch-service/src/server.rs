@@ -59,6 +59,15 @@ impl Server {
     fn capabilities(&self) -> &'static [&'static str] {
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         if let Some(fresh) = &self.fresh {
+            if fresh.has_core_admission() {
+                return &[
+                    "ping",
+                    "shutdown",
+                    "native_oci_arm64_v1",
+                    "memory",
+                    crate::core_admission::PENDING_WATCH_CAPABILITY,
+                ];
+            }
             if fresh.is_oci() {
                 return &["ping", "shutdown", "native_oci_arm64_v1", "memory"];
             }

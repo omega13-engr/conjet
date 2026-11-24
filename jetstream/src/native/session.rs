@@ -77,6 +77,9 @@ pub(super) struct Options {
     /// Set a diagnostic pending-discovery interval for an isolated release comparison.
     #[arg(long, value_enum, requires = "trace_core_admission")]
     core_discovery_ms: Option<DiscoveryCadence>,
+    /// Select periodic or authenticated event-driven pending discovery.
+    #[arg(long, value_enum, requires = "core_dynamic_memory")]
+    core_discovery_mode: Option<DiscoveryMode>,
     /// Enable the bounded service pressure fixture on this diagnostic boot.
     #[arg(long, requires = "core_dynamic_memory")]
     core_pressure_fixture: bool,
@@ -113,6 +116,7 @@ struct AdmissionControl<'a> {
     trace: bool,
     wake: AdmissionWake,
     cadence: DiscoveryCadence,
+    discovery: DiscoveryMode,
 }
 
 const TRACE_LIMIT: usize = 8192;
@@ -125,6 +129,7 @@ struct AdmissionTrace {
     polls: usize,
     polls_by_second: Vec<usize>,
     cadence: DiscoveryCadence,
+    discovery: DiscoveryMode,
 }
 
 #[derive(Serialize)]
@@ -139,6 +144,7 @@ enum AdmissionSpan {
         h1_ns: u128,
         owned: usize,
         pending: usize,
+        watch_pending: bool,
     },
     #[serde(rename = "core_admission")]
     Grant {
@@ -156,7 +162,7 @@ enum AdmissionSpan {
 }
 
 impl AdmissionTrace {
-    fn new(cadence: DiscoveryCadence) -> Self {
+    fn new(control: &AdmissionControl<'_>) -> Self {
         Self {
             origin: Instant::now(),
             host_clock_ns: host_monotonic_ns(),
@@ -164,7 +170,8 @@ impl AdmissionTrace {
             lost: 0,
             polls: 0,
             polls_by_second: Vec::new(),
-            cadence,
+            cadence: control.cadence,
+            discovery: control.discovery,
         }
     }
 
@@ -206,6 +213,7 @@ impl Drop for AdmissionTrace {
                 "event": "core_trace_summary", "rows": self.rows.len(), "lost": self.lost,
                 "polls": self.polls,
                 "discovery_interval_ms": self.cadence.interval().as_millis(),
+                "discovery_mode": self.discovery,
                 "host_clock_ns": self.host_clock_ns,
                 "polls_by_second": self.polls_by_second,
             })
@@ -217,6 +225,23 @@ impl Drop for AdmissionTrace {
 enum AdmissionWake {
     Poll,
     Event,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiscoveryMode {
+    Poll,
+    #[default]
+    Watch,
+}
+
+impl AdmissionControl<'_> {
+    fn can_watch(&self, peer: &client::Connection) -> bool {
+        self.discovery == DiscoveryMode::Watch
+            && matches!(self.cadence, DiscoveryCadence::Normal)
+            && matches!(self.wake, AdmissionWake::Event)
+            && peer.pending_watch
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -231,7 +256,7 @@ enum DiscoveryCadence {
 impl DiscoveryCadence {
     fn interval(self) -> Duration {
         Duration::from_millis(match self {
-            Self::Normal => 30,
+            Self::Normal => core_admission::PENDING_WATCH_MS,
             Self::Fast => 5,
         })
     }
@@ -397,6 +422,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             trace: options.trace_core_admission,
             wake: options.core_admission_wake,
             cadence: options.core_discovery_ms.unwrap_or_default(),
+            discovery: options.core_discovery_mode.unwrap_or_default(),
         });
         let boot_gate = admission.clone();
         let control = scope.spawn(move || {
@@ -490,13 +516,14 @@ fn manage_session(
     let mut trace = admission
         .as_ref()
         .filter(|control| control.trace)
-        .map(|control| AdmissionTrace::new(control.cadence));
+        .map(AdmissionTrace::new);
     let start = Instant::now();
     let startup = start + Duration::from_secs(15);
     let deadline = start + Duration::from_secs(lifetime);
     let mut ready = false;
     let mut admission_boot = None;
     let mut admission_peer = None;
+    let mut pending = false;
     while !finished.load(Ordering::Acquire) {
         let mut authenticated = false;
         let connect = !ready || (admission.is_some() && admission_peer.is_none());
@@ -513,10 +540,13 @@ fn manage_session(
                     force_stop.store(true, Ordering::Release);
                     bail!("native admission supervisor generation changed");
                 }
-                if poll_native_admission(&mut peer, control, trace.as_mut()).is_ok() {
+                if let Ok(has_pending) =
+                    poll_native_admission(&mut peer, control, trace.as_mut(), false)
+                {
                     admission_boot = Some(peer.boot.clone());
                     admission_peer = Some(peer);
                     authenticated = true;
+                    pending = has_pending;
                 }
             } else {
                 authenticated = true;
@@ -556,9 +586,20 @@ fn manage_session(
             break;
         }
         if let (Some(control), Some(peer)) = (&admission, admission_peer.as_mut()) {
-            if poll_native_admission(peer, control, trace.as_mut()).is_err() {
-                control.gate.invalidate();
-                admission_peer = None;
+            let can_watch = control.can_watch(peer);
+            match poll_native_admission(peer, control, trace.as_mut(), can_watch && !pending) {
+                Ok(has_pending) => {
+                    pending = has_pending;
+                    if can_watch && !pending {
+                        // One owner uses request/reply on this stream. With no
+                        // demand awaiting approval, start a bounded watch.
+                        continue;
+                    }
+                }
+                Err(_) => {
+                    control.gate.invalidate();
+                    admission_peer = None;
+                }
             }
         }
         match &admission {
@@ -576,7 +617,8 @@ fn poll_native_admission(
     peer: &mut client::Connection,
     control: &AdmissionControl<'_>,
     mut trace: Option<&mut AdmissionTrace>,
-) -> anyhow::Result<()> {
+    watch_pending: bool,
+) -> anyhow::Result<bool> {
     let request = |grant: Option<&core_admission::Admission>, boot: &str| {
         json!({
             "boot_id": boot, "budget_ms": 150, "core_only": true, "core_grant": grant,
@@ -615,11 +657,19 @@ fn poll_native_admission(
             Err(error) => return Err(error.into()),
         }
     }
-    let request = request(None, &peer.boot);
+    let request = if watch_pending {
+        json!({
+            "boot_id": peer.boot, "budget_ms": core_admission::PENDING_WATCH_MS,
+            "core_only": true, "watch_pending": true,
+        })
+    } else {
+        request(None, &peer.boot)
+    };
     let sent = trace.as_ref().map(|_| Instant::now());
     let value = peer.exchange(Kind::Memory, Kind::Memory, &request, timeout)?;
     let report: core_admission::Observation =
         serde_json::from_value(value["core_admission"].clone())?;
+    let has_pending = !report.pending.is_empty();
     let received = Instant::now();
     if let (Some(trace), Some(sent)) = (trace, sent) {
         trace.record_poll(received);
@@ -632,6 +682,7 @@ fn poll_native_admission(
                 h1_ns: trace.ns(received),
                 owned: report.owned,
                 pending: report.pending.len(),
+                watch_pending,
             });
         }
     }
@@ -639,7 +690,7 @@ fn poll_native_admission(
         control.gate.publish(report, received),
         "invalid native admission observation"
     );
-    Ok(())
+    Ok(has_pending)
 }
 
 fn read_regular(path: &Path, limit: u64) -> anyhow::Result<Vec<u8>> {

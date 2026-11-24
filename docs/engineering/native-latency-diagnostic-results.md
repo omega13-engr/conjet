@@ -105,3 +105,90 @@ approval still follows the existing controller path.
 
 Raw timing, resource, and release identity evidence is in
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-082/`.
+
+## SPEED-083
+
+The guest exposes `core_pending_watch_v1` on the authenticated native
+Core connection. The session owner issues a bounded request and reads
+its correlated reply on the same stream. The guest checks pending
+demand under the ledger lock before waiting and wakes that waiter
+after admitting work. On wake or the 30 ms reconciliation deadline,
+it returns the current authoritative snapshot. One waiter is allowed
+per guest. The host still publishes each observation to Core and sends
+grants for the current boot, workload ID, sequence, and deadline.
+The 25 ms VMM safety tick and verified removal boundary are unchanged.
+Native Core uses the watch by default on peers with the capability.
+Older guests, the explicit polling control, and the 5 ms diagnostic
+cadence retain periodic discovery.
+
+The live protocol canary started at 448 MiB. It admitted two pending
+workloads and observed both identities in one snapshot. The armed
+waiter saw the first admission. A watcher started after admission
+returned the current snapshot immediately. Resubmitting each launch
+reused the original handle. Both workloads were cancelled before exec,
+and their late grants were refused. The guest rejected stale boot IDs,
+invalid watch budgets and scopes, and an overlapping waiter. A
+disconnected watcher expired, and a reauthenticated connection obtained
+the same boot's empty snapshot.
+
+The same release artifacts ran two untraced alternating API pairs of
+200 measured operations per leg plus ten warmups. All operations
+verified guest cleanup and passed.
+
+| Pair | Mode | API p50 / p95 / p99 (ms) |
+| --- | --- | --- |
+| 1 | Periodic | 37.50 / 62.66 / 73.44 |
+| 1 | Watch | 2.51 / 3.40 / 11.80 |
+| 2 | Watch | 2.47 / 3.35 / 5.84 |
+| 2 | Periodic | 40.22 / 64.72 / 72.39 |
+
+A separate traced pair joined all 420 operations. Pending discovery
+p50 fell from 24.52 ms to 0.053 ms. Watch discovery was 0.130 ms at
+p95 and 0.211 ms at p99. Observation exchange spans include time
+spent awaiting demand in the watch. They are separate from the
+guest-local discovery duration. The eight-second idle observation
+windows measured 30.00 exchanges per second and 5.37% VMM CPU with
+periodic discovery, and 31.14 exchanges per second and 5.50% with the
+watch. Core returned to 448 MiB in both idle windows.
+
+The watch-mode reduced-capacity and independent-pressure canaries
+both grew from 448 MiB to 2,048 MiB and shrank again. The pressure
+service raised 153 high events before any container existed, then
+170 by the end of churn. Both canaries preserved the checksum across
+12 launches. Stale and expired grants were refused and the ownership
+and shutdown checks passed.
+
+The final release exposed the watch through the normal entry point.
+Its default trace measured discovery p50 at 0.050 ms. With the same
+host binary and the earlier guest, the authenticated capability check
+selected periodic discovery, which measured 26.01 ms p50. Both runs
+joined all warmups and measured operations with verified cleanup.
+
+The final release passed the eight-workload concurrency diagnostic.
+A separate fault probe killed its owned VMM. The adapter invalidated
+the in-flight wait and refused both replay and new admission. The
+launcher reported unresolved guest cleanup after SIGKILL. The fault
+runner's exact private session directory was removed after verifying
+the VMM had exited and no process held the directory.
+
+### Post-change Kiri pilot
+
+The final default release ran two 200-operation API and CLI pairs in
+alternating order with the pinned Kiri 0.2.2 binary. All 1,600 measured
+operations and 80 warmups passed. All native workloads verified their
+guest cleanup. Kiri guest teardown remains unobserved.
+
+| Pair | Engine | API p50 / p95 / p99 (ms) | CLI p50 / p95 / p99 (ms) | API / CLI harness operations per second |
+| --- | --- | --- | --- | --- |
+| 1 | Conjet native | 2.65 / 3.37 / 20.13 | 21.08 / 24.39 / 26.80 | 287.47 / 44.96 |
+| 1 | Kiri 0.2.2 | 3.88 / 4.63 / 5.52 | 21.73 / 23.10 / 23.98 | 252.90 / 45.93 |
+| 2 | Kiri 0.2.2 | 3.47 / 4.04 / 4.24 | 20.92 / 22.28 / 24.28 | 285.04 / 47.53 |
+| 2 | Conjet native | 2.58 / 3.67 / 18.76 | 21.92 / 30.21 / 37.60 | 285.21 / 42.47 |
+
+The isolated warm API median passed the below-5-ms target in both
+boots. Native API p99 exceeded Kiri's in both pairs. The two-pair pilot
+leaves formal API and CLI parity unqualified. The five-pair and broader
+SPEED-065 matrix still depends on SPEED-063.
+
+Raw data, process inventories, and release hashes are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-083/`.

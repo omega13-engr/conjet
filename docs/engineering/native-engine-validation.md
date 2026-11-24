@@ -270,6 +270,9 @@ transcripts are under
 
 ## SPEED-065 current release pilot
 
+This pilot predates the pending-demand watch. The latest release pilot
+is in the [native latency results](native-latency-diagnostic-results.md#post-change-kiri-pilot).
+
 Two independent release pairs alternated native-first and Kiri-first.
 Each VM ran ten warmups and 200 measured operations per API and CLI lane,
 for 80 warmups and 1,600 measured operations overall. All operations and

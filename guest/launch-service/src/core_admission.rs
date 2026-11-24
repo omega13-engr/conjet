@@ -6,6 +6,8 @@ pub const MARKER: &str = "/etc/conjet/native-core-admission";
 pub const PRESSURE_MARKER: &str = "/etc/conjet/native-core-pressure-fixture";
 pub const TRACE_MARKER: &str = "/etc/conjet/native-core-latency-trace";
 pub const CAPACITY: usize = 8;
+pub const PENDING_WATCH_CAPABILITY: &str = "core_pending_watch_v1";
+pub const PENDING_WATCH_MS: u64 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

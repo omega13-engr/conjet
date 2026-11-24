@@ -72,6 +72,8 @@ struct MemoryRequest {
     core_grant: Option<crate::core_admission::Admission>,
     #[serde(default)]
     core_only: bool,
+    #[serde(default)]
+    watch_pending: bool,
 }
 
 #[derive(Deserialize)]
@@ -279,6 +281,14 @@ struct Trace {
 }
 
 impl Record {
+    fn pending_core_admission(&self, now: Instant) -> bool {
+        self.phase == Phase::Accepted
+            && !self.terminate_requested
+            && self
+                .core_admission_deadline
+                .is_some_and(|deadline| now < deadline)
+    }
+
     fn change(&mut self, phase: Phase) {
         self.phase = phase;
         self.revision += 1;
@@ -372,6 +382,7 @@ struct Ledger {
     highest_sequence: u64,
     closing: bool,
     waiting: usize,
+    core_watcher: bool,
     records: VecDeque<Record>,
     pressure: bool,
     pressure_helper: Option<std::process::Child>,
@@ -454,13 +465,7 @@ impl Ledger {
         let pending = self
             .records
             .iter_mut()
-            .filter(|record| {
-                record.phase == Phase::Accepted
-                    && !record.terminate_requested
-                    && record
-                        .core_admission_deadline
-                        .is_some_and(|deadline| now < deadline)
-            })
+            .filter(|record| record.pending_core_admission(now))
             .map(|record| {
                 if observing && let Some(trace) = &mut record.trace {
                     trace.events.entry("observed").or_insert_with(|| {
@@ -474,6 +479,12 @@ impl Ledger {
             })
             .collect();
         crate::core_admission::Observation { owned, pending }
+    }
+
+    fn has_pending_core_admission(&self, now: Instant) -> bool {
+        self.records
+            .iter()
+            .any(|record| record.pending_core_admission(now))
     }
 
     fn grant_core_admission(
@@ -724,6 +735,10 @@ impl FreshFixture {
 
     pub(crate) fn is_oci(&self) -> bool {
         self.oci
+    }
+
+    pub(crate) fn has_core_admission(&self) -> bool {
+        self.core_admission
     }
 
     pub(crate) fn is_native(&self) -> bool {
@@ -1005,6 +1020,9 @@ impl FreshFixture {
             }
             record.change(Phase::Removed);
             return Ok((Kind::State, record.state()));
+        }
+        if ledger.core_watcher {
+            self.changed.notify_all();
         }
         Ok((Kind::State, reply))
     }
@@ -1645,6 +1663,32 @@ impl FreshFixture {
                 }
                 if (request.core_only || request.core_grant.is_some()) && !self.core_admission {
                     return Err(("unsupported_option", "Core admission is disabled"));
+                }
+                if request.watch_pending {
+                    if !observing
+                        || request.pressure.is_some()
+                        || request.budget_ms > crate::core_admission::PENDING_WATCH_MS
+                    {
+                        return Err(("malformed", "invalid pending admission watch"));
+                    }
+                    if guard.core_watcher {
+                        return Err(("busy", "a pending admission watch is already active"));
+                    }
+                    guard.core_watcher = true;
+                    // Admission and this predicate share the ledger lock. A new
+                    // request can either be observed here or wake the waiter.
+                    while !guard.closing && !guard.has_pending_core_admission(Instant::now()) {
+                        let remaining = expires.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        guard = self
+                            .changed
+                            .wait_timeout(guard, remaining)
+                            .expect("fresh ledger")
+                            .0;
+                    }
+                    guard.core_watcher = false;
                 }
                 if let Some(pressure) = request.pressure {
                     if self.core_pressure_fixture {
