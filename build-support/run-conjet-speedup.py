@@ -513,6 +513,9 @@ def native_session(args, root):
         if args.diagnostics in ('build-snapshot', 'build-bundle'):
             vm_command.append('--build-snapshot-disk')
             markers.append('etc/conjet/native-build-snapshot')
+        if args.native_disk_images:
+            vm_command.append('--disk-image-store')
+            markers.append('etc/conjet/native-image-store-disk')
         report['vm_command'] = list(map(str, vm_command))
         with (output / 'vmm.stderr').open('w') as log:
             vm = subprocess.Popen(vm_command, env=env, stdin=subprocess.DEVNULL,
@@ -767,6 +770,8 @@ def main():
     parser.add_argument('--network-helper', type=Path)
     parser.add_argument('--native-public-images', action='store_true',
                         help='use the frozen Docker Hub image pins in the private native store')
+    parser.add_argument('--native-disk-images', action='store_true',
+                        help='stage native image transfers on the leased private volume filesystem')
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output',
                  'native-memd', 'native-reclaimd', 'native-volume-disk', 'native-compose-cli',
                  'import-package', 'import-receipt', 'registry-fixtures', 'native-boot-layout'):
@@ -840,7 +845,11 @@ def main():
         parser.error('the wire watch probe needs the private watcher slot free')
     if args.native_latency_idle and not (args.matched_output and args.native_latency_trace):
         parser.error('an idle latency window requires matched traced timing')
-    if args.diagnostics in VOLUME_DIAGNOSTICS:
+    if args.native_disk_images and (
+            args.diagnostics not in ('archive', 'oci-import', 'public-images', 'compatibility-preflight')
+            or args.legacy_baseline or not args.native_memd or args.docker_owner != 'rust'):
+        parser.error('the disk image store requires a private native Core image diagnostic')
+    if args.diagnostics in VOLUME_DIAGNOSTICS or args.native_disk_images:
         if (not args.native_volume_disk
                 or args.native_volume_disk.resolve(strict=True) != args.native_volume_disk):
             parser.error('volume diagnostics require a canonical private disk path')

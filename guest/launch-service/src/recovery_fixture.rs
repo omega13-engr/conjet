@@ -81,6 +81,13 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
     } else {
         None
     };
+    let disk_images = oci && crate::image_store::disk_store_enabled();
+    if disk_images {
+        if volume.is_none() || Path::new(crate::build_snapshot::MARKER).try_exists()? {
+            return Err("disk image store requires the native volume filesystem".into());
+        }
+        crate::image_store::reset_generation()?;
+    }
     for attempt in 0..2 {
         let mut service = Command::new("/init")
             .arg(match profile {
@@ -100,6 +107,9 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
             }
             kernel_fixture::assert_cgroup_absent()?;
             sandbox_fixture::assert_absent()?;
+            if disk_images {
+                crate::image_store::reset_generation()?;
+            }
             if let Some(volume) = volume {
                 volume.close()?;
             }

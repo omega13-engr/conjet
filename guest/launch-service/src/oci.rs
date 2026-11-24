@@ -8,6 +8,7 @@ use crate::spec::ID_MAP_WIDTH;
 
 pub const MAX_RECORDS: usize = 4096;
 pub const PACKAGE_LIMIT: u64 = 64 * 1024 * 1024;
+pub const DISK_STORE_MARKER: &str = "/etc/conjet/native-image-store-disk";
 
 macro_rules! ensure {
     ($condition:expr, $message:literal $(,)?) => {

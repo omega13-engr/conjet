@@ -13,10 +13,11 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::handshake::{hex, unhex};
-use crate::oci::{Kind, PACKAGE_LIMIT, Root};
+use crate::oci::{DISK_STORE_MARKER, Kind, PACKAGE_LIMIT, Root};
 use crate::spec::{GID_BASE, UID_BASE};
 
 const DIRECTORY: &str = "/run/conjet/oci-images";
+const DISK_DIRECTORY: &str = "/run/conjet/volume-disk/.conjet-oci-images";
 const MAX_IMAGES: usize = 3;
 const CHUNK: usize = 8192;
 const TOTAL_BYTES: u64 = PACKAGE_LIMIT;
@@ -89,9 +90,21 @@ fn digest(value: &str) -> Result<(&str, [u8; 32]), Failure> {
     Ok((suffix, bytes))
 }
 
+pub(crate) fn disk_store_enabled() -> bool {
+    Path::new(DISK_STORE_MARKER).is_file()
+}
+
+fn directory() -> &'static Path {
+    Path::new(if disk_store_enabled() {
+        DISK_DIRECTORY
+    } else {
+        DIRECTORY
+    })
+}
+
 pub(crate) fn imported_root(config_digest: &str) -> Option<PathBuf> {
     let (suffix, _) = digest(config_digest).ok()?;
-    Some(Path::new(DIRECTORY).join(suffix))
+    Some(directory().join(suffix))
 }
 
 impl Store {
@@ -252,7 +265,7 @@ impl Store {
 }
 
 pub(crate) fn reset_generation() -> io::Result<()> {
-    let path = Path::new(DIRECTORY);
+    let path = directory();
     match path.symlink_metadata() {
         Ok(metadata)
             if metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o777 == 0o711 =>
@@ -277,7 +290,7 @@ fn owner_mode(path: &Path, uid: u32, gid: u32, mode: Option<u32>) -> io::Result<
 }
 
 fn store_directory() -> io::Result<&'static Path> {
-    let directory = Path::new(DIRECTORY);
+    let directory = directory();
     match fs::DirBuilder::new().mode(0o711).create(directory) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {

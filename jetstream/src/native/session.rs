@@ -96,6 +96,9 @@ pub(super) struct Options {
     /// Mount the leased disk as a private BuildKit workspace for diagnostics.
     #[arg(long, requires = "volume_disk")]
     build_snapshot_disk: bool,
+    /// Stage transferred OCI roots on the isolated Core guest's leased filesystem.
+    #[arg(long, requires = "volume_disk", conflicts_with = "build_snapshot_disk")]
+    disk_image_store: bool,
     /// Maximum lifetime of the disposable VM.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(30..=1800))]
     lifetime_seconds: u64,
@@ -111,7 +114,12 @@ struct MemoryHelpers {
 
 struct GuestBootFiles<'a> {
     memory: Option<&'a MemoryHelpers>,
-    disk: Option<([u8; 24], bool)>,
+    disk: Option<GuestDisk>,
+}
+
+struct GuestDisk {
+    volume: [u8; 24],
+    marker: Option<&'static str>,
 }
 
 struct AdmissionControl<'a> {
@@ -390,9 +398,16 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         oci.as_ref(),
         GuestBootFiles {
             memory: memory_helpers.as_ref(),
-            disk: volume
-                .as_ref()
-                .map(|disk| (disk.identity.encode(), options.build_snapshot_disk)),
+            disk: volume.as_ref().map(|disk| GuestDisk {
+                volume: disk.identity.encode(),
+                marker: if options.build_snapshot_disk {
+                    Some(conjet_launch_service::build_snapshot::MARKER)
+                } else if options.disk_image_store {
+                    Some(conjet_launch_service::oci::DISK_STORE_MARKER)
+                } else {
+                    None
+                },
+            }),
         },
     )?;
     let machine = MachineBuilder::new(JetstreamConfig {
@@ -897,26 +912,18 @@ fn build_archive(
         }
     }
     if let Some(root) = oci {
-        if let Some((volume, build_snapshot)) = files.disk {
+        if let Some(disk) = files.disk {
             append(
                 conjet_launch_service::volume_disk::MARKER.trim_start_matches('/'),
                 0o100400,
-                &volume,
+                &disk.volume,
                 0,
                 0,
                 0,
                 0,
             )?;
-            if build_snapshot {
-                append(
-                    conjet_launch_service::build_snapshot::MARKER.trim_start_matches('/'),
-                    0o100400,
-                    &[],
-                    0,
-                    0,
-                    0,
-                    0,
-                )?;
+            if let Some(marker) = disk.marker {
+                append(marker.trim_start_matches('/'), 0o100400, &[], 0, 0, 0, 0)?;
             }
         }
         append(

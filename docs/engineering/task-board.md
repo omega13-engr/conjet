@@ -886,6 +886,31 @@ stale generation. The separate common and Alpine archive round trips
 also passed. Both Core sessions shut down cleanly and preserved production.
 Logs are under `SPEED-104/` on ExternalSSD.
 
+### SPEED-105
+
+Title: Put imported OCI roots on an isolated Core guest disk
+
+Acceptance: Stage and execute the archive fixture from the exclusively
+leased ext4 volume with Core dynamic memory enabled. Keep the generation
+store separate from named volumes. Clear a stale generation before
+starting the next supervisor and clear current imports before shutdown.
+
+Evidence: The pinned CLI passed both archive round trips on ext4, then
+passed them again after a stale image generation was planted offline.
+Both runs preserved production, removed the private session and released
+the disk lease. The offline filesystem checks passed and the image
+generation directory was absent. Logs are under `SPEED-105/` on ExternalSSD.
+
+### SPEED-106
+
+Title: Encode native image packages with bounded streaming file extents
+
+Acceptance: Transfer and verify individually bounded raw file extents
+in the Core disk image profile. Preserve digest verification, validated
+root paths, credentials, hard links, atomic publication and cleanup.
+Reject malformed encodings, truncated files and invalid metadata. Retain
+the existing JSON small-image package and its limits.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle
