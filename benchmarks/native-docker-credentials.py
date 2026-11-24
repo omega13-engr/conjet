@@ -101,6 +101,9 @@ def collect(endpoint, peer, docker, env, output, *, all_images=False):
                         '--entrypoint', '/bin/sh', descriptor['ref'], '-ec', DEFAULT_PROBE]
                 row = {'argv': argv}
                 report['image_defaults'][case] = row
+                # The image pull can outlive the idle Docker API connection.
+                # Open a fresh peer-verified connection for the terminal witness.
+                connection.close()
                 try:
                     result = subprocess.run([*docker, *argv], env=env, capture_output=True,
                                             text=True, timeout=300)

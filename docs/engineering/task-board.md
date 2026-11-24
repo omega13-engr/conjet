@@ -1949,6 +1949,13 @@ admission. The complete frozen lifecycle still requires qualification on
 the final optimized artifacts.
 [Credential evidence](native-compatibility.md#speed-091-mapped-oci-credentials)
 
+The checkpoint run observed correct Rust UID, GID, cgroup limits and exit,
+then lost its removal witness because the registry pull outlasted the
+idle Docker API connection. The credential runner now opens a fresh
+peer-verified connection after each pull. All seven original image
+probes verified native teardown and the requested limits in
+`SPEED-098/cj-compat.tMPK1e-credentials-fresh-peer/`.
+
 ### SPEED-092
 
 Title: Qualify isolated Buildx worker provisioning
@@ -2023,12 +2030,13 @@ workloads, and broader control and OOM coverage remain open. Core
 memory and supported regressions passed. A new full SPEED-065
 comparison remains blocked. [Exact release results](native-compatibility.md#exact-release-gate-result)
 
-The refreshed `a792b4c` baseline returned 41 PASS and 30 FAIL on one
-recorded release artifact set. The shared lifecycle VM reached its 600 s
-lifetime cutoff in the final group. Its original result and cleanup gap
-remain recorded. The twelve independent group boots preserve the 2,000
-samples and ten warmups per case. See the 71-row ledger, launcher reports
-and six binary hashes in `SPEED-098/cj-compat.tMPK1e-a792b4c/`.
+The refreshed `a792b4c` baseline returned 53 PASS and 18 FAIL on one
+recorded release artifact set. The first run returned 41 PASS and 30 FAIL
+after a shared lifecycle VM reached its 600 s lifetime cutoff in the final
+group. Each of the twelve independent group boots then verified all 2,000
+samples, ten warmups and guest cleanup. The 71-row ledger, both summaries,
+launcher reports and six binary hashes are under
+`SPEED-098/cj-compat.tMPK1e-a792b4c/`.
 
 
 ### SPEED-025
