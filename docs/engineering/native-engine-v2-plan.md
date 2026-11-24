@@ -6,6 +6,8 @@ This plan supersedes that constraint in earlier plans and worker prompts.
 Production migration is still gated; the isolated candidate uses the new engine.
 Conjet Core dynamic memory is mandatory throughout development and timing.
 
+Current latency investigation: [stage attribution and architecture assessment](native-latency-diagnostic-plan.md), SPEED-081–083.
+
 ## Scope and measurable goal
 
 Build on Conjet's existing Rust Docker owner and authenticated native guest

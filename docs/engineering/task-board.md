@@ -6,6 +6,9 @@ Current iteration: [native engine implementation plan](native-engine-v2-plan.md)
 
 ## Current Docker performance priority
 
+Latency investigation: [native diagnostic plan](native-latency-diagnostic-plan.md),
+SPEED-081–083. These diagnose fresh launch independently of BuildKit completion.
+
 The user now authorizes replacing dockerd/containerd/runc in the candidate
 with Conjet's native Rust engine. Preserve Core dynamic memory in full.
 SPEED-057–065 are the active sequence. Reuse verified SPEED-027–036 research
@@ -78,6 +81,79 @@ their recorded binaries and workloads. SPEED-037 through SPEED-045
 retain their old acceptance criteria for research provenance.
 
 ## BACKLOG
+
+### SPEED-081
+
+Title: Attribute native pending admission through verified cleanup
+
+Description: Add bounded correlated stage tracing and reproduce the current no-network API baseline.
+
+Is blocked by task: None; freeze current native release.
+
+Acceptance Criteria:
+
+- Run two traced and two untraced alternating boots, 200 operations plus ten warmups each. Join host/guest stages without cross-clock subtraction; quantify observer overhead, pending-discovery latency, setup and cleanup. Report warm-capacity and reduced-capacity behavior separately.
+
+Problem and Evidence: Existing SPEED-060 timing starts after demand observation and leaves discovery unmeasured.
+
+Approach: Instrument existing session, guest lifecycle and Docker wait boundaries; flush bounded trace buffers after timing.
+
+Evidence: Pending; source review only.
+
+Source: [Native latency diagnostic plan](native-latency-diagnostic-plan.md).
+
+Review: Pending.
+
+Next Action: Add timestamps and trace-join validation, then run isolated controls.
+
+### SPEED-082
+
+Title: Test native admission discovery cadence sensitivity
+
+Description: Compare 30 ms and 5 ms observation waits without changing Core policy or the safety tick.
+
+Is blocked by task: SPEED-081.
+
+Acceptance Criteria:
+
+- Run two alternating 200-operation release pairs with ten warmups per leg. Record guest pending-discovery duration, lifecycle, idle CPU/wake counts, pressure response and cleanup. Accept or reject the hypothesis explicitly; no production shorter-poll default.
+
+Problem and Evidence: The event-mode manager still waits up to 30 ms between demand observations.
+
+Approach: Change only the diagnostic observation cadence; verify actual configured cadence in artifacts.
+
+Evidence: Pending; source review only.
+
+Source: [Native latency diagnostic plan](native-latency-diagnostic-plan.md).
+
+Review: Pending.
+
+Next Action: Freeze the A/B configuration after SPEED-081 attribution.
+
+### SPEED-083
+
+Title: Select and qualify one native latency correction
+
+Description: Implement the single correction justified by stage attribution; create a narrower child task if the protocol change needs separate increments.
+
+Is blocked by task: SPEED-081 and SPEED-082.
+
+Acceptance Criteria:
+
+- Name the confirmed stage and intervention first. For demand notifications test coalescing, lost wakeups, stale generation, reconnect, cancellation and overload. Preserve memory policy, execution/cleanup boundaries and safety tick. Pass memory gates and two release A/B pairs before accepting; reject non-improving changes.
+
+Problem and Evidence: No sub-5-ms native result exists; notification delay is a hypothesis until measured.
+
+Approach: Use the conditional architecture in the diagnostic plan only if supported; otherwise fix the measured dominant stage. Do not bypass admission or weaken cleanup.
+
+Evidence: Pending; source review only.
+
+Source: [Native latency diagnostic plan](native-latency-diagnostic-plan.md).
+
+Review: Pending.
+
+Next Action: Write the concrete implementation acceptance from diagnostic evidence.
+
 
 ### SPEED-057
 
