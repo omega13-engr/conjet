@@ -219,3 +219,33 @@ supports testing an explicit wake after fresh pending publication.
 
 Raw data is in
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-084/`.
+
+## SPEED-085
+
+Fresh authenticated pending demand now requests a VMM evaluation after
+the admission snapshot is published. Empty, invalid, stale and repeated
+pending observations do not request another evaluation. The registration
+ends before the VM releases its vCPU IDs. The wake carries no grant,
+changes no capacity decision, and retains the 25 ms safety tick.
+
+Two untraced alternating release pairs used 1,000 measured API
+operations plus ten warmups per leg. All operations passed the same
+guest-verified cleanup boundary.
+
+| Pair | Evaluation | API p50 / p95 / p99 (ms) |
+| --- | --- | --- |
+| 1 | Existing wake sources | 2.58 / 3.95 / 22.33 |
+| 1 | Explicit pending wake | 2.62 / 3.37 / 4.03 |
+| 2 | Explicit pending wake | 2.60 / 3.46 / 4.35 |
+| 2 | Existing wake sources | 2.56 / 3.55 / 12.86 |
+
+In the separate 1,000-operation wake trace, publication to the first
+Core evaluation was 0.007/0.038/0.064 ms at p50/p95/p99.
+Both idle control boots returned from 2,048 MiB to 448 MiB. Their
+eight-second idle windows consumed 0.61 and 0.68 VMM CPU seconds,
+respectively, after different-length timing runs. The wake release also
+passed reduced-capacity admission and independent pressure growth from
+448 MiB to 2,048 MiB, active data integrity through 12 launches,
+idle shrink, and verified guest teardown. Raw samples and production
+and memory witnesses are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-085/`.

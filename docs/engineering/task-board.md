@@ -210,6 +210,14 @@ Acceptance Criteria:
   and p99 in two untraced A/B pairs. Requalify reduced growth, pressure,
   idle shrink, data integrity and verified cleanup before adoption.
 
+Evidence: Two 1,000-operation A/B pairs reduced API p99 from
+12.86–22.33 ms to 4.03–4.35 ms. The explicit wake trace put first
+evaluation at 0.064 ms p99. Reduced growth, independent pressure,
+payload integrity, idle shrink and verified cleanup passed. See
+[the tail correction](native-latency-diagnostic-results.md#speed-085).
+
+Review: Isolated qualification passed. Independent review pending.
+
 ### SPEED-057
 
 Title: Audit and boot the native engine without a retained-engine fallback
@@ -566,6 +574,23 @@ Acceptance Criteria:
   gates. Verify the supported mounts, ownership, and cleanup. Reject
   unsupported requests explicitly and keep cache, RUN, and lifecycle
   results scoped to observed behavior.
+
+Depends on task: SPEED-086 bundle intake.
+
+### SPEED-086
+
+Title: Bind the pinned BuildKit worker policy to a verified snapshot
+
+Acceptance Criteria:
+
+- On the existing authenticated snapshot endpoint, inspect a bounded
+  root-owned config file for one verified bundle. Bind dynamic paths to
+  that exact worker and snapshot, validate the process through the
+  native launch limits, and reject changes to the captured namespace,
+  mount, capability, device and seccomp policy. Return only policy and
+  snapshot evidence, with no execution or process environment in the
+  reply. Test the pinned config and unsupported variants on an isolated
+  release guest.
 
 ### SPEED-080
 

@@ -80,6 +80,9 @@ pub(super) struct Options {
     /// Select periodic or authenticated event-driven pending discovery.
     #[arg(long, value_enum, requires = "core_dynamic_memory")]
     core_discovery_mode: Option<DiscoveryMode>,
+    /// Select the VMM evaluation wake for isolated A/B qualification.
+    #[arg(long, value_enum, requires = "core_dynamic_memory")]
+    core_evaluation_mode: Option<EvaluationMode>,
     /// Enable the bounded service pressure fixture on this diagnostic boot.
     #[arg(long, requires = "core_dynamic_memory")]
     core_pressure_fixture: bool,
@@ -235,6 +238,13 @@ enum DiscoveryMode {
     Poll,
     #[default]
     Watch,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum EvaluationMode {
+    Tick,
+    #[default]
+    Wake,
 }
 
 impl AdmissionControl<'_> {
@@ -411,9 +421,12 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         }
     }
     let force_stop = Arc::new(AtomicBool::new(false));
-    let admission = options
-        .core_dynamic_memory
-        .then(|| Arc::new(NativeMemoryAdmission::new(options.trace_core_admission)));
+    let admission = options.core_dynamic_memory.then(|| {
+        Arc::new(NativeMemoryAdmission::new(
+            options.trace_core_admission,
+            options.core_evaluation_mode.unwrap_or_default() == EvaluationMode::Wake,
+        ))
+    });
     let finished = AtomicBool::new(false);
     let orderly = std::thread::scope(|scope| -> anyhow::Result<bool> {
         let control_stop = Arc::clone(&force_stop);

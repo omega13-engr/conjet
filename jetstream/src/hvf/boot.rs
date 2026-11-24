@@ -2746,6 +2746,17 @@ impl HvfBootRunner {
                 });
             }
         }
+        let controller_wake = self
+            .options
+            .native_memory_admission
+            .as_deref()
+            .and_then(|gate| {
+                let ids = vcpu_ids.clone();
+                gate.register_controller_wake(move || {
+                    let ids = ids.lock().expect("vCPU id mutex poisoned");
+                    let _ = exit_vcpus(&ids);
+                })
+            });
         let memory_control = if let Some(socket_path) = self.options.memory_control_socket.clone() {
             match spawn_memory_control_socket(
                 socket_path.clone(),
@@ -3395,6 +3406,7 @@ impl HvfBootRunner {
             }
         }
 
+        drop(controller_wake);
         shared.stop_requested.store(true, Ordering::SeqCst);
         let ids = vcpu_ids.lock().expect("vCPU id mutex poisoned").clone();
         let _ = exit_vcpus(&ids);

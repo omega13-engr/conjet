@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,14 +31,60 @@ pub struct NativeMemoryAdmission {
     sample: Mutex<Option<Sample>>,
     approval: Condvar,
     trace: bool,
+    wake_on_pending: bool,
+    controller_wake: ControllerWake,
+}
+
+#[derive(Default)]
+struct ControllerWake {
+    callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl fmt::Debug for ControllerWake {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ControllerWake")
+            .finish_non_exhaustive()
+    }
+}
+
+pub(super) struct WakeRegistration<'a>(&'a ControllerWake);
+
+impl Drop for WakeRegistration<'_> {
+    fn drop(&mut self) {
+        // Synchronize with any in-flight callback before the VM releases IDs.
+        self.0
+            .callback
+            .lock()
+            .expect("native controller wake")
+            .take();
+    }
 }
 
 impl NativeMemoryAdmission {
-    pub fn new(trace: bool) -> Self {
+    pub fn new(trace: bool, wake_on_pending: bool) -> Self {
         Self {
             trace,
+            wake_on_pending,
             ..Self::default()
         }
+    }
+
+    pub(super) fn register_controller_wake(
+        &self,
+        callback: impl Fn() + Send + Sync + 'static,
+    ) -> Option<WakeRegistration<'_>> {
+        if !self.wake_on_pending {
+            return None;
+        }
+        let mut wake = self
+            .controller_wake
+            .callback
+            .lock()
+            .expect("native controller wake");
+        assert!(wake.is_none(), "only one VM owns the controller wake");
+        *wake = Some(Box::new(callback));
+        Some(WakeRegistration(&self.controller_wake))
     }
 
     pub fn publish(&self, report: Observation, now: Instant) -> bool {
@@ -55,6 +102,14 @@ impl NativeMemoryAdmission {
         if sample.as_ref().is_some_and(|last| now <= last.seen) {
             return false;
         }
+        let wake = self.wake_on_pending
+            && valid
+            && report.pending.iter().any(|request| {
+                sample.as_ref().is_none_or(|last| {
+                    now.saturating_duration_since(last.seen) >= MAX_AGE
+                        || !last.pending.contains(request)
+                })
+            });
         *sample = valid.then_some(Sample {
             seen: now,
             owned: report.owned,
@@ -63,6 +118,17 @@ impl NativeMemoryAdmission {
             first_evaluated_at: None,
             capacity_held: false,
         });
+        drop(sample);
+        if wake {
+            let callback = self
+                .controller_wake
+                .callback
+                .lock()
+                .expect("native controller wake");
+            if let Some(callback) = callback.as_ref() {
+                callback();
+            }
+        }
         valid
     }
 
@@ -198,7 +264,7 @@ mod tests {
 
     #[test]
     fn traced_grant_distinguishes_first_evaluation_and_capacity_hold() {
-        let gate = NativeMemoryAdmission::new(true);
+        let gate = NativeMemoryAdmission::new(true, false);
         let seen = Instant::now();
         assert!(gate.publish(pending(1), seen));
         assert_eq!(gate.observe(Instant::now()), Some((seen, 1, true)));
@@ -208,6 +274,44 @@ mod tests {
         let evaluated = grant.first_evaluated_at.unwrap();
         assert!(seen <= evaluated && evaluated <= grant.approved_at);
         assert!(grant.capacity_held);
+    }
+
+    #[test]
+    fn wake_only_hints_fresh_pending_generation_and_stops_when_unregistered() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let gate = NativeMemoryAdmission::new(false, true);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&wakes);
+        let registration = gate
+            .register_controller_wake(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+            })
+            .unwrap();
+        let now = Instant::now();
+        let at = |ms| now + Duration::from_millis(ms);
+        assert!(gate.publish(
+            Observation {
+                owned: 0,
+                pending: vec![]
+            },
+            now
+        ));
+        assert!(gate.publish(pending(1), at(1)));
+        assert!(gate.publish(pending(1), at(2)));
+        assert!(!gate.publish(pending(2), at(1)));
+        assert!(gate.take_grants(at(2)).is_empty());
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        let mut malformed = pending(2);
+        malformed.owned = 0;
+        assert!(!gate.publish(malformed, at(3)));
+        assert!(gate.publish(pending(2), at(4)));
+        assert_eq!(wakes.load(Ordering::Relaxed), 2);
+        drop(registration);
+        assert!(gate.publish(pending(3), at(5)));
+        assert_eq!(wakes.load(Ordering::Relaxed), 2);
     }
 
     #[test]

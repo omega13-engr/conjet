@@ -500,6 +500,8 @@ def native_session(args, root):
             vm_command += ['--core-discovery-ms', args.native_discovery_ms]
         if args.native_discovery_mode:
             vm_command += ['--core-discovery-mode', args.native_discovery_mode]
+        if args.native_evaluation_mode:
+            vm_command += ['--core-evaluation-mode', args.native_evaluation_mode]
         if pressure_fixture:
             vm_command.append('--core-pressure-fixture')
             markers.append('etc/conjet/native-core-pressure-fixture')
@@ -762,6 +764,7 @@ def main():
     parser.add_argument('--native-latency-lane', choices=('api', 'cli'))
     parser.add_argument('--native-discovery-ms', choices=('30', '5'))
     parser.add_argument('--native-discovery-mode', choices=('poll', 'watch'))
+    parser.add_argument('--native-evaluation-mode', choices=('tick', 'wake'))
     parser.add_argument('--native-latency-idle', action='store_true')
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
@@ -801,6 +804,8 @@ def main():
         parser.error('alternate discovery cadence requires the isolated latency tracer')
     if args.native_discovery_mode and (not args.native_memd or args.diagnostics == 'memory-telemetry'):
         parser.error('pending discovery mode requires the native Core governor')
+    if args.native_evaluation_mode and (not args.native_memd or args.diagnostics == 'memory-telemetry'):
+        parser.error('evaluation mode requires the native Core governor')
     if args.diagnostics == 'pending-watch' and args.native_discovery_mode != 'poll':
         parser.error('the wire watch probe needs the private watcher slot free')
     if args.native_latency_idle and not (args.matched_output and args.native_latency_trace):
