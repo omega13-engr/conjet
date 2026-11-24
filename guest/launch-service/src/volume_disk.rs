@@ -106,6 +106,7 @@ pub(crate) mod guest {
     const PENDING: &str = "/run/conjet/volume-disk/volumes/.pending";
     const LIMIT: usize = 8;
     const METADATA: &CStr = c"trusted.conjet.volume-labels";
+    const UNCLAIMED: &CStr = c"trusted.conjet.volume-unclaimed";
 
     fn path(value: &CStr) -> &Path {
         Path::new(value.to_str().expect("static mount path"))
@@ -293,6 +294,15 @@ pub(crate) mod guest {
                 Some(GID_BASE + WORKLOAD_GID),
             )?;
             let pending = File::open(PENDING)?;
+            checked(unsafe {
+                libc::fsetxattr(
+                    pending.as_raw_fd(),
+                    UNCLAIMED.as_ptr(),
+                    std::ptr::null(),
+                    0,
+                    libc::XATTR_CREATE,
+                )
+            })?;
             if !labels.is_empty() {
                 checked(unsafe {
                     libc::fsetxattr(
@@ -338,15 +348,8 @@ pub(crate) mod guest {
                 "invalid native volume name",
             ));
         }
-        let source = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
-            .open(Path::new(VOLUMES).join(name))?;
-        let mut info = checked_info(
-            name,
-            &source.metadata()?,
-            (UID_BASE + WORKLOAD_UID, GID_BASE + WORKLOAD_GID),
-        )?;
+        let source = open_volume(name, 0)?;
+        let mut info = checked_info(name, &source.metadata()?, (UID_BASE, GID_BASE))?;
         let mut payload = [0u8; LABELS_LIMIT];
         let length = unsafe {
             libc::fgetxattr(
@@ -369,37 +372,82 @@ pub(crate) mod guest {
     }
 
     pub(crate) fn mount_source(request: &VolumeMount) -> io::Result<File> {
-        if !valid_name(&request.name) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid native volume name",
-            ));
-        }
-        let source = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
-            .open(Path::new(VOLUMES).join(&request.name))?;
-        let info = checked_info(
-            &request.name,
-            &source.metadata()?,
-            (WORKLOAD_UID, WORKLOAD_GID),
-        )?;
+        let source = open_volume(&request.name, libc::O_PATH)?;
+        let info = checked_info(&request.name, &source.metadata()?, (0, 0))?;
         if info.inode != request.inode {
             return Err(io::Error::other("stale native volume identity"));
         }
         Ok(source)
     }
 
-    fn checked_info(name: &str, info: &Metadata, owner: (u32, u32)) -> io::Result<VolumeInfo> {
-        if !info.is_dir() || (info.uid(), info.gid()) != owner || info.mode() & 0o777 != 0o700 {
+    /// Called by the supervisor while it owns the volume admission lock.
+    /// The marker is set only on newly created volumes.
+    pub(crate) fn initialize_mount(request: &VolumeMount, namespace_root: bool) -> io::Result<()> {
+        let source = open_volume(&request.name, 0)?;
+        let info = checked_info(&request.name, &source.metadata()?, (UID_BASE, GID_BASE))?;
+        if info.inode != request.inode {
+            return Err(io::Error::other("stale native volume identity"));
+        }
+        let fd = source.as_raw_fd();
+        let marker = unsafe { libc::fgetxattr(fd, UNCLAIMED.as_ptr(), std::ptr::null_mut(), 0) };
+        if marker < 0 {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ENODATA) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        if marker != 0 {
+            return Err(io::Error::other(
+                "invalid native volume initialization marker",
+            ));
+        }
+        if namespace_root && info.guest_uid != 0 {
+            let directory = format!("/proc/self/fd/{fd}");
+            if fs::read_dir(directory)?.next().is_some() {
+                return Err(io::Error::other("unclaimed native volume contains data"));
+            }
+            checked(unsafe { libc::fchown(fd, UID_BASE, GID_BASE) })?;
+            source.sync_all()?;
+        }
+        checked(unsafe { libc::fremovexattr(fd, UNCLAIMED.as_ptr()) })?;
+        source.sync_all()
+    }
+
+    fn open_volume(name: &str, flags: libc::c_int) -> io::Result<File> {
+        if !valid_name(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid native volume name",
+            ));
+        }
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
+            .open(Path::new(VOLUMES).join(name))
+    }
+
+    fn checked_info(name: &str, info: &Metadata, base: (u32, u32)) -> io::Result<VolumeInfo> {
+        let owner = (
+            info.uid().checked_sub(base.0),
+            info.gid().checked_sub(base.1),
+        );
+        if !info.is_dir()
+            || !matches!(
+                owner,
+                (Some(0), Some(0)) | (Some(WORKLOAD_UID), Some(WORKLOAD_GID))
+            )
+            || info.mode() & 0o777 != 0o700
+        {
             return Err(io::Error::other(
                 "unexpected native volume directory identity",
             ));
         }
         Ok(VolumeInfo {
             name: name.into(),
-            guest_uid: WORKLOAD_UID,
-            guest_gid: WORKLOAD_GID,
+            guest_uid: owner.0.expect("validated volume UID"),
+            guest_gid: owner.1.expect("validated volume GID"),
             mode: info.mode() & 0o777,
             inode: info.ino(),
             labels: VolumeLabels::new(),
