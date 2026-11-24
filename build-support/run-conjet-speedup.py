@@ -539,8 +539,10 @@ def native_session(args, root):
             package_hash = fingerprint(args.import_package)['sha256']
             install = [args.core, 'native', 'docker-install', '--session', directory,
                        '--package', args.import_package, '--sha256', package_hash]
+            if args.import_disk_package:
+                install.append('--disk-package')
             report['install_command'] = list(map(str, install))
-            report['install'] = json.loads(run(install, env=env, timeout=60))
+            report['install'] = json.loads(run(install, env=env, timeout=195 if args.import_disk_package else 60))
             if report['install']['boot_id'] != boot:
                 raise RuntimeError('image was installed into a different boot')
             diagnostic['postflight'](directory, vm.pid, config_digest, boot, output)
@@ -772,6 +774,8 @@ def main():
                         help='use the frozen Docker Hub image pins in the private native store')
     parser.add_argument('--native-disk-images', action='store_true',
                         help='stage native image transfers on the leased private volume filesystem')
+    parser.add_argument('--import-disk-package', action='store_true',
+                        help='use the v2 package format for the staged OCI import diagnostic')
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output',
                  'native-memd', 'native-reclaimd', 'native-volume-disk', 'native-compose-cli',
                  'import-package', 'import-receipt', 'registry-fixtures', 'native-boot-layout'):
@@ -866,6 +870,8 @@ def main():
         native_assets += ('native_compose_cli',)
     elif args.native_compose_cli:
         parser.error('a Compose CLI requires Compose diagnostics')
+    if args.import_disk_package and (args.diagnostics != 'oci-import' or not args.native_disk_images):
+        parser.error('packed OCI import requires the private disk image store and OCI import diagnostic')
     if args.diagnostics == 'oci-import':
         if not (args.import_package and args.import_receipt and args.docker_owner == 'rust'):
             parser.error('OCI import diagnostics require the Rust owner and a staged package and receipt')

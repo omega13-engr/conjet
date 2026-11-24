@@ -13,14 +13,14 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::handshake::{hex, unhex};
-use crate::oci::{DISK_STORE_MARKER, Kind, PACKAGE_LIMIT, Root};
+use crate::oci::{DISK_STORE_MARKER, Kind, PACKAGE_LIMIT, PackageEncoding, Record, Root, packed};
 use crate::spec::{GID_BASE, UID_BASE};
 
 const DIRECTORY: &str = "/run/conjet/oci-images";
 const DISK_DIRECTORY: &str = "/run/conjet/volume-disk/.conjet-oci-images";
 const MAX_IMAGES: usize = 3;
 const CHUNK: usize = 8192;
-const TOTAL_BYTES: u64 = PACKAGE_LIMIT;
+const DISK_TOTAL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const IDLE: Duration = Duration::from_secs(10);
 
 type Failure = (&'static str, &'static str);
@@ -42,6 +42,8 @@ enum Action {
         config_digest: String,
         package_digest: String,
         size: u64,
+        #[serde(default)]
+        encoding: PackageEncoding,
     },
     Write {
         transfer: String,
@@ -65,6 +67,7 @@ struct Pending {
     config_digest: String,
     package_digest: [u8; 32],
     size: u64,
+    encoding: PackageEncoding,
     file: File,
     written: u64,
     hash: Sha256,
@@ -159,6 +162,7 @@ impl Store {
                 config_digest,
                 package_digest,
                 size,
+                encoding,
             } => {
                 unhex::<16>(&transfer).map_err(|_| ("malformed", "invalid OCI transfer ID"))?;
                 digest(&config_digest)?;
@@ -169,8 +173,21 @@ impl Store {
                 if self.pending.is_some() {
                     return Err(("busy", "one OCI transfer is already owned"));
                 }
+                let disk = disk_store_enabled();
+                if !disk && encoding == PackageEncoding::DiskV2 {
+                    return Err(("unsupported", "disk OCI packages require the disk store"));
+                }
+                let quota = if disk {
+                    DISK_TOTAL_BYTES
+                } else {
+                    PACKAGE_LIMIT
+                };
                 let used: u64 = self.images.values().map(|image| image.bytes).sum();
-                if size == 0 || size > TOTAL_BYTES - used || self.images.len() >= MAX_IMAGES {
+                if size == 0
+                    || size > encoding.byte_limit()
+                    || size > quota.saturating_sub(used)
+                    || self.images.len() >= MAX_IMAGES
+                {
                     return Err(("capacity", "guest OCI image capacity exceeded"));
                 }
                 let file = spool(&transfer)
@@ -181,6 +198,7 @@ impl Store {
                     config_digest,
                     package_digest,
                     size,
+                    encoding,
                     file,
                     written: 0,
                     hash: Sha256::new(),
@@ -224,14 +242,36 @@ impl Store {
                     .file
                     .rewind()
                     .map_err(|_| ("integrity", "cannot rewind staged OCI root"))?;
-                let root = Root::read_file(state.file)
-                    .map_err(|_| ("integrity", "invalid staged OCI root"))?;
-                if root.config_digest != state.config_digest {
-                    return Err(("integrity", "staged OCI config digest differs"));
-                }
-                if install(&root, &state.transfer, deadline).is_err() {
-                    return Err(("image_install_failed", "cannot publish staged OCI image"));
-                }
+                let validate_image = |root: &Root| {
+                    if root.config_digest == state.config_digest {
+                        Ok(())
+                    } else {
+                        Err(("integrity", "staged OCI config digest differs"))
+                    }
+                };
+                let malformed = ("integrity", "invalid staged OCI root");
+                let result = match state.encoding {
+                    PackageEncoding::Json => {
+                        let root = Root::read_file(state.file).map_err(|_| malformed)?;
+                        validate_image(&root)?;
+                        install(&root, &state.transfer, deadline, |record, target| {
+                            let data = base64::engine::general_purpose::STANDARD
+                                .decode(&record.data)
+                                .map_err(io::Error::other)?;
+                            target.write_all(&data)
+                        })
+                    }
+                    PackageEncoding::DiskV2 => {
+                        let mut file = io::BufReader::new(state.file);
+                        let index =
+                            packed::Index::read(&mut file, state.size).map_err(|_| malformed)?;
+                        validate_image(&index.root)?;
+                        install(&index.root, &state.transfer, deadline, |record, target| {
+                            index.copy_file(&mut file, &record.path, target)
+                        })
+                    }
+                };
+                result.map_err(|_| ("image_install_failed", "cannot publish staged OCI image"))?;
                 self.images.insert(
                     state.config_digest.clone(),
                     Image {
@@ -316,7 +356,12 @@ fn spool(transfer: &str) -> io::Result<File> {
     Ok(file)
 }
 
-fn install(root: &Root, transfer: &str, deadline: Instant) -> io::Result<()> {
+fn install(
+    root: &Root,
+    transfer: &str,
+    deadline: Instant,
+    mut write_file: impl FnMut(&Record, &mut File) -> io::Result<()>,
+) -> io::Result<()> {
     let directory = store_directory()?;
     let staging = directory.join(format!(".{transfer}"));
     fs::DirBuilder::new().mode(0o700).create(&staging)?;
@@ -334,10 +379,7 @@ fn install(root: &Root, transfer: &str, deadline: Instant) -> io::Result<()> {
             match record.kind {
                 Kind::Directory => fs::create_dir(&target)?,
                 Kind::File => {
-                    let data = base64::engine::general_purpose::STANDARD
-                        .decode(&record.data)
-                        .map_err(io::Error::other)?;
-                    fs::File::create_new(&target)?.write_all(&data)?;
+                    write_file(record, &mut fs::File::create_new(&target)?)?;
                     owner_mode(&target, record.uid, record.gid, Some(record.mode))?;
                 }
                 Kind::Symlink => {
@@ -364,6 +406,9 @@ fn install(root: &Root, transfer: &str, deadline: Instant) -> io::Result<()> {
             fs::write(staging.join("hardlinks.json"), groups)?;
         }
         fs::set_permissions(&staging, Permissions::from_mode(0o711))?;
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("OCI installation deadline elapsed"));
+        }
         let path = imported_root(&root.config_digest)
             .ok_or_else(|| io::Error::other("invalid OCI config digest"))?;
         if path.symlink_metadata().is_ok() {

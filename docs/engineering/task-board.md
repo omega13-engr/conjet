@@ -911,6 +911,21 @@ root paths, credentials, hard links, atomic publication and cleanup.
 Reject malformed encodings, truncated files and invalid metadata. Retain
 the existing JSON small-image package and its limits.
 
+Evidence: The original two-layer fixture passed install, overlapping
+execution, exec, removal, abort and integrity checks through the packed
+path. A separately identified 80 MiB streaming canary also passed.
+Both used the dynamic Core profile, released the private disk and passed
+offline ext4 checks. Logs are under `SPEED-106/` on ExternalSSD.
+
+### SPEED-107
+
+Title: Stage large pinned OCI layouts from verified on-disk tar extents
+
+Acceptance: Stream compressed and uncompressed layer verification and
+create a packed root under bounded ExternalSSD scratch. Exercise the fixed
+Node, Go and Rust layouts, retaining manifest and config identity,
+whiteouts, links, metadata validation and atomic publication.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

@@ -18,6 +18,25 @@ macro_rules! ensure {
     };
 }
 
+pub mod packed;
+
+#[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageEncoding {
+    #[default]
+    Json,
+    DiskV2,
+}
+
+impl PackageEncoding {
+    pub fn byte_limit(self) -> u64 {
+        match self {
+            Self::Json => PACKAGE_LIMIT,
+            Self::DiskV2 => packed::BYTE_LIMIT,
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Root {
@@ -103,13 +122,17 @@ impl Root {
     }
 
     fn validate(self) -> std::io::Result<Self> {
+        self.validate_with_limit(MAX_RECORDS)
+    }
+
+    fn validate_with_limit(self, max_records: usize) -> std::io::Result<Self> {
         let digest = self
             .config_digest
             .strip_prefix("sha256:")
             .ok_or_else(|| std::io::Error::other("invalid OCI image config digest"))?;
         unhex::<32>(digest).map_err(std::io::Error::other)?;
         ensure!(
-            !self.records.is_empty() && self.records.len() <= MAX_RECORDS,
+            !self.records.is_empty() && self.records.len() <= max_records,
             "invalid OCI rootfs entry count"
         );
         let mut types = BTreeMap::new();

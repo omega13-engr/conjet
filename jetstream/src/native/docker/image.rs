@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{self, BufReader, Read, Seek};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -7,7 +7,7 @@ use anyhow::{ensure, Context};
 use base64::Engine;
 use clap::Args;
 use conjet_launch_service::handshake::{hex, random, unhex};
-use conjet_launch_service::oci::{Root, PACKAGE_LIMIT};
+use conjet_launch_service::oci::{packed, PackageEncoding, Root};
 use conjet_launch_service::wire::Kind;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -152,6 +152,9 @@ pub(in crate::native) struct InstallOptions {
     package: PathBuf,
     #[arg(long)]
     sha256: String,
+    /// Install a streamed v2 package on a guest with the disk image profile.
+    #[arg(long)]
+    disk_package: bool,
 }
 
 pub(in crate::native) fn install(options: InstallOptions) -> anyhow::Result<()> {
@@ -161,20 +164,36 @@ pub(in crate::native) fn install(options: InstallOptions) -> anyhow::Result<()> 
         path == options.package && path.starts_with(SCRATCH),
         "expected ExternalSSD OCI package"
     );
+    let encoding = if options.disk_package {
+        PackageEncoding::DiskV2
+    } else {
+        PackageEncoding::Json
+    };
     let file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
+    let size = metadata.len();
     ensure!(
-        metadata.is_file() && metadata.len() <= PACKAGE_LIMIT,
+        metadata.is_file() && size > 0 && size <= encoding.byte_limit(),
         "invalid OCI package file"
     );
-    let mut package = Vec::new();
-    file.take(PACKAGE_LIMIT + 1).read_to_end(&mut package)?;
+    let mut file = BufReader::new(file);
     let digest = unhex::<32>(&options.sha256)?;
+    let mut hash = Sha256::new();
     ensure!(
-        Sha256::digest(&package)[..] == digest,
+        io::copy(&mut (&mut file).take(size + 1), &mut hash)? == size
+            && hash.finalize()[..] == digest,
         "OCI package SHA-256 mismatch"
     );
-    let image = Root::read(&package)?.config_digest;
+    file.rewind()?;
+    let image = match encoding {
+        PackageEncoding::DiskV2 => packed::Index::read(&mut file, size)?.root.config_digest,
+        PackageEncoding::Json => {
+            let mut package = Vec::new();
+            (&mut file).take(size + 1).read_to_end(&mut package)?;
+            Root::read(&package)?.config_digest
+        }
+    };
+    file.rewind()?;
     let _lock = admission_lock(&options.session)?;
     let (identity, key) = client::load(&options.session)?;
     let mut peer = client::Connection::open(&options.session, &identity, &key)?;
@@ -187,7 +206,7 @@ pub(in crate::native) fn install(options: InstallOptions) -> anyhow::Result<()> 
                 .map_or(true, Vec::is_empty),
         "native image installation requires an idle Docker guest"
     );
-    let response = install_with_peer(&mut peer, &image, &options.sha256, &package)?;
+    let response = install_reader(&mut peer, &image, &options.sha256, encoding, size, file)?;
     println!(
         "{}",
         json!({"boot_id":peer.boot,"image":response,"package_sha256":options.sha256})
@@ -214,37 +233,62 @@ pub(super) fn install_with_peer(
     sha256: &str,
     package: &[u8],
 ) -> anyhow::Result<Value> {
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let transfer = hex(&random::<16>()?);
-    let begin = image_request(
+    install_reader(
         peer,
-        json!({
-            "action":"begin", "transfer":transfer, "config_digest":image,
-            "package_digest":format!("sha256:{sha256}"), "size":package.len()
-        }),
-        1000,
-    )?;
+        image,
+        sha256,
+        PackageEncoding::Json,
+        package.len() as u64,
+        package,
+    )
+}
+
+pub(super) fn install_reader(
+    peer: &mut client::Connection,
+    image: &str,
+    sha256: &str,
+    encoding: PackageEncoding,
+    size: u64,
+    mut package: impl Read,
+) -> anyhow::Result<Value> {
+    let timeout = match encoding {
+        PackageEncoding::Json => 45,
+        PackageEncoding::DiskV2 => 180,
+    };
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    let transfer = hex(&random::<16>()?);
+    let mut operation = json!({
+        "action":"begin", "transfer":transfer, "config_digest":image,
+        "package_digest":format!("sha256:{sha256}"), "size":size
+    });
+    if encoding == PackageEncoding::DiskV2 {
+        operation["encoding"] = json!(encoding);
+    }
+    let begin = image_request(peer, operation, 1000)?;
     ensure!(
         begin["offset"] == 0,
         "unexpected initial OCI transfer offset"
     );
-    let mut offset = 0;
-    for chunk in package.chunks(CHUNK) {
+    let mut offset = 0u64;
+    let mut buffer = [0; CHUNK];
+    while offset < size {
         ensure!(
             Instant::now() < deadline && !super::STOP.load(std::sync::atomic::Ordering::Acquire),
             "OCI transfer deadline elapsed or the owner stopped"
         );
+        let chunk = &mut buffer[..(size - offset).min(CHUNK as u64) as usize];
+        package.read_exact(chunk)?;
         let reply = image_request(
             peer,
             json!({
                 "action":"write", "transfer":transfer, "offset":offset,
-                "data":base64::engine::general_purpose::STANDARD.encode(chunk)
+                "data":base64::engine::general_purpose::STANDARD.encode(&*chunk)
             }),
             1000,
         )?;
-        offset += chunk.len();
+        offset += chunk.len() as u64;
         ensure!(
-            reply["offset"].as_u64() == Some(offset as u64),
+            reply["offset"].as_u64() == Some(offset),
             "unexpected OCI transfer acknowledgement"
         );
     }
