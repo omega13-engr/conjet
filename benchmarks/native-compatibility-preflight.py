@@ -84,6 +84,15 @@ def qualified_lifecycle(workload, manifest, report, fixture, connection, docker,
         run.__globals__['sample'] = sample
 
 
+def event_snapshot(connection, api_version):
+    connection.request('GET', f'/v{api_version}/events')
+    with connection.getresponse() as response:
+        raw = response.read(65537)
+        if response.status != 200 or len(raw) > 65536:
+            raise RuntimeError('native event snapshot was unavailable')
+    return map(json.loads, raw.splitlines())
+
+
 def qualified_control(matrix, manifest, report, fixture, connection, docker, env):
     run = matrix['run_matrix']
     driver = run.__globals__['Docker']
@@ -94,13 +103,8 @@ def qualified_control(matrix, manifest, report, fixture, connection, docker, env
             if scenario == 'control-start' and result:
                 report['persistent_id'] = result.decode().strip()
             if scenario == 'control-remove' and result is not None:
-                connection.request('GET', f"/v{manifest['docker_api']}/events")
-                with connection.getresponse() as response:
-                    raw = response.read(65537)
-                    if response.status != 200 or len(raw) > 65536:
-                        raise RuntimeError('persistent control teardown snapshot was unavailable')
                 report['persistent_events'] = [
-                    event for event in map(json.loads, raw.splitlines())
+                    event for event in event_snapshot(connection, manifest['docker_api'])
                     if event['Actor']['ID'] == report['persistent_id']
                 ]
             return result
@@ -127,13 +131,8 @@ def qualified_storage(matrix, manifest, report, fixture, connection, docker, env
                 return result
             row = self.rows[-1]
             try:
-                connection.request('GET', f"/v{manifest['docker_api']}/events")
-                with connection.getresponse() as response:
-                    raw = response.read(65537)
-                    if response.status != 200 or len(raw) > 65536:
-                        raise RuntimeError('native storage event snapshot was unavailable')
                 events = [
-                    event for event in map(json.loads, raw.splitlines())
+                    event for event in event_snapshot(connection, manifest['docker_api'])
                     if event['Actor']['Attributes'].get(matrix['LABEL']) == self.token
                 ]
                 if [event['Action'] for event in events[-2:]] != ['die', 'destroy']:
@@ -166,6 +165,100 @@ def qualified_storage(matrix, manifest, report, fixture, connection, docker, env
     run.__globals__['Docker'] = StorageWitness
     try:
         run('storage_network', manifest, report, fixture, docker, env, connection=connection)
+    finally:
+        run.__globals__['Docker'] = driver
+
+
+def qualified_compose(matrix, manifest, report, fixture, connection, docker, env):
+    run = matrix['run_matrix']
+    driver = run.__globals__['Docker']
+
+    class ComposeWitness(driver):
+        def call(self, scenario, args, **options):
+            result = super().call(scenario, args, **options)
+            if scenario != 'compose.up':
+                return result
+            project = args[args.index('--project-name') + 1]
+            redis = f'{project}-redis-1'
+            if result is None:
+                for service in ('redis', 'app'):
+                    super().call('compose-failed-service-logs',
+                                 ['logs', f'{project}-{service}-1'],
+                                 phase='verification', timeout=5)
+            running = super().call('compose-redis-running',
+                                   ['inspect', '--format', '{{.State.Running}}', redis],
+                                   phase='verification', timeout=5)
+            if running == b'true\n':
+                status = super().call('compose-redis-process',
+                                      ['exec', redis, 'cat', '/proc/1/status'],
+                                      phase='verification', timeout=5)
+                if status is not None:
+                    expected = {'Uid': ['999'] * 4, 'Gid': ['1000'] * 4, 'Groups': [],
+                                'CapEff': ['0000000000000000'], 'NoNewPrivs': ['1']}
+                    fields = {}
+                    for line in status.decode().splitlines():
+                        key, _, value = line.partition(':')
+                        if key in expected:
+                            fields[key] = value.split()
+                    if fields != expected:
+                        self.rows[-1]['error'] = 'Redis process identity differs from the pinned image'
+            return result
+
+    run.__globals__['Docker'] = ComposeWitness
+    try:
+        run('compose', manifest, report, fixture, docker, env, connection=connection)
+    finally:
+        run.__globals__['Docker'] = driver
+
+
+def qualified_stress(matrix, manifest, report, fixture, connection, docker, env):
+    run = matrix['run_matrix']
+    driver = run.__globals__['Docker']
+    ids = {}
+    handles = set()
+    terminal_operations = {
+        'pressure-target-remove': ('pressure-create', 137),
+        'pressure-survivor-remove': ('pressure-survivor-create', 137),
+        'pressure-recovery': (None, 0),
+    }
+
+    class StressWitness(driver):
+        def call(self, scenario, args, **options):
+            result = super().call(scenario, args, **options)
+            if result is None:
+                return result
+            if scenario in ('pressure-create', 'pressure-survivor-create'):
+                ids[scenario] = result.decode().strip()
+            if scenario not in terminal_operations:
+                return result
+            row = self.rows[-1]
+            origin, code = terminal_operations[scenario]
+            try:
+                events = [
+                    event for event in event_snapshot(connection, manifest['docker_api'])
+                    if event['Actor']['Attributes'].get(matrix['LABEL']) == self.token
+                    and (origin is None or event['Actor']['ID'] == ids[origin])
+                ]
+                if [event['Action'] for event in events[-2:]] != ['die', 'destroy']:
+                    raise RuntimeError('native stress generation was not removed')
+                died, destroyed = events[-2:]
+                witness = died['Actor']['Attributes']
+                handle = witness.get('conjet.native_handle')
+                if (died['Actor']['ID'] != destroyed['Actor']['ID']
+                        or witness.get('conjet.backend') != 'jetstream-native-oci'
+                        or witness.get('conjet.guest_cleanup') != 'complete'
+                        or witness.get('exitCode') != str(code) or not handle or handle in handles):
+                    raise RuntimeError('native stress workload did not confirm its own cleanup')
+                handles.add(handle)
+                row['guest_witness'] = witness
+            except (OSError, RuntimeError, ValueError, KeyError, http.client.HTTPException) as error:
+                row['error'] = str(error)
+                connection.close()
+            return result
+
+    run.__globals__['Docker'] = StressWitness
+    try:
+        run('stress', manifest, report, fixture, docker, env, connection=connection)
     finally:
         run.__globals__['Docker'] = driver
 
@@ -209,6 +302,10 @@ def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None)
                     qualified_control(matrix, manifest, report, fixture, connection, docker, env)
                 elif suite == 'storage_network':
                     qualified_storage(matrix, manifest, report, fixture, connection, docker, env)
+                elif suite == 'compose':
+                    qualified_compose(matrix, manifest, report, fixture, connection, docker, env)
+                elif suite == 'stress':
+                    qualified_stress(matrix, manifest, report, fixture, connection, docker, env)
                 else:
                     matrix['run_matrix'](suite, manifest, report, fixture, docker, env,
                                          connection=connection)

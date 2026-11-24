@@ -182,6 +182,40 @@ def storage_cases(report, budget):
     return results
 
 
+def stress_oom(report):
+    rows = report.get('operations', [])
+    pressure = [row for row in rows if row['scenario'].startswith('pressure-')]
+    if report.get('error') or not pressure or any(row.get('error') is not None for row in pressure):
+        return False
+    outputs = {
+        'pressure-guest-limits': '67108864 0\n',
+        'pressure-oom-exit': '137\n',
+        'pressure-oom-inspect': 'true\n',
+        'pressure-survivor-before': 'active-before-oom',
+        'pressure-survivor-after': 'active-before-oom',
+        'pressure-recovery': 'pressure-recovered\n',
+        'fixture-leak-inventory': '',
+    }
+    for name, expected in outputs.items():
+        matching = [row for row in rows if row['scenario'] == name]
+        if not matching or matching[-1].get('error') is not None or matching[-1].get('stdout') != expected:
+            return False
+    handles = set()
+    for name, code in (('pressure-target-remove', '137'), ('pressure-survivor-remove', '137'),
+                       ('pressure-recovery', '0')):
+        matching = [row for row in pressure if row['scenario'] == name]
+        if len(matching) != 1 or matching[0].get('exit_code') != 0:
+            return False
+        witness = matching[0].get('guest_witness', {})
+        handle = witness.get('conjet.native_handle', '')
+        if (witness.get('conjet.backend') != 'jetstream-native-oci'
+                or witness.get('conjet.guest_cleanup') != 'complete' or witness.get('exitCode') != code
+                or not re.fullmatch(r'[0-9a-f]{32}', handle) or handle in handles):
+            return False
+        handles.add(handle)
+    return True
+
+
 def evaluate(root, revision, release):
     manifest = PREFLIGHT['contract']()
     required = {case['id']: {
@@ -275,6 +309,8 @@ def evaluate(root, revision, release):
                         and sum(row['phase'] == 'warmup' for row in rows) == warmups):
                     pass_case(f'stress/concurrency-{concurrency}',
                               f'{count} original runs and {warmups} warmups passed', suite)
+            if stress_oom(report):
+                pass_case('stress/oom-recover', 'kernel OOM, survivor and recovery verified with teardown', suite)
         if suite == 'control' and verified:
             for case in control_cases(report, scenarios['suites']['control']):
                 pass_case(f'control/{case}', 'original control runs passed with native teardown', suite)

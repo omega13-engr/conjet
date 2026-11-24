@@ -1399,6 +1399,10 @@ Evidence: The frozen stress preflight passed all 400 samples and
 40 warmups. The Node process read `67108864 0`, exited 137, and had
 `OOMKilled=true` from the kernel counter. The survivor preserved its
 bytes and the recovery launch passed. See `SPEED-138/stress-and-oom/`.
+The later optimized boot repeated those counts and confirmed distinct
+guest cleanup handles for the OOM target, survivor and recovery. The
+normalized OOM gate returned true with no operation errors and clean
+launcher teardown. See `SPEED-138/final-witness/`.
 
 ### SPEED-139
 
