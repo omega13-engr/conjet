@@ -308,6 +308,7 @@ impl Image {
             network_alias: None,
             secondary_network_alias: None,
             volume: None,
+            bind: None,
             build_snapshot: None,
             limits,
             docker_resource_defaults: limits.has_unlimited(),

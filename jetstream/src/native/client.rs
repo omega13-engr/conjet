@@ -168,6 +168,21 @@ impl Connection {
         Ok(self.stream)
     }
 
+    pub(super) fn bind(mut self, lease: &str, read_only: bool) -> anyhow::Result<Stream> {
+        let reply = self.exchange(
+            Kind::Bind,
+            Kind::Bind,
+            &json!({"boot_id":self.boot,"lease":lease,"read_only":read_only}),
+            Duration::from_secs(5),
+        )?;
+        ensure!(
+            reply["lease"] == lease,
+            "invalid native bind lease acknowledgement"
+        );
+        self.stream.deadline(None);
+        Ok(self.stream)
+    }
+
     fn state(&mut self, kind: Kind, handle: &Handle) -> anyhow::Result<Value> {
         let state = self.exchange(
             kind,
@@ -385,6 +400,7 @@ fn execute(
         network_alias: None,
         secondary_network_alias: None,
         volume: None,
+        bind: None,
         build_snapshot: None,
         limits: NATIVE_LIMITS,
     };

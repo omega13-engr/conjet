@@ -491,6 +491,11 @@ def native_session(args, root):
         if dynamic_memory:
             vm_command.append('--core-dynamic-memory')
             markers.append('etc/conjet/native-core-admission')
+        if args.native_bind_storage:
+            bind_root = output / 'matrix'
+            bind_root.mkdir(mode=0o700)
+            vm_command.append('--bind-filesystem')
+            markers.append('dev/fuse')
         if args.diagnostics == 'admission-trace' or args.native_latency_trace:
             vm_command.append('--trace-core-admission')
             markers.append('etc/conjet/native-core-latency-trace')
@@ -556,6 +561,8 @@ def native_session(args, root):
         bridge_command = [sys.executable, adapter] if python_owner else [args.core, 'native', 'docker-serve']
         bridge_command += ['--native-session', directory, '--receipt', args.import_receipt or args.native_receipt,
                            '--image', args.image, '--socket', endpoint]
+        if args.native_bind_storage:
+            bridge_command += ['--bind-root', bind_root]
         if not python_owner:
             store = root / 'image-store'
             store.mkdir(mode=0o700)
@@ -806,6 +813,7 @@ def main():
                                  'storage_network', 'stress'))
     parser.add_argument('--compatibility-lifecycle-group',
                         help='run one complete frozen lifecycle group in its own Core boot')
+    parser.add_argument('--native-bind-storage', action='store_true')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--volume-phase', choices=('create', 'inspect', 'remove'))
@@ -838,6 +846,9 @@ def main():
     args = parser.parse_args()
     if bool(args.compatibility_suite) != (args.diagnostics == 'compatibility-preflight'):
         parser.error('select one frozen suite for the native compatibility preflight')
+    if args.native_bind_storage and (
+            args.compatibility_suite != 'storage_network' or args.docker_owner != 'rust'):
+        parser.error('bind storage requires the isolated native storage suite')
     if args.compatibility_lifecycle_group:
         scenarios = json.loads((REPO / 'benchmarks/scenarios/native-compatibility-v1.json').read_text())
         groups = {case['id'].removeprefix('lifecycle/') for group in scenarios['groups']

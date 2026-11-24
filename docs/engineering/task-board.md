@@ -1354,6 +1354,12 @@ ExternalSSD source directory. Keep the host and guest views coherent,
 verify the original host checksum, and revoke the mount and its
 transport on teardown. Deny paths outside the configured share.
 
+Evidence: Six original bind runs agreed with the host's 16 MiB SHA-256
+and recorded independent guest and relay teardown. The descriptor
+walk denied symlink and parent traversal. The same preflight passed
+all writable-layer, named-volume and readback cases, with verified
+owned cleanup and an offline ext4 check. See `SPEED-135/storage-final/`.
+
 ### SPEED-136
 
 Title: Honor Compose volume removal framing

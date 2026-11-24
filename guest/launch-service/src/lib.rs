@@ -49,5 +49,7 @@ mod intent;
 #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 mod prepared;
 
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod bind_mount;
 #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 mod memory;

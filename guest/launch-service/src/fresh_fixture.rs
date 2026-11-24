@@ -350,6 +350,7 @@ struct Record {
     slot_expired: bool,
     memory_limit_bytes: u64,
     volume: Option<crate::spec::VolumeMount>,
+    bind_lease: Option<String>,
     build_snapshot: Option<crate::build_snapshot::Snapshot>,
     build_runtime_owned: bool,
     core_admission_deadline: Option<Instant>,
@@ -1065,6 +1066,10 @@ impl FreshFixture {
                 return Err(("stale_generation", "native volume inode changed"));
             }
         }
+        if let Some(bind) = &spec.bind {
+            crate::bind_mount::source(&bind.lease)
+                .map_err(|_| ("not_found", "native bind lease is unavailable"))?;
+        }
         if mode != "benchmark"
             && spec.image_digest != self.image_digest
             && !(self.oci && ledger.images.contains(&spec.image_digest))
@@ -1080,6 +1085,13 @@ impl FreshFixture {
                 return Err(("id_conflict", "sequence has a different admitted request"));
             }
             return Ok((Kind::State, record.state()));
+        }
+        if spec.bind.as_ref().is_some_and(|bind| {
+            ledger
+                .active()
+                .any(|record| record.bind_lease.as_deref() == Some(bind.lease.as_str()))
+        }) {
+            return Err(("busy", "native bind lease already owns a workload"));
         }
         if let Some(snapshot) = &spec.build_snapshot {
             if !self.oci || !self.core_admission {
@@ -1196,6 +1208,7 @@ impl FreshFixture {
             slot_expired: false,
             memory_limit_bytes: spec.limits.memory_bytes,
             volume: spec.volume.clone(),
+            bind_lease: spec.bind.as_ref().map(|bind| bind.lease.clone()),
             build_snapshot: spec.build_snapshot.clone(),
             build_runtime_owned: build,
             core_admission_deadline: self.core_admission.then_some(deadline),

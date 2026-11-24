@@ -1,5 +1,7 @@
 //! Bounded Docker compatibility endpoint for the isolated OCI candidate.
 mod archive;
+mod bind;
+mod bind_fuse;
 mod discovery;
 mod events;
 mod exec;
@@ -71,6 +73,9 @@ pub(super) struct Options {
     /// Retain verified source layers for exporting the base image.
     #[arg(long, requires = "image_store")]
     boot_layout: Option<PathBuf>,
+    /// Existing private ExternalSSD directory authorized for native host binds.
+    #[arg(long)]
+    bind_root: Option<PathBuf>,
     /// Record methods, paths and parameter names in the isolated diagnostic.
     #[arg(long)]
     trace_requests: bool,
@@ -216,6 +221,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         metadata,
         native,
         store,
+        options.bind_root.map(bind::Root::open).transpose()?,
         options.trace_requests,
     )
 }
@@ -233,6 +239,7 @@ fn serve_endpoint(
     metadata: request::Image,
     native: Native,
     store: Option<registry::Store>,
+    bind_root: Option<bind::Root>,
     trace_requests: bool,
 ) -> anyhow::Result<()> {
     let boot = &native.boot;
@@ -245,7 +252,7 @@ fn serve_endpoint(
         "{}",
         json!({"socket":_socket.0, "boot_id":boot, "backend":BACKEND})
     );
-    let owner = Arc::new(Owner::new(metadata, native, store));
+    let owner = Arc::new(Owner::new(metadata, native, store, bind_root));
     let mut handlers: Vec<JoinHandle<()>> = Vec::with_capacity(CONNECTIONS);
     let result = loop {
         for i in (0..handlers.len()).rev() {
@@ -620,10 +627,21 @@ struct Container {
     config: Value,
     spec: Value,
     volume: Option<conjet_launch_service::spec::VolumeMount>,
+    bind: Option<bind::Binding>,
     created: u64,
     healthcheck: Option<health::Config>,
     auto_remove: bool,
     cancel: AtomicU8,
+}
+
+impl Container {
+    fn mounts(&self) -> Vec<Value> {
+        self.volume
+            .iter()
+            .map(volume::mount_metadata)
+            .chain(self.bind.iter().map(bind::Binding::metadata))
+            .collect()
+    }
 }
 
 #[derive(Default)]
@@ -764,17 +782,24 @@ struct Owner {
     ledger: Mutex<Ledger>,
     store: Option<Mutex<registry::Store>>,
     archive_root: Option<PathBuf>,
+    bind_root: Option<bind::Root>,
     built_in_bridge: network::Network,
     exec_peer: Mutex<Option<client::Connection>>,
     event_changed: Condvar,
 }
 
 impl Owner {
-    fn new(image: request::Image, native: Native, store: Option<registry::Store>) -> Self {
+    fn new(
+        image: request::Image,
+        native: Native,
+        store: Option<registry::Store>,
+        bind_root: Option<bind::Root>,
+    ) -> Self {
         Self {
             image,
             mapped_ids: native.mapped_ids,
             archive_root: store.as_ref().map(|store| store.root().to_owned()),
+            bind_root,
             built_in_bridge: network::Network::built_in(&native.boot),
             native: Mutex::new(native),
             ledger: Mutex::new(Ledger::default()),
@@ -942,7 +967,7 @@ impl Owner {
                         "Command":command,"Created":container.created,"Labels":labels,
                         "State":state.status(),"Status":state.status(),
                         "NetworkSettings":{"Networks":networks},"Ports":ports,
-                        "Mounts":container.volume.iter().map(volume::mount_metadata).collect::<Vec<_>>() }))
+                        "Mounts":container.mounts() }))
         }).collect::<Vec<_>>();
         json!(selected)
     }
@@ -1344,6 +1369,9 @@ impl Owner {
                 json!(state["cleanup"].as_str().unwrap_or("not_admitted"));
             attributes["conjet.native_handle"] =
                 json!(state["handle"]["workload_id"].as_str().unwrap_or(""));
+            if let Some(verified) = state["bind_cleanup"].as_str() {
+                attributes["conjet.bind_cleanup"] = json!(verified);
+            }
             if let Some(sequence) = state["trace_sequence"].as_u64() {
                 let trace = json!({
                     "boot_id": state["handle"]["boot_id"],
@@ -1404,7 +1432,13 @@ impl Owner {
         let id = hex(&random::<32>()
             .map_err(|_| Rejected::internal("cannot allocate container identity"))?);
         let name = name.unwrap_or(&id[..12]).to_owned();
-        let volume = volume::requested(&config)?
+        let bind = bind::Binding::requested(&config, self.bind_root.as_ref())?;
+        let mount = if bind.is_none() {
+            volume::requested(&config)?
+        } else {
+            None
+        };
+        let volume = mount
             .map(|mount| {
                 let info = volume::ask(self, "inspect", Some(mount.name))?;
                 let inode = info["inode"]
@@ -1446,13 +1480,13 @@ impl Owner {
                 ));
             }
         }
-        let mut spec = if network.is_some() || volume.is_some() {
+        let mut spec = if network.is_some() || volume.is_some() || bind.is_some() {
             let mut process = config.clone();
             if network.is_some() {
                 process["HostConfig"]["NetworkMode"] = json!("none");
                 process["NetworkingConfig"] = Value::Null;
             }
-            if volume.is_some() {
+            if volume.is_some() || bind.is_some() {
                 let host = process["HostConfig"]
                     .as_object_mut()
                     .expect("Docker host config");
@@ -1475,6 +1509,11 @@ impl Owner {
         };
         if let Some(volume) = &volume {
             spec["volume"] = json!(volume);
+        }
+        if bind.is_some() && (spec["uid"] != 0 || spec["gid"] != 0) {
+            return Err(Rejected::bad(
+                "isolated host binds require the mapped root identity",
+            ));
         }
         let healthcheck = health::Config::parse(&config["Healthcheck"], &spec)?;
         let published = publication
@@ -1499,6 +1538,7 @@ impl Owner {
                 config,
                 spec,
                 volume,
+                bind,
                 created: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -1637,18 +1677,7 @@ impl Owner {
                 witness: json!({"cleanup":"not_admitted"}),
             })
         } else {
-            let admitted = self
-                .native
-                .lock()
-                .unwrap()
-                .begin(spec.unwrap_or(&item.container.spec));
-            admitted.and_then(|mut admitted| {
-                item.state().native_handle = Some(admitted.state["handle"].clone());
-                item.changed.notify_all();
-                let result = wait_for_native(self, &mut admitted, &item, generation);
-                self.native.lock().unwrap().finish(admitted, result.is_ok());
-                result
-            })
+            self.run_admitted(&item, generation, spec.unwrap_or(&item.container.spec))
         };
         let mut ledger = self.ledger.lock().unwrap();
         let mut state = item.state();
@@ -1672,6 +1701,39 @@ impl Owner {
             }
         }
         item.changed.notify_all();
+    }
+
+    fn run_admitted(&self, item: &Item, generation: u64, spec: &Value) -> anyhow::Result<Terminal> {
+        let bind = item
+            .container
+            .bind
+            .as_ref()
+            .map(|bind| bind.start(self))
+            .transpose()?;
+        let bound_spec = bind.as_ref().map(|lease| {
+            let mut spec = spec.clone();
+            spec["bind"] = json!(lease.binding);
+            spec
+        });
+        let admitted = self
+            .native
+            .lock()
+            .unwrap()
+            .begin(bound_spec.as_ref().unwrap_or(spec));
+        let mut result = admitted.and_then(|mut admitted| {
+            item.state().native_handle = Some(admitted.state["handle"].clone());
+            item.changed.notify_all();
+            let result = wait_for_native(self, &mut admitted, item, generation);
+            self.native.lock().unwrap().finish(admitted, result.is_ok());
+            result
+        });
+        if let Some(bind) = bind {
+            bind.finish()?;
+            if let Ok(terminal) = &mut result {
+                terminal.witness["bind_cleanup"] = json!("complete");
+            }
+        }
+        result
     }
 
     fn retire(&self, ledger: &mut Ledger, item: &Arc<Item>, state: &mut Lifecycle) {

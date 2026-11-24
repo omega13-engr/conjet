@@ -978,7 +978,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                 json!({
                     "Id":container.id,"Name":format!("/{}",container.name),"Image":container.spec["image_digest"],
                     "Driver":BACKEND,"Platform":"linux","Path":specs[0],"Args":specs[1..],
-                    "Mounts": container.volume.iter().map(super::volume::mount_metadata).collect::<Vec<_>>(),
+                    "Mounts":container.mounts(),
                     "RestartCount":state.generation,
                     "State":lifecycle,
                     "Config":config,"HostConfig":host,"NetworkSettings":{

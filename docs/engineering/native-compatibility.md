@@ -407,6 +407,16 @@ with complete cleanup. Raw artifacts are under `SPEED-130/` on
 ExternalSSD. This is control qualification evidence ahead of the full
 gate rerun on one finished release artifact set.
 
+The frozen storage preflight passed six writable-layer runs, six
+named-volume runs with independent readbacks, and six host bind runs.
+All paths produced the same 16 MiB SHA-256. The bind lane used a live
+FUSE relay over the authenticated guest connection to an owned
+ExternalSSD subdirectory. The host checksum and guest mount teardown
+were recorded for each bind. The current profile supports bounded
+regular-file I/O in the admitted dataset directory. The service
+fixture still stopped at Compose network creation. See
+`SPEED-135/storage-final/` on ExternalSSD.
+
 Revision `fa1cbad84f30482d08862aee051914a0bd4a8c9b` ran the native
 preflights and regressions against a single optimized release artifact
 set. Evaluating the 71 requirements produced **19 PASS and 52 FAIL**.

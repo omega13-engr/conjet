@@ -123,6 +123,65 @@ def control_cases(report, budget):
     return results
 
 
+def storage_cases(report, budget):
+    # The frozen program fills 16 MiB with 0x43 and replaces 128 blocks.
+    trace = '7c04e324992d8c145ffa8101dea3c2799cda7ab8cbc4421c6b2f03239d5dbb9b'
+    expected = budget['warmups'] + budget['samples_per_session']
+    handles = set()
+
+    def operations(name):
+        return [row for row in report.get('operations', []) if row['scenario'] == name]
+
+    def verified(name, *, readback=False, bind=False):
+        rows = operations(name)
+        if len(rows) != expected:
+            return False
+        phases = {phase: sum(row['phase'] == phase for row in rows)
+                  for phase in ('warmup', 'sample', 'verification')}
+        if phases != ({
+            'warmup': 0, 'sample': 0, 'verification': expected,
+        } if readback else {
+            'warmup': budget['warmups'], 'sample': budget['samples_per_session'], 'verification': 0,
+        }):
+            return False
+        for row in rows:
+            witness = row.get('guest_witness', {})
+            handle = witness.get('conjet.native_handle', '')
+            if (row.get('error') is not None or row.get('exit_code') != 0
+                    or witness.get('conjet.backend') != 'jetstream-native-oci'
+                    or witness.get('conjet.guest_cleanup') != 'complete'
+                    or witness.get('exitCode') != '0' or not re.fullmatch(r'[0-9a-f]{32}', handle)
+                    or handle in handles):
+                return False
+            handles.add(handle)
+            if readback:
+                if row.get('stdout') != trace + '\n':
+                    return False
+            else:
+                data = row.get('guest', {})
+                if data.get('bytes') != 16 * 1024 * 1024 or data.get('trace') != trace:
+                    return False
+            if bind and (witness.get('conjet.bind_cleanup') != 'complete' or row.get('host_sha256') != trace):
+                return False
+        return True
+
+    inventory = operations('fixture-leak-inventory')
+    if (report.get('error') or len(inventory) != 1 or inventory[0].get('error') is not None
+            or inventory[0].get('stdout') != ''):
+        return []
+    results = []
+    if verified('storage.writable-layer'):
+        results.append('writable-layer')
+    if (verified('storage.volume') and verified('storage.volume.readback', readback=True)
+            and all(len(operations(name)) == expected and
+                    all(row.get('error') is None and row.get('exit_code') == 0 for row in operations(name))
+                    for name in ('volume-create', 'volume-remove'))):
+        results.append('named-volume')
+    if verified('storage.bind', bind=True):
+        results.append('bind')
+    return results
+
+
 def evaluate(root, revision, release):
     manifest = PREFLIGHT['contract']()
     required = {case['id']: {
@@ -219,6 +278,9 @@ def evaluate(root, revision, release):
         if suite == 'control' and verified:
             for case in control_cases(report, scenarios['suites']['control']):
                 pass_case(f'control/{case}', 'original control runs passed with native teardown', suite)
+        if suite == 'storage_network' and verified:
+            for case in storage_cases(report, scenarios['suites']['storage_network']):
+                pass_case(f'storage_network/{case}', 'original storage cases verified data and teardown', suite)
 
     folder, verified = lane('credentials')
     credentials = read(folder, 'native-credentials.json')

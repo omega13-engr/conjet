@@ -86,6 +86,7 @@ pub(crate) fn parse(
         network_alias: None,
         secondary_network_alias: None,
         volume: None,
+        bind: None,
         build_snapshot: Some(selected),
         limits: NATIVE_LIMITS,
     };

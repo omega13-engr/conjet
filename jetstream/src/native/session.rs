@@ -99,6 +99,9 @@ pub(super) struct Options {
     /// Stage transferred OCI roots on the isolated Core guest's leased filesystem.
     #[arg(long, requires = "volume_disk", conflicts_with = "build_snapshot_disk")]
     disk_image_store: bool,
+    /// Admit an authenticated host filesystem relay for isolated bind mounts.
+    #[arg(long, requires = "core_dynamic_memory")]
+    bind_filesystem: bool,
     /// Maximum lifetime of the disposable VM.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(30..=1800))]
     lifetime_seconds: u64,
@@ -115,6 +118,7 @@ struct MemoryHelpers {
 struct GuestBootFiles<'a> {
     memory: Option<&'a MemoryHelpers>,
     disk: Option<GuestDisk>,
+    bind_filesystem: bool,
 }
 
 struct GuestDisk {
@@ -398,6 +402,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         oci.as_ref(),
         GuestBootFiles {
             memory: memory_helpers.as_ref(),
+            bind_filesystem: options.bind_filesystem,
             disk: volume.as_ref().map(|disk| GuestDisk {
                 volume: disk.identity.encode(),
                 marker: if options.build_snapshot_disk {
@@ -857,6 +862,9 @@ fn build_archive(
     append("dev/console", 0o020600, &[], 5, 1, 0, 0)?;
     append("dev/null", 0o020666, &[], 1, 3, 0, 0)?;
     append("dev/zero", 0o020666, &[], 1, 5, 0, 0)?;
+    if files.bind_filesystem {
+        append("dev/fuse", 0o020600, &[], 10, 229, 0, 0)?;
+    }
     append("init", 0o100755, guest, 0, 0, 0, 0)?;
     append("etc/conjet/launch.key", 0o100600, key, 0, 0, 0, 0)?;
     if let Some(helpers) = files.memory {

@@ -30,7 +30,7 @@ pub(crate) struct Sandbox {
     resolver: Option<std::net::Ipv4Addr>,
     standard_devices: bool,
     stdin: File,
-    volume: Option<VolumeBinding>,
+    volume: Option<FileBinding>,
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
     uid: u32,
     gid: u32,
@@ -97,23 +97,54 @@ fn mount_standard_devices(root: &CStr, devices: [File; 2]) -> io::Result<()> {
     Ok(())
 }
 
-struct VolumeBinding {
-    spec: VolumeMount,
+enum BindingSource {
+    Volume(VolumeMount),
+    Bind(crate::spec::BindMount),
+}
+
+struct FileBinding {
+    source: BindingSource,
+    destination: String,
+    read_only: bool,
     root: PathBuf,
     target: CString,
 }
 
-impl VolumeBinding {
-    fn prepare(name: &VolumeMount, root: &Path) -> io::Result<Self> {
-        if !valid_volume_target(&name.target) {
-            return Err(io::Error::other("unsupported native named volume target"));
-        }
-        let target_path = root.join(name.target.trim_start_matches('/'));
-        Ok(Self {
-            spec: name.clone(),
-            target: CString::new(target_path.as_os_str().as_bytes())?,
+impl FileBinding {
+    fn prepare(spec: &LaunchSpec, root: &Path) -> io::Result<Option<Self>> {
+        let (source, destination, read_only) = if let Some(volume) = &spec.volume {
+            if !valid_volume_target(&volume.target) {
+                return Err(io::Error::other("unsupported native named volume target"));
+            }
+            (
+                BindingSource::Volume(volume.clone()),
+                volume.target.as_str(),
+                volume.read_only,
+            )
+        } else if let Some(bind) = &spec.bind {
+            (
+                BindingSource::Bind(bind.clone()),
+                "/dataset",
+                bind.read_only,
+            )
+        } else {
+            return Ok(None);
+        };
+        let path = root.join(destination.trim_start_matches('/'));
+        Ok(Some(Self {
+            source,
+            destination: destination.into(),
+            read_only,
+            target: CString::new(path.as_os_str().as_bytes())?,
             root: root.to_owned(),
-        })
+        }))
+    }
+
+    fn open(&self) -> io::Result<File> {
+        match &self.source {
+            BindingSource::Volume(volume) => crate::volume_disk::guest::mount_source(volume),
+            BindingSource::Bind(bind) => crate::bind_mount::source(&bind.lease),
+        }
     }
 
     fn mount(&self, source: File) -> io::Result<()> {
@@ -121,7 +152,7 @@ impl VolumeBinding {
         // The overlay is private and has no running workload during setup.
         // Inspect each image ancestor before following it.
         let mut target = self.root.clone();
-        for segment in self.spec.target.trim_start_matches('/').split('/') {
+        for segment in self.destination.trim_start_matches('/').split('/') {
             target.push(segment);
             match fs::create_dir(&target) {
                 Ok(()) => {}
@@ -147,7 +178,7 @@ impl VolumeBinding {
                 std::ptr::null(),
             )
         })?;
-        if self.spec.read_only {
+        if self.read_only {
             security::checked(unsafe {
                 libc::mount(
                     std::ptr::null(),
@@ -281,9 +312,9 @@ impl Sandbox {
                     None => File::open("/dev/null")?,
                 },
                 volume: oci
-                    .and_then(|spec| spec.volume.as_ref())
-                    .map(|volume| VolumeBinding::prepare(volume, &base.join("root")))
-                    .transpose()?,
+                    .map(|spec| FileBinding::prepare(spec, &base.join("root")))
+                    .transpose()?
+                    .flatten(),
                 worker_mounts,
                 uid: oci.map_or(WORKLOAD_UID, |spec| spec.uid),
                 gid: oci.map_or(WORKLOAD_GID, |spec| spec.gid),
@@ -332,14 +363,7 @@ impl Sandbox {
         // opened before clone refers to the parent's mount and cannot be used
         // for a bind here. The child still owns its inherited guest UID when
         // opening the registry; only stdio survives into the workload.
-        let volume_source = self
-            .volume
-            .as_ref()
-            .map(|volume| {
-                crate::volume_disk::guest::mount_source(&volume.spec)
-                    .map_err(|error| io::Error::other(format!("open named volume: {error}")))
-            })
-            .transpose()?;
+        let volume_source = self.volume.as_ref().map(FileBinding::open).transpose()?;
         let worker = self
             .worker_mounts
             .as_ref()
@@ -404,7 +428,7 @@ impl Sandbox {
             }
         }
         if let Some((volume, source)) = self.volume.as_ref().zip(volume_source) {
-            step("private named volume", volume.mount(source))?;
+            step("private workload mount", volume.mount(source))?;
         }
         if let Some(devices) = devices {
             step(

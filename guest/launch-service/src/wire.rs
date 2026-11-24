@@ -45,6 +45,7 @@ pub enum Kind {
     ExecOutput = 28,
     Copy = 29,
     Input = 30,
+    Bind = 31,
 }
 
 impl TryFrom<u8> for Kind {
@@ -83,6 +84,7 @@ impl TryFrom<u8> for Kind {
             28 => Ok(ExecOutput),
             29 => Ok(Copy),
             30 => Ok(Input),
+            31 => Ok(Bind),
             _ => Err(WireError::BadHeader),
         }
     }

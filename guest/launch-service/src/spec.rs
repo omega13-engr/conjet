@@ -55,6 +55,8 @@ pub struct LaunchSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<VolumeMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<BindMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_snapshot: Option<crate::build_snapshot::Snapshot>,
     pub limits: ResourceLimits,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -74,6 +76,13 @@ pub struct VolumeMount {
         skip_serializing_if = "is_data_target"
     )]
     pub target: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindMount {
+    pub lease: String,
+    pub read_only: bool,
 }
 
 fn default_volume_target() -> String {
@@ -263,6 +272,7 @@ impl LaunchSpec {
                 || snapshot.inode == 0
                 || snapshot.device == 0
                 || spec.volume.is_some()
+                || spec.bind.is_some()
                 || spec.network != "none"
                 || spec.open_stdin
         }) {
@@ -272,6 +282,15 @@ impl LaunchSpec {
             volume.inode == 0
                 || !crate::volume_disk::valid_name(&volume.name)
                 || !valid_volume_target(&volume.target)
+        }) {
+            return Err(SpecError::Volume);
+        }
+        if spec.bind.as_ref().is_some_and(|bind| {
+            !search_path
+                || spec.volume.is_some()
+                || spec.uid != 0
+                || spec.gid != 0
+                || handshake::unhex::<16>(&bind.lease).is_err()
         }) {
             return Err(SpecError::Volume);
         }
@@ -393,6 +412,7 @@ mod tests {
                 network_alias: None,
                 secondary_network_alias: None,
                 volume: None,
+                bind: None,
                 build_snapshot: None,
                 limits: ResourceLimits {
                     memory_bytes: MIN_MEMORY_BYTES,

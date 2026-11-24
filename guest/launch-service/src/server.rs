@@ -203,6 +203,52 @@ impl Server {
                 )?;
             }
             #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            if frame.kind == Kind::Bind && self.fresh.as_ref().is_some_and(|fresh| fresh.is_oci()) {
+                let Some(request) = decode::<crate::bind_mount::Request>(&frame, &mut stream)?
+                else {
+                    continue;
+                };
+                if request.boot_id != boot_id {
+                    write_error(
+                        &mut stream,
+                        frame.id,
+                        "stale_generation",
+                        "unexpected native bind boot",
+                    )?;
+                    continue;
+                }
+                let Some(_slot) = RelaySlot::reserve(&self.relays) else {
+                    write_error(
+                        &mut stream,
+                        frame.id,
+                        "busy",
+                        "native relay slots are occupied",
+                    )?;
+                    continue;
+                };
+                let mount = match crate::bind_mount::Mount::open(&request) {
+                    Ok(mount) => mount,
+                    Err(error) => {
+                        eprintln!("native bind mount setup failed: {error}");
+                        write_error(
+                            &mut stream,
+                            frame.id,
+                            "storage_failed",
+                            "native bind mount setup failed",
+                        )?;
+                        continue;
+                    }
+                };
+                Frame::write(
+                    &mut stream,
+                    Kind::Bind,
+                    frame.id,
+                    &serde_json::json!({"lease":request.lease}),
+                )?;
+                mount.relay(&mut stream, &self.shutdown)?;
+                return Ok(());
+            }
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
             if let Some(fresh) = &self.fresh
                 && fresh.is_oci()
                 && frame.kind == Kind::Dial
