@@ -15,7 +15,12 @@ pub(super) struct VolumeDisk {
 }
 
 impl VolumeDisk {
-    pub fn lease(path: PathBuf, scratch: &Path, disk_image_store: bool) -> Result<Self> {
+    pub fn lease(
+        path: PathBuf,
+        scratch: &Path,
+        disk_image_store: bool,
+        build_workspace: bool,
+    ) -> Result<Self> {
         ensure!(
             scratch == Path::new("/Volumes/ExternalSSD/dev_workspace/tmp")
                 && path.starts_with(scratch)
@@ -28,7 +33,9 @@ impl VolumeDisk {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open(&path)?;
         let info = file.metadata()?;
-        let max_bytes = if disk_image_store {
+        let max_bytes = if disk_image_store && build_workspace {
+            16 * 1024 * 1024 * 1024
+        } else if disk_image_store {
             4 * 1024 * 1024 * 1024
         } else {
             512 * 1024 * 1024

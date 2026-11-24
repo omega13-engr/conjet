@@ -1843,6 +1843,22 @@ assertion was reached with an unexpected error variant. The local ARM64
 workspace passed the same check. The next CI attempt reports the
 actual returned error without changing the assertion.
 
+### SPEED-167
+
+Title: Bound the combined native build workspace for the frozen Rust base
+
+Acceptance: Keep the ordinary volume and image-store disk limits.
+Admit a larger canonical private disk only with both native build
+workspace and disk image store enabled. Verify the Rust fixture reaches
+RUN with its frozen inputs and compute limits, and release the disk.
+
+Evidence: The 4 GiB disk exhausted space while copying the Rust
+toolchain into native snapshots. `SPEED-165/live-root-16g/` reached
+RUN in all three Rust builders and recorded the separate bundle
+verification error. All nine workers were removed and offline ext4
+validation passed. The disk lease still enforces owner, permissions,
+canonical ExternalSSD path and exclusive locking.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle
