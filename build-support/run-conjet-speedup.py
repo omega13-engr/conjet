@@ -364,6 +364,61 @@ def stop_child(process, timeout):
     return process.returncode
 
 
+def audit_native_boot(directory, guest):
+    """Read the boot archive manifest without recording its private payloads."""
+    root = 'etc/conjet/oci-root'
+    allowed_top_level = {
+        'dev', 'dev/console', 'dev/null', 'proc', 'sys', 'run', 'run/conjet',
+        'etc', 'etc/conjet', 'init', 'etc/conjet/launch.key',
+        'etc/conjet/native-oci-image', 'etc/conjet/native-oci-hardlinks.json',
+        root,
+    }
+    entries = set()
+    supervisor = None
+    with (directory / 'init.cpio').open('rb') as archive:
+        while True:
+            header = archive.read(110)
+            if len(header) != 110 or header[:6] != b'070701':
+                raise RuntimeError('invalid native boot archive header')
+            size = int(header[54:62], 16)
+            name_size = int(header[94:102], 16)
+            if not 1 <= name_size <= 4096:
+                raise RuntimeError('invalid native boot entry name size')
+            encoded = archive.read(name_size)
+            if len(encoded) != name_size or not encoded.endswith(b'\0'):
+                raise RuntimeError('invalid native boot entry name')
+            name = encoded[:-1].decode()
+            archive.seek(-archive.tell() % 4, os.SEEK_CUR)
+            if name == 'TRAILER!!!':
+                if size or archive.read(1):
+                    raise RuntimeError('unexpected bytes after native boot archive')
+                break
+            if (name in entries or {'..', '.', ''}.intersection(name.split('/'))
+                    or name.split('/')[-1] in {'dockerd', 'containerd', 'containerd-shim',
+                                               'containerd-shim-runc-v2', 'runc'}
+                    or not (name in allowed_top_level or name.startswith(root + '/'))):
+                raise RuntimeError(f'unexpected native boot entry {name!r}')
+            entries.add(name)
+            if name == 'init':
+                if size != guest.stat().st_size or size > 4 * 1024 * 1024:
+                    raise RuntimeError('unexpected native init size')
+                supervisor = hashlib.sha256(archive.read(size)).hexdigest()
+            else:
+                archive.seek(size, os.SEEK_CUR)
+            archive.seek(-archive.tell() % 4, os.SEEK_CUR)
+    if supervisor != fingerprint(guest)['sha256'] or root not in entries:
+        raise RuntimeError('native boot archive does not match the trusted guest and OCI fixture')
+    disk = directory / 'blank.raw'
+    if disk.stat().st_size != 16 * 1024 * 1024:
+        raise RuntimeError('unexpected native boot data disk')
+    with disk.open('rb') as source:
+        if any(chunk.strip(b'\0') for chunk in iter(lambda: source.read(1024 * 1024), b'')):
+            raise RuntimeError('unexpected data in native boot block device')
+    return {'supervisor_sha256': supervisor, 'archive_entry_count': len(entries),
+            'supervisor_root_entries': sorted(entries & allowed_top_level),
+            'blank_block_bytes': disk.stat().st_size}
+
+
 def native_session(args, root):
     before = production()
     output = args.native_evidence
@@ -410,6 +465,8 @@ def native_session(args, root):
         directory = candidate
         report['vmm_pid'] = vm.pid
         report['native_session'] = str(directory)
+        if args.diagnostics == 'control':
+            report['native_boot_audit'] = audit_native_boot(directory, args.native_guest)
         if args.diagnostics == 'oci-import':
             diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-live-install.py'))
             config_digest = json.loads(args.import_receipt.read_text())['config_digest']

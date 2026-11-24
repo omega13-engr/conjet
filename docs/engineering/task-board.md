@@ -95,13 +95,17 @@ Problem and Evidence: 7dd2a95 and existing SPEED-027–036 research.
 
 Approach: Inspect the existing Rust owner and guest launch authority; reuse them. Capture boot identity and actual Docker request routing.
 
-Evidence: Pending; no new candidate result.
+Evidence: Six isolated release boots passed the control, streaming, exec,
+network, published-port and concurrency canaries. Control recorded 176 unique
+guest lifecycle handles. The live boot archive contained the expected
+`conjet-launchd` and pinned Alpine workload, backed by an empty block device.
+See [SPEED-057 evidence and capability limits](native-engine-validation.md#speed-057).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
-Review: Pending implementation, validation and independent evidence review.
+Review: Self-review and isolated validation passed. Independent evidence review pending.
 
-Next Action: Run the native acceptance fixtures before changing launch mechanics.
+Next Action: Connect the Core memory telemetry and admission contracts in SPEED-058.
 
 ### SPEED-058
 
