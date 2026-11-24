@@ -225,6 +225,17 @@ EPERM. These tests cover the entrypoint scripts. Application readiness
 and thread startup have separate acceptance. Evidence is under
 `SPEED-116/` on ExternalSSD.
 
+## SPEED-103 native threads
+
+The ARM64 filter permits same-process thread creation with the required
+shared-state flags. The musl probe verified a second thread under the
+original resource ceiling and rejected namespace creation. The pinned
+Registry binary advanced from thread-creation EPERM to PID exhaustion
+under its four-PID diagnostic. With omitted limits its first failure
+moved to epoll initialization. The pinned Node program reached a
+libuv initialization assertion in a separate baseline. Evidence is
+under `SPEED-103/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

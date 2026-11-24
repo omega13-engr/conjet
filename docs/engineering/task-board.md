@@ -869,6 +869,14 @@ that create a separate process or namespace. Reproduce the observed
 Go workload behavior and preserve the evidence for any remaining
 resource or syscall failure.
 
+Evidence: A native ARM64 musl probe created a same-process thread under
+the four-PID fixture ceiling. Namespace creation was rejected with
+EPERM and unchecked clone3 returned ENOSYS. The pinned Registry binary
+advanced from EPERM during thread creation to PID exhaustion under the
+same four-PID settings. With omitted PID limits it reached its next
+failure at epoll initialization, tracked in SPEED-118. Logs are under
+`SPEED-103/` on ExternalSSD.
+
 ### SPEED-104
 
 Title: Spool native OCI transfers and validate from the owned file
@@ -1083,6 +1091,24 @@ substitution. The original Node entrypoint invoked the selected payload
 from the reloaded archive. A namespace-creation request failed with
 EPERM, and both Node cases had verified native teardown. Logs are under
 `SPEED-116/` on ExternalSSD.
+
+### SPEED-117
+
+Title: Qualify full frozen lifecycle groups with native teardown witnesses
+
+Acceptance: Use the frozen runner and counts, require the original
+exit and output asserts and a unique guest cleanup witness on every row.
+Allow independent private boots per group without accepting shortened,
+duplicate, recovered or missing group evidence.
+
+### SPEED-118
+
+Title: Support descriptor-owned native event polling for pinned applications
+
+Acceptance: Run the original pinned Node command and Registry binary
+through their event-loop initialization. Admit the required event
+descriptor and poll operations for ordinary OCI only. Preserve existing
+resource limits, I/O ownership, seccomp and cleanup.
 
 ### SPEED-091
 

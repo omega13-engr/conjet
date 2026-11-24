@@ -199,23 +199,50 @@ impl WorkloadFilter {
             let tid_flags = (libc::CLONE_CHILD_CLEARTID
                 | libc::CLONE_CHILD_SETTID
                 | libc::CLONE_PARENT_SETTID) as u32;
-            let clone = [
+            let thread_required = (libc::CLONE_VM
+                | libc::CLONE_FS
+                | libc::CLONE_FILES
+                | libc::CLONE_SIGHAND
+                | libc::CLONE_THREAD) as u32;
+            // musl still supplies the ignored legacy CLONE_DETACHED bit.
+            let thread_allowed = thread_required
+                | tid_flags
+                | (libc::CLONE_SETTLS | libc::CLONE_SYSVSEM | libc::CLONE_DETACHED) as u32;
+            let skip_if_zero = |count| libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                k: 0,
+                jt: count,
+                jf: 0,
+            };
+            let thread = [
+                statement(BPF_LOAD_WORD, 16),
+                statement(BPF_AND, !thread_allowed),
+                skip_if_zero(1),
+                statement(BPF_RETURN, denied),
+                statement(BPF_LOAD_WORD, 16),
+                statement(BPF_AND, thread_required),
+                next_or_skip(thread_required),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, denied),
+            ];
+            let mut clone = vec![
                 statement(BPF_LOAD_WORD, 20), // high word of args[0]
-                libc::sock_filter {
-                    code: BPF_JUMP_EQUAL,
-                    k: 0,
-                    jt: 1,
-                    jf: 0,
-                },
+                skip_if_zero(1),
                 statement(BPF_RETURN, denied),
                 statement(BPF_LOAD_WORD, 16), // low word of args[0]
+                statement(BPF_AND, libc::CLONE_THREAD as u32),
+                skip_if_zero(thread.len() as u8),
+            ];
+            clone.extend(thread);
+            clone.extend([
+                statement(BPF_LOAD_WORD, 16),
                 statement(BPF_AND, !tid_flags),
                 next_or_skip(sigchld),
                 statement(BPF_RETURN, RET_ALLOW),
                 next_or_skip(sigchld | (libc::CLONE_VM | libc::CLONE_VFORK) as u32),
                 statement(BPF_RETURN, RET_ALLOW),
                 statement(BPF_RETURN, denied),
-            ];
+            ]);
             program.push(libc::sock_filter {
                 code: BPF_JUMP_EQUAL,
                 k: libc::SYS_clone as u32,
