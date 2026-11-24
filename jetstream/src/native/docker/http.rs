@@ -437,6 +437,38 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 _ => return Err(Rejected::bad("unsupported Docker network request")),
             }
         }
+        ("GET", "/images/json") => {
+            if query
+                .keys()
+                .any(|key| !matches!(key.as_str(), "filters" | "all" | "digests"))
+            {
+                return Err(Rejected::bad("unsupported image list option"));
+            }
+            let filters = super::discovery::parse_filters(query.get("filters"))?;
+            let reference = filters
+                .get("reference")
+                .filter(|names| filters.len() == 1 && names.len() == 1)
+                .map(|names| names[0].as_str())
+                .filter(|name| !name.contains(['*', '?', '[', ']', '\\']))
+                .ok_or_else(|| Rejected::bad("image listing requires one exact reference"))?;
+            let images = match owner.inspect_image(reference) {
+                Ok(mut image) => {
+                    let tag = super::image::Tags::key(reference);
+                    image["RepoTags"]
+                        .as_array_mut()
+                        .expect("image tag inventory")
+                        .retain(|name| name.as_str() == Some(tag.as_ref()));
+                    image["RepoDigests"]
+                        .as_array_mut()
+                        .expect("image digest inventory")
+                        .retain(|name| name.as_str() == Some(reference));
+                    vec![image]
+                }
+                Err(Rejected(404, _)) => Vec::new(),
+                Err(error) => return Err(error),
+            };
+            Reply::json(200, json!(images))
+        }
         ("GET", _) if path.starts_with("/images/") && path.ends_with("/json") => {
             let reference = image_reference(path, "/json")?;
             Reply::json(200, owner.inspect_image(&reference)?)

@@ -62,7 +62,7 @@ impl Tags {
             })
     }
 
-    fn key(reference: &str) -> std::borrow::Cow<'_, str> {
+    pub(super) fn key(reference: &str) -> std::borrow::Cow<'_, str> {
         if reference.contains('@') {
             return reference.into();
         }

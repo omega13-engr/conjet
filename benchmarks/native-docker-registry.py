@@ -161,12 +161,16 @@ def collect(endpoint, peer, docker, env, evidence, registry, store):
         tagged = json.loads(check('tag_inspect', 'image', 'inspect', tag))[0]
         if tagged['Id'] != resolved or tag not in tagged['RepoTags'] or multi not in tagged['RepoDigests']:
             raise RuntimeError('tag did not resolve to the immutable source image')
+        if check('tag_inventory', 'image', 'ls', '--quiet', '--no-trunc', tag).strip() != resolved:
+            raise RuntimeError('exact tag inventory did not return the source image ID')
         check('tag_protects_manifest', 'image', 'rm', multi, exit_code=1, message='image has local tags')
         name = 'cj-pull-tag'
         MATCHED['invoke'](docker, env, ['run', *MATCHED['FLAGS'], '--name', name, tag, '/bin/true'])
         cases['tag_run'] = MATCHED['native_terminal'](connection, name, set())
         check('untag', 'image', 'rm', tag)
         check('untagged_inspect', 'image', 'inspect', tag, exit_code=1)
+        if check('untagged_inventory', 'image', 'ls', '--quiet', tag):
+            raise RuntimeError('untagged alias remained in the image inventory')
         name = 'cj-pull-use'
         check('in_use_create', 'create', *MATCHED['FLAGS'], '--name', name, multi, '/bin/busybox', 'sleep', '30')
         check('in_use_start', 'start', name)

@@ -33,6 +33,24 @@ The case covers a configured loopback registry and verified staged
 images. The ordinary matrix still needs public pinned image
 provisioning, mutable registry tag resolution and archive save/load.
 
+The frozen image preflight also found that exact tag inventory was
+unavailable during cleanup. The adapter now answers the
+`docker image ls --quiet <reference>` lookup. The pinned CLI returned
+one image ID for the owned tag and no rows after untagging. The first
+inventory attempt exposed a duplicate row when the same image's
+registry digest belonged to a different repository. Exact filtering
+now returns only the matching reference. Both attempts and the
+successful registry regression are in `SPEED-090/exact-tag-*`.
+
+Staging the verified ARM64 layouts independently confirmed an
+additional image prerequisite. Alpine staged. Node and Rust exceeded
+the 40 MiB layer bounds. Their largest compressed layers are 55,699,454
+and 273,147,468 bytes, respectively. The Go layout hit a rejected
+PAX extended header before the full image could stage. These results
+require a bounded larger-image ingest and extraction design with Core
+memory accounting before public image provisioning can qualify.
+See `SPEED-098/staging-*.log` and `pinned-layer-descriptors.json`.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The
