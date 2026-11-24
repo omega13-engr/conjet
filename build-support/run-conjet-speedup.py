@@ -495,6 +495,8 @@ def native_session(args, root):
             markers.append('etc/conjet/native-core-latency-trace')
         if args.native_admission_wake:
             vm_command += ['--core-admission-wake', args.native_admission_wake]
+        if args.native_discovery_ms:
+            vm_command += ['--core-discovery-ms', args.native_discovery_ms]
         if pressure_fixture:
             vm_command.append('--core-pressure-fixture')
             markers.append('etc/conjet/native-core-pressure-fixture')
@@ -643,6 +645,17 @@ def native_session(args, root):
                              args.matched_samples, vm.pid, lane=args.native_latency_lane,
                              latency_trace=args.native_latency_trace)
             report['core_memory_after_timing'] = probe(directory, vm.pid)
+            if args.native_latency_idle:
+                idle = {'core_before': report['core_memory_after_timing']}
+                report['idle_window'] = idle
+                def host_activity():
+                    return run(['/bin/ps', '-p', f'{vm.pid},{bridge.pid}', '-o', 'pid=,time=,rss='])
+                idle['host_before'] = host_activity()
+                idle['h0_ns'] = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+                time.sleep(8)
+                idle['h1_ns'] = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+                idle['host_after'] = host_activity()
+                idle['core_after'] = probe(directory, vm.pid)
         if args.docker_args:
             command = docker + args.docker_args
             child = subprocess.Popen(command, env=env)
@@ -741,6 +754,8 @@ def main():
     parser.add_argument('--native-admission-wake', choices=('poll', 'event'))
     parser.add_argument('--native-latency-trace', action='store_true')
     parser.add_argument('--native-latency-lane', choices=('api', 'cli'))
+    parser.add_argument('--native-discovery-ms', choices=('30', '5'))
+    parser.add_argument('--native-latency-idle', action='store_true')
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
@@ -775,6 +790,10 @@ def main():
     if args.native_latency_trace and not (args.native_memd and
             (args.matched_output or args.diagnostics in ('dynamic-memory', 'dynamic-pressure'))):
         parser.error('collect native latency traces only with matched timing or Core memory canaries')
+    if args.native_discovery_ms and not args.native_latency_trace:
+        parser.error('alternate discovery cadence requires the isolated latency tracer')
+    if args.native_latency_idle and not (args.matched_output and args.native_latency_trace):
+        parser.error('an idle latency window requires matched traced timing')
     if args.diagnostics in VOLUME_DIAGNOSTICS:
         if (not args.native_volume_disk
                 or args.native_volume_disk.resolve(strict=True) != args.native_volume_disk):

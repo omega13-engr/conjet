@@ -126,13 +126,20 @@ Problem and Evidence: The event-mode manager still waits up to 30 ms between dem
 
 Approach: Change only the diagnostic observation cadence; verify actual configured cadence in artifacts.
 
-Evidence: Pending; source review only.
+Evidence: Two alternating release pairs reduced pending discovery p50
+from 25.47–26.09 ms to 3.28–3.48 ms and API p50 from 40.25–40.43 ms to
+6.54–6.70 ms. Faster polling more than doubled idle VMM CPU. The
+separate pressure, idle, data integrity and cleanup canaries passed
+at both cadences. See
+[the cadence results](native-latency-diagnostic-results.md#speed-082).
 
 Source: [Native latency diagnostic plan](native-latency-diagnostic-plan.md).
 
-Review: Pending.
+Review: Isolated diagnostic validation passed. The 5 ms cadence is
+rejected as a release default. Independent review pending.
 
-Next Action: Freeze the A/B configuration after SPEED-081 attribution.
+Next Action: Keep 30 ms as the periodic default and test authenticated
+pending-demand notification under SPEED-083.
 
 ### SPEED-083
 

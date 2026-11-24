@@ -64,3 +64,44 @@ from the warm timing table.
 Raw release hashes, launcher reports, the initial observer and its
 replacement, and the joined percentiles are in
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-081/`.
+
+## SPEED-082
+
+Two alternating API pairs used the same release host, guest, and
+fixture. Only the diagnostic delay between authoritative demand
+observations changed. The controller, authenticated workload grants,
+25 ms safety tick, and terminal cleanup boundary stayed in force. Each
+leg retained ten warmups and 200 measured operations. All 840 operations
+passed and joined, with zero trace overflow.
+
+| Pair | Configured observation interval | Discovery p50 / p95 / p99 (ms) | API p50 / p95 / p99 (ms) | Idle observations per second | Idle VMM CPU (% of one core) |
+| --- | ---: | --- | --- | ---: | ---: |
+| 1 | 30 ms | 26.09 / 32.20 / 34.45 | 40.25 / 63.67 / 71.27 | 29.14 | 5.62 |
+| 1 | 5 ms | 3.28 / 4.76 / 6.24 | 6.70 / 22.18 / 26.69 | 139.86 | 14.62 |
+| 2 | 5 ms | 3.48 / 4.87 / 6.34 | 6.54 / 19.56 / 25.44 | 141.43 | 13.87 |
+| 2 | 30 ms | 25.47 / 32.05 / 33.33 | 40.43 / 64.77 / 70.31 | 29.43 | 5.25 |
+
+Idle rates count completed observation exchanges in the full one-second
+host clock bins inside each separate eight-second idle window. CPU
+comes from cumulative VMM process time in the same window. All four
+windows saw Core converge from the warm 2,048 MiB target to 448 MiB.
+The measured cadence effect confirms that periodic pending discovery is
+a large part of the lifecycle median. The higher idle traffic and CPU
+cost rule out 5 ms polling as the release default.
+
+The separate pressure canaries passed at both cadences. The pressure
+service raised 170 high events before any container ran, triggering
+growth from 448 MiB to 2,048 MiB. Each run preserved the data checksum
+across 12 launches and returned to 448 MiB within the existing
+pressure-qualified idle window. Final counts were 238 events at 30 ms
+and 221 at 5 ms. All candidate boots verified cleanup and preserved the
+production snapshot.
+
+SPEED-083 will test a versioned, authenticated pending-demand wait on
+the existing admission control connection. One thread owns the stream
+and refreshes the authoritative snapshot when a pending request arrives
+or the existing reconciliation interval expires. Workload-specific
+approval still follows the existing controller path.
+
+Raw timing, resource, and release identity evidence is in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-082/`.

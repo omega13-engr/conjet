@@ -475,14 +475,11 @@ fn wait_for_native(
         }
     }
     let terminal = Instant::now();
-    if state.get("trace_sequence").is_some() {
-        let mut stamp = std::mem::MaybeUninit::<libc::timespec>::uninit();
-        // The benchmark driver reads the same macOS monotonic clock.
-        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, stamp.as_mut_ptr()) } == 0 {
-            let stamp = unsafe { stamp.assume_init() };
-            state["host_terminal_ns"] =
-                json!(stamp.tv_sec as u64 * 1_000_000_000 + stamp.tv_nsec as u64);
-        }
+    if let Some(stamp) = state
+        .get("trace_sequence")
+        .and_then(|_| super::session::host_monotonic_ns())
+    {
+        state["host_terminal_ns"] = json!(stamp);
     }
     let code = if sent_signal != 0 && state["exit"].is_null() && state["helper_failed"] == false {
         128 + i64::from(sent_signal)

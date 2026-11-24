@@ -74,6 +74,9 @@ pub(super) struct Options {
         requires = "core_dynamic_memory"
     )]
     core_admission_wake: AdmissionWake,
+    /// Set a diagnostic pending-discovery interval for an isolated release comparison.
+    #[arg(long, value_enum, requires = "trace_core_admission")]
+    core_discovery_ms: Option<DiscoveryCadence>,
     /// Enable the bounded service pressure fixture on this diagnostic boot.
     #[arg(long, requires = "core_dynamic_memory")]
     core_pressure_fixture: bool,
@@ -109,15 +112,19 @@ struct AdmissionControl<'a> {
     gate: &'a NativeMemoryAdmission,
     trace: bool,
     wake: AdmissionWake,
+    cadence: DiscoveryCadence,
 }
 
 const TRACE_LIMIT: usize = 8192;
 
 struct AdmissionTrace {
     origin: Instant,
+    host_clock_ns: Option<u64>,
     rows: Vec<AdmissionSpan>,
     lost: usize,
     polls: usize,
+    polls_by_second: Vec<usize>,
+    cadence: DiscoveryCadence,
 }
 
 #[derive(Serialize)]
@@ -149,12 +156,15 @@ enum AdmissionSpan {
 }
 
 impl AdmissionTrace {
-    fn new() -> Self {
+    fn new(cadence: DiscoveryCadence) -> Self {
         Self {
             origin: Instant::now(),
+            host_clock_ns: host_monotonic_ns(),
             rows: Vec::with_capacity(TRACE_LIMIT),
             lost: 0,
             polls: 0,
+            polls_by_second: Vec::new(),
+            cadence,
         }
     }
 
@@ -168,6 +178,17 @@ impl AdmissionTrace {
 
     fn ns(&self, stamp: Instant) -> u128 {
         stamp.saturating_duration_since(self.origin).as_nanos()
+    }
+
+    fn record_poll(&mut self, stamp: Instant) {
+        self.polls += 1;
+        let second = stamp.saturating_duration_since(self.origin).as_secs() as usize;
+        if second < 1_825 {
+            if self.polls_by_second.len() <= second {
+                self.polls_by_second.resize(second + 1, 0);
+            }
+            self.polls_by_second[second] += 1;
+        }
     }
 }
 
@@ -184,6 +205,9 @@ impl Drop for AdmissionTrace {
             json!({
                 "event": "core_trace_summary", "rows": self.rows.len(), "lost": self.lost,
                 "polls": self.polls,
+                "discovery_interval_ms": self.cadence.interval().as_millis(),
+                "host_clock_ns": self.host_clock_ns,
+                "polls_by_second": self.polls_by_second,
             })
         );
     }
@@ -193,6 +217,34 @@ impl Drop for AdmissionTrace {
 enum AdmissionWake {
     Poll,
     Event,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum DiscoveryCadence {
+    #[value(name = "30")]
+    #[default]
+    Normal,
+    #[value(name = "5")]
+    Fast,
+}
+
+impl DiscoveryCadence {
+    fn interval(self) -> Duration {
+        Duration::from_millis(match self {
+            Self::Normal => 30,
+            Self::Fast => 5,
+        })
+    }
+}
+
+pub(super) fn host_monotonic_ns() -> Option<u64> {
+    let mut stamp = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // The diagnostic client reads this same macOS clock for the API boundary.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, stamp.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let stamp = unsafe { stamp.assume_init() };
+    Some(stamp.tv_sec as u64 * 1_000_000_000 + stamp.tv_nsec as u64)
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -344,6 +396,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             gate,
             trace: options.trace_core_admission,
             wake: options.core_admission_wake,
+            cadence: options.core_discovery_ms.unwrap_or_default(),
         });
         let boot_gate = admission.clone();
         let control = scope.spawn(move || {
@@ -436,8 +489,8 @@ fn manage_session(
 ) -> anyhow::Result<bool> {
     let mut trace = admission
         .as_ref()
-        .is_some_and(|control| control.trace)
-        .then(AdmissionTrace::new);
+        .filter(|control| control.trace)
+        .map(|control| AdmissionTrace::new(control.cadence));
     let start = Instant::now();
     let startup = start + Duration::from_secs(15);
     let deadline = start + Duration::from_secs(lifetime);
@@ -510,9 +563,9 @@ fn manage_session(
         }
         match &admission {
             Some(control) if matches!(control.wake, AdmissionWake::Event) => {
-                control.gate.wait_for_approval(Duration::from_millis(30));
+                control.gate.wait_for_approval(control.cadence.interval());
             }
-            Some(_) => std::thread::sleep(Duration::from_millis(30)),
+            Some(control) => std::thread::sleep(control.cadence.interval()),
             None => std::thread::sleep(Duration::from_millis(100)),
         }
     }
@@ -569,7 +622,7 @@ fn poll_native_admission(
         serde_json::from_value(value["core_admission"].clone())?;
     let received = Instant::now();
     if let (Some(trace), Some(sent)) = (trace, sent) {
-        trace.polls += 1;
+        trace.record_poll(received);
         for pending in &report.pending {
             trace.push(AdmissionSpan::Observation {
                 boot_id: peer.boot.clone(),
