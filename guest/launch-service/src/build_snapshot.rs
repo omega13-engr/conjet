@@ -37,6 +37,25 @@ pub fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+fn snapshot_leaf<'a>(mountinfo: &'a str, bind_id: u64, volume: &str, id: &str) -> Option<&'a str> {
+    let mountpoint = format!("/var/lib/buildkit/runc-native/executor/{id}/rootfs");
+    let prefix = format!("/volumes/{volume}/runc-native/snapshots/snapshots/");
+    mountinfo.lines().find_map(|line| {
+        let mut fields = line.split_ascii_whitespace();
+        if fields.next()?.parse::<u64>().ok()? != bind_id {
+            return None;
+        }
+        let root = fields.nth(2)?;
+        if fields.next()? != mountpoint {
+            return None;
+        }
+        let leaf = root.strip_prefix(&prefix)?;
+        (leaf.parse::<u64>().is_ok() && leaf.bytes().all(|byte| byte.is_ascii_digit()))
+            .then_some(leaf)
+    })
+}
+
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub(crate) mod guest {
     use std::ffi::CString;
@@ -46,7 +65,7 @@ pub(crate) mod guest {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::path::Path;
 
-    use super::{MARKER, Snapshot, valid_id};
+    use super::{MARKER, Snapshot, snapshot_leaf, valid_id};
     use crate::spec::{GID_BASE, UID_BASE, VolumeMount};
 
     pub(crate) const ROOT: &std::ffi::CStr = c"/run/conjet/buildkit";
@@ -122,21 +141,44 @@ pub(crate) mod guest {
         open(id).map(|open| open.identity)
     }
 
+    pub(crate) struct LiveBundle {
+        pub(crate) config: Vec<u8>,
+        root: File,
+    }
+
+    impl LiveBundle {
+        pub(crate) fn clone_root(&self) -> io::Result<OwnedFd> {
+            let tree = clone_tree(&self.root)
+                .map_err(|error| io::Error::other(format!("clone owned snapshot: {error}")))?;
+            let attributes = libc::mount_attr {
+                attr_set: libc::MOUNT_ATTR_NOSUID | libc::MOUNT_ATTR_NODEV,
+                attr_clr: libc::MOUNT_ATTR_NOEXEC,
+                propagation: 0,
+                userns_fd: 0,
+            };
+            set_mount_attributes(&tree, &attributes).map_err(|error| {
+                io::Error::other(format!("configure detached snapshot: {error}"))
+            })?;
+            Ok(tree)
+        }
+    }
+
     pub(crate) fn read_worker_config(
         root: &File,
+        mountinfo: &str,
         volume: &VolumeMount,
         id: &str,
-    ) -> io::Result<Vec<u8>> {
+    ) -> io::Result<LiveBundle> {
         if !valid_id(id) || volume.target != "/var/lib/buildkit" || volume.read_only {
             return Err(io::Error::other("invalid live BuildKit bundle scope"));
         }
         let var = open_directory(root, "var")?;
         let lib = open_directory(&var, "lib")?;
         let cache = open_directory(&lib, "buildkit")?;
-        let expected = crate::volume_disk::guest::inspect(&volume.name)?;
+        let leased_cache = crate::volume_disk::guest::build_cache_source(volume)?;
+        let expected = leased_cache.metadata()?;
         let actual = cache.metadata()?;
-        if expected.inode != volume.inode
-            || (expected.device, expected.inode) != (actual.dev(), actual.ino())
+        if (expected.dev(), expected.ino()) != (actual.dev(), actual.ino())
             || (actual.uid(), actual.gid()) != (UID_BASE, GID_BASE)
         {
             return Err(io::Error::other("BuildKit worker cache identity changed"));
@@ -145,9 +187,24 @@ pub(crate) mod guest {
         let executor = open_directory(&native, "executor")?;
         let bundle = open_directory(&executor, id)?;
         let rootfs = open_directory(&bundle, "rootfs")?;
-        if rootfs.metadata()?.dev() != actual.dev() || mount_id(&rootfs)? == mount_id(&bundle)? {
+        let mounted = rootfs.metadata()?;
+        let bind_id = mount_id(&rootfs)?;
+        if mounted.dev() != actual.dev() || bind_id == mount_id(&bundle)? {
             return Err(io::Error::other(
                 "BuildKit rootfs is not mounted from its cache disk",
+            ));
+        }
+        let leaf = snapshot_leaf(mountinfo, bind_id, &volume.name, id).ok_or_else(|| {
+            io::Error::other("worker rootfs bind is outside its native snapshots")
+        })?;
+        let native = open_directory(&leased_cache, "runc-native")?;
+        let snapshots = open_directory(&native, "snapshots")?;
+        let snapshots = open_directory(&snapshots, "snapshots")?;
+        let source = open_directory(&snapshots, leaf)?;
+        let info = source.metadata()?;
+        if (info.dev(), info.ino()) != (mounted.dev(), mounted.ino()) {
+            return Err(io::Error::other(
+                "leased snapshot did not match the active rootfs",
             ));
         }
         let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
@@ -171,7 +228,10 @@ pub(crate) mod guest {
         if bytes.len() as u64 > super::bundle::MAX_CONFIG_BYTES {
             return Err(io::Error::other("live BuildKit config exceeds its bound"));
         }
-        Ok(bytes)
+        Ok(LiveBundle {
+            config: bytes,
+            root: source,
+        })
     }
 
     fn mount_id(file: &File) -> io::Result<u64> {
@@ -251,25 +311,34 @@ pub(crate) mod guest {
         if !snapshot.same_mount(&open.identity) {
             return Err(io::Error::other("stale native build snapshot identity"));
         }
-        // Clone a detached mount of only the verified root, without child mounts.
-        let tree = unsafe {
-            libc::syscall(
-                libc::SYS_open_tree,
-                open.root.as_raw_fd(),
-                c"".as_ptr(),
-                libc::AT_EMPTY_PATH | libc::OPEN_TREE_CLONE as i32 | libc::O_CLOEXEC,
-            )
-        };
-        if tree < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let tree = unsafe { OwnedFd::from_raw_fd(tree as i32) };
+        let tree = clone_tree(&open.root)?;
         let attributes = libc::mount_attr {
             attr_set: libc::MOUNT_ATTR_IDMAP,
             attr_clr: 0,
             propagation: 0,
             userns_fd: user.as_raw_fd() as u64,
         };
+        set_mount_attributes(&tree, &attributes)?;
+        Ok(tree)
+    }
+
+    fn clone_tree(root: &File) -> io::Result<OwnedFd> {
+        // Clone a detached mount of only the verified root, without child mounts.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_open_tree,
+                root.as_raw_fd(),
+                c"".as_ptr(),
+                libc::AT_EMPTY_PATH | libc::OPEN_TREE_CLONE as i32 | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    }
+
+    fn set_mount_attributes(tree: &OwnedFd, attributes: &libc::mount_attr) -> io::Result<()> {
         // Both descriptors remain open until the kernel copies the attributes.
         crate::security::checked(unsafe {
             libc::syscall(
@@ -277,11 +346,10 @@ pub(crate) mod guest {
                 tree.as_raw_fd(),
                 c"".as_ptr(),
                 libc::AT_EMPTY_PATH,
-                &attributes,
+                attributes,
                 size_of::<libc::mount_attr>(),
             ) as i32
-        })?;
-        Ok(tree)
+        })
     }
 
     pub(crate) fn listen(
@@ -357,5 +425,19 @@ mod tests {
         for name in ["", ".", "a/b", "a\\b", "../private", "a\0b"] {
             assert!(!valid_id(name));
         }
+    }
+
+    #[test]
+    fn worker_snapshot_paths_bind_the_exact_volume_bundle_and_mount() {
+        let example = "50 21 8:0 /volumes/cache/runc-native/snapshots/snapshots/72 \
+            /var/lib/buildkit/runc-native/executor/run1/rootfs rw - ext4 /dev/vda rw";
+        assert_eq!(snapshot_leaf(example, 50, "cache", "run1"), Some("72"));
+        assert_eq!(snapshot_leaf(example, 49, "cache", "run1"), None);
+        assert_eq!(snapshot_leaf(example, 50, "other", "run1"), None);
+        assert_eq!(snapshot_leaf(example, 50, "cache", "run2"), None);
+        assert_eq!(
+            snapshot_leaf(&example.replace("/72 ", "/72/extra "), 50, "cache", "run1"),
+            None,
+        );
     }
 }

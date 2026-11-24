@@ -2664,14 +2664,30 @@ impl FreshFixture {
             (pidfd.try_clone()?, volume)
         };
         let root = crate::exec_fixture::target_root(&pidfd)?;
-        let bytes = crate::build_snapshot::guest::read_worker_config(&root, &volume, &request.id)?;
-        let config: Value = serde_json::from_slice(&bytes)?;
+        let mountinfo = crate::exec_fixture::target_mountinfo(&pidfd)?;
+        let bundle = crate::build_snapshot::guest::read_worker_config(
+            &root,
+            &mountinfo,
+            &volume,
+            &request.id,
+        )?;
+        let config: Value = serde_json::from_slice(&bundle.config)?;
+        let detached = bundle.clone_root().map(|_| ());
+        let mounts = config["mounts"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("live BuildKit bundle omitted its mounts"))?;
+        let namespaces = config["linux"]["namespaces"]
+            .as_array()
+            .ok_or_else(|| io::Error::other("live BuildKit bundle omitted its namespaces"))?;
         Ok(json!({
-            "uid": config["process"]["user"]["uid"].as_u64(),
-            "gid": config["process"]["user"]["gid"].as_u64(),
-            "mounts": config["mounts"].as_array().map(Vec::len),
-            "namespaces": config["linux"]["namespaces"].as_array().map(Vec::len),
-            "cgroup_set": config["linux"]["cgroupsPath"].as_str().is_some_and(|value| !value.is_empty()),
+            "groups": config["process"]["user"]["additionalGids"],
+            "mounts": mounts.iter().filter_map(|mount| mount["destination"].as_str())
+                .collect::<Vec<_>>().join(","),
+            "namespaces": namespaces.iter().map(|ns| {
+                let name = ns["type"].as_str().unwrap_or("?");
+                if ns["path"].as_str().is_some() { format!("{name}*") } else { name.into() }
+            }).collect::<Vec<_>>().join(","),
+            "root": detached.map(|_| "ready".into()).unwrap_or_else(|error| error.to_string()),
         }))
     }
 

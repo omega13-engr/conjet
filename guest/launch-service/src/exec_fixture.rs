@@ -154,6 +154,17 @@ pub(crate) fn target_network(pidfd: &OwnedFd) -> io::Result<File> {
     pinned_target(pidfd, |pid| File::open(format!("/proc/{pid}/ns/net")))
 }
 
+pub(crate) fn target_mountinfo(pidfd: &OwnedFd) -> io::Result<String> {
+    const LIMIT: u64 = 64 * 1024;
+    let info = pinned_target(pidfd, |pid| File::open(format!("/proc/{pid}/mountinfo")))?;
+    let mut contents = String::new();
+    info.take(LIMIT + 1).read_to_string(&mut contents)?;
+    if contents.len() as u64 > LIMIT {
+        return Err(io::Error::other("worker mountinfo exceeded its limit"));
+    }
+    Ok(contents)
+}
+
 fn dup_high(fd: i32) -> io::Result<OwnedFd> {
     let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 64) };
     if copy < 0 {

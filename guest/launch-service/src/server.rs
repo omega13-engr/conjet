@@ -144,7 +144,7 @@ impl Server {
         }
         let result = fresh.inspect_build_worker_bundle(&frame, &hex(&self.boot_id), &cgroup);
         let detail = match result {
-            Ok(bundle) => format!("verified live BuildKit bundle awaits native mount: {bundle}"),
+            Ok(bundle) => format!("live bundle: {bundle}"),
             Err(error) => format!("cannot verify live BuildKit bundle: {error}"),
         };
         write_error(&mut stream, frame.id, "unsupported_option", &detail)

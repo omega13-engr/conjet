@@ -1766,6 +1766,22 @@ bounded single-link OCI configuration. The original Node RUN reported
 UID/GID 0, eight mounts and six namespaces. The rootless bundle omitted
 a cgroup path. The native launch and teardown remain open.
 
+`SPEED-165/node-leased-source/` confirmed that the worker's bind
+resolves to the same leased snapshot inode from the supervisor's own
+mount namespace. A detached executable view of that inode was created
+with `nosuid,nodev`. The live root mount stays private and is never
+remounted by this operation.
+
+### SPEED-168
+
+Title: Account for BuildKit RUN and worker processes together
+
+Acceptance: Keep compiler processes and the BuildKit daemon in the
+same owned aggregate cgroup with distinct child lifecycles. Preserve
+the original worker resource semantics, Core admission and memory
+ownership. Verify worker cancellation drains and removes every owned
+RUN before the cache lease is released.
+
 ### SPEED-161
 
 Title: Preserve frozen Dockerfile and base-layer metadata in the worker

@@ -378,8 +378,6 @@ pub(crate) mod guest {
         guest_uid: u32,
         guest_gid: u32,
         mode: u32,
-        #[serde(skip)]
-        pub(crate) device: u64,
         pub(crate) inode: u64,
         labels: VolumeLabels,
     }
@@ -415,8 +413,16 @@ pub(crate) mod guest {
     }
 
     pub(crate) fn mount_source(request: &VolumeMount) -> io::Result<File> {
+        checked_source(request, (0, 0))
+    }
+
+    pub(crate) fn build_cache_source(request: &VolumeMount) -> io::Result<File> {
+        checked_source(request, (UID_BASE, GID_BASE))
+    }
+
+    fn checked_source(request: &VolumeMount, uid_gid_base: (u32, u32)) -> io::Result<File> {
         let source = open_volume(&request.name, libc::O_PATH)?;
-        let info = checked_info(&request.name, &source.metadata()?, (0, 0))?;
+        let info = checked_info(&request.name, &source.metadata()?, uid_gid_base)?;
         if info.inode != request.inode {
             return Err(io::Error::other("stale native volume identity"));
         }
@@ -494,7 +500,6 @@ pub(crate) mod guest {
             guest_uid: owner.0.expect("validated volume UID"),
             guest_gid: owner.1.expect("validated volume GID"),
             mode: info.mode() & 0o777,
-            device: info.dev(),
             inode: info.ino(),
             labels: VolumeLabels::new(),
         })
