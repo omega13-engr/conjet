@@ -1422,6 +1422,29 @@ Docker Hub stalls during Compose setup. Authenticate the exact
 manifest, config and layer extents before publishing. Keep public
 registry acquisition as its own required test.
 
+Evidence: Local Node and Redis layouts passed the pinned manifest and
+layer checks. Both Compose prepulls then passed, and setup reached
+Redis container creation. Redis's config digest is transitively pinned
+by the manifest. No public acquisition pass was recorded. See
+`SPEED-140/compose-manifest-config/` on ExternalSSD.
+
+### SPEED-141
+
+Title: Resolve mapped credentials from the verified OCI image
+
+Acceptance: Read the bounded image account files for named users,
+groups and numeric primary groups. Retain explicit numeric pairs,
+inherit the resolved identity on exec, and reject unknown or
+unmapped identities without adding capabilities.
+
+### SPEED-142
+
+Title: Accept the frozen Compose healthcheck retry count
+
+Acceptance: Preserve the pinned fixture's 1-second interval, 2-second
+timeout and 12 retries without expanding the healthcheck command scope
+or weakening timeout and exhaustion checks.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

@@ -380,15 +380,64 @@ impl Store {
                 archive::Blob::Inline(oci_stage::blob(layout, config, METADATA)?),
             ),
         ]);
-        let mut budget = LAYERS;
+        let mut budget = match self.encoding {
+            PackageEncoding::Json => LAYERS as u64,
+            PackageEncoding::DiskV2 => oci_stage::DISK_COMPRESSED_BUDGET,
+        };
+        let mut layers = Vec::with_capacity(image.layers.len());
         for layer in image.layers {
-            ensure!(layer.size <= budget, "boot layout exceeds OCI layer budget");
-            let bytes = oci_stage::blob(layout, &layer.digest, layer.size)?;
-            ensure!(bytes.len() == layer.size, "boot layout layer size differs");
-            budget -= bytes.len();
-            blobs.insert(layer.digest, archive::Blob::Inline(bytes));
+            let size = layer.size as u64;
+            budget = budget
+                .checked_sub(size)
+                .context("boot layout exceeds OCI layer budget")?;
+            let path = layout.join("blobs/sha256").join(suffix(&layer.digest)?);
+            let file = oci_stage::open_bounded(layout, &path, size)?;
+            ensure!(
+                file.metadata()?.len() == size,
+                "boot layout layer size differs"
+            );
+            layers.push((layer.digest, file, size));
+        }
+        for (digest, file, size) in &layers {
+            blobs.insert(
+                digest.clone(),
+                archive::Blob::Extent {
+                    file,
+                    bytes: 0..*size,
+                },
+            );
         }
         self.publish_blobs(manifest, blobs)
+    }
+
+    pub(super) fn seed_frozen_layout(&self, layout: &Path) -> anyhow::Result<()> {
+        private_scratch(layout)?;
+        let index: Value = serde_json::from_slice(&oci_stage::read_bounded(
+            layout,
+            &layout.join("index.json"),
+            METADATA,
+        )?)?;
+        let Some([manifest]) = index["manifests"].as_array().map(Vec::as_slice) else {
+            anyhow::bail!("offline source must contain exactly one frozen manifest");
+        };
+        let digest = manifest["digest"]
+            .as_str()
+            .context("missing offline manifest digest")?;
+        suffix(digest)?;
+        let matrix: Value = serde_json::from_str(public_registry::FIXTURES)?;
+        let frozen = matrix["images"]
+            .as_object()
+            .context("missing frozen image inventory")?;
+        let (reference, config) = frozen
+            .values()
+            .find_map(|image| {
+                let reference = image["ref"].as_str()?;
+                let (_, pinned) = reference.rsplit_once('@')?;
+                (pinned == digest).then_some((reference, image["config_digest"].as_str()))
+            })
+            .context("offline OCI layout is not a frozen image")?;
+        let manifest = oci_stage::read_manifest(layout, digest)?;
+        self.seed_layout(layout, reference, config.unwrap_or(&manifest.config.digest))
     }
 
     fn publish_blobs(

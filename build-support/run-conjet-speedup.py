@@ -574,6 +574,10 @@ def native_session(args, root):
                 bridge_command += ['--boot-layout', args.native_boot_layout]
             if args.native_public_images:
                 bridge_command.append('--pinned-public-registry')
+            for layout in args.offline_oci_layout:
+                bridge_command += ['--seed-layout', layout]
+            if args.offline_oci_layout:
+                report['offline_oci_layouts'] = [str(layout) for layout in args.offline_oci_layout]
         if args.diagnostics == 'registry':
             registry_test = runpy.run_path(str(REPO / 'benchmarks/native-docker-registry.py'))
             registry = registry_scope.enter_context(registry_test['Registry'](args.registry_fixtures).serve())
@@ -816,6 +820,7 @@ def main():
                         help='run one complete frozen lifecycle group in its own Core boot')
     parser.add_argument('--native-bind-storage', action='store_true')
     parser.add_argument('--native-routed-bridge', action='store_true')
+    parser.add_argument('--offline-oci-layout', type=Path, action='append', default=[])
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--volume-phase', choices=('create', 'inspect', 'remove'))
@@ -853,6 +858,12 @@ def main():
         parser.error('bind storage requires the isolated native storage suite')
     if args.native_routed_bridge and args.diagnostics != 'docker-network':
         parser.error('select the routed bridge only for the network diagnostic')
+    if args.offline_oci_layout and (
+            args.compatibility_suite not in ('builds', 'compose', 'storage_network', 'stress')
+            or not args.native_public_images or not args.native_disk_images
+            or any(layout.resolve(strict=True) != layout or not layout.is_relative_to(SCRATCH)
+                   for layout in args.offline_oci_layout)):
+        parser.error('offline layouts require frozen native runtime diagnostics and canonical ExternalSSD sources')
     if args.compatibility_lifecycle_group:
         scenarios = json.loads((REPO / 'benchmarks/scenarios/native-compatibility-v1.json').read_text())
         groups = {case['id'].removeprefix('lifecycle/') for group in scenarios['groups']

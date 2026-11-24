@@ -73,6 +73,9 @@ pub(super) struct Options {
     /// Retain verified source layers for exporting the base image.
     #[arg(long, requires = "image_store")]
     boot_layout: Option<PathBuf>,
+    /// Seed a verified frozen image from a private offline OCI layout.
+    #[arg(long, requires = "pinned_public_registry")]
+    seed_layout: Vec<PathBuf>,
     /// Existing private ExternalSSD directory authorized for native host binds.
     #[arg(long)]
     bind_root: Option<PathBuf>,
@@ -198,6 +201,12 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             .as_ref()
             .expect("boot layout requires a store")
             .seed_layout(&layout, &metadata.reference, &metadata.config_digest)?;
+    }
+    for layout in options.seed_layout {
+        store
+            .as_ref()
+            .context("offline layouts require an image store")?
+            .seed_frozen_layout(&layout)?;
     }
     let sequence = status["last_sequence"]
         .as_u64()

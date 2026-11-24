@@ -9,7 +9,8 @@ use std::time::Instant;
 use anyhow::{ensure, Context};
 use serde_json::Value;
 
-const FIXTURES: &str = include_str!("../../../../benchmarks/scenarios/docker-comparison-v1.json");
+pub(super) const FIXTURES: &str =
+    include_str!("../../../../benchmarks/scenarios/docker-comparison-v1.json");
 
 #[derive(Default)]
 pub(super) struct Pins(BTreeMap<String, String>);
