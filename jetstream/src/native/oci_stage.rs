@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::io::{self, BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -10,17 +11,17 @@ use anyhow::{ensure, Context};
 use base64::Engine;
 use clap::Args;
 use conjet_launch_service::handshake::{hex, unhex};
+use conjet_launch_service::oci::{self, packed, Kind, Record, Root};
 use flate2::read::MultiGzDecoder;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::oci::{self, Kind, Record, Root};
-
 const SCRATCH: &str = "/Volumes/ExternalSSD/dev_workspace/tmp";
 pub(super) const METADATA_LIMIT: usize = 64 * 1024;
 pub(super) const LAYER_BUDGET: usize = 40 * 1024 * 1024;
 const LAYERS_LIMIT: usize = 16;
+const DISK_COMPRESSED_BUDGET: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Args)]
 pub(super) struct Options {
@@ -30,6 +31,9 @@ pub(super) struct Options {
     manifest_digest: String,
     #[arg(long)]
     output: PathBuf,
+    /// Stage verified file extents for the leased native disk image store.
+    #[arg(long)]
+    disk_package: bool,
 }
 
 #[derive(Deserialize)]
@@ -53,13 +57,14 @@ struct Entry {
     uid: u32,
     gid: u32,
     kind: Kind,
-    data: Vec<u8>,
+    layer: usize,
+    data: Range<u64>,
     target: String,
 }
 
 type Tree = BTreeMap<String, Arc<Entry>>;
 
-pub(super) fn read_bounded(root: &Path, path: &Path, bound: usize) -> anyhow::Result<Vec<u8>> {
+pub(super) fn open_bounded(root: &Path, path: &Path, bound: u64) -> anyhow::Result<File> {
     ensure!(
         path.starts_with(root) && path.canonicalize()? == path,
         "invalid OCI blob path"
@@ -70,9 +75,14 @@ pub(super) fn read_bounded(root: &Path, path: &Path, bound: usize) -> anyhow::Re
         .open(path)?;
     let metadata = file.metadata()?;
     ensure!(
-        metadata.is_file() && metadata.len() <= bound as u64,
+        metadata.is_file() && metadata.len() <= bound,
         "OCI blob exceeds its byte bound or is not a file"
     );
+    Ok(file)
+}
+
+pub(super) fn read_bounded(root: &Path, path: &Path, bound: usize) -> anyhow::Result<Vec<u8>> {
+    let file = open_bounded(root, path, bound as u64)?;
     let mut bytes = Vec::new();
     file.take(bound as u64 + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= bound, "OCI blob exceeds its byte bound");
@@ -167,21 +177,27 @@ fn pax_paths(mut bytes: &[u8]) -> anyhow::Result<PaxPaths> {
     Ok(paths)
 }
 
-fn archive(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
+fn archive(
+    source: &mut (impl Read + Seek),
+    length: u64,
+    layer: usize,
+    limit: usize,
+) -> anyhow::Result<BTreeMap<String, Entry>> {
     let mut entries = BTreeMap::new();
-    let mut tar = tar::Archive::new(Cursor::new(layer));
+    let mut tar = tar::Archive::new(source);
     let mut end = 0;
     let mut root_seen = false;
     let mut extended = None;
-    for entry in tar.entries()?.raw(true) {
+    for entry in tar.entries_with_seek()?.raw(true) {
         let mut entry = entry?;
         let header = entry.header();
         let file_type = header.entry_type();
         ensure!(
-            entry.size() <= layer.len() as u64,
+            entry.raw_file_position() <= length && entry.size() <= length,
             "OCI tar member exceeds layer size"
         );
         end = entry.raw_file_position() + entry.size().div_ceil(512) * 512;
+        ensure!(end <= length, "truncated OCI tar padding");
         if file_type == tar::EntryType::XHeader {
             ensure!(
                 extended.is_none() && entry.size() <= 4096,
@@ -252,18 +268,15 @@ fn archive(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
                 String::new()
             }
         };
-        let mut data = Vec::new();
-        if kind == Kind::File {
-            entry.read_to_end(&mut data)?;
-            ensure!(
-                data.len() == entry.size() as usize,
-                "truncated OCI tar member"
-            );
+        let data = if kind == Kind::File {
+            let start = entry.raw_file_position();
+            start..start + entry.size()
         } else {
             ensure!(entry.size() == 0, "unexpected OCI tar payload");
-        }
+            0..0
+        };
         ensure!(
-            entries.len() < oci::MAX_RECORDS
+            entries.len() < limit
                 && entries
                     .insert(
                         path,
@@ -272,6 +285,7 @@ fn archive(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
                             uid,
                             gid,
                             kind,
+                            layer,
                             data,
                             target
                         }
@@ -281,13 +295,22 @@ fn archive(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
         );
     }
     ensure!(extended.is_none(), "unattached OCI PAX header");
-    let trailer = layer
-        .get(end as usize..)
-        .context("truncated OCI tar padding")?;
     ensure!(
-        layer.len() % 512 == 0 && trailer.len() >= 1024 && trailer.iter().all(|byte| *byte == 0),
+        length % 512 == 0 && length - end >= 1024,
         "malformed OCI tar trailer"
     );
+    let source = tar.into_inner();
+    source.seek(SeekFrom::Start(end))?;
+    let mut buffer = [0; 8192];
+    while end < length {
+        let chunk = (length - end).min(buffer.len() as u64) as usize;
+        source.read_exact(&mut buffer[..chunk])?;
+        ensure!(
+            buffer[..chunk].iter().all(|byte| *byte == 0),
+            "malformed OCI tar trailer"
+        );
+        end += chunk as u64;
+    }
     Ok(entries)
 }
 
@@ -311,7 +334,8 @@ fn parents(tree: &mut Tree, path: &str) -> anyhow::Result<()> {
                 uid: 0,
                 gid: 0,
                 kind: Kind::Directory,
-                data: Vec::new(),
+                layer: 0,
+                data: 0..0,
                 target: String::new(),
             })
         });
@@ -323,7 +347,7 @@ fn parents(tree: &mut Tree, path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn apply(tree: &mut Tree, mut layer: BTreeMap<String, Entry>) -> anyhow::Result<()> {
+fn apply(tree: &mut Tree, mut layer: BTreeMap<String, Entry>, limit: usize) -> anyhow::Result<()> {
     for (path, entry) in &layer {
         let (directory, name) = parent(path);
         let Some(whiteout) = name.strip_prefix(".wh.") else {
@@ -375,7 +399,7 @@ fn apply(tree: &mut Tree, mut layer: BTreeMap<String, Entry>) -> anyhow::Result<
             tree.insert(path, Arc::new(entry));
         }
         ensure!(
-            tree.len() + links.len() <= oci::MAX_RECORDS,
+            tree.len() + links.len() <= limit,
             "OCI rootfs exceeds its entry bound"
         );
     }
@@ -403,26 +427,25 @@ fn apply(tree: &mut Tree, mut layer: BTreeMap<String, Entry>) -> anyhow::Result<
     Ok(())
 }
 
-fn flatten(config_digest: String, tree: Tree) -> Root {
+fn records(tree: &Tree) -> impl Iterator<Item = (Record, Option<&Entry>)> {
     let mut targets = BTreeMap::new();
-    let records = tree
-        .iter()
-        .map(|(path, node)| {
-            let mut kind = node.kind;
-            let mut target = node.target.clone();
-            let mut data = String::new();
-            if kind == Kind::File {
-                match targets.entry(Arc::as_ptr(node)) {
-                    std::collections::btree_map::Entry::Occupied(entry) => {
-                        kind = Kind::Hardlink;
-                        target = String::clone(entry.get());
-                    }
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(path.clone());
-                        data = base64::engine::general_purpose::STANDARD.encode(&node.data);
-                    }
+    tree.iter().map(move |(path, node)| {
+        let mut kind = node.kind;
+        let mut target = node.target.clone();
+        let mut data = None;
+        if kind == Kind::File {
+            match targets.entry(Arc::as_ptr(node)) {
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    kind = Kind::Hardlink;
+                    target = String::clone(entry.get());
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(path.clone());
+                    data = Some(node.as_ref());
                 }
             }
+        }
+        (
             Record {
                 path: path.clone(),
                 mode: node.mode,
@@ -430,14 +453,11 @@ fn flatten(config_digest: String, tree: Tree) -> Root {
                 gid: node.gid,
                 kind,
                 target,
-                data,
-            }
-        })
-        .collect();
-    Root {
-        config_digest,
-        records,
-    }
+                data: String::new(),
+            },
+            data,
+        )
+    })
 }
 
 fn process_metadata(config: &Value) -> anyhow::Result<Value> {
@@ -475,7 +495,7 @@ pub(super) fn read_manifest(layout: &Path, manifest_digest: &str) -> anyhow::Res
     Ok(manifest)
 }
 
-fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)> {
+fn verify_metadata(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Manifest, Value)> {
     let manifest = read_manifest(layout, manifest_digest)?;
     let config: Value =
         serde_json::from_slice(&read_descriptor(layout, &manifest.config, METADATA_LIMIT)?)?;
@@ -492,10 +512,19 @@ fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)>
         diff_ids.len() == manifest.layers.len(),
         "OCI layer and diff ID counts differ"
     );
+    let receipt = json!({"config_digest":manifest.config.digest, "manifest_digest":manifest_digest,
+                         "diff_ids":diff_ids, "layers":manifest.layers.iter().map(|layer| &layer.digest).collect::<Vec<_>>(),
+                         "process":process_metadata(&config)?, "platform":"linux/arm64"});
+    Ok((manifest, receipt))
+}
+
+fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)> {
+    let (manifest, mut receipt) = verify_metadata(layout, manifest_digest)?;
     let mut budget = LAYER_BUDGET;
     let mut compressed_budget = LAYER_BUDGET;
     let mut tree = Tree::new();
-    for (descriptor, diff_id) in manifest.layers.iter().zip(diff_ids) {
+    let mut layers = Vec::new();
+    for (index, descriptor) in manifest.layers.iter().enumerate() {
         let content = read_descriptor(layout, descriptor, compressed_budget)?;
         compressed_budget -= content.len();
         let layer = match descriptor.media_type.as_str() {
@@ -514,18 +543,144 @@ fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)>
             "OCI layers exceed the uncompressed byte budget"
         );
         ensure!(
-            *diff_id == format!("sha256:{}", hex(&Sha256::digest(&layer))),
+            receipt["diff_ids"][index] == format!("sha256:{}", hex(&Sha256::digest(&layer))),
             "uncompressed OCI diff ID mismatch"
         );
-        budget -= layer.len();
-        apply(&mut tree, archive(&layer)?)?;
+        let len = layer.len();
+        budget -= len;
+        layers.push(layer);
+        let entries = archive(
+            &mut Cursor::new(&layers[index]),
+            len as u64,
+            index,
+            oci::MAX_RECORDS,
+        )?;
+        apply(&mut tree, entries, oci::MAX_RECORDS)?;
     }
-    let root = flatten(manifest.config.digest.clone(), tree);
-    let receipt = json!({"config_digest":manifest.config.digest, "manifest_digest":manifest_digest,
-                         "diff_ids":diff_ids, "layers":manifest.layers.iter().map(|layer| &layer.digest).collect::<Vec<_>>(),
-                         "rootfs_entries":root.records.len(), "process":process_metadata(&config)?,
-                         "platform":"linux/arm64"});
+    let root = Root {
+        config_digest: manifest.config.digest,
+        records: records(&tree)
+            .map(|(mut record, entry)| {
+                if let Some(entry) = entry {
+                    let range = entry.data.start as usize..entry.data.end as usize;
+                    record.data = base64::engine::general_purpose::STANDARD
+                        .encode(&layers[entry.layer][range]);
+                }
+                record
+            })
+            .collect(),
+    };
+    receipt["rootfs_entries"] = json!(root.records.len());
     Ok((root, receipt))
+}
+
+fn digest_file(file: &mut File, size: u64) -> anyhow::Result<String> {
+    file.rewind()?;
+    let mut hash = Sha256::new();
+    ensure!(
+        io::copy(&mut file.take(size + 1), &mut hash)? == size,
+        "OCI file size changed during verification"
+    );
+    file.rewind()?;
+    Ok(hex(&hash.finalize()))
+}
+
+fn disk_layer(
+    layout: &Path,
+    workspace: &Path,
+    descriptor: &Descriptor,
+    budget: u64,
+) -> anyhow::Result<(File, u64)> {
+    let digest = descriptor
+        .digest
+        .strip_prefix("sha256:")
+        .context("expected an OCI digest")?;
+    unhex::<32>(digest)?;
+    let mut source = open_bounded(
+        layout,
+        &layout.join("blobs/sha256").join(digest),
+        descriptor.size as u64,
+    )?;
+    ensure!(
+        digest_file(&mut source, descriptor.size as u64)? == digest,
+        "OCI blob digest mismatch"
+    );
+    let mut output = tempfile::tempfile_in(workspace)?;
+    let size = match descriptor.media_type.as_str() {
+        "application/vnd.oci.image.layer.v1.tar" => {
+            io::copy(&mut source.take(budget + 1), &mut output)?
+        }
+        "application/vnd.oci.image.layer.v1.tar+gzip" => {
+            let decoder = MultiGzDecoder::new(BufReader::new(source));
+            io::copy(&mut decoder.take(budget + 1), &mut output)?
+        }
+        _ => anyhow::bail!("unsupported OCI layer media type"),
+    };
+    ensure!(
+        size <= budget,
+        "OCI layers exceed the uncompressed byte budget"
+    );
+    Ok((output, size))
+}
+
+fn write_disk_package(
+    layout: &Path,
+    manifest: &str,
+    workspace: &Path,
+) -> anyhow::Result<(String, Value)> {
+    let (manifest, mut receipt) = verify_metadata(layout, manifest)?;
+    let mut compressed_budget = DISK_COMPRESSED_BUDGET;
+    let mut budget = packed::BYTE_LIMIT;
+    let mut tree = Tree::new();
+    let mut layers = Vec::new();
+    for (index, descriptor) in manifest.layers.iter().enumerate() {
+        compressed_budget = compressed_budget
+            .checked_sub(descriptor.size as u64)
+            .context("OCI descriptor exceeds its disk byte budget")?;
+        let (mut layer, size) = disk_layer(layout, workspace, descriptor, budget)?;
+        ensure!(
+            receipt["diff_ids"][index] == format!("sha256:{}", digest_file(&mut layer, size)?),
+            "uncompressed OCI diff ID mismatch"
+        );
+        budget -= size;
+        let entries = archive(
+            &mut BufReader::new(&mut layer),
+            size,
+            index,
+            packed::RECORD_LIMIT,
+        )?;
+        apply(&mut tree, entries, packed::RECORD_LIMIT)?;
+        layers.push(layer);
+    }
+    let mut package = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(workspace.join("package.cjoci"))?;
+    packed::write_header(&mut package, &manifest.config.digest, tree.len())?;
+    for (record, entry) in records(&tree) {
+        if let Some(entry) = entry {
+            let layer = &mut layers[entry.layer];
+            layer.seek(SeekFrom::Start(entry.data.start))?;
+            packed::write_record(
+                &mut package,
+                &record,
+                layer,
+                entry.data.end - entry.data.start,
+            )?;
+        } else {
+            packed::write_record(&mut package, &record, &mut io::empty(), 0)?;
+        }
+    }
+    let size = package.metadata()?.len();
+    package.rewind()?;
+    packed::Index::read(&mut BufReader::new(&mut package), size)?;
+    let sha256 = digest_file(&mut package, size)?;
+    package.sync_all()?;
+    receipt["rootfs_entries"] = json!(tree.len());
+    receipt["package_encoding"] = json!(oci::PackageEncoding::DiskV2);
+    Ok((sha256, receipt))
 }
 
 pub(super) fn stage(options: Options) -> anyhow::Result<()> {
@@ -545,7 +700,16 @@ pub(super) fn stage(options: Options) -> anyhow::Result<()> {
         .file_name()
         .context("missing staging directory name")?;
     let output = parent.join(name);
-    let package_sha256 = publish(&layout, &options.manifest_digest, &output)?;
+    let package_sha256 = publish_with_encoding(
+        &layout,
+        &options.manifest_digest,
+        &output,
+        if options.disk_package {
+            oci::PackageEncoding::DiskV2
+        } else {
+            oci::PackageEncoding::Json
+        },
+    )?;
     println!(
         "{}",
         json!({"output":output, "package_sha256":package_sha256,
@@ -555,23 +719,33 @@ pub(super) fn stage(options: Options) -> anyhow::Result<()> {
 }
 
 pub(super) fn publish(layout: &Path, manifest: &str, output: &Path) -> anyhow::Result<String> {
+    publish_with_encoding(layout, manifest, output, oci::PackageEncoding::Json)
+}
+
+pub(super) fn publish_with_encoding(
+    layout: &Path,
+    manifest: &str,
+    output: &Path,
+    encoding: oci::PackageEncoding,
+) -> anyhow::Result<String> {
     let parent = output.parent().context("missing OCI output parent")?;
-    let (tree, mut receipt) = verify(layout, manifest)?;
-    let package = serde_json::to_vec(&tree)?;
-    ensure!(
-        package.len() <= oci::PACKAGE_LIMIT as usize,
-        "staged rootfs exceeds package bound"
-    );
-    Root::read(&package)?;
-    let package_sha256 = hex(&Sha256::digest(&package));
-    receipt["package_sha256"] = json!(package_sha256);
     let staged = tempfile::tempdir_in(parent)?;
     let write = |name: &str, data: &[u8]| -> std::io::Result<()> {
         let mut file = File::create(staged.path().join(name))?;
         file.write_all(data)?;
         file.sync_all()
     };
-    write("package.json", &package)?;
+    let (package_sha256, mut receipt) = match encoding {
+        oci::PackageEncoding::Json => {
+            let (tree, receipt) = verify(layout, manifest)?;
+            let package = serde_json::to_vec(&tree)?;
+            Root::read(&package)?;
+            write("package.json", &package)?;
+            (hex(&Sha256::digest(&package)), receipt)
+        }
+        oci::PackageEncoding::DiskV2 => write_disk_package(layout, manifest, staged.path())?,
+    };
+    receipt["package_sha256"] = json!(package_sha256);
     write("receipt.json", &serde_json::to_vec(&receipt)?)?;
     let source = std::ffi::CString::new(staged.path().as_os_str().as_bytes())?;
     let destination = std::ffi::CString::new(output.as_os_str().as_bytes())?;
@@ -587,6 +761,15 @@ pub(super) fn publish(layout: &Path, manifest: &str, output: &Path) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn read_layer(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
+        archive(
+            &mut Cursor::new(layer),
+            layer.len() as u64,
+            0,
+            oci::MAX_RECORDS,
+        )
+    }
 
     fn link_layer(fields: &[(&str, &[u8])]) -> Vec<u8> {
         let mut archive = tar::Builder::new(Vec::new());
@@ -608,7 +791,7 @@ mod tests {
 
     #[test]
     fn local_pax_paths_override_the_immediately_following_member() {
-        let entries = archive(&link_layer(&[
+        let entries = read_layer(&link_layer(&[
             ("path", b"etc/renamed"),
             ("linkpath", b"../bin/probe"),
         ]))
@@ -624,13 +807,13 @@ mod tests {
             ("path", b"../outside".as_slice()),
             ("linkpath", b"../../outside".as_slice()),
         ] {
-            assert!(archive(&link_layer(&[field])).is_err());
+            assert!(read_layer(&link_layer(&[field])).is_err());
         }
-        assert!(archive(&link_layer(&[("path", b"first"), ("path", b"second")])).is_err());
+        assert!(read_layer(&link_layer(&[("path", b"first"), ("path", b"second")])).is_err());
         let mut dangling = tar::Builder::new(Vec::new());
         dangling
             .append_pax_extensions([("path", b"unused".as_slice())])
             .unwrap();
-        assert!(archive(&dangling.into_inner().unwrap()).is_err());
+        assert!(read_layer(&dangling.into_inner().unwrap()).is_err());
     }
 }

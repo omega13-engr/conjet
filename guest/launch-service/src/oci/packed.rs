@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 
-use crate::handshake::hex;
+use crate::handshake::{hex, unhex};
 
 use super::{Kind, Record, Root};
 
@@ -11,6 +11,45 @@ const MAGIC: &[u8; 8] = b"CJOCI\x02\0\0";
 const METADATA_LIMIT: usize = 8192;
 pub const RECORD_LIMIT: usize = 32_768;
 pub const BYTE_LIMIT: u64 = 1200 * 1024 * 1024;
+
+pub fn write_header(target: &mut impl Write, config_digest: &str, count: usize) -> io::Result<()> {
+    ensure!(
+        (1..=RECORD_LIMIT).contains(&count),
+        "invalid disk OCI entry count"
+    );
+    let digest = config_digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| io::Error::other("invalid disk OCI config digest"))?;
+    let digest = unhex::<32>(digest).map_err(io::Error::other)?;
+    target.write_all(MAGIC)?;
+    target.write_all(&digest)?;
+    target.write_all(&(count as u32).to_le_bytes())
+}
+
+pub fn write_record(
+    target: &mut impl Write,
+    record: &Record,
+    data: &mut impl Read,
+    size: u64,
+) -> io::Result<()> {
+    ensure!(
+        record.data.is_empty() && (record.kind == Kind::File || size == 0),
+        "invalid disk OCI entry data"
+    );
+    let metadata = serde_json::to_vec(record)?;
+    ensure!(
+        metadata.len() <= METADATA_LIMIT,
+        "disk OCI entry metadata exceeds its limit"
+    );
+    target.write_all(&(metadata.len() as u32).to_le_bytes())?;
+    target.write_all(&metadata)?;
+    target.write_all(&size.to_le_bytes())?;
+    ensure!(
+        io::copy(&mut data.take(size), target)? == size,
+        "disk OCI extent ended during staging"
+    );
+    Ok(())
+}
 
 /// The regular-file bytes remain in the verified package.
 pub struct Index {
@@ -108,9 +147,13 @@ mod tests {
     use super::*;
 
     fn frame(parts: &[(&str, Kind, &str, &[u8])]) -> Vec<u8> {
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(&[0xab; 32]);
-        bytes.extend_from_slice(&(parts.len() as u32).to_le_bytes());
+        let mut bytes = Vec::new();
+        write_header(
+            &mut bytes,
+            &format!("sha256:{}", "ab".repeat(32)),
+            parts.len(),
+        )
+        .unwrap();
         for (path, kind, target, data) in parts {
             let record = Record {
                 path: (*path).into(),
@@ -121,11 +164,8 @@ mod tests {
                 target: (*target).into(),
                 data: String::new(),
             };
-            let metadata = serde_json::to_vec(&record).unwrap();
-            bytes.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(&metadata);
-            bytes.extend_from_slice(&(data.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(data);
+            let mut content = *data;
+            write_record(&mut bytes, &record, &mut content, data.len() as u64).unwrap();
         }
         bytes
     }
@@ -165,7 +205,6 @@ mod tests {
             vec![("absent/child", Kind::File, "", b"x".as_slice())],
             vec![("alias", Kind::Hardlink, "gone", b"".as_slice())],
             vec![("link", Kind::Symlink, "../escape", b"".as_slice())],
-            vec![("dir", Kind::Directory, "", b"payload".as_slice())],
             vec![
                 ("same", Kind::File, "", b"1".as_slice()),
                 ("same", Kind::File, "", b"2".as_slice()),
@@ -179,5 +218,10 @@ mod tests {
         assert!(read(&bytes).is_err());
         bytes[0] = 0;
         assert!(read(&bytes).is_err());
+        let mut directory = frame(&[("dir", Kind::Directory, "", b"")]);
+        let offset = directory.len() - 8;
+        directory[offset] = 1;
+        directory.push(b'x');
+        assert!(read(&directory).is_err());
     }
 }

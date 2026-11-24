@@ -926,6 +926,31 @@ create a packed root under bounded ExternalSSD scratch. Exercise the fixed
 Node, Go and Rust layouts, retaining manifest and config identity,
 whiteouts, links, metadata validation and atomic publication.
 
+Evidence: The fixed Go and Rust layouts staged 214,178,773 and
+1,042,718,012 byte packages with peak process RSS of 20.1 and 8.7 MiB.
+The legacy archive regression passed through native execution. Node
+reached the mode validator and exposed the directory metadata handled in
+SPEED-108. This evidence covers staging. Logs are under `SPEED-107/`
+on ExternalSSD.
+
+### SPEED-108
+
+Title: Preserve mapped group inheritance on OCI directories
+
+Acceptance: Preserve the group inheritance mode on the pinned Node and
+Redis home directories. Reject set-user-ID on all entries and
+set-group-ID on non-directory entries. Verify the directory mode and
+mapped ownership without broadening workload credentials.
+
+### SPEED-109
+
+Title: Stream large registry blobs into the private native disk image store
+
+Acceptance: Pull exact frozen public image pins through the real Docker
+endpoint. Verify bounded blob downloads and packed guest installation,
+old JSON cache entries, shared references, rollback and cleanup. Keep
+the private lease and Core dynamic memory.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

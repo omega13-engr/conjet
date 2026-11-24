@@ -3,9 +3,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use conjet_launch_service::spec::{GID_BASE, UID_BASE};
 
-pub(super) use conjet_launch_service::oci::{
-    root_path, rooted_symlink, Kind, Record, Root, MAX_RECORDS, PACKAGE_LIMIT,
-};
+pub(super) use conjet_launch_service::oci::{Kind, Root, PACKAGE_LIMIT};
 
 pub(super) fn append(
     root: &Root,
