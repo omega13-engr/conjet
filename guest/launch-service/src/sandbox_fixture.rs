@@ -31,6 +31,8 @@ pub(crate) struct Sandbox {
     stdin: File,
     volume: Option<VolumeBinding>,
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
+    uid: u32,
+    gid: u32,
 }
 
 enum RootMode {
@@ -206,6 +208,8 @@ impl Sandbox {
                     .map(|volume| VolumeBinding::prepare(volume, &base.join("root")))
                     .transpose()?,
                 worker_mounts,
+                uid: oci.map_or(WORKLOAD_UID, |spec| spec.uid),
+                gid: oci.map_or(WORKLOAD_GID, |spec| spec.gid),
             })
         })();
         if setup.is_err() {
@@ -364,7 +368,7 @@ impl Sandbox {
         step("resource limits", security::set_process_limits())?;
         step(
             "credentials and capabilities",
-            security::drop_workload_identity(self.worker_mounts.is_some()),
+            security::drop_workload_identity(self.uid, self.gid, self.worker_mounts.is_some()),
         )?;
         before_filter()?;
         step("seccomp", self.filter.install())

@@ -818,6 +818,11 @@ mapped namespace IDs and enforce the original resources, capabilities,
 network policy, seccomp and cleanup. Reject unmapped IDs and privilege
 expansion. Exercise each workload, API/CLI boundary and network pair.
 
+Evidence: The isolated release verified Alpine default and explicit
+numeric credentials, inherited exec identity, and unmapped ID and
+privilege rejection. Named-account resolution and frozen lifecycle
+fixtures remain open. [Credential evidence](native-compatibility.md#speed-091-mapped-oci-credentials)
+
 ### SPEED-092
 
 Title: Qualify isolated Buildx worker provisioning

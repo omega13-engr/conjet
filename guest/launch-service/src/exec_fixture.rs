@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::handshake::{hex, unhex};
 use crate::output::{Capture, drain};
 use crate::security::{self, checked};
-use crate::spec::{LaunchSpec, NATIVE_LIMITS, WORKLOAD_GID, WORKLOAD_UID};
+use crate::spec::{LaunchSpec, NATIVE_LIMITS};
 
 const TARGET_PIDFD: libc::c_int = 3;
 const TARGET_ROOT: libc::c_int = 4;
@@ -313,8 +313,8 @@ pub fn run_helper(
     }
     let spec: LaunchSpec = serde_json::from_str(&specification)?;
     spec.validate_exec()?;
-    if spec.uid != WORKLOAD_UID || spec.gid != WORKLOAD_GID || spec.limits != NATIVE_LIMITS {
-        return Err("unsupported exec credentials or resources".into());
+    if spec.limits != NATIVE_LIMITS {
+        return Err("unsupported exec resources".into());
     }
 
     let args: Vec<_> = spec
@@ -388,7 +388,7 @@ pub fn run_helper(
         }
         let setup = (|| -> io::Result<()> {
             security::set_process_limits()?;
-            security::drop_workload_identity(false)?;
+            security::drop_workload_identity(spec.uid, spec.gid, false)?;
             checked(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;
             let mut poll = libc::pollfd {
                 fd: lifeline[0],

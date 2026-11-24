@@ -32,3 +32,29 @@ evidence root.
 The case covers a configured loopback registry and verified staged
 images. The ordinary matrix still needs public pinned image
 provisioning, mutable registry tag resolution and archive save/load.
+
+## SPEED-091 mapped OCI credentials
+
+The guest advertises mapped credentials on its OCI handshake. The
+adapter uses the staged image's default when Docker omits the user.
+An empty image default starts as namespace UID/GID 0. Explicit numeric
+UID:GID pairs are limited to the existing 65,536-entry map. Exec inherits
+the owned target process's numeric pair. The static and snapshot
+fixtures keep their fixed pair. Namespace root still enters exec with
+an empty capability set and bounding set, no-new-privileges and the
+existing seccomp filter.
+
+The original Alpine invocation with no user failed before the change.
+On the isolated release candidate the pinned CLI observed effective
+0:0, 1234:4321 and 65532:65532, plus root identity inherited by exec.
+The Docker API denied unmapped UID and GID, privileged create and
+capability addition. Guest lifecycle witnesses, shutdown and production
+fingerprints passed. One earlier credential probe used shell command
+substitution and hit the existing pipe syscall policy. The successful
+credential probe uses the image's BusyBox ID command directly and keeps
+the original syscall policy. The benchmark fixtures were retained.
+Raw attempts and binary identities are under `SPEED-091/` on ExternalSSD.
+
+This increment verifies the pinned Alpine default and numeric mappings.
+Named-account and single-ID resolution against the image's account
+database and the full original lifecycle remain open.

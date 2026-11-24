@@ -806,6 +806,12 @@ impl FreshFixture {
             return Err(("invalid_spec", "invalid launch sequence domain"));
         }
         let spec = &ready.request().spec;
+        if !self.oci && !spec.fixture_identity() {
+            return Err((
+                "invalid_spec",
+                "the static fixture requires UID and GID 65532",
+            ));
+        }
         if spec
             .build_snapshot
             .as_ref()

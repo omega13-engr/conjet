@@ -10,6 +10,7 @@ pub const WORKLOAD_GID: u32 = 65_532;
 pub const UID_BASE: u32 = 100_000;
 pub const GID_BASE: u32 = 100_000;
 pub const ID_MAP_WIDTH: u32 = 65_536;
+pub const MAPPED_IDS_CAPABILITY: &str = "native_oci_mapped_ids_v1";
 pub const VOLUME_TARGET: &str = "/data";
 pub const MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
@@ -95,7 +96,7 @@ pub enum SpecError {
     Path,
     #[error("environment entries require distinct valid names")]
     Environment,
-    #[error("native launch requires UID and GID 65532")]
+    #[error("native workload credentials do not fit the launch profile's UID/GID map")]
     Identity,
     #[error("this launch profile supports only none and bridge networking")]
     Network,
@@ -158,6 +159,10 @@ impl LaunchRequest {
 }
 
 impl LaunchSpec {
+    pub(crate) fn fixture_identity(&self) -> bool {
+        self.uid == WORKLOAD_UID && self.gid == WORKLOAD_GID
+    }
+
     pub(crate) fn aliases(&self) -> impl Iterator<Item = &String> {
         self.network_alias
             .iter()
@@ -223,7 +228,10 @@ impl LaunchSpec {
                 return Err(SpecError::Environment);
             }
         }
-        if spec.uid != WORKLOAD_UID || spec.gid != WORKLOAD_GID {
+        if spec.uid >= ID_MAP_WIDTH
+            || spec.gid >= ID_MAP_WIDTH
+            || (spec.build_snapshot.is_some() && !spec.fixture_identity())
+        {
             return Err(SpecError::Identity);
         }
         if !matches!(spec.network.as_str(), "none" | "bridge")
@@ -331,8 +339,23 @@ mod tests {
         request.spec.network = "host".into();
         assert_eq!(request.validate().err(), Some(SpecError::Network));
         let mut request = valid();
-        request.spec.uid = 0;
+        request.spec.uid = ID_MAP_WIDTH;
         assert_eq!(request.validate().err(), Some(SpecError::Identity));
+    }
+
+    #[test]
+    fn validates_namespace_root_but_keeps_build_fixture_identity() {
+        let mut request = valid();
+        request.spec.uid = 0;
+        request.spec.gid = 0;
+        assert!(request.spec.validate().is_ok());
+        request.spec.build_snapshot = Some(crate::build_snapshot::Snapshot {
+            id: "fixture".into(),
+            device: 1,
+            inode: 1,
+            bundle_policy: true,
+        });
+        assert_eq!(request.spec.validate().err(), Some(SpecError::Identity));
     }
 
     #[test]

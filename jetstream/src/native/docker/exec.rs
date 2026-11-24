@@ -82,11 +82,13 @@ impl Entry {
 
     pub(super) fn inspect(&self) -> Value {
         let state = self.state.lock().unwrap();
+        let spec = &self.container.container.spec;
+        let user = format!("{}:{}", spec["uid"], spec["gid"]);
         json!({
             "ID":self.id, "ContainerID":self.container.container.id,
             "Running":matches!(*state, State::Submitted),
             "ExitCode":match *state {State::Finished(code)=>Some(code), _=>None},
-            "ProcessConfig":{"entrypoint":self.argv[0],"arguments":self.argv[1..],"tty":false,"user":"65532:65532"},
+            "ProcessConfig":{"entrypoint":self.argv[0],"arguments":self.argv[1..],"tty":false,"user":user},
             "OpenStdin":false, "OpenStdout":self.output[0], "OpenStderr":self.output[1],
         })
     }

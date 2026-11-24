@@ -175,6 +175,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         .as_u64()
         .context("missing sequence")?;
     let native = Native {
+        mapped_ids: peer.mapped_ids,
         pool: vec![peer],
         peer_directory: options.native_session,
         identity,
@@ -265,6 +266,7 @@ fn serve_endpoint(
 }
 
 struct Native {
+    mapped_ids: bool,
     pool: Vec<client::Connection>,
     peer_directory: PathBuf,
     identity: session::Identity,
@@ -704,6 +706,7 @@ fn checked_network_address(address: &str) -> anyhow::Result<String> {
 
 struct Owner {
     image: request::Image,
+    mapped_ids: bool,
     native: Mutex<Native>,
     ledger: Mutex<Ledger>,
     store: Option<Mutex<registry::Store>>,
@@ -715,6 +718,7 @@ impl Owner {
     fn new(image: request::Image, native: Native, store: Option<registry::Store>) -> Self {
         Self {
             image,
+            mapped_ids: native.mapped_ids,
             native: Mutex::new(native),
             ledger: Mutex::new(Ledger::default()),
             store: store.map(Mutex::new),
@@ -768,11 +772,11 @@ impl Owner {
         let reference = tags.resolve(requested);
         let process = |image: &request::Image| {
             if requested == image.reference {
-                image.process(config)
+                image.process(config, self.mapped_ids)
             } else {
                 let mut canonical = config.clone();
                 canonical["Image"] = json!(image.reference);
-                image.process(&canonical)
+                image.process(&canonical, self.mapped_ids)
             }
         };
         if self.boot_reference(reference) {
@@ -780,7 +784,7 @@ impl Owner {
         }
         if self.store.is_none() {
             // Preserve the existing request validation on the boot-only route.
-            return self.image.process(config);
+            return self.image.process(config, self.mapped_ids);
         }
         let mut store = self.image_store()?;
         let image = store

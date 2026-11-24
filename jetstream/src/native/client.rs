@@ -71,6 +71,7 @@ impl Handle {
 pub(super) struct Connection {
     pub(super) boot: String,
     pub(super) oci: bool,
+    pub(super) mapped_ids: bool,
     pub(super) pending_watch: bool,
     stream: Stream,
 }
@@ -114,6 +115,10 @@ impl Connection {
         Ok(Self {
             boot: hello.boot_id,
             oci,
+            mapped_ids: hello
+                .capabilities
+                .iter()
+                .any(|value| value == conjet_launch_service::spec::MAPPED_IDS_CAPABILITY),
             pending_watch: hello.capabilities.iter().any(|value| {
                 value == conjet_launch_service::core_admission::PENDING_WATCH_CAPABILITY
             }),

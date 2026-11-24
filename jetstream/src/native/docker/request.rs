@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use anyhow::{ensure, Context};
 use conjet_launch_service::handshake::unhex;
-use conjet_launch_service::spec::{LaunchSpec, NATIVE_LIMITS, WORKLOAD_GID, WORKLOAD_UID};
+use conjet_launch_service::spec::{
+    LaunchSpec, ID_MAP_WIDTH, NATIVE_LIMITS, WORKLOAD_GID, WORKLOAD_UID,
+};
 use serde_json::{json, Map, Value};
 
 use super::Rejected;
@@ -99,6 +101,40 @@ fn env(value: &Value) -> Result<BTreeMap<String, String>, Rejected> {
     Ok(entries)
 }
 
+fn identity(request: &Value, image: &Value, mapped_ids: bool) -> Result<(u32, u32), Rejected> {
+    let value = match request {
+        Value::Null => image.as_str().or(image.is_null().then_some("")),
+        Value::String(value) if value.is_empty() => {
+            image.as_str().or(image.is_null().then_some(""))
+        }
+        _ => request.as_str(),
+    }
+    .ok_or_else(|| Rejected::bad("expected a Docker user string"))?;
+    const FIXTURE: (u32, u32) = (WORKLOAD_UID, WORKLOAD_GID);
+    if value == "65532:65532" {
+        return Ok(FIXTURE);
+    }
+    if !mapped_ids {
+        return Err(Rejected::bad("guest requires UID and GID 65532"));
+    }
+    if value.is_empty() {
+        return Ok((0, 0));
+    }
+    let numeric = |value: &str| {
+        if !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit()) {
+            value.parse::<u32>().ok().filter(|&id| id < ID_MAP_WIDTH)
+        } else {
+            None
+        }
+    };
+    let (uid, gid) = value
+        .split_once(':')
+        .ok_or_else(|| Rejected::bad("native credentials require a mapped numeric UID:GID"))?;
+    numeric(uid)
+        .zip(numeric(gid))
+        .ok_or_else(|| Rejected::bad("native credentials require a mapped numeric UID:GID"))
+}
+
 impl Image {
     pub(super) fn new(reference: String, metadata: Value) -> anyhow::Result<Self> {
         let (name, pinned) = reference
@@ -126,14 +162,13 @@ impl Image {
         })
     }
 
-    pub(super) fn process(&self, data: &Value) -> Result<Value, Rejected> {
+    pub(super) fn process(&self, data: &Value, mapped_ids: bool) -> Result<Value, Rejected> {
         let config = object(data, "Docker request")?
             .ok_or_else(|| Rejected::bad("expected a Docker request object"))?;
         let host = &data["HostConfig"];
         let host_options = object(host, "Docker HostConfig")?
             .ok_or_else(|| Rejected::bad("expected Docker HostConfig"))?;
         if data["Image"] != self.reference
-            || data["User"] != "65532:65532"
             || host["NetworkMode"] != "none"
             || host["Memory"].as_u64() != Some(NATIVE_LIMITS.memory_bytes)
             || host["NanoCpus"].as_u64()
@@ -141,7 +176,7 @@ impl Image {
             || host["PidsLimit"].as_u64() != Some(u64::from(NATIVE_LIMITS.pids))
         {
             return Err(Rejected::bad(
-                "require the staged image, --network none, fixed UID/GID and 16 MiB/4 PIDs/0.5 CPU",
+                "require the staged image, --network none and 16 MiB/4 PIDs/0.5 CPU",
             ));
         }
         options(
@@ -248,6 +283,7 @@ impl Image {
         let cwd = working_directory
             .as_str()
             .ok_or_else(|| Rejected::bad("invalid working directory"))?;
+        let (uid, gid) = identity(&data["User"], &self.defaults["User"], mapped_ids)?;
         let spec = LaunchSpec {
             image_digest: self.config_digest.clone(),
             argv,
@@ -256,8 +292,8 @@ impl Image {
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect(),
             cwd: cwd.into(),
-            uid: WORKLOAD_UID,
-            gid: WORKLOAD_GID,
+            uid,
+            gid,
             network: "none".into(),
             network_alias: None,
             secondary_network_alias: None,
@@ -269,5 +305,36 @@ impl Image {
             .map_err(|error| Rejected::bad(error.to_string()))?;
         serde_json::to_value(spec)
             .map_err(|_| Rejected::internal("cannot encode native process spec"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_the_requested_pair_before_the_image_default() {
+        assert_eq!(identity(&Value::Null, &json!(""), true).unwrap(), (0, 0));
+        assert_eq!(
+            identity(&json!(""), &json!("12:34"), true).unwrap(),
+            (12, 34)
+        );
+        assert_eq!(
+            identity(&json!("0:1"), &json!("12:34"), true).unwrap(),
+            (0, 1)
+        );
+        assert_eq!(
+            identity(&json!("65532:65532"), &json!(""), false).unwrap(),
+            (65532, 65532)
+        );
+    }
+
+    #[test]
+    fn rejects_unmapped_ambiguous_and_unnegotiated_identities() {
+        for value in ["65536:0", "0:65536", "root", "1", "1:", "+1:2", "1:2:3"] {
+            assert!(identity(&json!(value), &Value::Null, true).is_err());
+        }
+        assert!(identity(&Value::Null, &json!(""), false).is_err());
+        assert!(identity(&json!(123), &json!(""), true).is_err());
     }
 }

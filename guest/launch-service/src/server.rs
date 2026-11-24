@@ -64,12 +64,19 @@ impl Server {
                     "ping",
                     "shutdown",
                     "native_oci_arm64_v1",
+                    crate::spec::MAPPED_IDS_CAPABILITY,
                     "memory",
                     crate::core_admission::PENDING_WATCH_CAPABILITY,
                 ];
             }
             if fresh.is_oci() {
-                return &["ping", "shutdown", "native_oci_arm64_v1", "memory"];
+                return &[
+                    "ping",
+                    "shutdown",
+                    "native_oci_arm64_v1",
+                    crate::spec::MAPPED_IDS_CAPABILITY,
+                    "memory",
+                ];
             }
             if fresh.is_native() {
                 return &[

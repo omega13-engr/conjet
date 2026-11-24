@@ -600,6 +600,9 @@ def native_session(args, root):
             elif args.diagnostics == 'exec':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-exec.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
+            elif args.diagnostics == 'credentials':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-credentials.py'))
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
             elif args.diagnostics == 'guest-bridge':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-bridge.py'))
                 diagnostic['collect'](directory, vm.pid, output)
@@ -753,7 +756,7 @@ def main():
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
-                                                  'concurrency', 'concurrency-loss', 'streaming', 'exec',
+                                                  'concurrency', 'concurrency-loss', 'streaming', 'exec', 'credentials',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
                                                   'volume-disk', 'mounted-volume', 'admission-trace', 'compose',
@@ -878,7 +881,7 @@ def main():
             parser.error('run diagnostics separately from qualification or a custom workload')
         if args.diagnostics == 'trace' and args.docker_owner != 'python':
             parser.error('request Python reference tracing with --docker-owner python')
-        if (args.diagnostics in ('concurrency', 'concurrency-loss', 'streaming', 'exec',
+        if (args.diagnostics in ('concurrency', 'concurrency-loss', 'streaming', 'exec', 'credentials',
                                  'guest-bridge', 'docker-network', 'tcp-relay', 'published-port')
                 and args.docker_owner != 'rust'):
             parser.error('Docker overlap and streaming checks require the Rust owner')

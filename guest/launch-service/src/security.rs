@@ -1,7 +1,5 @@
 use std::io;
 
-use crate::spec::{WORKLOAD_GID, WORKLOAD_UID};
-
 const AUDIT_ARCH_AARCH64: u32 = 0xc000_00b7;
 const RET_KILL_PROCESS: u32 = 0x8000_0000;
 const RET_ERRNO: u32 = 0x0005_0000;
@@ -15,11 +13,15 @@ pub(crate) fn clear_supplementary_groups() -> io::Result<()> {
     checked(unsafe { libc::setgroups(0, std::ptr::null()) })
 }
 
-pub(crate) fn drop_workload_identity(supplementary_primary_gid: bool) -> io::Result<()> {
+pub(crate) fn drop_workload_identity(
+    uid: u32,
+    gid: u32,
+    supplementary_primary_gid: bool,
+) -> io::Result<()> {
     let mut group = 0;
     let count = unsafe { libc::getgroups(1, &mut group) };
     let valid = if supplementary_primary_gid {
-        count == 1 && group == WORKLOAD_GID
+        count == 1 && group == gid
     } else {
         count == 0
     };
@@ -48,8 +50,8 @@ pub(crate) fn drop_workload_identity(supplementary_primary_gid: bool) -> io::Res
         }
         checked(unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) })?;
     }
-    checked(unsafe { libc::setresgid(WORKLOAD_GID, WORKLOAD_GID, WORKLOAD_GID) })?;
-    checked(unsafe { libc::setresuid(WORKLOAD_UID, WORKLOAD_UID, WORKLOAD_UID) })?;
+    checked(unsafe { libc::setresgid(gid, gid, gid) })?;
+    checked(unsafe { libc::setresuid(uid, uid, uid) })?;
 
     let header = CapabilityHeader::current();
     let empty = [0u32; 6]; // Two Linux capability data entries, three masks each.
@@ -57,7 +59,12 @@ pub(crate) fn drop_workload_identity(supplementary_primary_gid: bool) -> io::Res
     if unsafe { libc::syscall(libc::SYS_capset, &header, empty.as_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    checked(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })
+    checked(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })?;
+    // Namespace root must enter exec with the same empty capability state.
+    if uid == 0 {
+        verify_empty_capabilities()?;
+    }
+    Ok(())
 }
 
 #[repr(C)]
