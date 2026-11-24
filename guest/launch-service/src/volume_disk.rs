@@ -102,6 +102,7 @@ pub(crate) mod guest {
 
     const DEVICES: &CStr = c"/run/conjet/volume-devices";
     const ROOT: &CStr = c"/run/conjet/volume-disk";
+    const BUILD_WORKSPACE: &CStr = c"/run/conjet/volume-disk/buildkit";
     const VOLUMES: &str = "/run/conjet/volume-disk/volumes";
     const PENDING: &str = "/run/conjet/volume-disk/volumes/.pending";
     const LIMIT: usize = 8;
@@ -154,6 +155,7 @@ pub(crate) mod guest {
     }
 
     pub(crate) struct Store {
+        workspace: Option<Mount>,
         disk: Mount,
         devices: Mount,
     }
@@ -206,7 +208,8 @@ pub(crate) mod guest {
                 std::thread::sleep(Duration::from_millis(10));
             };
             let build_root = Path::new(crate::build_snapshot::MARKER).try_exists()?;
-            let (target, flags) = if build_root {
+            let combined = build_root && Path::new(crate::oci::DISK_STORE_MARKER).try_exists()?;
+            let (target, flags) = if build_root && !combined {
                 (
                     crate::build_snapshot::guest::ROOT,
                     libc::MS_NOSUID | libc::MS_NODEV,
@@ -215,12 +218,16 @@ pub(crate) mod guest {
                 (ROOT, base_flags | libc::MS_NODEV)
             };
             let disk = Mount::open(source, target, c"ext4", flags)?;
-            if build_root {
+            if build_root && !combined {
                 let info = fs::symlink_metadata(path(target))?;
                 if !info.is_dir() || info.uid() != 0 || info.mode() & 0o022 != 0 {
                     return Err(io::Error::other("invalid native build workspace ownership"));
                 }
-                return Ok(Some(Self { disk, devices }));
+                return Ok(Some(Self {
+                    workspace: None,
+                    disk,
+                    devices,
+                }));
             }
             match DirBuilder::new().mode(0o700).create(VOLUMES) {
                 Ok(()) => {}
@@ -233,10 +240,44 @@ pub(crate) mod guest {
             }
             remove_pending()?;
             names()?;
-            Ok(Some(Self { disk, devices }))
+            let workspace = if combined {
+                match DirBuilder::new().mode(0o700).create(path(BUILD_WORKSPACE)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                let info = fs::symlink_metadata(path(BUILD_WORKSPACE))?;
+                if !info.is_dir() || info.uid() != 0 || info.mode() & 0o777 != 0o700 {
+                    return Err(io::Error::other("invalid native build workspace ownership"));
+                }
+                let target = crate::build_snapshot::guest::ROOT;
+                let workspace = Mount::open(BUILD_WORKSPACE, target, c"", libc::MS_BIND)?;
+                // Only this private directory needs executable snapshots.
+                // Leave the rest of the volume-disk mount noexec.
+                checked(unsafe {
+                    libc::mount(
+                        std::ptr::null(),
+                        target.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_NOSUID | libc::MS_NODEV,
+                        std::ptr::null(),
+                    )
+                })?;
+                Some(workspace)
+            } else {
+                None
+            };
+            Ok(Some(Self {
+                workspace,
+                disk,
+                devices,
+            }))
         }
 
         pub(crate) fn close(mut self) -> io::Result<()> {
+            if let Some(workspace) = &mut self.workspace {
+                workspace.close()?;
+            }
             self.disk.close()?;
             self.devices.close()
         }

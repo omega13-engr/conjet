@@ -97,7 +97,7 @@ pub(super) struct Options {
     #[arg(long, requires = "volume_disk")]
     build_snapshot_disk: bool,
     /// Stage transferred OCI roots on the isolated Core guest's leased filesystem.
-    #[arg(long, requires = "volume_disk", conflicts_with = "build_snapshot_disk")]
+    #[arg(long, requires = "volume_disk")]
     disk_image_store: bool,
     /// Admit an authenticated host filesystem relay for isolated bind mounts.
     #[arg(long, requires = "core_dynamic_memory")]
@@ -123,7 +123,8 @@ struct GuestBootFiles<'a> {
 
 struct GuestDisk {
     volume: [u8; 24],
-    marker: Option<&'static str>,
+    build_workspace: bool,
+    image_store: bool,
 }
 
 struct AdmissionControl<'a> {
@@ -405,13 +406,8 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             bind_filesystem: options.bind_filesystem,
             disk: volume.as_ref().map(|disk| GuestDisk {
                 volume: disk.identity.encode(),
-                marker: if options.build_snapshot_disk {
-                    Some(conjet_launch_service::build_snapshot::MARKER)
-                } else if options.disk_image_store {
-                    Some(conjet_launch_service::oci::DISK_STORE_MARKER)
-                } else {
-                    None
-                },
+                build_workspace: options.build_snapshot_disk,
+                image_store: options.disk_image_store,
             }),
         },
     )?;
@@ -931,7 +927,19 @@ fn build_archive(
                 0,
                 0,
             )?;
-            if let Some(marker) = disk.marker {
+            for (enabled, marker) in [
+                (
+                    disk.build_workspace,
+                    conjet_launch_service::build_snapshot::MARKER,
+                ),
+                (
+                    disk.image_store,
+                    conjet_launch_service::oci::DISK_STORE_MARKER,
+                ),
+            ] {
+                if !enabled {
+                    continue;
+                }
                 append(marker.trim_start_matches('/'), 0o100400, &[], 0, 0, 0, 0)?;
             }
         }

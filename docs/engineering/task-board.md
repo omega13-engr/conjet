@@ -1636,6 +1636,14 @@ Docker adapter while the native build runtime borrows an executable
 snapshot. Validate both isolated stores, preserve ordinary mount
 restrictions and release the lease after both mounts are closed.
 
+Evidence: The optimized isolated boot enabled both disk profiles and
+borrowed the exact snapshot inode. It denied traversal, symlinks, stale
+generation and conflicting ownership, cancelled the first workload
+with complete cleanup, and reopened the inode to verify the saved
+payload. Guest shutdown, disk lease release and offline ext4 checks
+passed. The joint mount is a prerequisite for Docker Buildx provisioning.
+See `SPEED-154/combined-recovery-mounted/` and `SPEED-154/disk-after.log`.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

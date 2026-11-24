@@ -84,7 +84,7 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
     };
     let disk_images = oci && crate::image_store::disk_store_enabled();
     if disk_images {
-        if volume.is_none() || Path::new(crate::build_snapshot::MARKER).try_exists()? {
+        if volume.is_none() {
             return Err("disk image store requires the native volume filesystem".into());
         }
         crate::image_store::reset_generation()?;

@@ -898,7 +898,8 @@ def main():
     if args.native_latency_idle and not (args.matched_output and args.native_latency_trace):
         parser.error('an idle latency window requires matched traced timing')
     if args.native_disk_images and (
-            args.diagnostics not in ('archive', 'oci-import', 'public-images', 'compatibility-preflight')
+            args.diagnostics not in ('archive', 'oci-import', 'public-images', 'build-snapshot',
+                                     'build-bundle', 'compatibility-preflight')
             or args.legacy_baseline or not args.native_memd or args.docker_owner != 'rust'):
         parser.error('the disk image store requires a private native Core image diagnostic')
     if args.diagnostics in VOLUME_DIAGNOSTICS or args.native_disk_images:
