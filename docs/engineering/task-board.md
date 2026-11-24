@@ -1644,6 +1644,33 @@ payload. Guest shutdown, disk lease release and offline ext4 checks
 passed. The joint mount is a prerequisite for Docker Buildx provisioning.
 See `SPEED-154/combined-recovery-mounted/` and `SPEED-154/disk-after.log`.
 
+### SPEED-155
+
+Title: Stage the exact pinned BuildKit image on the no-suid disk store
+
+Acceptance: Preserve the pinned manifest and file metadata for the
+BuildKit image. Permit its exact `fusermount3` mode only on the
+no-suid disk path. Retain the existing rejection of arbitrary setuid
+content, identity mismatch and hard-link aliases.
+
+Evidence: The original ARM64 BuildKit image's verified layers contain
+one root-owned setuid entry at `usr/bin/fusermount3`. The optimized
+disk importer staged the unchanged config and layers. Inside the
+ordinary confined workload, `stat` returned mode 4755. The existing
+no-suid mount and no-new-privileges rule still apply. The pinned
+Buildx driver reached its requested cache volume after image pull.
+See `SPEED-156/pinned-cache-and-gateway/` and
+`SPEED-156/frozen-buildx-cache/`.
+
+### SPEED-156
+
+Title: Attach the BuildKit cache at its original named-volume target
+
+Acceptance: Mount an explicitly owned volume at `/var/lib/buildkit`
+in the pinned image. Verify it is writable, survives container
+replacement as required, and is removed through the original
+volume lifecycle. Keep the live worker bootstrap gate separate.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

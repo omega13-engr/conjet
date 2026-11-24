@@ -16,6 +16,8 @@ pub const REDIS_CONFIG: &str =
     "sha256:eab78b9649d5ca8b91192621c91136c9c1465a81338fb686fbc02bac4dd851ae";
 pub const REGISTRY_CONFIG: &str =
     "sha256:33eeff39e0aaabe61ca826fd7502396183462451be0783133e1a8fa944fc7350";
+pub const BUILDKIT_CONFIG: &str =
+    "sha256:8ff6bca64af355cd0434480a0fd583a7c571211750a5eb806b992017148bab55";
 
 pub fn workload_output_limit(image: &str) -> usize {
     if image == REGISTRY_CONFIG {
@@ -147,7 +149,10 @@ fn is_data_target(target: &str) -> bool {
 }
 
 pub fn valid_volume_target(target: &str) -> bool {
-    matches!(target, VOLUME_TARGET | "/dataset" | "/var/lib/registry")
+    matches!(
+        target,
+        VOLUME_TARGET | "/dataset" | "/var/lib/registry"
+    )
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]

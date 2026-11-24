@@ -182,6 +182,7 @@ fn archive(
     length: u64,
     layer: usize,
     limit: usize,
+    disk_image: &str,
 ) -> anyhow::Result<BTreeMap<String, Entry>> {
     let mut entries = BTreeMap::new();
     let mut tar = tar::Archive::new(source);
@@ -227,10 +228,6 @@ fn archive(
         let mode = header.mode()?;
         let uid = u32::try_from(header.uid()?)?;
         let gid = u32::try_from(header.gid()?)?;
-        ensure!(
-            mode & !oci::mode_mask(kind) == 0 && uid <= 65535 && gid <= 65535,
-            "unsafe OCI mode or ownership"
-        );
         if kind == Kind::Directory && matches!(raw.as_ref(), b"." | b"./") {
             ensure!(
                 !root_seen
@@ -245,6 +242,12 @@ fn archive(
             continue;
         }
         let path = text_path(&raw, kind == Kind::Directory)?;
+        ensure!(
+            oci::allowed_mode(kind, &path, mode, uid, gid, disk_image)
+                && uid <= 65535
+                && gid <= 65535,
+            "unsafe OCI mode or ownership"
+        );
         let link = extended
             .link
             .map(std::borrow::Cow::Owned)
@@ -559,6 +562,7 @@ fn verify(layout: &Path, manifest_digest: &str) -> anyhow::Result<(Root, Value)>
             len as u64,
             index,
             oci::MAX_RECORDS,
+            "",
         )?;
         apply(&mut tree, entries, oci::MAX_RECORDS)?;
     }
@@ -654,6 +658,7 @@ fn write_disk_package(
             size,
             index,
             packed::RECORD_LIMIT,
+            &manifest.config.digest,
         )?;
         apply(&mut tree, entries, packed::RECORD_LIMIT)?;
         layers.push(layer);
@@ -770,6 +775,7 @@ mod tests {
             layer.len() as u64,
             0,
             oci::MAX_RECORDS,
+            "",
         )
     }
 

@@ -61,6 +61,23 @@ pub fn mode_mask(kind: Kind) -> u32 {
     }
 }
 
+pub fn allowed_mode(
+    kind: Kind,
+    path: &str,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    disk_image: &str,
+) -> bool {
+    mode & !mode_mask(kind) == 0
+        || (disk_image == crate::spec::BUILDKIT_CONFIG
+            && kind == Kind::File
+            && path == "usr/bin/fusermount3"
+            && mode == 0o4755
+            && uid == 0
+            && gid == 0)
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
@@ -130,10 +147,10 @@ impl Root {
     }
 
     fn validate(self) -> std::io::Result<Self> {
-        self.validate_with_limit(MAX_RECORDS)
+        self.validate_with_limit(MAX_RECORDS, false)
     }
 
-    fn validate_with_limit(self, max_records: usize) -> std::io::Result<Self> {
+    fn validate_with_limit(self, max_records: usize, disk: bool) -> std::io::Result<Self> {
         let digest = self
             .config_digest
             .strip_prefix("sha256:")
@@ -144,11 +161,22 @@ impl Root {
             "invalid OCI rootfs entry count"
         );
         let mut types = BTreeMap::new();
+        let disk_image = if disk {
+            self.config_digest.as_str()
+        } else {
+            ""
+        };
         for record in &self.records {
             ensure!(root_path(&record.path), "invalid OCI rootfs path");
             ensure!(
-                record.mode & !mode_mask(record.kind) == 0
-                    && record.uid < ID_MAP_WIDTH
+                allowed_mode(
+                    record.kind,
+                    &record.path,
+                    record.mode,
+                    record.uid,
+                    record.gid,
+                    disk_image
+                ) && record.uid < ID_MAP_WIDTH
                     && record.gid < ID_MAP_WIDTH,
                 "invalid OCI rootfs mode or ownership"
             );
@@ -183,6 +211,11 @@ impl Root {
                     types.get(record.target.as_str()) == Some(&Kind::File),
                     "OCI hard link must refer to a regular file"
                 );
+                ensure!(
+                    disk_image != crate::spec::BUILDKIT_CONFIG
+                        || record.target != "usr/bin/fusermount3",
+                    "pinned BuildKit helper cannot be aliased by a hard link"
+                );
             }
         }
         Ok(self)
@@ -216,5 +249,16 @@ mod tests {
         assert!(!validate_mode(0o2755, Kind::File));
         assert!(!validate_mode(0o4755, Kind::Directory));
         assert!(!validate_mode(0o4755, Kind::File));
+    }
+
+    #[test]
+    fn buildkit_disk_mode_exception_keeps_exact_file_and_identity() {
+        let digest = crate::spec::BUILDKIT_CONFIG;
+        let path = "usr/bin/fusermount3";
+        assert!(allowed_mode(Kind::File, path, 0o4755, 0, 0, digest));
+        assert!(!allowed_mode(Kind::File, path, 0o4755, 0, 0, ""));
+        assert!(!allowed_mode(Kind::File, path, 0o4755, 1000, 0, digest));
+        assert!(!allowed_mode(Kind::File, "bin/copy", 0o4755, 0, 0, digest));
+        assert!(!allowed_mode(Kind::File, path, 0o6755, 0, 0, digest));
     }
 }

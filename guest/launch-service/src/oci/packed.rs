@@ -110,7 +110,7 @@ impl Index {
             config_digest: format!("sha256:{}", hex(&digest)),
             records,
         }
-        .validate_with_limit(RECORD_LIMIT)?;
+        .validate_with_limit(RECORD_LIMIT, true)?;
         Ok(Self { root, extents })
     }
 
