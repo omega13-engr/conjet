@@ -57,6 +57,8 @@ pub struct LaunchSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary_network_alias: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_alias_project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<VolumeMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<BindMount>,
@@ -195,6 +197,34 @@ impl BridgeScope {
 
 pub fn valid_network_alias(alias: &str) -> bool {
     crate::bridge_dns::valid_name(alias)
+}
+
+pub fn valid_service_alias(project: &str, primary: &str, service: &str) -> bool {
+    let Some((prefix, number)) = primary.rsplit_once('-') else {
+        return false;
+    };
+    !project.contains('.')
+        && !service.contains('.')
+        && valid_network_alias(project)
+        && valid_network_alias(service)
+        && prefix == format!("{project}-{service}")
+        && number
+            .parse::<u32>()
+            .is_ok_and(|index| index != 0 && index.to_string() == number)
+}
+
+pub fn network_aliases_conflict(
+    left: &[String],
+    left_project: Option<&str>,
+    right: &[String],
+    right_project: Option<&str>,
+) -> bool {
+    left.iter().enumerate().any(|(i, name)| {
+        right.iter().enumerate().any(|(j, candidate)| {
+            name.eq_ignore_ascii_case(candidate)
+                && !(i == 1 && j == 1 && left_project.is_some() && left_project == right_project)
+        })
+    })
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -439,6 +469,16 @@ impl LaunchSpec {
                     .as_ref()
                     .is_none_or(|first| first.eq_ignore_ascii_case(second))
             })
+            || spec.network_alias_project.as_ref().is_some_and(|project| {
+                spec.bridge_scope() == Some(BridgeScope::BuiltIn)
+                    || !spec
+                        .network_alias
+                        .as_deref()
+                        .zip(spec.secondary_network_alias.as_deref())
+                        .is_some_and(|(primary, service)| {
+                            valid_service_alias(project, primary, service)
+                        })
+            })
         {
             return Err(SpecError::Network);
         }
@@ -498,6 +538,7 @@ mod tests {
                 network: "none".into(),
                 network_alias: None,
                 secondary_network_alias: None,
+                network_alias_project: None,
                 volume: None,
                 bind: None,
                 build_snapshot: None,
@@ -655,5 +696,37 @@ mod tests {
         let mut input = serde_json::to_value(valid()).unwrap();
         input["spec"]["mounts"] = serde_json::json!([]);
         assert!(serde_json::from_value::<LaunchRequest>(input).is_err());
+    }
+
+    #[test]
+    fn only_matching_secondary_service_aliases_can_overlap() {
+        let first = ["project-app-1", "app"].map(String::from);
+        let second = ["project-app-2", "app"].map(String::from);
+        assert!(valid_service_alias("project", &first[0], &first[1]));
+        assert!(!valid_service_alias("project", "project-app-01", "app"));
+        assert!(!network_aliases_conflict(
+            &first,
+            Some("project"),
+            &second,
+            Some("project")
+        ));
+        assert!(network_aliases_conflict(
+            &first,
+            None,
+            &second,
+            Some("project")
+        ));
+        assert!(network_aliases_conflict(
+            &first,
+            Some("project"),
+            &second,
+            Some("other")
+        ));
+        assert!(network_aliases_conflict(
+            &first,
+            Some("project"),
+            &first,
+            Some("project")
+        ));
     }
 }

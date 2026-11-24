@@ -176,8 +176,14 @@ def qualified_compose(matrix, manifest, report, fixture, connection, docker, env
     class ComposeWitness(driver):
         def call(self, scenario, args, **options):
             result = super().call(scenario, args, **options)
+            if scenario == 'compose.scale' and result is not None:
+                row = self.rows[-1]
+                project = args[args.index('--project-name') + 1]
+                row['dns_witness'] = self.dns_witness(project)
+                return result
             if scenario != 'compose.up':
                 return result
+            row = self.rows[-1]
             project = args[args.index('--project-name') + 1]
             redis = f'{project}-redis-1'
             if result is None:
@@ -185,13 +191,11 @@ def qualified_compose(matrix, manifest, report, fixture, connection, docker, env
                     super().call('compose-failed-service-logs',
                                  ['logs', f'{project}-{service}-1'],
                                  phase='verification', timeout=5)
-            running = super().call('compose-redis-running',
-                                   ['inspect', '--format', '{{.State.Running}}', redis],
-                                   phase='verification', timeout=5)
+            probe = self.probe
+            running = probe(row, 'compose-redis-running',
+                            ['inspect', '--format', '{{.State.Running}}', redis])
             if running == b'true\n':
-                status = super().call('compose-redis-process',
-                                      ['exec', redis, 'cat', '/proc/1/status'],
-                                      phase='verification', timeout=5)
+                status = probe(row, 'compose-redis-process', ['exec', redis, 'cat', '/proc/1/status'])
                 if status is not None:
                     expected = {'Uid': ['999'] * 4, 'Gid': ['1000'] * 4, 'Groups': [],
                                 'CapEff': ['0000000000000000'], 'NoNewPrivs': ['1']}
@@ -201,8 +205,35 @@ def qualified_compose(matrix, manifest, report, fixture, connection, docker, env
                         if key in expected:
                             fields[key] = value.split()
                     if fields != expected:
-                        self.rows[-1]['error'] = 'Redis process identity differs from the pinned image'
+                        row['witness'][-1]['error'] = 'Redis process identity differs from the pinned image'
             return result
+
+        def probe(self, row, label, args):
+            result = super().call(label, args, phase='verification', timeout=5)
+            row.setdefault('witness', []).append(self.rows.pop())
+            return result
+
+        def dns_witness(self, project):
+            row = self.rows[-1]
+            instances = [f'{project}-app-1', f'{project}-app-2']
+            owned = self.probe(row, 'compose-replica-ips', ['inspect', *instances])
+            if owned is None:
+                return False
+            addresses = [
+                entry['NetworkSettings']['Networks'][f'{project}_default']['IPAddress']
+                for entry in json.loads(owned)
+            ]
+            code = ("const dns=require('node:dns').promises;"
+                    "Promise.all(process.argv.slice(1).map(name=>dns.resolve4(name)))"
+                    ".then(answers=>console.log(JSON.stringify(answers)))"
+                    ".catch(error=>{console.error(error.message);process.exitCode=1})")
+            result = self.probe(row, 'compose-live-dns',
+                                ['exec', instances[0], 'node', '-e', code, 'app', *instances])
+            if result is None:
+                return False
+            service, *individual = json.loads(result)
+            return (len(set(addresses)) == 2 and set(service) == set(addresses)
+                    and individual == [[ip] for ip in addresses])
 
     run.__globals__['Docker'] = ComposeWitness
     try:

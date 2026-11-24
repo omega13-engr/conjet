@@ -1,5 +1,5 @@
 use conjet_launch_service::handshake::hex;
-use conjet_launch_service::spec::BridgeScope;
+use conjet_launch_service::spec::{valid_service_alias, BridgeScope};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -18,6 +18,7 @@ pub(super) struct Network {
 pub(super) struct Attachment {
     pub network: Network,
     pub aliases: Vec<String>,
+    pub alias_project: Option<String>,
 }
 
 impl Network {
@@ -137,6 +138,7 @@ impl Attachment {
         Ok(Self {
             network: network.clone(),
             aliases,
+            alias_project: None,
         })
     }
 
@@ -190,7 +192,25 @@ pub(super) fn configured(
             endpoint = data;
         }
     }
-    Ok(Some(Attachment::new(network, endpoint, name)?))
+    let mut attachment = Attachment::new(network, endpoint, name)?;
+    let labels = &data["Labels"];
+    attachment.alias_project = match (
+        attachment.aliases.as_slice(),
+        labels["com.docker.compose.project"].as_str(),
+        labels["com.docker.compose.container-number"].as_str(),
+    ) {
+        ([primary, alias], Some(project), Some(number))
+            if network.scope != BridgeScope::BuiltIn
+                && network.labels["com.docker.compose.project"] == project
+                && labels["com.docker.compose.service"] == alias.as_str()
+                && primary == &format!("{project}-{alias}-{number}")
+                && valid_service_alias(project, primary, alias) =>
+        {
+            Some(project.into())
+        }
+        _ => None,
+    };
+    Ok(Some(attachment))
 }
 
 pub(super) fn change(

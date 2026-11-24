@@ -192,10 +192,22 @@ pub(super) fn execute(
     tty: bool,
     budget_ms: u64,
 ) -> std::result::Result<(i64, Result), String> {
-    let mut control = owner
-        .exec_peer
-        .try_lock()
-        .map_err(|_| "native exec slot is occupied")?;
+    let deadline = Instant::now() + Duration::from_millis(budget_ms);
+    let mut control = loop {
+        match owner.exec_peer.try_lock() {
+            Ok(control) => break control,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err("native exec slot remained occupied until its deadline".into());
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(2)));
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("native exec slot is unresolved".into());
+            }
+        }
+    };
     if control.is_none() {
         let native = owner.native.lock().unwrap();
         let candidate =
@@ -211,7 +223,6 @@ pub(super) fn execute(
     if tty {
         request["tty"] = json!(true);
     }
-    let deadline = Instant::now() + Duration::from_millis(budget_ms);
     let reply = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {

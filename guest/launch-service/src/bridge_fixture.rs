@@ -449,6 +449,7 @@ struct BridgePort {
     target: File,
     address: Ipv4Addr,
     aliases: Vec<String>,
+    alias_project: Option<String>,
 }
 
 struct SharedLinks {
@@ -479,7 +480,13 @@ impl SharedLinks {
         Ok(links)
     }
 
-    fn attach(&mut self, slot: usize, target: File, aliases: &[String]) -> io::Result<Ipv4Addr> {
+    fn attach(
+        &mut self,
+        slot: usize,
+        target: File,
+        aliases: &[String],
+        project: Option<&str>,
+    ) -> io::Result<Ipv4Addr> {
         if !(1..=2).contains(&aliases.len())
             || aliases.iter().enumerate().any(|(index, alias)| {
                 !bridge_dns::valid_name(alias)
@@ -493,13 +500,14 @@ impl SharedLinks {
                 "invalid bridge alias",
             ));
         }
-        if self
-            .ports
-            .iter()
-            .flatten()
-            .flat_map(|port| &port.aliases)
-            .any(|name| aliases.iter().any(|alias| name.eq_ignore_ascii_case(alias)))
-        {
+        if self.ports.iter().flatten().any(|port| {
+            crate::spec::network_aliases_conflict(
+                &port.aliases,
+                port.alias_project.as_deref(),
+                aliases,
+                project,
+            )
+        }) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "bridge alias is occupied",
@@ -524,6 +532,7 @@ impl SharedLinks {
             target,
             address,
             aliases: Vec::new(),
+            alias_project: project.map(str::to_owned),
         });
         let port = owner.as_ref().expect("owned bridge port");
         let result = (|| {
@@ -570,12 +579,16 @@ impl SharedLinks {
             return Ok(());
         }
         let reply = bridge_dns::answer(&packet[..count], |name| {
-            self.ports.iter().flatten().find_map(|port| {
-                port.aliases
-                    .iter()
-                    .any(|alias| alias == name)
-                    .then_some(port.address)
-            })
+            self.ports
+                .iter()
+                .flatten()
+                .filter_map(|port| {
+                    port.aliases
+                        .iter()
+                        .any(|alias| alias == name)
+                        .then_some(port.address)
+                })
+                .collect()
         });
         if let Some(reply) = reply
             && socket.send_to(&reply, source)? != reply.len()
@@ -698,6 +711,7 @@ impl NetworkOwner {
         owner: [u8; 16],
         target: File,
         aliases: &[String],
+        project: Option<&str>,
     ) -> io::Result<Ipv4Addr> {
         if self.workloads.contains(&Some(owner)) {
             return Err(io::Error::other(
@@ -709,7 +723,7 @@ impl NetworkOwner {
             .iter()
             .position(Option::is_none)
             .ok_or_else(|| io::Error::other("private bridge capacity exhausted"))?;
-        let address = self.in_bridge(|links| links.attach(slot, target, aliases))?;
+        let address = self.in_bridge(|links| links.attach(slot, target, aliases, project))?;
         self.workloads[slot] = Some(owner);
         Ok(address)
     }
@@ -943,7 +957,7 @@ pub fn check_shared() -> io::Result<()> {
     enter_namespace(&bridge.namespace)?;
     configured?;
     if bridge
-        .attach(1, target(&failed)?, &["client".into()])
+        .attach(1, target(&failed)?, &["client".into()], None)
         .is_ok()
         || bridge.ports[1].is_some()
     {
@@ -951,13 +965,18 @@ pub fn check_shared() -> io::Result<()> {
             "partial peer allocation did not roll back",
         ));
     }
-    let server_ip = bridge.attach(0, target(&server)?, &["service".into(), "instance".into()])?;
-    let client_ip = bridge.attach(1, target(&client)?, &["client".into()])?;
+    let server_ip = bridge.attach(
+        0,
+        target(&server)?,
+        &["service".into(), "instance".into()],
+        None,
+    )?;
+    let client_ip = bridge.attach(1, target(&client)?, &["client".into()], None)?;
     if bridge
-        .attach(1, target(&failed)?, &["retry".into()])
+        .attach(1, target(&failed)?, &["retry".into()], None)
         .is_ok()
         || bridge
-            .attach(2, target(&failed)?, &["Instance".into()])
+            .attach(2, target(&failed)?, &["Instance".into()], None)
             .is_ok()
         || server_ip == client_ip
     {
@@ -981,7 +1000,7 @@ pub fn check_shared() -> io::Result<()> {
     // A replacement inherits the free address while the server and its
     // listening socket remain live.
     let mut replacement = FixtureProcess::spawn("--check-shared-bridge-peer")?;
-    if bridge.attach(1, target(&replacement)?, &["replacement".into()])? != client_ip {
+    if bridge.attach(1, target(&replacement)?, &["replacement".into()], None)? != client_ip {
         return Err(io::Error::other("bridge address was not reused"));
     }
     replacement.control.write_all(&[4])?;

@@ -1532,6 +1532,13 @@ service name and a single response for each unique instance name.
 Reject unrelated duplicate aliases and remove answers when backing
 ports detach.
 
+Evidence: Six original Compose projects resolved the service alias to
+both live app addresses and each instance alias to one matching
+address. Both replicas completed their next persisted transactions.
+All six projects tore down with empty inventories. Redis restart
+readiness and the service exec resource probe remain separately open.
+See `SPEED-147/compose-scale-dns/` on ExternalSSD.
+
 ### SPEED-148
 
 Title: Report actual cgroup counters for the frozen service stats check
@@ -1549,6 +1556,10 @@ Acceptance: Admit an owned replacement for the exact existing service
 generation. Prevent alias reuse while the old container can serve,
 then support the original stop, remove, rename and start sequence.
 
+Evidence: All six original Compose projects passed forced app recreation
+and received transaction 3 after the generation change. See
+`SPEED-149/compose-recreate/`. The later scale run repeated the result.
+
 ### SPEED-150
 
 Title: Preserve stdin for native Docker exec without a terminal
@@ -1557,6 +1568,15 @@ Acceptance: Round-trip bounded stdin and EOF through the Docker exec
 stream without modifying the caller or treating an attached stream as
 empty. Qualify the original Compose cgroup observer and retain the
 input and output integrity checks for the Buildx worker gateway.
+
+### SPEED-151
+
+Title: Preserve bridge neighbor reachability across service restart
+
+Acceptance: Verify a live app can continue using its resolved Redis
+endpoint after the earlier network namespace and links are removed.
+Preserve both readiness and the next persisted sequence numbers within
+the original fixture windows.
 
 ### SPEED-091
 

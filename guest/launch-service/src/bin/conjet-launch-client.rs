@@ -54,6 +54,7 @@ fn launch(
             network,
             network_alias: None,
             secondary_network_alias: None,
+            network_alias_project: None,
             volume: None,
             bind: None,
             build_snapshot: None,

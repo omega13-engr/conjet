@@ -351,6 +351,7 @@ struct Record {
     network_cleanup: &'static str,
     network_scope: Option<BridgeScope>,
     network_aliases: Vec<String>,
+    network_alias_project: Option<String>,
     network_address: Option<std::net::Ipv4Addr>,
     trace: Option<Trace>,
     slot: Option<Slot>,
@@ -1143,16 +1144,19 @@ impl FreshFixture {
         if ledger.closing {
             return Err(("busy", "fresh fixture is draining"));
         }
-        if spec.aliases().any(|alias| {
-            !self.oci
+        let network_aliases: Vec<_> = spec.aliases().cloned().collect();
+        if !network_aliases.is_empty()
+            && (!self.oci
                 || ledger.active().any(|record| {
                     record.network_scope == scope
-                        && record
-                            .network_aliases
-                            .iter()
-                            .any(|active| active.eq_ignore_ascii_case(alias))
-                })
-        }) {
+                        && crate::spec::network_aliases_conflict(
+                            &record.network_aliases,
+                            record.network_alias_project.as_deref(),
+                            &network_aliases,
+                            spec.network_alias_project.as_deref(),
+                        )
+                }))
+        {
             return Err(("unsupported_option", "private network alias is unavailable"));
         }
         if prepared
@@ -1221,7 +1225,8 @@ impl FreshFixture {
             helper_failed: false,
             network_cleanup: if bridge { "pending" } else { "not_applicable" },
             network_scope: scope,
-            network_aliases: spec.aliases().cloned().collect(),
+            network_aliases,
+            network_alias_project: spec.network_alias_project.clone(),
             network_address: None,
             trace: ((benchmark && self.trace_benchmark) || self.trace_core_latency).then(|| {
                 Trace {
@@ -1542,12 +1547,13 @@ impl FreshFixture {
                         let mut response =
                             UnixStream::from(descriptors.pop().expect("bridge response"));
                         let target = fs::File::from(descriptors.pop().expect("bridge target"));
-                        let (scope, aliases) = {
+                        let (scope, aliases, project) = {
                             let ledger = self.ledger.lock().expect("fresh ledger");
                             let record = ledger.record(&workload).expect("owned workload");
                             (
                                 record.network_scope.expect("leased bridge scope"),
                                 record.network_aliases.clone(),
+                                record.network_alias_project.clone(),
                             )
                         };
                         let mut networks = self.private_networks.lock().expect("private bridges");
@@ -1555,10 +1561,12 @@ impl FreshFixture {
                         if private.is_none() {
                             *private = Some(crate::bridge_fixture::NetworkOwner::new(scope)?);
                         }
-                        let address = private
-                            .as_mut()
-                            .expect("private bridge")
-                            .attach(id, target, &aliases)?;
+                        let address = private.as_mut().expect("private bridge").attach(
+                            id,
+                            target,
+                            &aliases,
+                            project.as_deref(),
+                        )?;
                         self.update(&workload, |record| {
                             record.network_address = Some(address);
                             record.revision += 1;
@@ -1776,10 +1784,11 @@ impl FreshFixture {
             let address = network
                 .as_mut()
                 .expect("private bridge")
-                .attach(id, target, std::slice::from_ref(&alias))
+                .attach(id, target, std::slice::from_ref(&alias), None)
                 .map_err(|_| ("network_failed", "private bridge peer attachment failed"))?;
             record.network_address = Some(address);
             record.network_aliases = vec![alias];
+            record.network_alias_project = None;
         } else {
             if record.network_address.is_none() {
                 return Err(("not_found", "workload has no bridge port"));
@@ -1791,6 +1800,7 @@ impl FreshFixture {
                 .map_err(|_| ("cleanup_failed", "cannot verify peer removal"))?;
             record.network_address = None;
             record.network_aliases.clear();
+            record.network_alias_project = None;
         }
         record.revision += 1;
         let response = json!({"network_address":record.network_address});

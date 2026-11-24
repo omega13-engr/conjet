@@ -22,7 +22,7 @@ pub(super) fn valid_name(name: &str) -> bool {
 #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 pub(super) fn answer(
     message: &[u8],
-    lookup: impl FnOnce(&str) -> Option<Ipv4Addr>,
+    lookup: impl FnOnce(&str) -> Vec<Ipv4Addr>,
 ) -> Option<Vec<u8>> {
     let [_, _, flags, resolver_flags, 0, 1, 0, 0, 0, 0, 0, 0, ..] = message else {
         return None;
@@ -60,19 +60,20 @@ pub(super) fn answer(
     let &[0, kind, 0, 1] = message.get(cursor..)? else {
         return None;
     };
-    let address = lookup(&name);
-    let endpoint = match kind {
-        1 => address,
-        28 => None, // A known service has no IPv6 address.
-        _ => return None,
-    };
+    if !matches!(kind, 1 | 28) {
+        return None;
+    }
+    let addresses = lookup(&name);
     let mut response = message.to_vec();
     response[2] = 0x84 | *flags;
-    response[3] = if address.is_some() { 0 } else { 3 };
-    if let Some(ip) = endpoint {
-        response[7] = 1;
-        response.extend_from_slice(b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x00\x00\x04");
-        response.extend_from_slice(&ip.octets());
+    response[3] = if addresses.is_empty() { 3 } else { 0 };
+    // A known service has no IPv6 addresses. The bridge has at most 8 peers.
+    if kind == 1 {
+        for ip in addresses.into_iter().take(8) {
+            response[7] += 1;
+            response.extend_from_slice(b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x00\x00\x04");
+            response.extend_from_slice(&ip.octets());
+        }
     }
     Some(response)
 }
@@ -89,18 +90,31 @@ mod tests {
     fn authoritative_case_insensitive_a_answer() {
         let mut query = QUERY.to_vec();
         query[3] = 0x20;
-        let reply = answer(&query, |name| (name == "app.test").then_some(IP)).unwrap();
+        let reply = answer(&query, |name| {
+            (name == "app.test").then_some(IP).into_iter().collect()
+        })
+        .unwrap();
         assert_eq!(&reply[..8], &[0x12, 0x34, 0x85, 0, 0, 1, 0, 1]);
         assert_eq!(&reply[reply.len() - 4..], &IP.octets());
+    }
+
+    #[test]
+    fn shared_service_returns_each_ipv4_answer() {
+        let second = Ipv4Addr::new(198, 18, 0, 7);
+        let reply = answer(QUERY, |_| vec![IP, second]).unwrap();
+        assert_eq!(reply[7], 2);
+        assert_eq!(&reply[QUERY.len() + 12..QUERY.len() + 16], &IP.octets());
+        assert_eq!(&reply[reply.len() - 4..], &second.octets());
+        assert!(reply.len() <= MAX_MESSAGE);
     }
 
     #[test]
     fn missing_name_and_known_service_without_ipv6_have_distinct_responses() {
         let mut aaaa = QUERY.to_vec();
         aaaa[QUERY.len() - 3] = 28;
-        let reply = answer(&aaaa, |_| Some(IP)).unwrap();
+        let reply = answer(&aaaa, |_| vec![IP]).unwrap();
         assert_eq!(&reply[2..8], &[0x85, 0, 0, 1, 0, 0]);
-        let reply = answer(QUERY, |_| None).unwrap();
+        let reply = answer(QUERY, |_| Vec::new()).unwrap();
         assert_eq!(&reply[2..8], &[0x85, 3, 0, 1, 0, 0]);
     }
 

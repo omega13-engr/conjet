@@ -819,6 +819,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
         ("POST", "wait") => &["condition"],
         ("POST", "stop" | "restart") => &["t", "signal"],
         ("POST", "kill") => &["signal"],
+        ("POST", "rename") => &["name"],
         ("DELETE", "") => &["force", "v", "link"],
         _ => &[],
     };
@@ -871,6 +872,14 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             let mut reply = Reply::empty(204);
             reply.attributed = true;
             reply
+        }
+        ("POST", "rename") => {
+            let name = query
+                .get("name")
+                .filter(|name| super::request::name(name))
+                .ok_or_else(|| Rejected::bad("invalid Docker container name"))?;
+            owner.rename(&item, name)?;
+            Reply::empty(204)
         }
         ("POST", "stop" | "restart") => {
             if query
@@ -978,7 +987,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             let mut reply = Reply::json(
                 200,
                 json!({
-                    "Id":container.id,"Name":format!("/{}",container.name),"Image":container.spec["image_digest"],
+                    "Id":container.id,"Name":format!("/{}",container.name().as_str()),"Image":container.spec["image_digest"],
                     "Driver":BACKEND,"Platform":"linux","Path":specs[0],"Args":specs[1..],
                     "Mounts":container.mounts(),
                     "RestartCount":state.generation,

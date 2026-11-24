@@ -632,7 +632,7 @@ impl Rejected {
 
 struct Container {
     id: String,
-    name: String,
+    name: Mutex<String>,
     config: Value,
     spec: Value,
     volume: Option<conjet_launch_service::spec::VolumeMount>,
@@ -644,6 +644,10 @@ struct Container {
 }
 
 impl Container {
+    fn name(&self) -> MutexGuard<'_, String> {
+        self.name.lock().unwrap()
+    }
+
     fn mounts(&self) -> Vec<Value> {
         self.volume
             .iter()
@@ -666,6 +670,7 @@ struct Lifecycle {
     network: Option<network::Attachment>,
     network_address: Option<String>,
     health: Option<health::State>,
+    replacement_name: Option<String>,
 }
 
 impl Lifecycle {
@@ -940,21 +945,62 @@ impl Owner {
     fn check_network_aliases(
         ledger: &Ledger,
         attachment: &network::Attachment,
+        replacing: Option<&str>,
     ) -> Result<(), Rejected> {
         if ledger.active.iter().any(|item| {
+            if replacing == Some(item.container.id.as_str()) {
+                return false;
+            }
             item.state().network.as_ref().is_some_and(|entry| {
                 entry.network.id == attachment.network.id
-                    && entry.aliases.iter().any(|old| {
-                        attachment
-                            .aliases
-                            .iter()
-                            .any(|alias| old.eq_ignore_ascii_case(alias))
-                    })
+                    && conjet_launch_service::spec::network_aliases_conflict(
+                        &entry.aliases,
+                        entry.alias_project.as_deref(),
+                        &attachment.aliases,
+                        attachment.alias_project.as_deref(),
+                    )
             })
         }) {
             return Err(Rejected(409, "private DNS alias is already owned".into()));
         }
         Ok(())
+    }
+
+    fn compose_replacement(
+        ledger: &Ledger,
+        name: &str,
+        config: &Value,
+        attachment: &network::Attachment,
+    ) -> Option<(String, String)> {
+        let (previous, final_name) = name.split_once('_')?;
+        let project = config["Labels"]["com.docker.compose.project"].as_str()?;
+        let service = config["Labels"]["com.docker.compose.service"].as_str()?;
+        let number = config["Labels"]["com.docker.compose.container-number"].as_str()?;
+        if previous.len() != 12
+            || attachment.network.labels["com.docker.compose.project"] != project
+            || final_name != format!("{project}-{service}-{number}")
+        {
+            return None;
+        }
+        ledger.active.iter().find_map(|item| {
+            let old = &item.container;
+            let labels = &old.config["Labels"];
+            if &old.id[..12] != previous
+                || old.name().as_str() != final_name
+                || labels["com.docker.compose.project"] != project
+                || labels["com.docker.compose.service"] != service
+                || labels["com.docker.compose.container-number"] != number
+            {
+                return None;
+            }
+            item.state()
+                .network
+                .as_ref()
+                .filter(|entry| {
+                    entry.network.id == attachment.network.id && entry.aliases == attachment.aliases
+                })
+                .map(|_| (old.id.clone(), final_name.to_owned()))
+        })
     }
 
     fn create_network(&self, config: Value) -> Result<Value, Rejected> {
@@ -987,7 +1033,8 @@ impl Owner {
             let state = item.state();
             let container = &item.container;
             let labels = &container.config["Labels"];
-            if (!all && state.status() != "running") || !filters.matches(&container.name, labels) {
+            let name = container.name();
+            if (!all && state.status() != "running") || !filters.matches(&name, labels) {
                 return None;
             }
             let command = container.spec["argv"].as_array().expect("validated native argv")
@@ -998,7 +1045,7 @@ impl Owner {
             let ports = item.published.lock().unwrap().as_ref()
                 .filter(|_| state.network_address.is_some())
                 .map(port::PublishedPort::summary).into_iter().collect::<Vec<_>>();
-            Some(json!({"Id":container.id,"Names":[format!("/{}",container.name)],
+            Some(json!({"Id":container.id,"Names":[format!("/{name}")],
                         "Image":container.config["Image"],"ImageID":container.spec["image_digest"],
                         "Command":command,"Created":container.created,"Labels":labels,
                         "State":state.status(),"Status":state.status(),
@@ -1033,7 +1080,7 @@ impl Owner {
                     .is_some_and(|entry| entry.network.id == network.id)
                 {
                     endpoints.insert(item.container.id.clone(),
-                        json!({"Name":item.container.name,"IPv4Address":format!("{ip}/28"),"IPv6Address":""}));
+                        json!({"Name":item.container.name().as_str(),"IPv4Address":format!("{ip}/28"),"IPv6Address":""}));
                 }
             }
         }
@@ -1095,10 +1142,10 @@ impl Owner {
             .find_network(&ledger, reference)
             .ok_or_else(|| Rejected(404, "private bridge was not found".into()))?;
         let attachment = endpoint
-            .map(|endpoint| network::Attachment::new(network, endpoint, &item.container.name))
+            .map(|endpoint| network::Attachment::new(network, endpoint, &item.container.name()))
             .transpose()?;
         if let Some(entry) = &attachment {
-            Self::check_network_aliases(&ledger, entry)?;
+            Self::check_network_aliases(&ledger, entry, None)?;
         }
         let mut state = item.state();
         if state.removed || state.error.is_some() {
@@ -1391,7 +1438,7 @@ impl Owner {
     }
 
     fn event(&self, ledger: &mut Ledger, action: &str, item: &Item, terminal: Option<&Terminal>) {
-        let mut attributes = json!({"name":item.container.name,"image":item.container.config["Image"],"conjet.backend":BACKEND});
+        let mut attributes = json!({"name":item.container.name().as_str(),"image":item.container.config["Image"],"conjet.backend":BACKEND});
         if let Some(labels) = item.container.config["Labels"].as_object() {
             let fields = attributes.as_object_mut().expect("event attributes");
             for (key, value) in labels {
@@ -1458,7 +1505,11 @@ impl Owner {
             ));
         }
         if let Some(name) = name {
-            if ledger.active.iter().any(|item| item.container.name == name) {
+            if ledger
+                .active
+                .iter()
+                .any(|item| item.container.name().as_str() == name)
+            {
                 return Err(Rejected(
                     409,
                     "native container name is already owned".into(),
@@ -1495,8 +1546,15 @@ impl Owner {
             ledger.network.as_ref(),
             &name,
         )?;
+        let replacement = network
+            .as_ref()
+            .and_then(|entry| Self::compose_replacement(&ledger, &name, &config, entry));
         if let Some(attachment) = &network {
-            Self::check_network_aliases(&ledger, attachment)?;
+            Self::check_network_aliases(
+                &ledger,
+                attachment,
+                replacement.as_ref().map(|pair| pair.0.as_str()),
+            )?;
         }
         let publication = port::RequestedPort::parse(&config)?;
         if publication.is_some() && network.is_none() {
@@ -1565,7 +1623,7 @@ impl Owner {
         let item = Arc::new(Item {
             container: Container {
                 id,
-                name,
+                name: Mutex::new(name),
                 config,
                 spec,
                 volume,
@@ -1580,6 +1638,7 @@ impl Owner {
             },
             state: Mutex::new(Lifecycle {
                 network,
+                replacement_name: replacement.map(|(_, final_name)| final_name),
                 ..Lifecycle::default()
             }),
             control: Mutex::new(()),
@@ -1616,7 +1675,7 @@ impl Owner {
             .chain(&ledger.history)
             .find(|item| {
                 let container = &item.container;
-                id == container.id || id == &container.id[..12] || id == container.name
+                id == container.id || id == &container.id[..12] || id == container.name().as_str()
             })
             .cloned()
             .ok_or_else(|| Rejected(404, "container was not found".into()))
@@ -1625,6 +1684,33 @@ impl Owner {
     fn start(self: &Arc<Self>, item: &Arc<Item>) -> Result<(), Rejected> {
         let _control = item.control.lock().unwrap();
         self.submit(item, false)
+    }
+
+    fn rename(&self, item: &Arc<Item>, name: &str) -> Result<(), Rejected> {
+        let _control = item.control.lock().unwrap();
+        let mut ledger = self.ledger.lock().unwrap();
+        let mut state = item.state();
+        if state.removed || state.started || state.replacement_name.as_deref() != Some(name) {
+            return Err(Rejected::bad(
+                "rename requires an unstarted owned Compose replacement",
+            ));
+        }
+        if ledger.closing
+            || ledger.poisoned
+            || ledger
+                .active
+                .iter()
+                .any(|entry| entry.container.name().as_str() == name)
+        {
+            return Err(Rejected(
+                409,
+                "container name is occupied or unresolved".into(),
+            ));
+        }
+        *item.container.name() = name.to_owned();
+        state.replacement_name = None;
+        self.event(&mut ledger, "rename", item, None);
+        Ok(())
     }
 
     fn submit(self: &Arc<Self>, item: &Arc<Item>, restart: bool) -> Result<(), Rejected> {
@@ -1638,6 +1724,12 @@ impl Owner {
             return Err(Rejected(
                 409,
                 "container has already been submitted or removed".into(),
+            ));
+        }
+        if state.replacement_name.is_some() {
+            return Err(Rejected(
+                409,
+                "Compose replacement must be renamed before start".into(),
             ));
         }
         for index in (0..ledger.workers.len()).rev() {
@@ -1663,6 +1755,9 @@ impl Owner {
             spec["network_alias"] = json!(attachment.aliases[0]);
             if let Some(alias) = attachment.aliases.get(1) {
                 spec["secondary_network_alias"] = json!(alias);
+            }
+            if let Some(project) = &attachment.alias_project {
+                spec["network_alias_project"] = json!(project);
             }
             spec
         });
