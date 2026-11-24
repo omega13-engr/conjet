@@ -706,6 +706,37 @@ impl Store {
         Ok(true)
     }
 
+    pub(super) fn evict_idle_guest_roots(
+        &mut self,
+        peer: &mut client::Connection,
+        active: &BTreeSet<&str>,
+    ) -> anyhow::Result<()> {
+        let idle: Vec<_> = self
+            .installed
+            .keys()
+            .filter(|digest| !active.contains(digest.as_str()))
+            .cloned()
+            .collect();
+        for digest in idle {
+            self.remove_guest_root(peer, &digest)?;
+        }
+        Ok(())
+    }
+
+    fn remove_guest_root(
+        &mut self,
+        peer: &mut client::Connection,
+        digest: &str,
+    ) -> anyhow::Result<()> {
+        image::image_request(
+            peer,
+            serde_json::json!({"action":"remove", "config_digest":digest}),
+            1000,
+        )?;
+        self.installed.remove(digest);
+        Ok(())
+    }
+
     pub(super) fn remove(
         &mut self,
         peer: &mut client::Connection,
@@ -729,14 +760,7 @@ impl Store {
                 }
             }
             if !keep {
-                image::image_request(
-                    peer,
-                    serde_json::json!({
-                        "action":"remove", "config_digest":image.metadata.config_digest
-                    }),
-                    1000,
-                )?;
-                self.installed.remove(&image.metadata.config_digest);
+                self.remove_guest_root(peer, &image.metadata.config_digest)?;
             }
         }
         let retired = self

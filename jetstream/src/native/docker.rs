@@ -947,7 +947,35 @@ impl Owner {
             .installed(&image)
             .map_err(|error| Rejected::internal(error.to_string()))?
         {
-            self.with_guest(|peer| store.ensure_guest(peer, &image))?;
+            if ledger
+                .active
+                .iter()
+                .any(|item| item.container.buildkit_worker)
+            {
+                // The worker's lifetime holds the pooled connection.
+                let mut peer = self.scoped_peer()?;
+                let install = store.ensure_guest(&mut peer, &image);
+                let archive_capacity = reference.starts_with(&format!("{}@", archive::LOCAL))
+                    && install.as_ref().is_err_and(|error| {
+                        matches!(error.downcast_ref::<WireError>(),
+                            Some(WireError::PeerError(code)) if code == "capacity")
+                    });
+                if archive_capacity {
+                    let active = ledger
+                        .active
+                        .iter()
+                        .filter_map(|item| item.container.spec["image_digest"].as_str())
+                        .collect();
+                    store
+                        .evict_idle_guest_roots(&mut peer, &active)
+                        .and_then(|()| store.ensure_guest(&mut peer, &image))
+                        .map_err(|error| Rejected::internal(format!("{error:#}")))?;
+                } else {
+                    install.map_err(|error| Rejected::internal(format!("{error:#}")))?;
+                }
+            } else {
+                self.with_guest(|peer| store.ensure_guest(peer, &image))?;
+            }
         }
         self.resolve_account(spec)
     }
@@ -1413,7 +1441,16 @@ impl Owner {
 
     fn load_archive(&self, file: &fs::File) -> Result<Vec<u8>, Rejected> {
         let mut ledger = self.ledger.lock().unwrap();
-        if !ledger.active.is_empty() || ledger.poisoned || ledger.closing {
+        // Buildx loads the export while the pinned worker owns its cache.
+        // Loading publishes verified host content. The guest receives the
+        // image only when a workload starts from it.
+        if ledger.poisoned
+            || ledger.closing
+            || ledger
+                .active
+                .iter()
+                .any(|item| !item.container.buildkit_worker)
+        {
             return Err(Rejected(
                 409,
                 "native guest must be idle to load an archive".into(),

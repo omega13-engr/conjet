@@ -1804,8 +1804,8 @@ removal, the private disk lease and offline ext4 checks all passed.
 [Pinned BuildKit flag collection](https://github.com/moby/buildkit/blob/v0.23.2/util/rootless/mountopts/mountopts_linux.go#L16-L38)
 
 Review: The real Node solve establishes RUN and snapshot writeback.
-Aggregate worker and RUN limits, active cancellation, public pulls and
-archive load remain open.
+Aggregate accounting and active cancellation have separate SPEED-168
+evidence. Public pulls remain a separate SPEED-162 gate.
 
 ### SPEED-168
 
@@ -1876,6 +1876,17 @@ Acceptance: Prove the original Rust, Go and Node build solves execute
 RUN in a native workload with verified cleanup and correct artifacts.
 Preserve exit and cancellation behavior, cache reuse, and source and
 dependency invalidation. Keep the frozen fixture limits and inputs.
+
+The pinned Node client completed all 12 export, load and execution
+canaries across three builders and four cache conditions with verified
+offline base layouts. Archive load now accepts the active pinned worker.
+Archive execution uses a separate authenticated guest connection and
+can reclaim inactive cached guest roots on capacity pressure while
+keeping verified host images and tags. The original three-root guest
+limit stays enforced. The standalone common, Alpine and Node archive
+regressions, including corrupt-layer rejection, passed. See
+`SPEED-165/cj-compat.tMPK1e-offline-builds/node/` and
+`SPEED-165/cj-compat.tMPK1e-archive-regression/`.
 
 ### SPEED-163
 
