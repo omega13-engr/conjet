@@ -9,6 +9,44 @@ boundary. SPEED-008 remains unresolved.
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Native OCI research scope](docker-native-adapter.md)
 
+## SPEED-056 retained guest start attribution
+
+Two disposable Core 1.3.1 boots ran the pinned guest-local API lifecycle
+with the tracer detached and attached, reversing the order on the second
+boot. Each trial used four warmups and 16 measured operations. All
+operations returned the expected status. Each trace joined guest-clock
+syscalls to the API request window and container ID. The effective
+runtime writes confirmed four PIDs, 16 MiB and 500 millicores in all 32
+traced starts. Daemon cgroups showed no CPU throttle or PID-limit counter
+increase. Those counters do not resolve per-thread scheduler delay.
+
+| Guest-local boundary | Boot 1 median (ms) | Boot 2 median (ms) |
+| --- | ---: | ---: |
+| Start request, tracer detached | 87.798 | 83.500 |
+| Start request, tracer attached | 286.175 | 307.961 |
+| Request to first shim exec | 24.390 | 30.095 |
+| Shim exec to containerd task Create | 21.517 | 21.556 |
+| Task Create to runc create exec | 19.092 | 23.588 |
+| runc create exec to exit | 180.385 | 190.970 |
+| Within runc create, systemd scope request to first controller write | 23.192 | 16.280 |
+| Within runc create, first controller write to PID limit write | 94.350 | 102.170 |
+| runc start exec to exit | 24.237 | 21.656 |
+| runc start exit to dockerd response write | 3.988 | 6.707 |
+| Response write to guest client completion | 0.168 | 0.179 |
+
+The last two runc intervals have 12–15 joined observations per boot.
+The other reported intervals have 16. Namespace mount activity overlaps
+the controller-to-limit interval. Tracing substantially increases the
+wall times, so the substage magnitudes describe traced executions.
+The data locate the largest interval in OCI create and support testing
+the cgroup setup within that stage. They do not attribute the interval
+to CPU throttling or to systemd alone.
+
+Raw syscall, request, cgroup, memory, and launcher observations are in
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-056`.
+Both launchers verified teardown and production fingerprints. These
+diagnostics use the shipped Core and release host artifacts from SPEED-049.
+
 ## SPEED-055 qualification status
 
 The SPEED-051 exit-127 attribution and correctness gate remains open.
