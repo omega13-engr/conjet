@@ -138,6 +138,14 @@ pub(super) fn ask(owner: &Owner, action: &str, name: Option<&str>) -> Result<Val
 }
 
 fn exchange(owner: &Owner, operation: Value) -> Result<Value, Rejected> {
+    // Removing a worker cache waits for the full recursive unlink and the
+    // guest directory fsync. Keep that acknowledgement within a distinct
+    // bounded budget so a large cache is not mistaken for lost ownership.
+    let budget_ms = if operation["action"] == "remove" {
+        15_000
+    } else {
+        1_500
+    };
     let (directory, identity, key, boot) = {
         let native = owner.native.lock().unwrap();
         (
@@ -157,9 +165,9 @@ fn exchange(owner: &Owner, operation: Value) -> Result<Value, Rejected> {
         Kind::Volume,
         Kind::Volume,
         &json!({
-            "boot_id":boot,"budget_ms":1500,"operation":operation,
+            "boot_id":boot,"budget_ms":budget_ms,"operation":operation,
         }),
-        Duration::from_secs(2),
+        Duration::from_millis(budget_ms + 500),
     ) {
         Ok(value) => Ok(value),
         Err(WireError::PeerError(code)) => Err(match code.as_str() {

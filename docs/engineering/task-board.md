@@ -1933,6 +1933,15 @@ and the common, Alpine and Node archive regression passed. See
 `SPEED-160/cj-compat.tMPK1e-mixed-archive-lifetime/` and
 `SPEED-160/cj-compat.tMPK1e-archive-lifetime-regression/`.
 
+The mixed regression then passed all 36 canaries and released the image
+backing for every builder in one boot. Its worker image and bases came
+from verified OCI layouts. The public Go rerun also passed all twelve
+canaries after a volume removal acknowledgment outlasted the earlier
+two-second channel deadline. The removal request now has a 15-second
+budget and still waits for recursive deletion and directory fsync.
+See `SPEED-160/cj-compat.tMPK1e-mixed-lifetime-seeded-worker/` and
+`SPEED-160/cj-compat.tMPK1e-volume-ack/`.
+
 ### SPEED-163
 
 Title: Read actual cgroup counters from the pinned BuildKit worker
