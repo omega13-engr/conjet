@@ -183,46 +183,6 @@ Next Action: Set matching version metadata and release notes for the reviewed pa
 
 ## INPROGRESS
 
-### SPEED-056
-
-Title: Attribute and reduce retained Docker guest start latency
-
-Description: Measure the start request inside a disposable retained Core
-guest, then test one change at an observed bottleneck.
-
-Is blocked by task: None for attribution or isolated A/B. SPEED-051 still
-gates formal lifecycle qualification.
-
-Acceptance Criteria:
-
-- Join the pinned API starts to containerd, shim, runc, guest scheduling
-  and HTTP response witnesses by workload identity. Compare with an
-  untraced control. Keep guest and host clock domains separate.
-- Measure cgroup accounting and effective CPU, memory and PID limits.
-  Identify the expensive stage before selecting a candidate.
-- Evaluate a confirmed candidate in alternating independent release A/B
-  boots. Preserve the retained engine stack, provisioning and teardown,
-  cgroup isolation, dynamic memory, and the recovery tick. Record a
-  negative result if the change fails latency or memory acceptance.
-- Preserve raw failure witnesses for SPEED-051 and verify private cleanup.
-  The archived reclaim variant stays rejected.
-
-Problem and Evidence: SPEED-050 measured 74–77 ms from delivery to dockerd
-to the first start response byte. A separate SPEED-051 syscall trace
-observed runtime setup in the same path but perturbed its timings.
-
-Approach: Correlate a bounded scoped syscall trace with guest-local
-API start requests, containerd task events and cgroup counters. Compare
-observer-on and observer-off intervals before testing candidate behavior.
-
-Evidence: [SPEED-056 stage trace](docker-benchmark-results.md#speed-056-retained-guest-start-attribution).
-Two observer-order controls located the largest traced interval in
-runc create. Guest-local start was 83–88 ms without ptrace. The
-systemd scope and controller setup were present in all joined starts.
-
-Review: Stage attribution recorded. The traced timings include substantial
-observer overhead. A release A/B of the cgroup hierarchy is pending.
-
 ### SPEED-051
 
 Title: Diagnose and correct the retained Docker four-PID CLI failure
@@ -246,7 +206,10 @@ Problem and Evidence: SPEED-049 `cli/pair-5/conjet/session.json`, measured sampl
 The traced boot ran 550 clean launches. The cgroup-observer boot ran
 2,000 clean launches and observed runc init inside the intended
 four-PID workload scopes. Neither boot reproduced the exit-127
-signature. Raw results are under `conjet-speedup-evidence/SPEED-051`.
+signature. The SPEED-056 allocation-held capture added 256 clean CLI
+launches with runc init observed in each workload scope and no
+PID event increase. Raw captures are under
+`conjet-speedup-evidence/SPEED-051` and `SPEED-056/pid-witness-pressure`.
 Production and owned host cleanup checks passed.
 
 Source: [SPEED-049](#speed-049).
@@ -724,6 +687,52 @@ then rerun the original matrix. Experimental release proceeds under local
 acceptance without changing the SPEED-008 verdict.
 
 ## UNDERREVIEW
+
+### SPEED-056
+
+Title: Attribute and reduce retained Docker guest start latency
+
+Description: Measure the start request inside a disposable retained Core
+guest, then test one change at an observed bottleneck.
+
+Is blocked by task: None for attribution or isolated A/B. SPEED-051 still
+gates formal lifecycle qualification.
+
+Acceptance Criteria:
+
+- Join the pinned API starts to containerd, shim, runc, guest scheduling
+  and HTTP response witnesses by workload identity. Compare with an
+  untraced control. Keep guest and host clock domains separate.
+- Measure cgroup accounting and effective CPU, memory and PID limits.
+  Identify the expensive stage before selecting a candidate.
+- Evaluate a confirmed candidate in alternating independent release A/B
+  boots. Preserve the retained engine stack, provisioning and teardown,
+  cgroup isolation, dynamic memory, and the recovery tick. Record a
+  negative result if the change fails latency or memory acceptance.
+- Preserve raw failure witnesses for SPEED-051 and verify private cleanup.
+  The archived reclaim variant stays rejected.
+
+Problem and Evidence: SPEED-050 measured 74–77 ms from delivery to dockerd
+to the first start response byte. A separate SPEED-051 syscall trace
+observed runtime setup in the same path but perturbed its timings.
+
+Approach: Correlate a bounded scoped syscall trace with guest-local
+API start requests, containerd task events and cgroup counters. Compare
+observer-on and observer-off intervals before testing candidate behavior.
+
+Evidence: [SPEED-056 stage trace](docker-benchmark-results.md#speed-056-retained-guest-start-attribution).
+Two observer-order controls located the largest traced interval in
+runc create. Guest-local start was 83–88 ms without ptrace. The
+systemd scope and controller setup were present in all joined starts.
+Two release A/B pairs tested a shorter systemd slice hierarchy.
+The variant moved lifecycle p50 by +2.5% and −3.1%. All 920 launches
+and the scoped telemetry, data and idle checks passed.
+
+Review: Reject the layout change for lack of repeatable improvement.
+Traced timings include substantial observer overhead. The stock guest
+did not expose per-process scheduler delay metrics. No speed change
+is accepted or qualified.
+
 
 ### SPEED-054
 

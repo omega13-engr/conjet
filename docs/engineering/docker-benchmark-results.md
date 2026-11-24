@@ -40,12 +40,59 @@ the controller-to-limit interval. Tracing substantially increases the
 wall times, so the substage magnitudes describe traced executions.
 The data locate the largest interval in OCI create and support testing
 the cgroup setup within that stage. They do not attribute the interval
-to CPU throttling or to systemd alone.
+to CPU throttling or to systemd alone. The follow-up allocation-held
+observer found no CPU-throttle increase in sampled workload scopes.
+The shipped guest exposed neither per-process `schedstat` nor the
+`sched_schedstats` control, so runnable queue time remains unmeasured.
 
 Raw syscall, request, cgroup, memory, and launcher observations are in
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-056`.
 Both launchers verified teardown and production fingerprints. These
 diagnostics use the shipped Core and release host artifacts from SPEED-049.
+
+### Shallow systemd service slices
+
+The experimental layout removed two intermediate slice levels while
+retaining `conjet-services.slice` and a distinct leaf per workload or
+service. Both arms staged the same release-mode telemetry binary
+with support for both paths. The pilot selected the layout with the
+Docker create parent. The pinned release VMM and Docker binaries handled
+both arms, with tracing disabled. Systemd uses hyphens to encode slice
+ancestry. [Systemd cgroup interface](https://systemd.io/CONTROL_GROUP_INTERFACE/)
+
+| Pair and order | Layout | Lifecycle p50 / p95 / p99 (ms) | Start p50 (ms) | Launches/s | Reclaim submissions | Runtime CPU delta (s) | Highest sampled footprint (MiB) | Idle convergence (s) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 first | Existing | 121.173 / 142.038 / 152.477 | 84.539 | 8.266 | 400 | 40.74 | 1491.53 | 10.213 |
+| 1 second | Shallow | 124.195 / 141.797 / 152.560 | 85.602 | 8.091 | 24 | 42.24 | 1586.18 | 10.144 |
+| 2 first | Shallow | 124.566 / 147.734 / 162.933 | 82.992 | 7.944 | 25 | 42.25 | 1575.21 | 6.097 |
+| 2 second | Existing | 128.600 / 151.204 / 159.294 | 86.436 | 7.711 | 25 | 44.23 | 1557.69 | 6.121 |
+
+Each leg timed 200 API lifecycles after ten warmups. A separate phase
+held a 512 MiB allocation during 20 launches per leg. All 920 launches
+succeeded. The four-PID, 16 MiB and 500-millicore limits were read back
+on each layout. Per-service telemetry identified both 64 MiB canaries in
+each trial, including during the allocation. Both canaries verified their
+data. The allocation verified, released and passed demand-zero reuse.
+All boots converged to 512 MiB with no unauthorized backing releases
+in the sampled ledgers. The allocation ran with the VM already at
+2,048 MiB, so pressure-driven capacity growth was not exercised.
+
+The shallow layout moved median lifecycle latency by +2.5% and −3.1%.
+Start and throughput also changed in opposite directions across pairs.
+The first existing-layout boot recorded 400 accepted reclaim requests
+in the serial window against 24–25 in the other legs. The A/B left the
+reclaim policy active, so this remains observed boot variation.
+CPU deltas include setup, the held allocation and idle observation.
+The slice variant was rejected for lack of a repeatable improvement.
+
+The private telemetry binary SHA-256 was
+`39915ceba97815d6b184c0e90df7ddcffa786d3ffc8851df1cb7a0cc5d4cfd63`.
+The variant parser regression, both layout witnesses, production and
+cleanup snapshots, and raw samples are in the SPEED-056 evidence folder.
+The retained layout then passed all 26 existing compatibility probes and
+four API/CLI output canaries on a separate stock Core boot. The probes
+covered bridge and no-network execution, image, volume, Buildx and Compose.
+This series is a Conjet A/B. SPEED-055 still gates formal requalification.
 
 ## SPEED-055 qualification status
 
@@ -175,6 +222,15 @@ error. No correction or limit change was selected. Raw process output,
 syscalls, cgroup membership and launcher cleanup are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-051`.
 Both completed capture boots passed production and host cleanup guards.
+
+The SPEED-056 follow-up ran 256 further pinned CLI launches in one
+private boot while the 512 MiB allocation fixture held memory. It
+captured runc init in all 256 workload scopes. There were 352 readable
+PID event observations with `max 0`, one read during scope removal,
+and zero observed throttled scopes. Every CLI launch returned exit 0.
+The canary passed before and after the churn, and the balloon returned
+to 512 MiB in 6.094 seconds after cleanup. The supplemental process
+and controller records are in `SPEED-056/pid-witness-pressure`.
 
 ## SPEED-050 guest-local retained Docker lifecycle
 
