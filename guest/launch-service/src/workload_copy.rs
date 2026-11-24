@@ -173,7 +173,7 @@ fn with_filesystem_owner<T>(uid: u32, operation: impl FnOnce() -> io::Result<T>)
     result
 }
 
-fn destination(parent: &File, name: &CString) -> io::Result<()> {
+fn destination(parent: &File, name: &CString) -> io::Result<bool> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
         libc::fstatat(
@@ -186,14 +186,14 @@ fn destination(parent: &File, name: &CString) -> io::Result<()> {
     {
         let kind = unsafe { stat.assume_init() }.st_mode & libc::S_IFMT;
         return if kind == libc::S_IFREG {
-            Ok(())
+            Ok(true)
         } else {
             Err(rejected())
         };
     }
     let error = io::Error::last_os_error();
     if error.kind() == io::ErrorKind::NotFound {
-        Ok(())
+        Ok(false)
     } else {
         Err(error)
     }
@@ -227,7 +227,7 @@ impl Upload {
         if (current.dev(), current.ino()) != (original.dev(), original.ino()) {
             return Err(rejected());
         }
-        destination(&self.parent, &self.name)?;
+        let replace = destination(&self.parent, &self.name)?;
         let file = self.file.as_raw_fd();
         publishing(
             "archive_ownership",
@@ -242,17 +242,26 @@ impl Upload {
             }),
         )?;
         publishing("archive_sync", self.file.sync_all())?;
-        publishing(
-            "archive_replace",
+        let rename = |flags: libc::c_uint| {
             crate::security::checked(unsafe {
-                libc::renameat(
+                libc::syscall(
+                    libc::SYS_renameat2,
                     self.staging.directory.as_raw_fd(),
                     c"payload".as_ptr(),
                     self.parent.as_raw_fd(),
                     self.name.as_ptr(),
-                )
-            }),
-        )?;
+                    flags,
+                ) as i32
+            })
+        };
+        if replace {
+            publishing("archive_replace", rename(0))?;
+        } else {
+            publishing(
+                "archive_create",
+                with_filesystem_owner(self.staging.uid, || rename(libc::RENAME_NOREPLACE)),
+            )?;
+        }
         publishing("archive_stage_cleanup", self.staging.remove(false))?;
         Ok(json!({"offset":self.size}))
     }
@@ -262,6 +271,7 @@ struct Staging {
     parent: File,
     directory: File,
     name: CString,
+    uid: u32,
 }
 
 impl Staging {
@@ -335,6 +345,7 @@ impl Staging {
             parent,
             directory: unsafe { File::from_raw_fd(fd) },
             name,
+            uid,
         };
         let metadata = staging.directory.metadata()?;
         if metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {

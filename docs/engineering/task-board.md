@@ -1217,6 +1217,57 @@ Acceptance: Support the frozen interactive create and attach request
 through a bounded stdin path. Preserve the original output streams,
 exit 23, logs, disconnect recovery and cleanup.
 
+### SPEED-126
+
+Title: Publish the first copy into an absent guest destination
+
+Acceptance: Run the frozen Docker copy fixture from an absent
+`/tmp/control` and then replace it. Preserve the guest identity,
+digest, atomic publication and cleanup checks for both cases.
+
+Evidence: The first full control preflight reproduced a guest rename
+failure only when the target was absent. The mapped, no-replace
+publication then passed all 440 original copy operations. The focused
+create-and-replace run also passed. See `SPEED-125/control-preflight/`
+and `SPEED-127/file-enumeration/` on ExternalSSD.
+
+### SPEED-127
+
+Title: Permit owned directory enumeration and file removal
+
+Acceptance: Verify the ordinary guest can enumerate a nonempty
+workload directory and remove its own regular file. Preserve the
+existing mount, capability, BuildKit and static fixture policies.
+
+Evidence: The running Alpine workload removed the old file and listed
+exactly `control` after round trips. The directory had no retained
+upload staging entry. See `SPEED-127/file-enumeration/`.
+
+### SPEED-128
+
+Title: Qualify the frozen control cases with native teardown witnesses
+
+Acceptance: Preserve all original control operations and counts.
+Verify persistent identity, every attach and copy result, separate
+stop/kill/restart generations, and native teardown on exact release
+artifacts before recording any control requirement as passing.
+
+### SPEED-130
+
+Title: Release disconnected native Docker stream subscribers on Darwin
+
+Acceptance: Distinguish a client that closed its socket from one
+that only closed its write side. Run all original attach cases
+beyond the 32-socket endpoint limit and preserve detach recovery.
+
+### SPEED-131
+
+Title: Resolve immediate exec while the assigned workload is still starting
+
+Acceptance: Retry only the same generation's in-progress startup
+within the exec budget. Observe the original immediate large-output
+command and keep stopped, removed and failed workloads rejected.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

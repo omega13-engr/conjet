@@ -279,6 +279,8 @@ impl WorkloadFilter {
                 libc::SYS_wait4,
                 libc::SYS_getppid,
                 libc::SYS_umask,
+                libc::SYS_getdents64,
+                libc::SYS_unlinkat,
                 libc::SYS_epoll_create1,
                 libc::SYS_epoll_ctl,
                 libc::SYS_epoll_pwait,

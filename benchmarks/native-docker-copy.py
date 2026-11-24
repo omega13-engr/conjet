@@ -108,6 +108,7 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
                 call('after_aborted_upload', ['cp', f'{name}:{archive}', restored])
                 if hashlib.sha256(restored.read_bytes()).hexdigest() != cases['copy_out_8388608']['sha256']:
                     raise RuntimeError('uncommitted upload changed the existing file')
+                call('prepare_missing_destination', ['exec', name, 'rm', archive])
                 for size in (4096, 8 * 1024 * 1024):
                     expected = b'conjet-control-1' * (size // 16)
                     source.write_bytes(expected)
@@ -120,6 +121,9 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
             finally:
                 source.unlink(missing_ok=True)
                 restored.unlink(missing_ok=True)
+            call('staging_inventory', ['exec', name, 'ls', '-A', '/tmp'])
+            if cases['staging_inventory']['stdout'].splitlines() != ['control']:
+                raise RuntimeError('unexpected workload directory contents after upload')
         finally:
             call('remove', ['rm', '-f', name])
         with closing(MATCHED['TOOLS']['UnixHTTP'](endpoint, peer)) as connection:
