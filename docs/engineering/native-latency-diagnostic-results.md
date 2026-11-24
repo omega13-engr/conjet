@@ -249,3 +249,10 @@ passed reduced-capacity admission and independent pressure growth from
 idle shrink, and verified guest teardown. Raw samples and production
 and memory witnesses are in
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-085/`.
+
+The final default wake release repeated the two-pair Kiri pilot with
+1,600 measured API/CLI operations and 80 warmups, all passing. Native
+API p50 was 2.60–2.72 ms and p99 4.11–4.71 ms. Kiri API p50 was
+3.53–3.55 ms and p99 4.49–4.57 ms. Native CLI p50 was
+21.33–21.60 ms versus Kiri 21.00–21.19 ms. These two pairs leave
+formal parity and the broader matrix unqualified.

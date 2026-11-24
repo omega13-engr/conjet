@@ -575,7 +575,7 @@ Acceptance Criteria:
   unsupported requests explicitly and keep cache, RUN, and lifecycle
   results scoped to observed behavior.
 
-Depends on task: SPEED-086 bundle intake.
+Depends on task: SPEED-086 bundle intake, passed in isolation.
 
 ### SPEED-086
 
@@ -591,6 +591,13 @@ Acceptance Criteria:
   snapshot evidence, with no execution or process environment in the
   reply. Test the pinned config and unsupported variants on an isolated
   release guest.
+
+Evidence: The authenticated release probe accepted the captured ten-mount
+policy and refused ten incompatible or unsafe variants. The leased disk
+was clean before and after the boot. See [the bundle intake
+evidence](native-buildkit-executor.md#speed-086-verified-bundle-intake).
+
+Review: Isolated validation passed. Independent review pending.
 
 ### SPEED-080
 
@@ -733,12 +740,12 @@ Problem and Evidence: Parity and superiority remain unproven for the new candida
 
 Approach: Keep native API, Docker API and CLI timers separate; record hashes, p50/p95/p99, throughput, confidence intervals, resource data and exact cleanup boundaries.
 
-Evidence: Two post-SPEED-083 release pilot pairs passed all 1,600
-measured operations. Native API p50 was 2.58–2.65 ms versus Kiri
-3.47–3.88 ms, passing the below-5-ms isolated median target. Native
-API p99 was 18.76–20.13 ms versus Kiri 4.24–5.52 ms. Formal parity
-and the full matrix remain unqualified. See [the post-change
-pilot](native-latency-diagnostic-results.md#post-change-kiri-pilot).
+Evidence: Two post-SPEED-085 release pilot pairs passed all 1,600
+measured operations. Native API p50 was 2.60–2.72 ms versus Kiri
+3.53–3.55 ms, passing the below-5-ms isolated median target. Native
+API p99 was 4.11–4.71 ms versus Kiri 4.49–4.57 ms. Formal parity
+and the full matrix remain unqualified. See [the tail correction
+and pilot](native-latency-diagnostic-results.md#speed-085).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 

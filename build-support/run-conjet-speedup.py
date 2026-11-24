@@ -25,7 +25,7 @@ SCRATCH = SSD / 'dev_workspace/tmp'
 REPO = Path(__file__).resolve().parents[1]
 CONTEXT = 'conjet-speedup'
 DOCKER = Path('/opt/homebrew/bin/docker')
-VOLUME_DIAGNOSTICS = ('volume-disk', 'mounted-volume', 'compose', 'build-snapshot')
+VOLUME_DIAGNOSTICS = ('volume-disk', 'mounted-volume', 'compose', 'build-snapshot', 'build-bundle')
 CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'admission-trace', 'pending-watch',
                     *VOLUME_DIAGNOSTICS)
 
@@ -510,7 +510,7 @@ def native_session(args, root):
             markers.append('etc/conjet/native-volume')
             info = volume_disk.stat()
             report['volume_disk'] = {'path': str(volume_disk), 'device': info.st_dev, 'inode': info.st_ino}
-        if args.diagnostics == 'build-snapshot':
+        if args.diagnostics in ('build-snapshot', 'build-bundle'):
             vm_command.append('--build-snapshot-disk')
             markers.append('etc/conjet/native-build-snapshot')
         report['vm_command'] = list(map(str, vm_command))
@@ -631,6 +631,9 @@ def native_session(args, root):
                 diagnostic['collect'](endpoint, bridge.pid, output, docker, env, args.native_compose_cli)
             elif args.diagnostics == 'build-snapshot':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-build-snapshot.py'))
+                diagnostic['collect'](directory, vm.pid, output)
+            elif args.diagnostics == 'build-bundle':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-build-bundle.py'))
                 diagnostic['collect'](directory, vm.pid, output)
             elif args.diagnostics == 'pending-watch':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-core-watch.py'))
@@ -754,7 +757,7 @@ def main():
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
                                                   'volume-disk', 'mounted-volume', 'admission-trace', 'compose',
-                                                  'build-snapshot', 'pending-watch'),
+                                                  'build-snapshot', 'build-bundle', 'pending-watch'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')

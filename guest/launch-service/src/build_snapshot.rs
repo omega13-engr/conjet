@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod bundle;
+
 pub const MARKER: &str = "/etc/conjet/native-build-snapshot";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub const CONTROL_ADDRESS: &[u8] = b"conjet-build-snapshot-v1";
@@ -22,7 +25,7 @@ pub fn valid_id(id: &str) -> bool {
 pub(crate) mod guest {
     use std::ffi::CString;
     use std::fs::{File, OpenOptions};
-    use std::io;
+    use std::io::{self, Read};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::path::Path;
@@ -43,7 +46,7 @@ pub(crate) mod guest {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    fn open(id: &str) -> io::Result<(File, Snapshot)> {
+    fn open(id: &str) -> io::Result<(File, Snapshot, File)> {
         if !valid_id(id) || !Path::new(MARKER).try_exists()? {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -81,15 +84,45 @@ pub(crate) mod guest {
             device: info.dev(),
             inode: info.ino(),
         };
-        Ok((rootfs, snapshot))
+        Ok((rootfs, snapshot, bundle))
     }
 
     pub(crate) fn inspect(id: &str) -> io::Result<Snapshot> {
-        open(id).map(|(_, identity)| identity)
+        open(id).map(|(_, identity, _)| identity)
+    }
+
+    pub(crate) fn inspect_bundle(
+        id: &str,
+        image_digest: &str,
+    ) -> Result<super::bundle::BundleWitness, &'static str> {
+        let (_, snapshot, bundle) = open(id).map_err(|_| "native build snapshot is unavailable")?;
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+        // The bundle descriptor pins the verified worker directory.
+        let fd = unsafe { libc::openat(bundle.as_raw_fd(), c"config.json".as_ptr(), flags) };
+        if fd < 0 {
+            return Err("native build config is unavailable");
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let metadata = file
+            .metadata()
+            .map_err(|_| "unreadable native build config")?;
+        if !metadata.is_file()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o022 != 0
+            || metadata.dev() != snapshot.device
+            || metadata.len() > super::bundle::MAX_CONFIG_BYTES
+        {
+            return Err("native build config has invalid ownership, location, or size");
+        }
+        let mut bytes = Vec::new();
+        file.take(super::bundle::MAX_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "unreadable native build config")?;
+        super::bundle::inspect(&bytes, snapshot, image_digest)
     }
 
     pub(crate) fn mapped_mount(snapshot: &Snapshot, user: &File) -> io::Result<OwnedFd> {
-        let (file, identity) = open(&snapshot.id)?;
+        let (file, identity, _) = open(&snapshot.id)?;
         if *snapshot != identity {
             return Err(io::Error::other("stale native build snapshot identity"));
         }

@@ -152,6 +152,8 @@ struct BuildSnapshotRequest {
     boot_id: String,
     budget_ms: u64,
     id: String,
+    #[serde(default)]
+    verify_bundle: bool,
 }
 
 #[derive(Deserialize)]
@@ -1750,6 +1752,21 @@ impl FreshFixture {
                 }
                 if !crate::build_snapshot::valid_id(&request.id) {
                     return Err(("malformed", "invalid native build bundle identity"));
+                }
+                if request.verify_bundle {
+                    drop(guard);
+                    let bundle = crate::build_snapshot::guest::inspect_bundle(
+                        &request.id,
+                        &self.image_digest,
+                    )
+                    .map_err(|message| ("unsupported_option", message))?;
+                    if Instant::now() >= expires {
+                        return Err((
+                            "deadline_exceeded",
+                            "build bundle verification budget elapsed",
+                        ));
+                    }
+                    return Ok((Kind::BuildSnapshot, json!(bundle)));
                 }
                 let snapshot = crate::build_snapshot::guest::inspect(&request.id)
                     .map_err(|_| ("not_found", "native build snapshot is unavailable"))?;
