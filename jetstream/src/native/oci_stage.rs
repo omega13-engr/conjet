@@ -117,15 +117,85 @@ fn text_path(bytes: &[u8], directory: bool) -> anyhow::Result<String> {
     Ok(path.to_owned())
 }
 
+#[derive(Default)]
+struct PaxPaths {
+    path: Option<Vec<u8>>,
+    link: Option<Vec<u8>>,
+}
+
+fn pax_paths(mut bytes: &[u8]) -> anyhow::Result<PaxPaths> {
+    let mut paths = PaxPaths::default();
+    ensure!(!bytes.is_empty(), "empty OCI PAX header");
+    while !bytes.is_empty() {
+        let separator = bytes
+            .iter()
+            .position(|byte| *byte == b' ')
+            .context("invalid OCI PAX length")?;
+        let length = std::str::from_utf8(&bytes[..separator])?;
+        ensure!(
+            !length.is_empty() && length.bytes().all(|byte| byte.is_ascii_digit()),
+            "invalid OCI PAX length"
+        );
+        let length: usize = length.parse()?;
+        ensure!(
+            length > separator + 1 && length <= bytes.len(),
+            "invalid OCI PAX record size"
+        );
+        let record = bytes[separator + 1..length]
+            .strip_suffix(b"\n")
+            .context("missing OCI PAX record terminator")?;
+        let equals = record
+            .iter()
+            .position(|byte| *byte == b'=')
+            .context("missing OCI PAX field value")?;
+        let (key, value) = (&record[..equals], &record[equals + 1..]);
+        ensure!(
+            !value.is_empty() && value.len() <= 1024 && !value.contains(&0),
+            "invalid OCI PAX path"
+        );
+        let slot = match key {
+            b"path" => &mut paths.path,
+            b"linkpath" => &mut paths.link,
+            _ => anyhow::bail!("unsupported OCI PAX field"),
+        };
+        ensure!(
+            slot.replace(value.to_vec()).is_none(),
+            "duplicate OCI PAX field"
+        );
+        bytes = &bytes[length..];
+    }
+    Ok(paths)
+}
+
 fn archive(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
     let mut entries = BTreeMap::new();
     let mut tar = tar::Archive::new(Cursor::new(layer));
     let mut end = 0;
     let mut root_seen = false;
+    let mut extended = None;
     for entry in tar.entries()?.raw(true) {
         let mut entry = entry?;
         let header = entry.header();
         let file_type = header.entry_type();
+        ensure!(
+            entry.size() <= layer.len() as u64,
+            "OCI tar member exceeds layer size"
+        );
+        end = entry.raw_file_position() + entry.size().div_ceil(512) * 512;
+        if file_type == tar::EntryType::XHeader {
+            ensure!(
+                extended.is_none() && entry.size() <= 4096,
+                "invalid OCI PAX header sequence or size"
+            );
+            let mut payload = Vec::new();
+            entry.read_to_end(&mut payload)?;
+            ensure!(
+                payload.len() == entry.size() as usize,
+                "truncated OCI PAX header"
+            );
+            extended = Some(pax_paths(&payload)?);
+            continue;
+        }
         let kind = match file_type {
             tar::EntryType::Regular => Kind::File,
             tar::EntryType::Directory => Kind::Directory,
@@ -133,12 +203,11 @@ fn archive(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
             tar::EntryType::Link => Kind::Hardlink,
             _ => anyhow::bail!("unsupported OCI tar entry type"),
         };
-        ensure!(
-            entry.size() <= layer.len() as u64,
-            "OCI tar member exceeds layer size"
-        );
-        end = entry.raw_file_position() + entry.size().div_ceil(512) * 512;
-        let raw = entry.path_bytes();
+        let extended = extended.take().unwrap_or_default();
+        let raw = extended
+            .path
+            .map(std::borrow::Cow::Owned)
+            .unwrap_or_else(|| entry.path_bytes());
         let mode = header.mode()?;
         let uid = u32::try_from(header.uid()?)?;
         let gid = u32::try_from(header.gid()?)?;
@@ -148,14 +217,22 @@ fn archive(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
         );
         if kind == Kind::Directory && matches!(raw.as_ref(), b"." | b"./") {
             ensure!(
-                !root_seen && entry.size() == 0 && mode == 0o755 && uid == 0 && gid == 0,
+                !root_seen
+                    && extended.link.is_none()
+                    && entry.size() == 0
+                    && mode == 0o755
+                    && uid == 0
+                    && gid == 0,
                 "unsupported OCI root directory metadata"
             );
             root_seen = true;
             continue;
         }
         let path = text_path(&raw, kind == Kind::Directory)?;
-        let link = entry.link_name_bytes();
+        let link = extended
+            .link
+            .map(std::borrow::Cow::Owned)
+            .or_else(|| entry.link_name_bytes());
         let target = match kind {
             Kind::Symlink => {
                 let target =
@@ -203,6 +280,7 @@ fn archive(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
             "duplicate or too many OCI tar entries"
         );
     }
+    ensure!(extended.is_none(), "unattached OCI PAX header");
     let trailer = layer
         .get(end as usize..)
         .context("truncated OCI tar padding")?;
@@ -504,4 +582,55 @@ pub(super) fn publish(layout: &Path, manifest: &str, output: &Path) -> anyhow::R
     }
     let _ = staged.keep();
     Ok(package_sha256)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link_layer(fields: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut archive = tar::Builder::new(Vec::new());
+        archive
+            .append_pax_extensions(fields.iter().copied())
+            .unwrap();
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_mode(0o755);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_size(0);
+        header.set_link_name("placeholder").unwrap();
+        archive
+            .append_data(&mut header, "old-name", &[][..])
+            .unwrap();
+        archive.into_inner().unwrap()
+    }
+
+    #[test]
+    fn local_pax_paths_override_the_immediately_following_member() {
+        let entries = archive(&link_layer(&[
+            ("path", b"etc/renamed"),
+            ("linkpath", b"../bin/probe"),
+        ]))
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries["etc/renamed"].target, "../bin/probe");
+    }
+
+    #[test]
+    fn pax_cannot_override_ownership_or_bypass_root_path_validation() {
+        for field in [
+            ("uid", b"0".as_slice()),
+            ("path", b"../outside".as_slice()),
+            ("linkpath", b"../../outside".as_slice()),
+        ] {
+            assert!(archive(&link_layer(&[field])).is_err());
+        }
+        assert!(archive(&link_layer(&[("path", b"first"), ("path", b"second")])).is_err());
+        let mut dangling = tar::Builder::new(Vec::new());
+        dangling
+            .append_pax_extensions([("path", b"unused".as_slice())])
+            .unwrap();
+        assert!(archive(&dangling.into_inner().unwrap()).is_err());
+    }
 }

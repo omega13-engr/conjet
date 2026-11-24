@@ -831,6 +831,19 @@ ingest the frozen larger layers under explicit storage and Core memory bounds,
 and exercise PAX metadata, shared blobs, interruption and cleanup without
 lowering the fixture acceptance rules.
 
+### SPEED-101
+
+Title: Apply verified OCI PAX path metadata
+
+Acceptance: Interpret the pinned Go layout's local path and link-path
+records. Preserve regular entry ownership, mode, root-relative checks
+and payload bounds. Reject unsupported extensions before publishing.
+
+Evidence: Local path and link-path validation tests passed, including
+duplicate, dangling, unsupported and escaping metadata. The pinned Go
+layout advanced past the earlier PAX failure and reached the existing
+OCI byte bound. Logs are under `SPEED-101/` on ExternalSSD.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle
