@@ -70,6 +70,7 @@ def collect(endpoint, owner_pid, session, vm_pid, output, phase, client, env, *,
                     or evidence['mount'][0]['Destination'] != target):
                 raise RuntimeError('Docker inspected the wrong volume mount')
             evidence['busy_running'] = api(conn, 'DELETE', volume_path, (409,))
+            evidence['force_busy_running'] = api(conn, 'DELETE', volume_path + '?force=true', (409,))
             with NATIVE['channel'](session, vm_pid) as (stream, boot):
                 evidence['guest_busy'] = NATIVE['exchange'](stream, 25, {
                     'boot_id': boot, 'budget_ms': 1000, 'operation': {'action': 'remove', 'name': NAME},
@@ -94,8 +95,9 @@ def collect(endpoint, owner_pid, session, vm_pid, output, phase, client, env, *,
         run(['/bin/busybox', 'cat', witness], stdout=PAYLOAD)
         evidence['same_payload_after_readonly_write'] = True
         if phase == 'inspect':
-            invoke(['volume', 'rm', NAME], stdout=(NAME + '\n').encode())
+            invoke(['volume', 'rm', '--force', NAME], stdout=(NAME + '\n').encode())
             evidence['removed'] = api(conn, 'GET', volume_path, (404,))
+            api(conn, 'DELETE', volume_path + '?force=true', (204,))
     finally:
         conn.close()
         (output / 'native-mounted-volume.json').write_text(json.dumps(evidence, indent=2) + '\n')

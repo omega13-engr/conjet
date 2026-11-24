@@ -1361,6 +1361,11 @@ Title: Honor Compose volume removal framing
 Acceptance: Accept the pinned client's force query on local removal.
 Keep referenced volumes protected and verify scoped teardown.
 
+Evidence: The optimized API returned 409 for forced removal while
+the workload held the volume. After another boot, the pinned client
+removed it, a repeated forced removal returned 204, and the offline
+ext4 check passed. See `SPEED-136/` on ExternalSSD.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

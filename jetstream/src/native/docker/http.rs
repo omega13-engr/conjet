@@ -593,10 +593,17 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 "GET" if query.is_empty() => {
                     Reply::json(200, super::volume::inspect(owner, &name)?)
                 }
-                "DELETE"
-                    if query.keys().all(|key| key == "force") && disabled(query.get("force")) =>
-                {
-                    owner.remove_volume(&name)?;
+                "DELETE" if query.keys().all(|key| key == "force") => {
+                    let force = match query.get("force").map(String::as_str) {
+                        Some("true" | "1") => true,
+                        Some("false" | "0") | None => false,
+                        _ => return Err(Rejected::bad("invalid volume removal force option")),
+                    };
+                    match owner.remove_volume(&name) {
+                        Ok(()) => {}
+                        Err(Rejected(404, _)) if force => {}
+                        Err(error) => return Err(error),
+                    }
                     Reply::empty(204)
                 }
                 _ => return Err(Rejected::bad("unsupported Docker volume operation")),
