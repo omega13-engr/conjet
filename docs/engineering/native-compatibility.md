@@ -149,6 +149,22 @@ one run apiece with their original output and exit assertions and unique
 native cleanup witnesses. This lane does not establish full release counts
 or performance. Evidence is under `SPEED-110/` on ExternalSSD.
 
+## SPEED-111 native cgroup resources
+
+The native OCI path applies the requested memory, PID and CPU controls
+within its supported ranges. Omitted controls leave the individual
+workload cgroup uncapped for that resource within the Core guest. This
+matches Docker's omitted-resource convention. [Docker resource constraints](https://docs.docker.com/engine/containers/resource_constraints/)
+
+The isolated release read the actual cgroup values for omitted, partial,
+lifecycle and service settings. The frozen service settings were
+134,217,728 bytes, 64 PIDs and 50,000 microseconds of CPU per 100,000.
+The lifecycle settings remained 16,777,216 bytes, four PIDs and the same
+CPU quota. Invalid bounds failed before admission. The resource canary
+used an absolute sleep executable to isolate resource handling after
+the first run surfaced the separate relative-command limitation.
+Evidence is under `SPEED-111/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

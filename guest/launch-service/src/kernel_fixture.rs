@@ -970,13 +970,26 @@ pub(crate) fn recover_cgroup(id: [u8; 16], oci: bool) -> io::Result<()> {
 }
 
 pub(crate) fn cgroup_observation(id: &str, prepared: bool, oci: bool) -> io::Result<(u64, bool)> {
+    crate::cgroups::observation(&cgroup_scope(id, prepared, oci))
+}
+
+pub(crate) fn cgroup_effective_limits(id: &str) -> io::Result<serde_json::Value> {
+    let dir = cgroup_scope(id, false, true);
+    let read = |file| std::fs::read_to_string(dir.join(file)).map(|value| value.trim().to_owned());
+    Ok(serde_json::json!({
+        "memory_max":read("memory.max")?,
+        "pids_max":read("pids.max")?,
+        "cpu_max":read("cpu.max")?,
+    }))
+}
+
+fn cgroup_scope(id: &str, prepared: bool, oci: bool) -> std::path::PathBuf {
     let (mount, root) = cgroup_paths(id, oci);
-    let path = mount
+    mount
         .join(root)
         .join("workloads")
         .join(if prepared { "prepared" } else { "active" })
-        .join(id);
-    crate::cgroups::observation(&path)
+        .join(id)
 }
 
 pub(crate) fn assert_cgroup_absent() -> io::Result<()> {

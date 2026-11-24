@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{ensure, Context};
 use conjet_launch_service::handshake::unhex;
 use conjet_launch_service::spec::{
-    LaunchSpec, ID_MAP_WIDTH, NATIVE_LIMITS, WORKLOAD_GID, WORKLOAD_UID,
+    LaunchSpec, ResourceLimits, ID_MAP_WIDTH, WORKLOAD_GID, WORKLOAD_UID,
 };
 use serde_json::{json, Map, Value};
 
@@ -168,15 +168,9 @@ impl Image {
         let host = &data["HostConfig"];
         let host_options = object(host, "Docker HostConfig")?
             .ok_or_else(|| Rejected::bad("expected Docker HostConfig"))?;
-        if data["Image"] != self.reference
-            || host["NetworkMode"] != "none"
-            || host["Memory"].as_u64() != Some(NATIVE_LIMITS.memory_bytes)
-            || host["NanoCpus"].as_u64()
-                != Some(u64::from(NATIVE_LIMITS.cpu_millicores) * 1_000_000)
-            || host["PidsLimit"].as_u64() != Some(u64::from(NATIVE_LIMITS.pids))
-        {
+        if data["Image"] != self.reference || host["NetworkMode"] != "none" {
             return Err(Rejected::bad(
-                "require the staged image, --network none and 16 MiB/4 PIDs/0.5 CPU",
+                "invalid staged image or normalized network mode",
             ));
         }
         options(
@@ -284,6 +278,7 @@ impl Image {
             .as_str()
             .ok_or_else(|| Rejected::bad("invalid working directory"))?;
         let (uid, gid) = identity(&data["User"], &self.defaults["User"], mapped_ids)?;
+        let limits = resources(host)?;
         let spec = LaunchSpec {
             image_digest: self.config_digest.clone(),
             argv,
@@ -299,7 +294,8 @@ impl Image {
             secondary_network_alias: None,
             volume: None,
             build_snapshot: None,
-            limits: NATIVE_LIMITS,
+            limits,
+            docker_resource_defaults: limits.has_unlimited(),
         };
         spec.validate()
             .map_err(|error| Rejected::bad(error.to_string()))?;
@@ -308,9 +304,63 @@ impl Image {
     }
 }
 
+fn resources(host: &Value) -> Result<ResourceLimits, Rejected> {
+    let read = |key| match &host[key] {
+        Value::Null => Ok(0),
+        value => value
+            .as_u64()
+            .ok_or_else(|| Rejected::bad(format!("invalid native Docker {key}"))),
+    };
+    let nano_cpus = read("NanoCpus")?;
+    if nano_cpus % 1_000_000 != 0 {
+        return Err(Rejected::bad("native CPU limits must use whole millicores"));
+    }
+    let cpu_millicores = u32::try_from(nano_cpus / 1_000_000)
+        .map_err(|_| Rejected::bad("native CPU limit exceeds its bound"))?;
+    let pids = if host["PidsLimit"].as_i64() == Some(-1) {
+        0
+    } else {
+        u32::try_from(read("PidsLimit")?)
+            .map_err(|_| Rejected::bad("native PID limit exceeds its bound"))?
+    };
+    Ok(ResourceLimits {
+        memory_bytes: read("Memory")?,
+        pids,
+        cpu_millicores,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_explicit_and_omitted_docker_limits_without_clamping() {
+        let control = resources(&json!({})).unwrap();
+        assert_eq!(
+            control,
+            ResourceLimits {
+                memory_bytes: 0,
+                pids: 0,
+                cpu_millicores: 0
+            }
+        );
+        let service = resources(&json!({"Memory":134217728, "PidsLimit":64,
+            "NanoCpus":500000000}))
+        .unwrap();
+        assert_eq!(
+            service,
+            ResourceLimits {
+                memory_bytes: 134217728,
+                pids: 64,
+                cpu_millicores: 500
+            }
+        );
+        assert_eq!(resources(&json!({"PidsLimit":-1})).unwrap().pids, 0);
+        assert!(resources(&json!({"NanoCpus":500000001})).is_err());
+        assert!(resources(&json!({"PidsLimit":-2})).is_err());
+        assert!(resources(&json!({"Memory":-1})).is_err());
+    }
 
     #[test]
     fn resolves_the_requested_pair_before_the_image_default() {

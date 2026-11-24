@@ -481,6 +481,11 @@ impl Ledger {
                     "cgroup_mount":mount,"cgroup_scope":scope,"overlay":overlay,
                     "overlay_present":overlay.is_dir(),
                 });
+                if let Ok(limits) =
+                    crate::kernel_fixture::cgroup_effective_limits(&record.handle.workload_id)
+                {
+                    state["effective_limits"] = limits;
+                }
             }
             if oci && active {
                 active_workloads.push(state.clone());
@@ -833,7 +838,6 @@ impl FreshFixture {
         let mode = match argv.as_slice() {
             _ if self.oci
                 && (spec.network == "none" || spec.network_alias.is_some())
-                && spec.limits == crate::spec::NATIVE_LIMITS
                 && !prepared =>
             {
                 "native-oci"
@@ -842,6 +846,12 @@ impl FreshFixture {
                 return Err((
                     "unsupported_option",
                     "OCI requires a fresh constrained launch with no network or a private DNS alias",
+                ));
+            }
+            _ if spec.docker_resource_defaults => {
+                return Err((
+                    "unsupported_option",
+                    "Docker resource defaults require an OCI boot",
                 ));
             }
             ["/bin/probe"]

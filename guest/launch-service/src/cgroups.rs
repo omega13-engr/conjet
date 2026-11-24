@@ -40,10 +40,21 @@ impl WorkloadCgroup {
         std::fs::create_dir(&path)?;
         let result = (|| {
             let directory = File::open(&path)?;
-            write_control(&path, "memory.max", &limits.memory_bytes.to_string())?;
-            write_control(&path, "pids.max", &limits.pids.to_string())?;
+            let maximum = |value: u64| {
+                if value == 0 {
+                    "max".to_owned()
+                } else {
+                    value.to_string()
+                }
+            };
+            write_control(&path, "memory.max", &maximum(limits.memory_bytes))?;
+            write_control(&path, "pids.max", &maximum(u64::from(limits.pids)))?;
             let quota = u64::from(limits.cpu_millicores) * CPU_PERIOD_US / 1_000;
-            write_control(&path, "cpu.max", &format!("{quota} {CPU_PERIOD_US}"))?;
+            write_control(
+                &path,
+                "cpu.max",
+                &format!("{} {CPU_PERIOD_US}", maximum(quota)),
+            )?;
             Ok(directory)
         })();
         match result {

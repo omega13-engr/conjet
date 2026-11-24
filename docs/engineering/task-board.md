@@ -993,6 +993,13 @@ the native engine's documented effective policy, and report and verify
 the resulting bounds. Preserve static fixture restrictions and Core
 admission, pressure recovery and idle shrink.
 
+Evidence: Release diagnostics checked the kernel cgroup and Docker
+configuration for omitted limits, partial limits and the frozen lifecycle
+and service values. All four workloads had verified teardown. Invalid
+limits were rejected before admission. The first run exposed the relative
+launch command restriction tracked in SPEED-113. Logs are under
+`SPEED-111/` on ExternalSSD.
+
 ### SPEED-112
 
 Title: Keep admitted Docker services alive through bounded control waits
@@ -1001,6 +1008,16 @@ Acceptance: Verify a detached native service remains available beyond
 the current setup tracking deadline. Separate startup, running and
 teardown waits. Preserve service cancellation, output draining,
 generation ownership and release cleanup.
+
+### SPEED-113
+
+Title: Resolve named launch commands inside the OCI workload root
+
+Acceptance: Launch the frozen default `sleep` command and pinned image
+entrypoints through the workload's configured PATH. Reuse the existing
+bounded exec search after chroot and identity setup. Preserve absolute
+command behavior, reject ambiguous paths and keep the static guest
+fixture restriction.
 
 ### SPEED-091
 

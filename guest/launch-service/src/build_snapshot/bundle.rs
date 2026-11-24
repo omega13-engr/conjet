@@ -73,6 +73,7 @@ pub(crate) fn parse(
     let mut selected = snapshot.clone();
     selected.bundle_policy = true;
     let spec = LaunchSpec {
+        docker_resource_defaults: false,
         image_digest: image_digest.to_owned(),
         argv: serde_json::from_value(field("args")?).map_err(|_| "invalid build argv")?,
         env: serde_json::from_value(field("env")?).map_err(|_| "invalid build environment")?,

@@ -56,6 +56,8 @@ pub struct LaunchSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_snapshot: Option<crate::build_snapshot::Snapshot>,
     pub limits: ResourceLimits,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub docker_resource_defaults: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -72,6 +74,20 @@ pub struct ResourceLimits {
     pub memory_bytes: u64,
     pub pids: u32,
     pub cpu_millicores: u32,
+}
+
+impl ResourceLimits {
+    pub fn has_unlimited(self) -> bool {
+        self.memory_bytes == 0 || self.pids == 0 || self.cpu_millicores == 0
+    }
+
+    fn validate(self, defaults: bool) -> bool {
+        ((defaults && self.memory_bytes == 0)
+            || (MIN_MEMORY_BYTES..=MAX_MEMORY_BYTES).contains(&self.memory_bytes))
+            && ((defaults && self.pids == 0) || (1..=MAX_PIDS).contains(&self.pids))
+            && ((defaults && self.cpu_millicores == 0)
+                || (MIN_CPU_MILLICORES..=MAX_CPU_MILLICORES).contains(&self.cpu_millicores))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -282,10 +298,9 @@ impl LaunchSpec {
         {
             return Err(SpecError::Network);
         }
-        let limits = spec.limits;
-        if !(MIN_MEMORY_BYTES..=MAX_MEMORY_BYTES).contains(&limits.memory_bytes)
-            || !(1..=MAX_PIDS).contains(&limits.pids)
-            || !(MIN_CPU_MILLICORES..=MAX_CPU_MILLICORES).contains(&limits.cpu_millicores)
+        if !spec
+            .limits
+            .validate(spec.docker_resource_defaults && spec.build_snapshot.is_none())
         {
             return Err(SpecError::Resources);
         }
@@ -343,6 +358,7 @@ mod tests {
                     pids: 4,
                     cpu_millicores: 500,
                 },
+                docker_resource_defaults: false,
             },
         }
     }
@@ -377,6 +393,20 @@ mod tests {
         let mut request = valid();
         request.spec.uid = ID_MAP_WIDTH;
         assert_eq!(request.validate().err(), Some(SpecError::Identity));
+    }
+
+    #[test]
+    fn permits_independent_docker_resource_omissions_with_explicit_authority() {
+        let mut request = valid();
+        request.spec.docker_resource_defaults = true;
+        request.spec.limits = ResourceLimits {
+            memory_bytes: 128 * 1024 * 1024,
+            pids: 0,
+            cpu_millicores: 0,
+        };
+        assert!(request.spec.validate().is_ok());
+        request.spec.limits.memory_bytes = MAX_MEMORY_BYTES + 1;
+        assert_eq!(request.validate().err(), Some(SpecError::Resources));
     }
 
     #[test]
