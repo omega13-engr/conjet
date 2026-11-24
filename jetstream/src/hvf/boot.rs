@@ -123,6 +123,7 @@ pub struct HvfBootOptions {
     pub trace_guest_readiness: bool,
     pub enable_native_launch: bool,
     pub native_airgap: bool,
+    pub enable_native_memory_bridge: bool,
     pub external_stop: Option<Arc<AtomicBool>>,
 }
 
@@ -142,6 +143,7 @@ impl Default for HvfBootOptions {
             trace_guest_readiness: false,
             enable_native_launch: false,
             native_airgap: false,
+            enable_native_memory_bridge: false,
             external_stop: None,
         }
     }
@@ -2533,8 +2535,7 @@ impl HvfBootRunner {
             &mut vm_state,
             Some(memory_reclaimer),
             trace_started,
-            self.options.enable_native_launch,
-            self.options.native_airgap,
+            &self.options,
         ) {
             Ok(detail) => stage(&mut stages, "virtio-runtime", true, detail),
             Err(error) => {
@@ -3860,8 +3861,7 @@ fn configure_virtio_runtime(
     vm_state: &mut VmState,
     memory_reclaimer: Option<Arc<dyn GuestMemoryReclaimer>>,
     trace_started: Option<Instant>,
-    enable_native_launch: bool,
-    native_airgap: bool,
+    options: &HvfBootOptions,
 ) -> Result<String, String> {
     let mut block_paths = vec![config.boot_source.root_disk_path.clone()];
     if let Some(path) = config.boot_source.data_disk_path.clone() {
@@ -3907,7 +3907,7 @@ fn configure_virtio_runtime(
             }
             VirtioDeviceKind::Vsock => {
                 let mut bridges = Vec::new();
-                if !native_airgap {
+                if !options.native_airgap {
                     let docker_bridge =
                         if let Some(existing) = vm_state.devices.docker_bridge.as_ref() {
                             existing.state.clone()
@@ -3919,6 +3919,9 @@ fn configure_virtio_runtime(
                             vm_state.devices.docker_bridge = Some(bridge);
                             state
                         };
+                    bridges.push(docker_bridge);
+                }
+                if !options.native_airgap || options.enable_native_memory_bridge {
                     let memory_socket_path =
                         memory_socket_path(&config.boot_source.docker_socket_path);
                     let memory_bridge =
@@ -3935,9 +3938,9 @@ fn configure_virtio_runtime(
                             vm_state.devices.memory_bridge = Some(bridge);
                             state
                         };
-                    bridges.extend([docker_bridge, memory_bridge]);
+                    bridges.push(memory_bridge);
                 }
-                if enable_native_launch {
+                if options.enable_native_launch {
                     let native_bridge = HostUnixVsockBridge::bind_native_launch(
                         config
                             .boot_source

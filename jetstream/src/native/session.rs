@@ -51,6 +51,12 @@ pub(super) struct Options {
     /// Trusted branch-built guest supervisor, for development builds.
     #[arg(long)]
     guest_init: Option<PathBuf>,
+    /// Trusted static Core memory service for a native telemetry canary.
+    #[arg(long, requires_all = ["guest_reclaimd", "oci_package"])]
+    guest_memd: Option<PathBuf>,
+    /// Trusted static Core reclaim helper paired with the memory service.
+    #[arg(long, requires = "guest_memd")]
+    guest_reclaimd: Option<PathBuf>,
     /// Maximum lifetime of the disposable VM.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(30..=1800))]
     lifetime_seconds: u64,
@@ -103,6 +109,17 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         )
     })?;
     validate_executable(&guest).context("invalid guest supervisor")?;
+    let memory_helpers = options
+        .guest_memd
+        .zip(options.guest_reclaimd)
+        .map(|(memd, reclaimd)| -> anyhow::Result<_> {
+            let memd = read_regular(&memd, WORKLOAD_LIMIT)?;
+            let reclaimd = read_regular(&reclaimd, WORKLOAD_LIMIT)?;
+            validate_executable(&memd).context("invalid Core memory service")?;
+            validate_executable(&reclaimd).context("invalid Core reclaim helper")?;
+            Ok((memd, reclaimd))
+        })
+        .transpose()?;
     let kernel = read_regular(&options.kernel, 64 * 1024 * 1024)?;
     ensure!(
         Sha512::digest(&kernel)[..] == kernel_expected,
@@ -139,6 +156,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         &descriptor,
         &key,
         oci.as_ref(),
+        memory_helpers.as_ref(),
     )?;
     let machine = MachineBuilder::new(JetstreamConfig {
         memory_mib: 2048,
@@ -188,6 +206,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             require_conjet_ready: false,
             enable_native_launch: true,
             native_airgap: true,
+            enable_native_memory_bridge: memory_helpers.is_some(),
             external_stop: Some(force_stop),
             ..Default::default()
         });
@@ -375,6 +394,7 @@ fn build_archive(
     descriptor: &[u8],
     key: &[u8],
     oci: Option<&super::oci::Root>,
+    memory_helpers: Option<&(Vec<u8>, Vec<u8>)>,
 ) -> anyhow::Result<()> {
     let mut archive = OpenOptions::new()
         .write(true)
@@ -420,6 +440,10 @@ fn build_archive(
     append("dev/null", 0o020666, &[], 1, 3, 0, 0)?;
     append("init", 0o100755, guest, 0, 0, 0, 0)?;
     append("etc/conjet/launch.key", 0o100600, key, 0, 0, 0, 0)?;
+    if let Some((memd, reclaimd)) = memory_helpers {
+        append("etc/conjet/conjet-memd", 0o100500, memd, 0, 0, 0, 0)?;
+        append("etc/conjet/conjet-reclaimd", 0o100500, reclaimd, 0, 0, 0, 0)?;
+    }
     if let Some(root) = oci {
         append(
             "etc/conjet/native-oci-image",

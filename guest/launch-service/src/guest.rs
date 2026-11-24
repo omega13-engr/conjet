@@ -90,6 +90,9 @@ pub fn serve(key_path: &Path, profile: Profile) -> Result<(), Box<dyn std::error
         Profile::Fixture { .. } | Profile::Native => {
             let allow_crash = matches!(profile, Profile::Fixture { allow_crash: true });
             let native = matches!(profile, Profile::Native);
+            if native {
+                crate::recovery_fixture::start_memory_service()?;
+            }
             Server::with_fresh(
                 key,
                 crate::fresh_fixture::FreshFixture::open(allow_crash, native)?,

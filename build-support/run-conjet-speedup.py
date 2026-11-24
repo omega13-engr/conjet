@@ -364,7 +364,7 @@ def stop_child(process, timeout):
     return process.returncode
 
 
-def audit_native_boot(directory, guest):
+def audit_native_boot(directory, guest, helpers=()):
     """Read the boot archive manifest without recording its private payloads."""
     root = 'etc/conjet/oci-root'
     allowed_top_level = {
@@ -374,7 +374,10 @@ def audit_native_boot(directory, guest):
         root,
     }
     entries = set()
-    supervisor = None
+    expected_executables = {'init': guest, **dict(zip(
+        ('etc/conjet/conjet-memd', 'etc/conjet/conjet-reclaimd'), helpers))}
+    observed_executables = {}
+    allowed_top_level.update(expected_executables)
     with (directory / 'init.cpio').open('rb') as archive:
         while True:
             header = archive.read(110)
@@ -399,14 +402,17 @@ def audit_native_boot(directory, guest):
                     or not (name in allowed_top_level or name.startswith(root + '/'))):
                 raise RuntimeError(f'unexpected native boot entry {name!r}')
             entries.add(name)
-            if name == 'init':
-                if size != guest.stat().st_size or size > 4 * 1024 * 1024:
-                    raise RuntimeError('unexpected native init size')
-                supervisor = hashlib.sha256(archive.read(size)).hexdigest()
+            if name in expected_executables:
+                source = expected_executables[name]
+                if size != source.stat().st_size or size > 4 * 1024 * 1024:
+                    raise RuntimeError(f'unexpected executable size for {name}')
+                observed_executables[name] = hashlib.sha256(archive.read(size)).hexdigest()
             else:
                 archive.seek(size, os.SEEK_CUR)
             archive.seek(-archive.tell() % 4, os.SEEK_CUR)
-    if supervisor != fingerprint(guest)['sha256'] or root not in entries:
+    if (observed_executables != {name: fingerprint(source)['sha256']
+                                for name, source in expected_executables.items()}
+            or root not in entries):
         raise RuntimeError('native boot archive does not match the trusted guest and OCI fixture')
     disk = directory / 'blank.raw'
     if disk.stat().st_size != 16 * 1024 * 1024:
@@ -414,7 +420,8 @@ def audit_native_boot(directory, guest):
     with disk.open('rb') as source:
         if any(chunk.strip(b'\0') for chunk in iter(lambda: source.read(1024 * 1024), b'')):
             raise RuntimeError('unexpected data in native boot block device')
-    return {'supervisor_sha256': supervisor, 'archive_entry_count': len(entries),
+    return {'supervisor_sha256': observed_executables['init'], 'archive_entry_count': len(entries),
+            'supervisor_executables': observed_executables,
             'supervisor_root_entries': sorted(entries & allowed_top_level),
             'blank_block_bytes': disk.stat().st_size}
 
@@ -439,11 +446,12 @@ def native_session(args, root):
     vm = bridge = directory = None
     registry_scope = ExitStack()
     registry = None
+    helpers = (args.native_memd, args.native_reclaimd) if args.native_memd else ()
     try:
         if host == before['endpoint']:
             raise RuntimeError('candidate endpoint overlaps production')
         assets = [cli, args.core, args.native_kernel, args.native_guest, args.native_package,
-                  args.native_receipt, DOCKER]
+                  args.native_receipt, DOCKER, *helpers]
         if python_owner:
             assets.append(adapter)
         report['binary_sha256'] = {str(path): fingerprint(path.resolve(strict=True))['sha256'] for path in assets}
@@ -452,6 +460,8 @@ def native_session(args, root):
                       '--kernel', args.native_kernel, '--kernel-sha512', kernel_hash,
                       '--guest-init', args.native_guest, '--oci-package', args.native_package,
                       '--sha256', report['binary_sha256'][str(args.native_package)]]
+        if helpers:
+            vm_command += ['--guest-memd', helpers[0], '--guest-reclaimd', helpers[1]]
         report['vm_command'] = list(map(str, vm_command))
         with (output / 'vmm.stderr').open('w') as log:
             vm = subprocess.Popen(vm_command, env=env, stdin=subprocess.DEVNULL,
@@ -465,8 +475,8 @@ def native_session(args, root):
         directory = candidate
         report['vmm_pid'] = vm.pid
         report['native_session'] = str(directory)
-        if args.diagnostics == 'control':
-            report['native_boot_audit'] = audit_native_boot(directory, args.native_guest)
+        if args.diagnostics in ('control', 'memory-telemetry'):
+            report['native_boot_audit'] = audit_native_boot(directory, args.native_guest, helpers)
         if args.diagnostics == 'oci-import':
             diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-live-install.py'))
             config_digest = json.loads(args.import_receipt.read_text())['config_digest']
@@ -548,6 +558,9 @@ def native_session(args, root):
             elif args.diagnostics == 'published-port':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-published-port.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
+            elif args.diagnostics == 'memory-telemetry':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-core-memory.py'))
+                diagnostic['collect'](endpoint, bridge.pid, directory, vm.pid, output)
             elif args.diagnostics in ('oci', 'oci-import'):
                 oci = runpy.run_path(str(REPO / 'benchmarks/native-oci-two-layer.py'))
                 oci['collect'](endpoint, bridge.pid, docker, env, output, args.image)
@@ -633,12 +646,14 @@ def main():
     parser.add_argument('--legacy-baseline', action='store_true', help='explicit historical Docker/containerd lane')
     parser.add_argument('--network-helper', type=Path)
     for name in ('native-kernel', 'native-guest', 'native-package', 'native-receipt', 'native-evidence', 'matched-output',
+                 'native-memd', 'native-reclaimd',
                  'import-package', 'import-receipt', 'registry-fixtures'):
         parser.add_argument('--' + name, type=Path)
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec',
-                                                  'guest-bridge', 'docker-network', 'tcp-relay', 'published-port'),
+                                                  'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
+                                                  'memory-telemetry'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
@@ -664,6 +679,12 @@ def main():
     if args.docker_args[:1] == ['--']:
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
+    if args.diagnostics == 'memory-telemetry':
+        if not (args.native_memd and args.native_reclaimd and args.docker_owner == 'rust'):
+            parser.error('memory telemetry requires the two static Core helpers and the Rust owner')
+        native_assets += ('native_memd', 'native_reclaimd')
+    elif args.native_memd or args.native_reclaimd:
+        parser.error('Core memory helpers require the memory-telemetry canary')
     if args.diagnostics == 'oci-import':
         if not (args.import_package and args.import_receipt and args.docker_owner == 'rust'):
             parser.error('OCI import diagnostics require the Rust owner and a staged package and receipt')

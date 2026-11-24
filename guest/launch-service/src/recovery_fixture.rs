@@ -4,11 +4,66 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::cgroups::write_control;
 use crate::handshake::hex;
 use crate::intent::{DIRECTORY, Intent};
 use crate::kernel_fixture;
 use crate::sandbox_fixture;
 use crate::security::checked;
+
+const MEMD: &str = "/etc/conjet/conjet-memd";
+const RECLAIMD: &str = "/etc/conjet/conjet-reclaimd";
+
+fn core_cgroups() -> io::Result<kernel_fixture::CgroupMount> {
+    std::fs::create_dir("/sys/fs")?;
+    let root = Path::new("/sys/fs/cgroup");
+    let mount = kernel_fixture::CgroupMount::new(root)?;
+    let conjet = root.join("conjet.slice");
+    write_control(root, "cgroup.subtree_control", "+memory")?;
+    std::fs::create_dir(&conjet)?;
+    write_control(&conjet, "cgroup.subtree_control", "+memory")?;
+    for name in ["conjet-daemons.slice", "conjet-services.slice"] {
+        std::fs::create_dir(conjet.join(name))?;
+    }
+    Ok(mount)
+}
+
+pub(crate) fn start_memory_service() -> io::Result<()> {
+    const READY: &str = "/run/conjet/memory-vsock-ready";
+    if !Path::new(MEMD).try_exists()? {
+        return Ok(());
+    }
+    match std::fs::remove_file(READY) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let daemon = Path::new("/sys/fs/cgroup/conjet.slice/conjet-daemons.slice");
+    write_control(daemon, "cgroup.procs", &std::process::id().to_string())?;
+    // Both helpers inherit the service group. PID 1 drains that group on
+    // clean shutdown and before restarting this supervisor.
+    let mut service = Command::new(MEMD)
+        .env("CONJET_RECLAIMD_PATH", RECLAIMD)
+        .env("CONJET_NATIVE_WORKLOAD_CGROUPS", "1")
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = service.try_wait()? {
+            return Err(io::Error::other(format!(
+                "Core memory service exited {status}"
+            )));
+        }
+        if std::fs::read_to_string(READY).is_ok_and(|port| port == "2376\n") {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Core memory service",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::Error>> {
     if std::process::id() != 1 {
@@ -18,6 +73,9 @@ pub fn serve(profile: crate::guest::Profile) -> Result<(), Box<dyn std::error::E
     let intent = Intent::open(Path::new(DIRECTORY));
     let oci = matches!(profile, crate::guest::Profile::Native)
         && Path::new(sandbox_fixture::OCI_MARKER).try_exists()?;
+    let _core_cgroups = (oci && Path::new(MEMD).try_exists()?)
+        .then(core_cgroups)
+        .transpose()?;
     for attempt in 0..2 {
         let mut service = Command::new("/init")
             .arg(match profile {

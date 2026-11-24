@@ -825,14 +825,14 @@ pub(crate) fn reap(pid: libc::pid_t) -> io::Result<i32> {
     }
 }
 
-struct CgroupMount {
+pub(crate) struct CgroupMount {
     path: PathBuf,
     target: CString,
     mounted: bool,
 }
 
 impl CgroupMount {
-    fn new(path: &Path) -> io::Result<Self> {
+    pub(crate) fn new(path: &Path) -> io::Result<Self> {
         let target = CString::new(path.as_os_str().as_bytes())?;
         std::fs::create_dir(path)?;
         // The fixture owns the new mountpoint inside its disposable guest.

@@ -973,8 +973,24 @@ static void test_residual_service_reclaim_request_validation_is_root_scoped(void
     require_int("reject unsafe residual key", service_reclaim_request_is_valid(&request) ? 1 : 0, 0);
 }
 
+static void test_native_workload_requires_owned_active_leaf(void) {
+    const char *prefix = "/sys/fs/cgroup/conjet-native-0123456789abcdef0123456789abcdef";
+    const char *id = "0123456789abcdef0123456789abcdef";
+    char path[256];
+    snprintf(path, sizeof(path), "%s/workloads/active/%s", prefix, id);
+    require_int("exact native workload leaf", path_is_native_workload(path), 1);
+    snprintf(path, sizeof(path), "%s/workloads/prepared/%s", prefix, id);
+    require_int("prepared leaf excluded", path_is_native_workload(path), 0);
+    snprintf(path, sizeof(path), "%s/workloads/active/%s/child", prefix, id);
+    require_int("descendant excluded", path_is_native_workload(path), 0);
+    snprintf(path, sizeof(path), "%s/workloads/active/1123456789abcdef0123456789abcdef", prefix);
+    require_int("foreign leaf excluded", path_is_native_workload(path), 0);
+    require_int("short path excluded", path_is_native_workload("/"), 0);
+}
+
 int main(void) {
     test_vsock_peer_requires_host_cid();
+    test_native_workload_requires_owned_active_leaf();
     test_build_snapshot_aggregates_prefixed_sibling_memory_without_false_activity();
     test_default_build_cgroup_path_tracks_daemon_scoped_build_workers();
     test_page_size_and_mglru_helpers_are_fail_closed();

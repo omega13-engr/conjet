@@ -36,3 +36,27 @@ Every boot acknowledged guest cleanup, removed the private session and owner
 socket, and matched its production fingerprint before and after. These
 functional canaries do not qualify performance or compare with Kiri.
 Independent evidence review remains pending.
+
+## SPEED-066
+
+The release native memory canary booted the existing Core `conjet-memd` and
+`conjet-reclaimd` as trusted static ARM64 executables in the isolated
+initramfs. The live archive matched all three guest executables. The guest
+only exposed the native and memory bridges and kept daemon and service cgroups
+separate from the per-workload cgroups. PID 1 owned the guest memory helper
+process group through supervisor restart and shutdown.
+
+The Core endpoint returned known available memory and complete telemetry for
+the same service cgroup before, during and after a fresh 16 MiB, four-PID,
+0.5-CPU Alpine workload. Active count was 0 → 1 → 0 and container charge was
+0 → 131,072 → 0 bytes. The launcher confirmed zero reclaim failures, guest
+shutdown, no remaining session or sockets, and matching production
+fingerprints. Exact artifact hashes, commands and metric snapshots are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-057/verified-memory-telemetry/`.
+
+The C cgroup regression suite passed, as did `cargo test --locked --workspace`
+(171 passed, three ignored). The unmodified Clippy configuration reported
+existing 32-bit PSCI enum and raw-pointer FFI lint errors. This increment
+keeps Core policy activation gated pending generation-scoped admission. It
+verifies telemetry transport and native ownership classification. Balloon
+growth, pressure-time integrity and idle shrink remain SPEED-058 work.

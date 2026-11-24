@@ -129,7 +129,52 @@ Source: [Native engine plan](native-engine-v2-plan.md) and current native host/g
 
 Review: Pending implementation, validation and independent evidence review.
 
-Next Action: Trace existing native memory integration and add only missing contract links.
+Next Action: Qualify the guest telemetry transport in SPEED-066, then connect
+authenticated admission and terminal cleanup to the governor and run the
+pressure and idle qualification.
+
+### SPEED-066
+
+Title: Expose Core memory telemetry from the isolated native guest
+
+Description: Run the existing Core memory helpers in the native initramfs.
+Expose native workload cgroups to Core telemetry over the private memory vsock,
+with a fixture that samples a live and a removed workload.
+
+Is blocked by task: SPEED-057 validation, complete.
+
+Acceptance Criteria:
+
+- The same Core metrics endpoint returns guest memory and real native
+  workload cgroup usage. Verify service cgroup telemetry, workload removal,
+  no retained runtime, production preservation and shutdown cleanup.
+- Keep controller activation behind verified admission and cleanup ownership.
+  This increment does not qualify SPEED-058 or authorize new timing.
+
+Evidence: The release telemetry canary observed 0 → 1 → 0 native cgroups,
+131,072 bytes of live cgroup usage and a stable service cgroup identity.
+See [SPEED-066 evidence](native-engine-validation.md#speed-066).
+
+Review: Self-review and isolated validation passed. Independent review pending.
+
+### SPEED-067
+
+Title: Gate native launch on generation-scoped Core admission
+
+Description: Publish pending admissions and owned workload records on the
+authenticated guest channel. Bind a Core grant to the exact boot and workload
+identity. Keep the launch pending until its own grant arrives or it expires.
+
+Is blocked by task: SPEED-066 validation, complete.
+
+Acceptance Criteria:
+
+- Missing, stale or reused ownership cannot authorize a launch or release
+  capacity reserved for another workload. Cover timeout, cancellation, clean
+  exit and unknown cleanup disposition.
+- Core activates only with the memory bridge and an authenticated admission
+  authority. Keep admission and guest cleanup authoritative over idle shrink.
+  Run the SPEED-058 memory qualification before comparative timing.
 
 ### SPEED-059
 
