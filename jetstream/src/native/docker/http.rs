@@ -1033,6 +1033,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             let specs = container.spec["argv"].as_array().expect("validated args");
             let mut lifecycle = json!({
                 "Status":status,"Running":status=="running","ExitCode":code,
+                "StartedAt":state.started_at.as_deref().unwrap_or("0001-01-01T00:00:00Z"),
                 "OOMKilled":state.terminal.as_ref().is_some_and(|terminal|
                     terminal.witness["exit"]["oom_killed"] == true),
                 "Error":state.error.as_deref().unwrap_or("")

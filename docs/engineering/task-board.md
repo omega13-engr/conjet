@@ -1710,6 +1710,46 @@ report its native OCI worker through the original Buildx debug call,
 and retain separate task-owned configuration, cache, cgroup and
 network leases. Runtime RUN and cancellation remain their own gates.
 
+Evidence: The original Buildx client bootstrapped the pinned v0.23.2
+daemon for Rust, Go and Node. All three reported the private
+`conjet-speedup` endpoint, `docker-container` driver, Linux ARM64,
+native snapshotter and sandbox process mode. The launched argv
+explicitly selected Conjet's native runtime binary. The guest exposed a
+read-only proc and owned cgroup view. Native admission retained cgroup
+authority instead of delegating it to BuildKit's entrypoint.
+`SPEED-158/bootstrap-procfs-stat/` records the actual worker output,
+removal of all three containers and caches, a released disk and clean
+ext4 check. The first solve reached Dockerfile transfer and failed at
+timestamp preservation. No build or benchmark passed in this run.
+
+### SPEED-159
+
+Title: Connect the pinned BuildKit executor to the native supervisor
+
+Acceptance: Authenticate the executor as a member of the live worker
+generation. Limit the channel to the native build runtime verbs.
+Resolve only the requested bundle in that generation's owned cache
+and mount namespace. Verify the detached snapshot identity before
+admission. Fail stale, foreign and unmounted bundle requests.
+
+### SPEED-161
+
+Title: Preserve frozen Dockerfile and base-layer metadata in the worker
+
+Acceptance: Complete the original Buildx preload through the pinned
+worker. Preserve filesystem ownership, timestamps and content in the
+owned cache. Retain the frozen base digests, and verify cache cleanup and
+the original image transfer semantics.
+
+### SPEED-160
+
+Title: Qualify RUN, cancellation and cache through the original Buildx client
+
+Acceptance: Prove the original Rust, Go and Node build solves execute
+RUN in a native workload with verified cleanup and correct artifacts.
+Preserve exit and cancellation behavior, cache reuse, and source and
+dependency invalidation. Keep the frozen fixture limits and inputs.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

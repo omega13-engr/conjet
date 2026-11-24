@@ -18,6 +18,18 @@ pub const REGISTRY_CONFIG: &str =
     "sha256:33eeff39e0aaabe61ca826fd7502396183462451be0783133e1a8fa944fc7350";
 pub const BUILDKIT_CONFIG: &str =
     "sha256:8ff6bca64af355cd0434480a0fd583a7c571211750a5eb806b992017148bab55";
+pub const BUILDKIT_PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+pub const BUILDKIT_NATIVE_ARGS: &[&str] = &[
+    "buildkitd",
+    "--root=/run/conjet/buildkit/worker",
+    "--containerd-worker=false",
+    "--oci-worker=true",
+    "--oci-worker-rootless",
+    "--oci-worker-snapshotter=native",
+    "--oci-worker-binary=/usr/bin/conjet-buildkit-runtime",
+    "--oci-worker-net=host",
+];
+pub const BUILDKIT_NETWORK_ENTITLEMENT: &str = "--allow-insecure-entitlement=network.host";
 
 pub fn buildkit_control_exec(image: &str, argv: &[String]) -> bool {
     image == BUILDKIT_CONFIG
@@ -99,6 +111,8 @@ pub struct LaunchSpec {
     pub open_stdin: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub redis_bootstrap: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub buildkit_worker: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -337,6 +351,9 @@ impl LaunchRequest {
             return Err(SpecError::Budget);
         }
         let digest = self.spec.validate_process(search_path)?;
+        if self.spec.buildkit_worker && !self.spec.can_start_buildkit() {
+            return Err(SpecError::Identity);
+        }
         Ok(ValidatedLaunch {
             request: self,
             digest,
@@ -345,6 +362,32 @@ impl LaunchRequest {
 }
 
 impl LaunchSpec {
+    pub fn can_start_buildkit(&self) -> bool {
+        self.image_digest == BUILDKIT_CONFIG
+            && self.uid == 0
+            && self.gid == 0
+            && self.cwd == "/"
+            && self.env.as_slice() == [BUILDKIT_PATH]
+            && self.build_snapshot.is_none()
+            && self.bind.is_none()
+            && !self.open_stdin
+            && !self.redis_bootstrap
+            && self
+                .volume
+                .as_ref()
+                .is_some_and(|volume| volume.target == "/var/lib/buildkit" && !volume.read_only)
+            && self
+                .argv
+                .iter()
+                .take(BUILDKIT_NATIVE_ARGS.len())
+                .map(String::as_str)
+                .eq(BUILDKIT_NATIVE_ARGS.iter().copied())
+            && self
+                .argv
+                .get(BUILDKIT_NATIVE_ARGS.len()..)
+                .is_some_and(|extra| extra.is_empty() || extra == [BUILDKIT_NETWORK_ENTITLEMENT])
+    }
+
     pub fn can_bootstrap_redis(&self) -> bool {
         let args = self.argv.iter().map(String::as_str);
         self.image_digest == REDIS_CONFIG
@@ -485,6 +528,10 @@ impl LaunchSpec {
                     || !account.valid()
             })
             || (spec.redis_bootstrap && (!search_path || !spec.can_bootstrap_redis()))
+            || (spec.buildkit_worker
+                && (!search_path
+                    || (!spec.can_start_buildkit()
+                        && !buildkit_control_exec(&spec.image_digest, &spec.argv))))
         {
             return Err(SpecError::Identity);
         }
@@ -580,6 +627,7 @@ mod tests {
                 memory_swap_disabled: false,
                 open_stdin: false,
                 redis_bootstrap: false,
+                buildkit_worker: false,
             },
         }
     }
@@ -715,6 +763,40 @@ mod tests {
 
         request.spec.volume.as_mut().unwrap().read_only = true;
         assert_eq!(request.validate_oci().err(), Some(SpecError::Identity));
+    }
+
+    #[test]
+    fn buildkit_worker_requires_the_pinned_native_runtime_and_writable_cache() {
+        let mut spec = valid().spec;
+        spec.buildkit_worker = true;
+        spec.image_digest = BUILDKIT_CONFIG.into();
+        spec.argv = BUILDKIT_NATIVE_ARGS
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        spec.cwd = "/".into();
+        spec.uid = 0;
+        spec.gid = 0;
+        spec.env = vec![BUILDKIT_PATH.into()];
+        spec.volume = Some(VolumeMount {
+            name: "buildx_buildkit_worker_state".into(),
+            target: "/var/lib/buildkit".into(),
+            inode: 14,
+            read_only: false,
+        });
+        let validate = |spec| LaunchRequest { spec, ..valid() }.validate_oci();
+        assert!(validate(spec.clone()).is_ok());
+
+        let mut changed = spec.clone();
+        changed.argv.push("--oci-worker-binary=runc".into());
+        assert_eq!(validate(changed).err(), Some(SpecError::Identity));
+
+        let mut changed = spec.clone();
+        changed.image_digest = valid().spec.image_digest;
+        assert_eq!(validate(changed).err(), Some(SpecError::Identity));
+
+        spec.volume.as_mut().unwrap().read_only = true;
+        assert_eq!(validate(spec).err(), Some(SpecError::Identity));
     }
 
     #[test]

@@ -380,6 +380,7 @@ struct Record {
     bind_lease: Option<String>,
     build_snapshot: Option<crate::build_snapshot::Snapshot>,
     build_runtime_owned: bool,
+    buildkit_worker: bool,
     core_admission_deadline: Option<Instant>,
     cancelled: bool,
     terminate_requested: bool,
@@ -540,6 +541,7 @@ impl Ledger {
         let mut spec = spec.clone();
         spec.redis_bootstrap = false;
         spec.argv = argv;
+        spec.buildkit_worker &= crate::spec::buildkit_control_exec(&spec.image_digest, &spec.argv);
         spec.validate_exec()
             .map_err(|_| ("invalid_spec", "invalid native exec argv"))?;
         let pidfd = pidfd
@@ -1008,6 +1010,15 @@ impl FreshFixture {
             return Err(("invalid_spec", "invalid launch sequence domain"));
         }
         let spec = &ready.request().spec;
+        if spec.buildkit_worker
+            && (!crate::image_store::disk_store_enabled()
+                || !Path::new(crate::build_snapshot::MARKER).is_file())
+        {
+            return Err((
+                "unsupported_option",
+                "BuildKit requires the leased native workspace",
+            ));
+        }
         if !self.oci && !spec.fixture_identity() {
             return Err((
                 "invalid_spec",
@@ -1196,6 +1207,9 @@ impl FreshFixture {
         if ledger.closing {
             return Err(("busy", "fresh fixture is draining"));
         }
+        if spec.buildkit_worker && ledger.active().any(|record| record.buildkit_worker) {
+            return Err(("busy", "native BuildKit worker already owns the workspace"));
+        }
         let network_aliases: Vec<_> = spec.aliases().cloned().collect();
         if !network_aliases.is_empty()
             && (!self.oci
@@ -1295,6 +1309,7 @@ impl FreshFixture {
             bind_lease: spec.bind.as_ref().map(|bind| bind.lease.clone()),
             build_snapshot: spec.build_snapshot.clone(),
             build_runtime_owned: build,
+            buildkit_worker: spec.buildkit_worker,
             core_admission_deadline: self.core_admission.then_some(deadline),
             cancelled: false,
             terminate_requested: false,

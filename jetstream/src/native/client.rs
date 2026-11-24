@@ -413,6 +413,7 @@ fn execute(
         memory_swap_disabled: false,
         open_stdin: false,
         redis_bootstrap: false,
+        buildkit_worker: false,
         image_digest: identity.image_digest.clone(),
         argv: vec!["/bin/probe".into()],
         cwd: "/work".into(),

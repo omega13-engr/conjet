@@ -681,6 +681,7 @@ impl Container {
 #[derive(Default)]
 struct Lifecycle {
     started: bool,
+    started_at: Option<String>,
     terminal: Option<Arc<Terminal>>,
     error: Option<String>,
     removed: bool,
@@ -1699,6 +1700,16 @@ impl Owner {
         if let Some(volume) = &volume {
             spec["volume"] = json!(volume);
         }
+        if buildkit_worker {
+            use conjet_launch_service::spec::{BUILDKIT_NATIVE_ARGS, BUILDKIT_PATH};
+            let mut args = BUILDKIT_NATIVE_ARGS.iter().copied().collect::<Vec<_>>();
+            if let Some(flags) = config["Cmd"].as_array() {
+                args.extend(flags.iter().filter_map(Value::as_str));
+            }
+            spec["argv"] = json!(args);
+            spec["env"] = json!([BUILDKIT_PATH]);
+            spec["buildkit_worker"] = json!(true);
+        }
         if spec["image_digest"] == conjet_launch_service::spec::REDIS_CONFIG
             && config["HostConfig"]["CapDrop"] != json!(["ALL"])
             && serde_json::from_value::<conjet_launch_service::spec::LaunchSpec>(spec.clone())
@@ -1950,12 +1961,6 @@ impl Owner {
     }
 
     fn submit(self: &Arc<Self>, item: &Arc<Item>, restart: bool) -> Result<(), Rejected> {
-        if item.container.buildkit_worker {
-            return Err(Rejected(
-                501,
-                "native BuildKit worker execution is not configured".into(),
-            ));
-        }
         let mut ledger = self.ledger.lock().unwrap();
         let mut state = item.state();
         if !ledger.active.iter().any(|active| Arc::ptr_eq(active, item))
@@ -1973,6 +1978,9 @@ impl Owner {
                 409,
                 "Compose replacement must be renamed before start".into(),
             ));
+        }
+        if item.container.buildkit_worker {
+            state.started_at = Some(events::daemon_time()?);
         }
         for index in (0..ledger.workers.len()).rev() {
             if ledger.workers[index].is_finished() {

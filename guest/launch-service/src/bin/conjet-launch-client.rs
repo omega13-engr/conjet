@@ -44,6 +44,7 @@ fn launch(
             memory_swap_disabled: false,
             open_stdin: false,
             redis_bootstrap: false,
+            buildkit_worker: false,
             image_digest,
             argv: vec!["/bin/probe".into()],
             env: Vec::new(),

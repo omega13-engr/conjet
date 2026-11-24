@@ -331,6 +331,7 @@ impl Image {
             memory_swap_disabled,
             open_stdin,
             redis_bootstrap: false,
+            buildkit_worker: false,
         };
         spec.validate_exec()
             .map_err(|error| Rejected::bad(error.to_string()))?;

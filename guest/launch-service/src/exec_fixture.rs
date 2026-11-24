@@ -547,7 +547,11 @@ pub fn run_helper(
     let filter = security::WorkloadFilter::new(
         spec.bridge_scope().is_some(),
         spec.build_snapshot.is_none(),
-        false,
+        if spec.buildkit_worker {
+            security::WorkloadPolicy::BuildKitControl
+        } else {
+            security::WorkloadPolicy::Standard
+        },
     );
     let mut lifeline = [-1; 2];
     checked(unsafe { libc::pipe2(lifeline.as_mut_ptr(), libc::O_CLOEXEC) })?;
@@ -561,7 +565,12 @@ pub fn run_helper(
         }
         let setup = (|| -> io::Result<()> {
             security::set_process_limits(security::DEFAULT_OPEN_FILES)?;
-            security::drop_workload_identity(spec.uid, spec.gid, false, false)?;
+            security::drop_workload_identity(
+                spec.uid,
+                spec.gid,
+                false,
+                security::WorkloadPolicy::Standard,
+            )?;
             checked(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;
             let mut poll = libc::pollfd {
                 fd: lifeline[0],

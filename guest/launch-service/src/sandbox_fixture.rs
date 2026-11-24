@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::security::{self, WorkloadFilter};
+use crate::security::{self, WorkloadFilter, WorkloadPolicy};
 use crate::spec::{
     GID_BASE, ID_MAP_WIDTH, LaunchSpec, UID_BASE, VolumeMount, WORKLOAD_GID, WORKLOAD_UID,
     valid_volume_target,
@@ -49,6 +49,7 @@ pub(crate) struct Sandbox {
     gid: u32,
     redis_bootstrap: bool,
     buildkit_image: bool,
+    policy: WorkloadPolicy,
 }
 
 enum RootMode {
@@ -159,7 +160,7 @@ fn mount_cgroup(root: &CStr, source: File) -> io::Result<()> {
     })
 }
 
-fn mount_workload_proc(root: &CStr) -> io::Result<()> {
+fn mount_workload_proc(root: &CStr, pid_only: bool) -> io::Result<()> {
     let target = Path::new(std::ffi::OsStr::from_bytes(root.to_bytes())).join("proc");
     match fs::symlink_metadata(&target) {
         Ok(metadata) if metadata.is_dir() => {}
@@ -174,9 +175,33 @@ fn mount_workload_proc(root: &CStr) -> io::Result<()> {
             target.as_ptr(),
             c"proc".as_ptr(),
             libc::MS_RDONLY | libc::MS_NODEV | libc::MS_NOSUID | libc::MS_NOEXEC,
-            c"subset=pid".as_ptr().cast(),
+            if pid_only {
+                c"subset=pid".as_ptr().cast()
+            } else {
+                std::ptr::null()
+            },
         )
     })
+}
+
+fn prepare_buildkit_worker(root: &CStr) -> io::Result<()> {
+    let root = Path::new(std::ffi::OsStr::from_bytes(root.to_bytes()));
+    for relative in ["usr", "usr/bin", "run", "run/conjet", "run/conjet/buildkit"] {
+        let path = root.join(relative);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(io::Error::other("invalid BuildKit worker directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(path)?,
+            Err(error) => return Err(error),
+        }
+    }
+    let mut runtime = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o555)
+        .open(root.join("usr/bin/conjet-buildkit-runtime"))?;
+    io::copy(&mut File::open("/init")?, &mut runtime)?;
+    std::os::unix::fs::symlink("/var/lib/buildkit", root.join("run/conjet/buildkit/worker"))
 }
 
 fn expose_cpu_information(root: &CStr) -> io::Result<()> {
@@ -375,6 +400,13 @@ impl Sandbox {
                 base.join("outside-canary"),
                 b"must stay outside workload root\n",
             )?;
+            let policy = if oci.is_some_and(|spec| spec.buildkit_worker) {
+                WorkloadPolicy::BuildKitWorker
+            } else if oci.is_some_and(|spec| spec.redis_bootstrap) {
+                WorkloadPolicy::RedisBootstrap
+            } else {
+                WorkloadPolicy::Standard
+            };
             Ok(Self {
                 base: base.clone(),
                 cwd: CString::new(oci.map_or("/work", |spec| spec.cwd.as_str()))?,
@@ -391,7 +423,7 @@ impl Sandbox {
                 filter: WorkloadFilter::new(
                     bridge,
                     oci.is_some_and(|spec| spec.build_snapshot.is_none()),
-                    oci.is_some_and(|spec| spec.redis_bootstrap),
+                    policy,
                 ),
                 resolver: oci
                     .and_then(|spec| spec.bridge_scope())
@@ -411,6 +443,7 @@ impl Sandbox {
                 redis_bootstrap: oci.is_some_and(|spec| spec.redis_bootstrap),
                 buildkit_image: oci
                     .is_some_and(|spec| spec.image_digest == crate::spec::BUILDKIT_CONFIG),
+                policy,
             })
         })();
         if setup.is_err() {
@@ -538,9 +571,21 @@ impl Sandbox {
             step("workload cgroup view", mount_cgroup(&self.new_root, cgroup))?;
         }
         if self.redis_bootstrap {
-            step("workload PID view", mount_workload_proc(&self.new_root))?;
+            step(
+                "workload PID view",
+                mount_workload_proc(&self.new_root, true),
+            )?;
         }
-        if self.buildkit_image {
+        if self.policy == WorkloadPolicy::BuildKitWorker {
+            step(
+                "BuildKit worker proc view",
+                mount_workload_proc(&self.new_root, false),
+            )?;
+            step(
+                "BuildKit native runtime",
+                prepare_buildkit_worker(&self.new_root),
+            )?;
+        } else if self.buildkit_image {
             step(
                 "pinned BuildKit CPU information",
                 expose_cpu_information(&self.new_root),
@@ -608,7 +653,7 @@ impl Sandbox {
                 self.uid,
                 self.gid,
                 self.worker_mounts.is_some(),
-                self.redis_bootstrap,
+                self.policy,
             ),
         )?;
         before_filter()?;

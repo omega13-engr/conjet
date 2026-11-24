@@ -11,6 +11,16 @@ const BPF_AND: u16 = 0x54;
 const SYS_FADVISE64_AARCH64: u32 = 223;
 // Linux capability numbers for CHOWN, DAC_OVERRIDE, SETGID, and SETUID.
 const REDIS_CAPABILITIES: u32 = (1 << 0) | (1 << 1) | (1 << 6) | (1 << 7);
+// CHOWN, DAC_OVERRIDE, FOWNER and SYS_ADMIN in the worker's mapped user namespace.
+const BUILDKIT_CAPABILITIES: u32 = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 21);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkloadPolicy {
+    Standard,
+    RedisBootstrap,
+    BuildKitWorker,
+    BuildKitControl,
+}
 
 pub(crate) fn clear_supplementary_groups() -> io::Result<()> {
     checked(unsafe { libc::setgroups(0, std::ptr::null()) })
@@ -20,7 +30,7 @@ pub(crate) fn drop_workload_identity(
     uid: u32,
     gid: u32,
     supplementary_primary_gid: bool,
-    redis_bootstrap: bool,
+    policy: WorkloadPolicy,
 ) -> io::Result<()> {
     let mut group = 0;
     let count = unsafe { libc::getgroups(1, &mut group) };
@@ -43,10 +53,10 @@ pub(crate) fn drop_workload_identity(
             0,
         )
     })?;
-    let allowed = if redis_bootstrap {
-        REDIS_CAPABILITIES
-    } else {
-        0
+    let allowed = match policy {
+        WorkloadPolicy::RedisBootstrap => REDIS_CAPABILITIES,
+        WorkloadPolicy::BuildKitWorker => BUILDKIT_CAPABILITIES,
+        _ => 0,
     };
     for capability in 0..64 {
         let supported = unsafe { libc::prctl(libc::PR_CAPBSET_READ, capability, 0, 0, 0) };
@@ -72,7 +82,7 @@ pub(crate) fn drop_workload_identity(
     }
     checked(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })?;
     // Namespace root must enter exec with the same empty capability state.
-    if uid == 0 && !redis_bootstrap {
+    if uid == 0 && allowed == 0 {
         verify_empty_capabilities()?;
     }
     Ok(())
@@ -146,7 +156,7 @@ pub(crate) struct WorkloadFilter {
 }
 
 impl WorkloadFilter {
-    pub(crate) fn new(bridge: bool, ordinary_oci: bool, redis_bootstrap: bool) -> Self {
+    pub(crate) fn new(bridge: bool, ordinary_oci: bool, policy: WorkloadPolicy) -> Self {
         fn statement(code: u16, k: u32) -> libc::sock_filter {
             libc::sock_filter {
                 code,
@@ -357,7 +367,7 @@ impl WorkloadFilter {
             });
             program.extend(cache_advice);
         }
-        if redis_bootstrap {
+        if policy == WorkloadPolicy::RedisBootstrap {
             for syscall in [
                 libc::SYS_fchownat,
                 libc::SYS_getresuid,
@@ -404,51 +414,101 @@ impl WorkloadFilter {
             });
             program.extend(controls);
         }
-        if bridge {
+        let unix = matches!(
+            policy,
+            WorkloadPolicy::BuildKitWorker | WorkloadPolicy::BuildKitControl
+        );
+        if policy == WorkloadPolicy::BuildKitWorker {
+            for syscall in [
+                libc::SYS_flock,
+                libc::SYS_fchmod,
+                libc::SYS_fchmodat,
+                libc::SYS_fchownat,
+                libc::SYS_statfs,
+                libc::SYS_fstatfs,
+                libc::SYS_mount,
+                libc::SYS_umount2,
+            ] {
+                program.push(next_or_skip(syscall as u32));
+                program.push(statement(BPF_RETURN, RET_ALLOW));
+            }
+        }
+        if bridge || unix {
             let denied = RET_ERRNO | libc::EPERM as u32;
-            let socket = [
-                statement(BPF_LOAD_WORD, 16), // args[0]: domain, little-endian ARM64
-                libc::sock_filter {
+            let mut socket = vec![statement(BPF_LOAD_WORD, 16)];
+            if unix {
+                let stream = [
+                    statement(BPF_LOAD_WORD, 32),
+                    libc::sock_filter {
+                        code: BPF_JUMP_EQUAL,
+                        k: 0,
+                        jt: 1,
+                        jf: 0,
+                    },
+                    statement(BPF_RETURN, denied),
+                    statement(BPF_LOAD_WORD, 24),
+                    statement(
+                        BPF_AND,
+                        !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
+                    ),
+                    next_or_skip(libc::SOCK_STREAM as u32),
+                    statement(BPF_RETURN, RET_ALLOW),
+                    statement(BPF_RETURN, denied),
+                ];
+                socket.push(libc::sock_filter {
                     code: BPF_JUMP_EQUAL,
-                    k: libc::AF_INET as u32,
-                    jt: 3,
-                    jf: 0,
-                },
-                next_or_skip(libc::AF_INET6 as u32),
-                statement(BPF_RETURN, RET_ERRNO | libc::EAFNOSUPPORT as u32),
-                statement(BPF_RETURN, denied),
-                statement(BPF_LOAD_WORD, 24), // args[1]: type and socket flags
-                statement(
-                    BPF_AND,
-                    !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
-                ),
-                // libc's getaddrinfo returns the explicit protocol that the
-                // kernel would select for the corresponding socket type.
-                libc::sock_filter {
-                    code: BPF_JUMP_EQUAL,
-                    k: libc::SOCK_STREAM as u32,
+                    k: libc::AF_UNIX as u32,
                     jt: 0,
-                    jf: 6,
-                },
-                statement(BPF_LOAD_WORD, 32), // args[2]: protocol
-                next_or_skip(0),
-                statement(BPF_RETURN, RET_ALLOW),
-                next_or_skip(libc::IPPROTO_TCP as u32),
-                statement(BPF_RETURN, RET_ALLOW),
-                statement(BPF_RETURN, denied),
-                libc::sock_filter {
-                    code: BPF_JUMP_EQUAL,
-                    k: libc::SOCK_DGRAM as u32,
-                    jt: 0,
-                    jf: 5,
-                },
-                statement(BPF_LOAD_WORD, 32),
-                next_or_skip(0),
-                statement(BPF_RETURN, RET_ALLOW),
-                next_or_skip(libc::IPPROTO_UDP as u32),
-                statement(BPF_RETURN, RET_ALLOW),
-                statement(BPF_RETURN, denied),
-            ];
+                    jf: stream.len() as u8,
+                });
+                socket.extend(stream);
+            }
+            if bridge {
+                socket.extend([
+                    libc::sock_filter {
+                        code: BPF_JUMP_EQUAL,
+                        k: libc::AF_INET as u32,
+                        jt: 3,
+                        jf: 0,
+                    },
+                    next_or_skip(libc::AF_INET6 as u32),
+                    statement(BPF_RETURN, RET_ERRNO | libc::EAFNOSUPPORT as u32),
+                    statement(BPF_RETURN, denied),
+                    statement(BPF_LOAD_WORD, 24), // args[1]: type and socket flags
+                    statement(
+                        BPF_AND,
+                        !((libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) as u32),
+                    ),
+                    // libc's getaddrinfo returns the explicit protocol that the
+                    // kernel would select for the corresponding socket type.
+                    libc::sock_filter {
+                        code: BPF_JUMP_EQUAL,
+                        k: libc::SOCK_STREAM as u32,
+                        jt: 0,
+                        jf: 6,
+                    },
+                    statement(BPF_LOAD_WORD, 32), // args[2]: protocol
+                    next_or_skip(0),
+                    statement(BPF_RETURN, RET_ALLOW),
+                    next_or_skip(libc::IPPROTO_TCP as u32),
+                    statement(BPF_RETURN, RET_ALLOW),
+                    statement(BPF_RETURN, denied),
+                    libc::sock_filter {
+                        code: BPF_JUMP_EQUAL,
+                        k: libc::SOCK_DGRAM as u32,
+                        jt: 0,
+                        jf: 5,
+                    },
+                    statement(BPF_LOAD_WORD, 32),
+                    next_or_skip(0),
+                    statement(BPF_RETURN, RET_ALLOW),
+                    next_or_skip(libc::IPPROTO_UDP as u32),
+                    statement(BPF_RETURN, RET_ALLOW),
+                    statement(BPF_RETURN, denied),
+                ]);
+            } else {
+                socket.push(statement(BPF_RETURN, denied));
+            }
             program.push(libc::sock_filter {
                 code: BPF_JUMP_EQUAL,
                 k: libc::SYS_socket as u32,
@@ -465,6 +525,7 @@ impl WorkloadFilter {
                 libc::SYS_setsockopt,
                 libc::SYS_getsockopt,
                 libc::SYS_getsockname,
+                libc::SYS_getpeername,
                 libc::SYS_listen,
                 libc::SYS_accept,
                 libc::SYS_accept4,
