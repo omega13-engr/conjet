@@ -121,6 +121,35 @@ impl AsRawFd for Stream {
 }
 
 impl Stream {
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            descriptor: self.descriptor.try_clone()?,
+            shutdown: self.shutdown.clone(),
+            deadline: self.deadline,
+        })
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) fn cancellable_clone(&self) -> io::Result<(Self, Arc<Shutdown>)> {
+        let stop = Shutdown::new()?;
+        let mut stream = self.try_clone()?;
+        stream.shutdown = Some(stop.clone());
+        Ok((stream, stop))
+    }
+
+    pub fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+        let direction = match how {
+            std::net::Shutdown::Read => libc::SHUT_RD,
+            std::net::Shutdown::Write => libc::SHUT_WR,
+            std::net::Shutdown::Both => libc::SHUT_RDWR,
+        };
+        if unsafe { libc::shutdown(self.as_raw_fd(), direction) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
     pub fn unix(stream: UnixStream, shutdown: Option<Arc<Shutdown>>) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
         Ok(Self::nonblocking(stream.into(), shutdown))

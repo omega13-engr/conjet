@@ -120,6 +120,14 @@ struct Exec {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ExecStream {
+    handle: Handle,
+    budget_ms: u64,
+    argv: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Inspect {
     budget_ms: u64,
     #[serde(default)]
@@ -496,6 +504,7 @@ struct Ledger {
     pressure_helper: Option<std::process::Child>,
     evictions: u64,
     exec_active: bool,
+    exec_streams: usize,
     exec_output: Option<PendingExecOutput>,
 }
 
@@ -508,6 +517,39 @@ struct PendingExecOutput {
 }
 
 impl Ledger {
+    fn exec_target(
+        &self,
+        handle: &Handle,
+        argv: Vec<String>,
+    ) -> Result<(LaunchSpec, OwnedFd, [u8; 16]), Failure> {
+        let record = self
+            .record(&handle.workload_id)
+            .filter(|record| record.handle == *handle)
+            .ok_or(("stale_generation", "native exec workload is not owned"))?;
+        if matches!(
+            record.phase,
+            Phase::Accepted | Phase::Preparing | Phase::ChildCreated
+        ) {
+            return Err(("preparing", "native exec target is still starting"));
+        }
+        let (spec, pidfd) = record
+            .exec_context
+            .as_ref()
+            .filter(|_| record.phase == Phase::Running)
+            .ok_or(("not_running", "native exec requires a live OCI process"))?;
+        let mut spec = spec.clone();
+        spec.redis_bootstrap = false;
+        spec.argv = argv;
+        spec.validate_exec()
+            .map_err(|_| ("invalid_spec", "invalid native exec argv"))?;
+        let pidfd = pidfd
+            .try_clone()
+            .map_err(|_| ("busy", "cannot retain native exec target"))?;
+        let id = crate::handshake::unhex(&handle.workload_id)
+            .map_err(|_| ("malformed", "invalid native workload ID"))?;
+        Ok((spec, pidfd, id))
+    }
+
     fn complete_exec(
         &mut self,
         result: crate::exec_fixture::ExecResult,
@@ -1877,6 +1919,75 @@ impl FreshFixture {
             })
     }
 
+    pub(crate) fn serve_exec_stream(
+        &self,
+        frame: &Frame,
+        boot: &str,
+        stream: &mut Stream,
+    ) -> Result<(), WireError> {
+        let opened = (|| -> Result<_, Failure> {
+            let request: ExecStream = frame
+                .decode()
+                .map_err(|_| ("malformed", "invalid exec stream payload"))?;
+            if request.handle.boot_id != boot {
+                return Err(("stale_generation", "unexpected native exec boot ID"));
+            }
+            if !(1..=crate::wire::BUILDKIT_EXEC_BUDGET_MS).contains(&request.budget_ms) {
+                return Err(("malformed", "invalid exec stream budget"));
+            }
+            let mut ledger = self.ledger.lock().expect("fresh ledger");
+            if ledger.closing || ledger.exec_streams >= 2 {
+                return Err(("busy", "native exec stream slots are occupied"));
+            }
+            let target = ledger.exec_target(&request.handle, request.argv)?;
+            if request.budget_ms > crate::wire::EXEC_STREAM_BUDGET_MS
+                && !crate::spec::buildkit_control_exec(&target.0.image_digest, &target.0.argv)
+            {
+                return Err((
+                    "invalid_spec",
+                    "long exec stream budgets require the pinned BuildKit control command",
+                ));
+            }
+            ledger.exec_streams += 1;
+            Ok((
+                target,
+                Instant::now() + Duration::from_millis(request.budget_ms),
+            ))
+        })();
+        let ((spec, pidfd, id), deadline) = match opened {
+            Ok(opened) => opened,
+            Err((code, detail)) => return write_error(stream, frame.id, code, detail),
+        };
+        let result = (|| {
+            Frame::write(
+                &mut *stream,
+                Kind::ExecStream,
+                frame.id,
+                &json!({"attached":true}),
+            )?;
+            Ok::<_, WireError>(crate::exec_fixture::execute_stream(
+                pidfd, id, spec, stream, deadline,
+            ))
+        })();
+        self.ledger.lock().expect("fresh ledger").exec_streams -= 1;
+        self.changed.notify_all();
+        stream.deadline(Some(Instant::now() + Duration::from_secs(2)));
+        match result? {
+            Ok(code) => crate::wire::write_exec_stream(stream, 4, &[code as u8])?,
+            Err(error) => {
+                eprintln!("native exec stream failed: {error}");
+                let reason = if error.kind() == io::ErrorKind::TimedOut {
+                    "native exec stream deadline exceeded"
+                } else {
+                    "native exec stream ended before completion"
+                };
+                crate::wire::write_exec_stream(&mut *stream, 3, reason.as_bytes())?;
+                crate::wire::write_exec_stream(stream, 4, &[125])?;
+            }
+        }
+        Ok(())
+    }
+
     fn operation(self: &Arc<Self>, frame: &Frame, boot: &str, connection: ConnectionId) -> Reply {
         fn parse<T: serde::de::DeserializeOwned>(frame: &Frame) -> Result<T, Failure> {
             frame
@@ -2003,6 +2114,7 @@ impl FreshFixture {
                         "installed_images": guard.images.snapshot(),
                         "disk_image_store": crate::image_store::disk_store_enabled(),
                         "exec_active": guard.exec_active,
+                        "exec_streams": guard.exec_streams,
                         "active_workloads": guard.active().map(Record::state).collect::<Vec<_>>(),
                     }),
                 ))
@@ -2176,30 +2288,7 @@ impl FreshFixture {
                 if guard.closing || guard.exec_active || guard.exec_output.is_some() {
                     return Err(("busy", "the native exec slot is already owned"));
                 }
-                let record = guard
-                    .record(&request.handle.workload_id)
-                    .expect("checked record");
-                if matches!(
-                    record.phase,
-                    Phase::Accepted | Phase::Preparing | Phase::ChildCreated
-                ) {
-                    return Err(("preparing", "native exec target is still starting"));
-                }
-                let (spec, target) = record
-                    .exec_context
-                    .as_ref()
-                    .filter(|_| record.phase == Phase::Running)
-                    .ok_or(("not_running", "native exec requires a live OCI process"))?;
-                let mut spec = spec.clone();
-                spec.redis_bootstrap = false;
-                spec.argv = request.argv;
-                spec.validate_exec()
-                    .map_err(|_| ("invalid_spec", "invalid native exec argv"))?;
-                let target = target
-                    .try_clone()
-                    .map_err(|_| ("busy", "cannot retain native exec target"))?;
-                let id = crate::handshake::unhex(&request.handle.workload_id)
-                    .map_err(|_| ("malformed", "invalid native workload ID"))?;
+                let (spec, target, id) = guard.exec_target(&request.handle, request.argv)?;
                 guard.exec_active = true;
                 drop(guard);
                 let result =
@@ -2613,7 +2702,10 @@ impl FreshFixture {
         let mut ledger = self.ledger.lock().expect("fresh ledger");
         ledger.closing = true;
         loop {
-            if !ledger.exec_active && ledger.records.iter().all(|record| record.phase.terminal()) {
+            if !ledger.exec_active
+                && ledger.exec_streams == 0
+                && ledger.records.iter().all(|record| record.phase.terminal())
+            {
                 let cleaned = !ledger
                     .active()
                     .any(|record| record.phase == Phase::CleanupFailed);

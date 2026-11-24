@@ -168,6 +168,27 @@ impl Connection {
         Ok(self.stream)
     }
 
+    pub(super) fn exec_stream(
+        mut self,
+        handle: &Value,
+        argv: &[String],
+        budget_ms: u64,
+    ) -> anyhow::Result<Stream> {
+        let deadline = Instant::now() + Duration::from_millis(budget_ms) + Duration::from_secs(5);
+        let response = self.exchange(
+            Kind::ExecStream,
+            Kind::ExecStream,
+            &json!({"handle":handle,"argv":argv,"budget_ms":budget_ms}),
+            Duration::from_secs(2),
+        )?;
+        ensure!(
+            response["attached"] == true,
+            "invalid native exec stream acknowledgement"
+        );
+        self.stream.deadline(Some(deadline));
+        Ok(self.stream)
+    }
+
     pub(super) fn bind(mut self, lease: &str, read_only: bool) -> anyhow::Result<Stream> {
         let reply = self.exchange(
             Kind::Bind,

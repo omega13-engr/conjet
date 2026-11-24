@@ -7,6 +7,10 @@ pub const VERSION: u8 = 1;
 pub const MAX_PAYLOAD: usize = 16_384;
 pub const EXEC_OUTPUT_LIMIT: usize = 256 * 1024;
 pub const EXEC_STDIN_LIMIT: usize = 4096;
+pub const EXEC_STREAM_CHUNK: usize = 8192;
+pub const EXEC_STREAM_BUDGET_MS: u64 = 30_000;
+pub const BUILDKIT_EXEC_BUDGET_MS: u64 = 600_000;
+pub const EXEC_STREAM_INPUT: usize = 4096;
 
 #[derive(Deserialize, Serialize)]
 pub struct CgroupUsage {
@@ -59,6 +63,7 @@ pub enum Kind {
     Input = 30,
     Bind = 31,
     Account = 32,
+    ExecStream = 33,
 }
 
 impl TryFrom<u8> for Kind {
@@ -99,9 +104,78 @@ impl TryFrom<u8> for Kind {
             30 => Ok(Input),
             31 => Ok(Bind),
             32 => Ok(Account),
+            33 => Ok(ExecStream),
             _ => Err(WireError::BadHeader),
         }
     }
+}
+
+pub fn write_exec_stream(mut output: impl Write, stream: u8, data: &[u8]) -> io::Result<()> {
+    if !valid_exec_stream(stream, data.len()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid exec stream chunk",
+        ));
+    }
+    let [a, b, c, d] = (data.len() as u32).to_be_bytes();
+    output.write_all(&[stream, 0, 0, 0, a, b, c, d])?;
+    output.write_all(data)
+}
+
+pub fn read_exec_stream(
+    mut input: impl Read,
+    data: &mut [u8; EXEC_STREAM_CHUNK],
+) -> io::Result<(u8, usize)> {
+    let mut header = [0; 8];
+    input.read_exact(&mut header)?;
+    let [stream, r1, r2, r3, a, b, c, d] = header;
+    let count = u32::from_be_bytes([a, b, c, d]) as usize;
+    if [r1, r2, r3] != [0; 3] || !valid_exec_stream(stream, count) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid exec stream chunk",
+        ));
+    }
+    input.read_exact(&mut data[..count])?;
+    Ok((stream, count))
+}
+
+fn valid_exec_stream(stream: u8, count: usize) -> bool {
+    match stream {
+        1..=3 => (1..=EXEC_STREAM_CHUNK).contains(&count),
+        4 => count == 1,
+        _ => false,
+    }
+}
+
+/// Forward one bounded stdin chunk. A zero-length chunk closes the owned
+/// pipe while leaving the authenticated socket open to observe disconnects.
+pub fn write_exec_input(mut output: impl Write, data: &[u8]) -> io::Result<()> {
+    if data.len() > EXEC_STREAM_INPUT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid exec input chunk",
+        ));
+    }
+    output.write_all(&(data.len() as u32).to_be_bytes())?;
+    output.write_all(data)
+}
+
+pub fn read_exec_input(
+    mut input: impl Read,
+    data: &mut [u8; EXEC_STREAM_INPUT],
+) -> io::Result<usize> {
+    let mut header = [0; 4];
+    input.read_exact(&mut header)?;
+    let count = u32::from_be_bytes(header) as usize;
+    if count > EXEC_STREAM_INPUT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid exec input chunk",
+        ));
+    }
+    input.read_exact(&mut data[..count])?;
+    Ok(count)
 }
 
 #[derive(Debug, Error)]

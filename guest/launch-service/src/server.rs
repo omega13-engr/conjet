@@ -251,6 +251,13 @@ impl Server {
             #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
             if let Some(fresh) = &self.fresh
                 && fresh.is_oci()
+                && frame.kind == Kind::ExecStream
+            {
+                return fresh.serve_exec_stream(&frame, &boot_id, &mut stream);
+            }
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            if let Some(fresh) = &self.fresh
+                && fresh.is_oci()
                 && frame.kind == Kind::Dial
             {
                 let Some(_slot) = RelaySlot::reserve(&self.relays) else {

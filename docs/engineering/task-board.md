@@ -1627,6 +1627,15 @@ directions while the pinned Buildx client exchanges frames. Preserve
 EOF, backpressure, stderr, terminal status, disconnect and cancellation.
 Finish guest cleanup before releasing the exact exec owner.
 
+Evidence: The authenticated guest transport emitted output before
+receiving input, returned 16,384 binary bytes with separate stderr
+and exit 23, rejected an extended budget on an ordinary workload, and
+released its slot on disconnect. The Docker gateway ran the real
+pinned `buildkitd --version` with stdin open, returned v0.23.2 and
+reported exit 0. It read the actual guest ARM64 CPU information. See
+`SPEED-156/cache-gateway-cpu-info/`. The worker still must run the
+original Buildx `dial-stdio` solve and cancellation.
+
 ### SPEED-154
 
 Title: Mount a leased native BuildKit workspace beside the disk image store
@@ -1670,6 +1679,20 @@ Acceptance: Mount an explicitly owned volume at `/var/lib/buildkit`
 in the pinned image. Verify it is writable, survives container
 replacement as required, and is removed through the original
 volume lifecycle. Keep the live worker bootstrap gate separate.
+
+Evidence: Two isolated containers using the pinned image mounted
+`/var/lib/buildkit`. The second read the first container's written
+bytes. Both generations reported complete native cleanup and the
+volume removal passed. See `SPEED-156/cache-gateway-cpu-info/`.
+
+### SPEED-157
+
+Title: Provision and own the frozen Buildx container and state volume
+
+Acceptance: Admit the pinned Docker-container driver's original create
+request and the bootstrap config copy. Bind its exact named cache
+volume and verify the object and volume are removed on failure.
+Ordinary privileged and nonempty configuration requests remain denied.
 
 ### SPEED-091
 

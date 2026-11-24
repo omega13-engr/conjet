@@ -48,6 +48,7 @@ pub(crate) struct Sandbox {
     uid: u32,
     gid: u32,
     redis_bootstrap: bool,
+    buildkit_image: bool,
 }
 
 enum RootMode {
@@ -176,6 +177,31 @@ fn mount_workload_proc(root: &CStr) -> io::Result<()> {
             c"subset=pid".as_ptr().cast(),
         )
     })
+}
+
+fn expose_cpu_information(root: &CStr) -> io::Result<()> {
+    use std::io::{Read, Write};
+
+    let directory = Path::new(std::ffi::OsStr::from_bytes(root.to_bytes())).join("proc");
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(io::Error::other("invalid BuildKit proc directory")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&directory)?,
+        Err(error) => return Err(error),
+    }
+    let mut data = Vec::new();
+    File::open("/proc/cpuinfo")?
+        .take(65_537)
+        .read_to_end(&mut data)?;
+    if data.is_empty() || data.len() > 65_536 {
+        return Err(io::Error::other("invalid guest CPU information length"));
+    }
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o444)
+        .open(directory.join("cpuinfo"))?
+        .write_all(&data)
 }
 
 struct FileBinding {
@@ -383,6 +409,8 @@ impl Sandbox {
                 uid: oci.map_or(WORKLOAD_UID, |spec| spec.uid),
                 gid: oci.map_or(WORKLOAD_GID, |spec| spec.gid),
                 redis_bootstrap: oci.is_some_and(|spec| spec.redis_bootstrap),
+                buildkit_image: oci
+                    .is_some_and(|spec| spec.image_digest == crate::spec::BUILDKIT_CONFIG),
             })
         })();
         if setup.is_err() {
@@ -511,6 +539,12 @@ impl Sandbox {
         }
         if self.redis_bootstrap {
             step("workload PID view", mount_workload_proc(&self.new_root))?;
+        }
+        if self.buildkit_image {
+            step(
+                "pinned BuildKit CPU information",
+                expose_cpu_information(&self.new_root),
+            )?;
         }
         if let Some(devices) = devices {
             step(

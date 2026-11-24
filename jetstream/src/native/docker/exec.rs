@@ -1,10 +1,16 @@
+use std::io::{self, BufReader, Read};
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use conjet_launch_service::handshake::{hex, random, unhex};
-use conjet_launch_service::spec::LaunchSpec;
-use conjet_launch_service::wire::{Kind, WireError, EXEC_OUTPUT_LIMIT};
+use conjet_launch_service::spec::{buildkit_control_exec, LaunchSpec};
+use conjet_launch_service::wire::{
+    read_exec_stream, write_exec_input, write_exec_stream, Kind, WireError,
+    BUILDKIT_EXEC_BUDGET_MS, EXEC_OUTPUT_LIMIT, EXEC_STREAM_CHUNK, EXEC_STREAM_INPUT,
+};
 use serde_json::{json, Value};
 
 use super::{client, Item, Owner, Rejected, CHUNK};
@@ -96,6 +102,16 @@ impl Entry {
 
     pub(super) fn stdin(&self) -> bool {
         self.stdin
+    }
+
+    pub(super) fn streaming(&self) -> bool {
+        self.stdin
+            && buildkit_control_exec(
+                self.container.container.spec["image_digest"]
+                    .as_str()
+                    .unwrap_or_default(),
+                &self.argv,
+            )
     }
 
     pub(super) fn inspect(&self) -> Value {
@@ -195,6 +211,82 @@ impl Entry {
         };
         *self.state.lock().unwrap() = State::Finished(status);
         reply
+    }
+
+    pub(super) fn run_stream(
+        &self,
+        owner: &Owner,
+        handle: &Value,
+        input: &mut BufReader<UnixStream>,
+        output: &mut UnixStream,
+    ) -> anyhow::Result<()> {
+        let result = (|| {
+            let startup = Instant::now() + Duration::from_millis(500);
+            let mut guest = loop {
+                let opened = owner
+                    .scoped_peer()
+                    .map_err(|error| anyhow::anyhow!(error.1))?
+                    .exec_stream(handle, &self.argv, BUILDKIT_EXEC_BUDGET_MS);
+                match opened {
+                    Err(error)
+                        if matches!(error.downcast_ref::<WireError>(), Some(WireError::PeerError(code))
+                            if code == "preparing")
+                            && Instant::now() < startup =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    result => break result?,
+                }
+            };
+            let mut sender = guest.try_clone()?;
+            input.get_ref().set_read_timeout(None)?;
+            let result = std::thread::scope(|workers| -> io::Result<i64> {
+                let sender = workers.spawn(move || {
+                    let mut bytes = [0; EXEC_STREAM_INPUT];
+                    loop {
+                        match input.read(&mut bytes) {
+                            Ok(0) if super::http::client_disconnected(input.get_ref()) => {
+                                let _ = sender.shutdown(Shutdown::Both);
+                                break;
+                            }
+                            Ok(count) => {
+                                if write_exec_input(&mut sender, &bytes[..count]).is_err()
+                                    || count == 0
+                                {
+                                    break;
+                                }
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                            Err(_) => {
+                                let _ = sender.shutdown(Shutdown::Both);
+                                break;
+                            }
+                        }
+                    }
+                });
+                let outcome = (|| {
+                    let mut bytes = [0; EXEC_STREAM_CHUNK];
+                    loop {
+                        let (stream, count) = read_exec_stream(&mut guest, &mut bytes)?;
+                        if stream == 4 {
+                            return Ok(i64::from(bytes[0]));
+                        }
+                        if stream == 3 || self.output[usize::from(stream - 1)] {
+                            write_exec_stream(&mut *output, stream, &bytes[..count])?;
+                        }
+                    }
+                })();
+                let _ = output.shutdown(Shutdown::Read);
+                let _ = guest.shutdown(Shutdown::Both);
+                sender
+                    .join()
+                    .map_err(|_| io::Error::other("Docker exec input stream stopped"))?;
+                outcome
+            })?;
+            Ok::<_, anyhow::Error>(result)
+        })();
+        *self.state.lock().unwrap() = State::Finished(result.as_ref().copied().unwrap_or(125));
+        result.map(|_| ())
     }
 }
 

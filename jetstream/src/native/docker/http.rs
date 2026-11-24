@@ -1392,6 +1392,17 @@ pub(super) fn serve(
                 break;
             }
             Ok(Action::Exec(entry, handle)) => {
+                if entry.streaming() {
+                    let sent = header(&mut stream, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n");
+                    if let Err(error) = sent {
+                        entry.fail("native exec client disconnected before start".into());
+                        return Err(error);
+                    }
+                    if let Err(error) = entry.run_stream(owner, &handle, &mut reader, &mut stream) {
+                        send_frame(&mut stream, 3, error.to_string().as_bytes())?;
+                    }
+                    break;
+                }
                 let completed = (!entry.stdin()).then(|| entry.run(owner, handle.clone(), None));
                 let (status, connection) = if request.tcp_upgrade {
                     (101, "Connection: Upgrade\r\nUpgrade: tcp\r\n")

@@ -19,6 +19,20 @@ pub const REGISTRY_CONFIG: &str =
 pub const BUILDKIT_CONFIG: &str =
     "sha256:8ff6bca64af355cd0434480a0fd583a7c571211750a5eb806b992017148bab55";
 
+pub fn buildkit_control_exec(image: &str, argv: &[String]) -> bool {
+    image == BUILDKIT_CONFIG
+        && match argv {
+            [program, operation] => {
+                (program == "buildctl" && operation == "dial-stdio")
+                    || (program == "buildkitd" && operation == "--version")
+            }
+            [program, operation, target] => {
+                program == "buildctl" && operation == "debug" && target == "workers"
+            }
+            _ => false,
+        }
+}
+
 pub fn workload_output_limit(image: &str) -> usize {
     if image == REGISTRY_CONFIG {
         256 * 1024
@@ -151,7 +165,7 @@ fn is_data_target(target: &str) -> bool {
 pub fn valid_volume_target(target: &str) -> bool {
     matches!(
         target,
-        VOLUME_TARGET | "/dataset" | "/var/lib/registry"
+        VOLUME_TARGET | "/dataset" | "/var/lib/registry" | "/var/lib/buildkit"
     )
 }
 

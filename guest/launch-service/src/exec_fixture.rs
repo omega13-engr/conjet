@@ -4,13 +4,16 @@ use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::handshake::{hex, unhex};
 use crate::output::{Capture, drain};
 use crate::security::{self, checked};
+use crate::socket::Stream;
 use crate::spec::LaunchSpec;
 
 const TARGET_PIDFD: libc::c_int = 3;
@@ -173,20 +176,6 @@ pub(crate) fn execute(
     stdin: Option<Vec<u8>>,
     deadline: Instant,
 ) -> io::Result<ExecResult> {
-    let root = target_root(&pidfd)?;
-    let pidfd = dup_high(pidfd.as_raw_fd())?;
-    let root = dup_high(root.as_raw_fd())?;
-    let owner = std::process::id() as libc::pid_t;
-    let mut result_fds = [-1; 2];
-    checked(unsafe { libc::pipe2(result_fds.as_mut_ptr(), libc::O_CLOEXEC) })?;
-    let mut result_reader = unsafe { File::from_raw_fd(result_fds[0]) };
-    let pipe_writer = unsafe { OwnedFd::from_raw_fd(result_fds[1]) };
-    let writer = dup_high(pipe_writer.as_raw_fd())?;
-    drop(pipe_writer);
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(io::ErrorKind::TimedOut.into());
-    }
     let input = if let Some(bytes) = stdin {
         let (reader, mut writer) = crate::workload_input::pipe()?;
         if !crate::workload_input::write(&mut writer, &bytes)? {
@@ -196,6 +185,50 @@ pub(crate) fn execute(
     } else {
         Stdio::null()
     };
+    let (mut child, result_reader, master) = start(pidfd, id, spec, tty, input, deadline)?;
+    type Reader = Box<dyn Read + Send>;
+    let (out, err): (Reader, Reader) = if let Some(master) = master {
+        (Box::new(master), Box::new(io::empty()))
+    } else {
+        (
+            Box::new(child.stdout.take().expect("piped output")),
+            Box::new(child.stderr.take().expect("piped error")),
+        )
+    };
+    let stdout = thread::spawn(move || capture(out));
+    let stderr = thread::spawn(move || capture(err));
+    let status = wait(&mut child, deadline, || false);
+    let output = stdout
+        .join()
+        .map_err(|_| io::Error::other("exec output reader panicked"))??;
+    let error = stderr
+        .join()
+        .map_err(|_| io::Error::other("exec error reader panicked"))??;
+    Ok(ExecResult {
+        code: result_code(status?, result_reader, deadline)?,
+        streams: [output, error],
+    })
+}
+
+fn start(
+    pidfd: OwnedFd,
+    id: [u8; 16],
+    spec: LaunchSpec,
+    tty: bool,
+    input: Stdio,
+    deadline: Instant,
+) -> io::Result<(Child, File, Option<crate::pty::Master>)> {
+    let root = target_root(&pidfd)?;
+    let pidfd = dup_high(pidfd.as_raw_fd())?;
+    let root = dup_high(root.as_raw_fd())?;
+    let owner = std::process::id() as libc::pid_t;
+    let (result_reader, pipe_writer) = crate::workload_input::pipe()?;
+    let writer = dup_high(pipe_writer.as_raw_fd())?;
+    drop(pipe_writer);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::ErrorKind::TimedOut.into());
+    }
     let mut command = Command::new("/init");
     command.process_group(0);
     command
@@ -233,21 +266,16 @@ pub(crate) fn execute(
             Ok(())
         });
     }
-    let mut child = command.spawn()?;
+    Ok((command.spawn()?, result_reader, master))
+}
+
+fn wait(
+    child: &mut Child,
+    deadline: Instant,
+    cancelled: impl Fn() -> bool,
+) -> io::Result<ExitStatus> {
     let process_group = -(child.id() as libc::pid_t);
-    drop(command);
-    type Reader = Box<dyn Read + Send>;
-    let (out, err): (Reader, Reader) = if let Some(master) = master {
-        (Box::new(master), Box::new(io::empty()))
-    } else {
-        (
-            Box::new(child.stdout.take().expect("piped output")),
-            Box::new(child.stderr.take().expect("piped error")),
-        )
-    };
-    let stdout = thread::spawn(move || capture(out));
-    let stderr = thread::spawn(move || capture(err));
-    let mut forced = false;
+    let mut forced = None;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -259,25 +287,27 @@ pub(crate) fn execute(
                 return Err(error);
             }
         }
-        if Instant::now() >= deadline + Duration::from_millis(500) {
+        if cancelled() || Instant::now() >= deadline + Duration::from_millis(500) {
             child.kill()?;
-            forced = true;
+            forced = Some(if Instant::now() >= deadline {
+                io::ErrorKind::TimedOut
+            } else {
+                io::ErrorKind::ConnectionAborted
+            });
             break child.wait()?;
         }
         thread::sleep(Duration::from_millis(5));
     };
-    if forced || status.signal().is_some() {
+    if forced.is_some() || status.signal().is_some() {
         // Container removal can kill the exec wrapper and its child
         // together. Reap only this wrapper's adopted descendants so the
         // owning workload can finish cgroup cleanup.
         crate::recovery_fixture::reap_owned_children(process_group)?;
     }
-    let output = stdout
-        .join()
-        .map_err(|_| io::Error::other("exec output reader panicked"))??;
-    let error = stderr
-        .join()
-        .map_err(|_| io::Error::other("exec error reader panicked"))??;
+    forced.map_or(Ok(status), |error| Err(error.into()))
+}
+
+fn result_code(status: ExitStatus, mut result_reader: File, deadline: Instant) -> io::Result<i32> {
     let mut result = [0];
     let count = result_reader.read(&mut result)?;
     if result == [1] || (Instant::now() >= deadline && status.signal() == Some(libc::SIGKILL)) {
@@ -291,11 +321,120 @@ pub(crate) fn execute(
             "native exec helper lost its result channel",
         ));
     }
-    Ok(ExecResult {
-        code: status
-            .code()
-            .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
-        streams: [output, error],
+    Ok(status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+}
+
+pub(crate) fn execute_stream(
+    pidfd: OwnedFd,
+    id: [u8; 16],
+    spec: LaunchSpec,
+    peer: &mut Stream,
+    deadline: Instant,
+) -> io::Result<i32> {
+    let (mut source, stop_input) = peer.cancellable_clone()?;
+    source.deadline(Some(deadline));
+    let mut target = peer.try_clone()?;
+    target.deadline(Some(deadline));
+    let (reader, writer) = crate::workload_input::pipe()?;
+    let (mut child, result_reader, _) =
+        start(pidfd, id, spec, false, Stdio::from(reader), deadline)?;
+    let mut stdout = child.stdout.take().expect("piped output");
+    let mut stderr = child.stderr.take().expect("piped error");
+    let cancelled = AtomicBool::new(false);
+    let target = Mutex::new(target);
+
+    thread::scope(|workers| {
+        let stopped = &cancelled;
+        let input = workers.spawn(move || -> io::Result<()> {
+            let mut chunk = [0; crate::wire::EXEC_STREAM_INPUT];
+            let mut writer = Some(writer);
+            loop {
+                let count = match crate::wire::read_exec_input(&mut source, &mut chunk) {
+                    Ok(count) => count,
+                    Err(_) if stopped.load(Ordering::Acquire) => return Ok(()),
+                    Err(error) => {
+                        stopped.store(true, Ordering::Release);
+                        return Err(error);
+                    }
+                };
+                if count == 0 {
+                    writer.take();
+                    continue;
+                }
+                let Some(pipe) = &mut writer else {
+                    stopped.store(true, Ordering::Release);
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "exec input continued after EOF",
+                    ));
+                };
+                loop {
+                    if stopped.load(Ordering::Acquire) || Instant::now() >= deadline {
+                        return Ok(());
+                    }
+                    match crate::workload_input::write(pipe, &chunk[..count]) {
+                        Ok(true) => break,
+                        Ok(false) => crate::socket::wait(
+                            pipe.as_raw_fd(),
+                            libc::POLLOUT,
+                            None,
+                            Some(deadline),
+                        )?,
+                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(()),
+                        Err(error) => {
+                            stopped.store(true, Ordering::Release);
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+        });
+        let target = &target;
+        let forward = move |stream, reader: &mut dyn Read| -> io::Result<()> {
+            let mut chunk = [0; crate::wire::EXEC_STREAM_CHUNK];
+            loop {
+                let count = reader.read(&mut chunk)?;
+                if count == 0 {
+                    return Ok(());
+                }
+                let mut stream_target = target.lock().unwrap();
+                stream_target.deadline(Some(deadline.min(Instant::now() + Duration::from_secs(5))));
+                crate::wire::write_exec_stream(&mut *stream_target, stream, &chunk[..count])?;
+            }
+        };
+        let forward_output = move |stream, reader: &mut dyn Read| {
+            let result = forward(stream, reader);
+            if result.is_err() {
+                stopped.store(true, Ordering::Release);
+            }
+            result
+        };
+        let out = workers.spawn(move || forward_output(1, &mut stdout));
+        let err = workers.spawn(move || forward_output(2, &mut stderr));
+        let status = wait(&mut child, deadline, || {
+            if cancelled.load(Ordering::Acquire) {
+                return true;
+            }
+            let mut descriptor = libc::pollfd {
+                fd: peer.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            unsafe { libc::poll(&mut descriptor, 1, 0) };
+            descriptor.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+        });
+        cancelled.store(true, Ordering::Release);
+        stop_input.request()?;
+        input
+            .join()
+            .map_err(|_| io::Error::other("exec input worker stopped"))??;
+        out.join()
+            .map_err(|_| io::Error::other("exec output worker stopped"))??;
+        err.join()
+            .map_err(|_| io::Error::other("exec error worker stopped"))??;
+        result_code(status?, result_reader, deadline)
     })
 }
 
@@ -339,7 +478,7 @@ pub fn run_helper(
         .and_then(|value| value.into_string().ok())
         .ok_or("missing exec budget")?
         .parse()?;
-    if !(1..=30_000).contains(&budget) {
+    if !(1..=crate::wire::BUILDKIT_EXEC_BUDGET_MS).contains(&budget) {
         return Err("invalid exec budget".into());
     }
     let deadline = Instant::now() + Duration::from_millis(budget);
@@ -357,6 +496,11 @@ pub fn run_helper(
     }
     let spec: LaunchSpec = serde_json::from_str(&specification)?;
     spec.validate_exec()?;
+    if budget > crate::wire::EXEC_STREAM_BUDGET_MS
+        && !crate::spec::buildkit_control_exec(&spec.image_digest, &spec.argv)
+    {
+        return Err("long exec budgets require the pinned BuildKit control command".into());
+    }
 
     let args: Vec<_> = spec
         .argv

@@ -515,7 +515,8 @@ def native_session(args, root):
             markers.append('etc/conjet/native-volume')
             info = volume_disk.stat()
             report['volume_disk'] = {'path': str(volume_disk), 'device': info.st_dev, 'inode': info.st_ino}
-        if args.diagnostics in ('build-snapshot', 'build-bundle'):
+        if (args.diagnostics in ('build-snapshot', 'build-bundle')
+                or (args.compatibility_suite == 'builds' and args.native_disk_images)):
             vm_command.append('--build-snapshot-disk')
             markers.append('etc/conjet/native-build-snapshot')
         if args.native_disk_images:
@@ -585,7 +586,7 @@ def native_session(args, root):
             report['registry'] = registry.authority
         if args.diagnostics == 'trace':
             bridge_command += ['--trace', output / 'adapter-trace.json']
-        if args.diagnostics in ('compose', 'registry'):
+        if args.diagnostics in ('compose', 'registry') or args.compatibility_suite == 'builds':
             bridge_command.append('--trace-requests')
         report['adapter_command'] = list(map(str, bridge_command))
         report['docker_owner'] = args.docker_owner
@@ -621,7 +622,8 @@ def native_session(args, root):
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
             elif args.diagnostics == 'exec':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-exec.py'))
-                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid,
+                                      buildkit=args.native_disk_images and args.native_public_images)
             elif args.diagnostics == 'copy':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-copy.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
@@ -859,7 +861,8 @@ def main():
     if args.native_routed_bridge and args.diagnostics != 'docker-network':
         parser.error('select the routed bridge only for the network diagnostic')
     if args.offline_oci_layout and (
-            args.compatibility_suite not in ('registry-service', 'builds', 'compose', 'storage_network', 'stress')
+            (args.compatibility_suite not in ('registry-service', 'builds', 'compose', 'storage_network', 'stress')
+             and args.diagnostics != 'exec')
             or not args.native_public_images or not args.native_disk_images
             or any(layout.resolve(strict=True) != layout or not layout.is_relative_to(SCRATCH)
                    for layout in args.offline_oci_layout)):
@@ -898,7 +901,7 @@ def main():
     if args.native_latency_idle and not (args.matched_output and args.native_latency_trace):
         parser.error('an idle latency window requires matched traced timing')
     if args.native_disk_images and (
-            args.diagnostics not in ('archive', 'oci-import', 'public-images', 'build-snapshot',
+            args.diagnostics not in ('archive', 'oci-import', 'public-images', 'exec', 'build-snapshot',
                                      'build-bundle', 'compatibility-preflight')
             or args.legacy_baseline or not args.native_memd or args.docker_owner != 'rust'):
         parser.error('the disk image store requires a private native Core image diagnostic')
