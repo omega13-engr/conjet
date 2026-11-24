@@ -869,6 +869,23 @@ that create a separate process or namespace. Reproduce the observed
 Go workload behavior and preserve the evidence for any remaining
 resource or syscall failure.
 
+### SPEED-104
+
+Title: Spool native OCI transfers and validate from the owned file
+
+Acceptance: Preserve the existing wire, generation, integrity and
+publication rules. Replace full in-memory transfer buffering with
+an unlinked private spool and incremental digest, and validate the
+package directly from the file. Qualify interruption, rollback and
+successful native execution at the existing limits before expanding
+the image budgets.
+
+Evidence: The two-layer fixture passed live import, execution, overlap,
+removal and rejection checks, including bad digest, offset, abort and
+stale generation. The separate common and Alpine archive round trips
+also passed. Both Core sessions shut down cleanly and preserved production.
+Logs are under `SPEED-104/` on ExternalSSD.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle

@@ -88,17 +88,31 @@ impl Root {
             "OCI package exceeds its bound"
         );
         let root: Self = serde_json::from_slice(bytes)?;
-        let digest = root
+        root.validate()
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) fn read_file(file: std::fs::File) -> std::io::Result<Self> {
+        ensure!(
+            file.metadata()?.len() <= PACKAGE_LIMIT,
+            "OCI package exceeds its bound"
+        );
+        let root: Self = serde_json::from_reader(std::io::BufReader::new(file))?;
+        root.validate()
+    }
+
+    fn validate(self) -> std::io::Result<Self> {
+        let digest = self
             .config_digest
             .strip_prefix("sha256:")
             .ok_or_else(|| std::io::Error::other("invalid OCI image config digest"))?;
         unhex::<32>(digest).map_err(std::io::Error::other)?;
         ensure!(
-            !root.records.is_empty() && root.records.len() <= MAX_RECORDS,
+            !self.records.is_empty() && self.records.len() <= MAX_RECORDS,
             "invalid OCI rootfs entry count"
         );
         let mut types = BTreeMap::new();
-        for record in &root.records {
+        for record in &self.records {
             ensure!(root_path(&record.path), "invalid OCI rootfs path");
             ensure!(
                 record.mode & !0o1777 == 0
@@ -131,7 +145,7 @@ impl Root {
                 );
             }
         }
-        for record in &root.records {
+        for record in &self.records {
             if record.kind == Kind::Hardlink {
                 ensure!(
                     types.get(record.target.as_str()) == Some(&Kind::File),
@@ -139,6 +153,6 @@ impl Root {
                 );
             }
         }
-        Ok(root)
+        Ok(self)
     }
 }

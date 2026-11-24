@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
-use std::fs::{self, Permissions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions, Permissions};
+use std::io::{self, Seek, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -64,7 +64,9 @@ struct Pending {
     config_digest: String,
     package_digest: [u8; 32],
     size: u64,
-    bytes: Vec<u8>,
+    file: File,
+    written: u64,
+    hash: Sha256,
     seen: Instant,
 }
 
@@ -158,17 +160,17 @@ impl Store {
                 if size == 0 || size > TOTAL_BYTES - used || self.images.len() >= MAX_IMAGES {
                     return Err(("capacity", "guest OCI image capacity exceeded"));
                 }
-                let mut bytes = Vec::new();
-                bytes
-                    .try_reserve_exact(size as usize)
-                    .map_err(|_| ("capacity", "cannot reserve guest OCI transfer"))?;
+                let file = spool(&transfer)
+                    .map_err(|_| ("capacity", "cannot open guest OCI transfer spool"))?;
                 self.pending = Some(Pending {
                     owner,
                     transfer,
                     config_digest,
                     package_digest,
                     size,
-                    bytes,
+                    file,
+                    written: 0,
+                    hash: Sha256::new(),
                     seen: Instant::now(),
                 });
                 Ok(json!({"offset":0}))
@@ -182,31 +184,38 @@ impl Store {
                 let data = base64::engine::general_purpose::STANDARD
                     .decode(data)
                     .map_err(|_| ("malformed", "invalid OCI transfer encoding"))?;
-                if offset != state.bytes.len() as u64
+                if offset != state.written
                     || data.is_empty()
                     || data.len() > CHUNK
                     || offset + data.len() as u64 > state.size
                 {
                     return Err(("malformed", "invalid OCI transfer offset or chunk size"));
                 }
-                state.bytes.extend_from_slice(&data);
+                if state.file.write_all(&data).is_err() {
+                    self.pending = None;
+                    return Err(("capacity", "cannot write guest OCI transfer spool"));
+                }
+                state.hash.update(&data);
+                state.written += data.len() as u64;
                 state.seen = Instant::now();
-                Ok(json!({"offset":state.bytes.len()}))
+                Ok(json!({"offset":state.written}))
             }
             Action::Commit { transfer } => {
                 self.transfer(&transfer, owner)?;
-                let state = self.pending.take().expect("checked OCI transfer");
-                if state.bytes.len() as u64 != state.size
-                    || Sha256::digest(&state.bytes)[..] != state.package_digest
+                let mut state = self.pending.take().expect("checked OCI transfer");
+                if state.written != state.size || state.hash.finalize()[..] != state.package_digest
                 {
                     return Err(("integrity", "OCI transfer package digest differs"));
                 }
-                let root = Root::read(&state.bytes)
+                state
+                    .file
+                    .rewind()
+                    .map_err(|_| ("integrity", "cannot rewind staged OCI root"))?;
+                let root = Root::read_file(state.file)
                     .map_err(|_| ("integrity", "invalid staged OCI root"))?;
                 if root.config_digest != state.config_digest {
                     return Err(("integrity", "staged OCI config digest differs"));
                 }
-                drop(state.bytes);
                 if install(&root, &state.transfer, deadline).is_err() {
                     return Err(("image_install_failed", "cannot publish staged OCI image"));
                 }
@@ -267,7 +276,7 @@ fn owner_mode(path: &Path, uid: u32, gid: u32, mode: Option<u32>) -> io::Result<
     Ok(())
 }
 
-fn install(root: &Root, transfer: &str, deadline: Instant) -> io::Result<()> {
+fn store_directory() -> io::Result<&'static Path> {
     let directory = Path::new(DIRECTORY);
     match fs::DirBuilder::new().mode(0o711).create(directory) {
         Ok(()) => {}
@@ -279,6 +288,23 @@ fn install(root: &Root, transfer: &str, deadline: Instant) -> io::Result<()> {
         }
         Err(error) => return Err(error),
     }
+    Ok(directory)
+}
+
+fn spool(transfer: &str) -> io::Result<File> {
+    let path = store_directory()?.join(format!(".transfer-{transfer}"));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    fs::remove_file(path)?;
+    Ok(file)
+}
+
+fn install(root: &Root, transfer: &str, deadline: Instant) -> io::Result<()> {
+    let directory = store_directory()?;
     let staging = directory.join(format!(".{transfer}"));
     fs::DirBuilder::new().mode(0o700).create(&staging)?;
     let result = (|| {
