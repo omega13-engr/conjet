@@ -1029,6 +1029,14 @@ bounded exec search after chroot and identity setup. Preserve absolute
 command behavior, reject ambiguous paths and keep the static guest
 fixture restriction.
 
+Evidence: The actual bare `sleep` command passed under the default,
+partial, lifecycle and service resource settings, and a relative path
+with a slash was rejected. The original absolute lifecycle canaries
+passed. The verified Redis boot entered its declared shell script and
+the script reached the `umask` command substitution before the pipe
+restriction. Shell subprocesses are tracked in SPEED-116. Logs are under
+`SPEED-113/` on ExternalSSD.
+
 ### SPEED-114
 
 Title: Stream the frozen Node Docker image archive round trip
@@ -1046,6 +1054,17 @@ Title: Apply inherited cgroup semantics to native exec
 Acceptance: Exercise exec in a workload with omitted Docker resources
 and in a workload with the frozen service limits. Join the existing
 owned cgroup and retain its credentials and exit behavior.
+
+### SPEED-116
+
+Title: Support ordinary shell subprocesses inside the native OCI sandbox
+
+Acceptance: Reproduce the pinned Redis entrypoint's command substitution
+and the original Node entrypoint. Admit pipes and ordinary child
+creation with cgroup ownership and bounded flags. Keep namespace
+creation, process-parent changes, ptrace and privilege changes outside
+the workload's authority. Keep thread creation separately qualified by
+SPEED-103.
 
 ### SPEED-091
 

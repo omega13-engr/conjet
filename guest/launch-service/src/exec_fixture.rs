@@ -277,6 +277,28 @@ pub(crate) fn execute(
     }))
 }
 
+pub(crate) fn program_paths(spec: &LaunchSpec) -> io::Result<Vec<CString>> {
+    let program = &spec.argv[0];
+    if program.starts_with('/') {
+        return Ok(vec![CString::new(program.as_bytes())?]);
+    }
+    spec.env
+        .iter()
+        .find_map(|entry| entry.strip_prefix("PATH="))
+        .unwrap_or("/bin:/usr/bin")
+        .split(':')
+        .take(32)
+        .filter(|directory| {
+            directory.starts_with('/')
+                && directory.split('/').all(|part| !matches!(part, "." | ".."))
+        })
+        .map(|directory| {
+            CString::new(format!("{}/{program}", directory.trim_end_matches('/')))
+                .map_err(Into::into)
+        })
+        .collect()
+}
+
 pub fn run_helper(
     mut args: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -338,23 +360,7 @@ pub fn run_helper(
         .chain([std::ptr::null()])
         .collect();
     let cwd = CString::new(spec.cwd.as_bytes())?;
-    let program = &spec.argv[0];
-    let executables = if program.starts_with('/') {
-        vec![CString::new(program.as_bytes())?]
-    } else {
-        spec.env
-            .iter()
-            .find_map(|entry| entry.strip_prefix("PATH="))
-            .unwrap_or("/bin:/usr/bin")
-            .split(':')
-            .take(32)
-            .filter(|directory| {
-                directory.starts_with('/')
-                    && directory.split('/').all(|part| !matches!(part, "." | ".."))
-            })
-            .map(|directory| CString::new(format!("{}/{program}", directory.trim_end_matches('/'))))
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    let executables = program_paths(&spec)?;
     let (mount, scope) = crate::kernel_fixture::cgroup_paths(&workload, true);
     let cgroup = mount.join(scope).join("workloads/active").join(&workload);
     crate::cgroups::write_control(&cgroup, "cgroup.procs", "0")?;

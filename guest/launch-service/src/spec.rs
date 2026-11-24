@@ -179,6 +179,14 @@ impl ValidatedLaunch {
 
 impl LaunchRequest {
     pub fn validate(self) -> Result<ValidatedLaunch, SpecError> {
+        self.validate_with_path_search(false)
+    }
+
+    pub fn validate_oci(self) -> Result<ValidatedLaunch, SpecError> {
+        self.validate_with_path_search(true)
+    }
+
+    fn validate_with_path_search(self, search_path: bool) -> Result<ValidatedLaunch, SpecError> {
         handshake::unhex::<16>(&self.boot_id).map_err(|_| SpecError::BootId)?;
         if self.sequence == 0 {
             return Err(SpecError::Sequence);
@@ -193,7 +201,7 @@ impl LaunchRequest {
         if !(1..=30_000).contains(&self.budget_ms) {
             return Err(SpecError::Budget);
         }
-        let digest = self.spec.validate()?;
+        let digest = self.spec.validate_process(search_path)?;
         Ok(ValidatedLaunch {
             request: self,
             digest,
@@ -380,6 +388,17 @@ mod tests {
         let mut request = valid();
         request.spec.argv[0] = "/bad\0".into();
         assert_eq!(request.validate().err(), Some(SpecError::Strings));
+    }
+
+    #[test]
+    fn accepts_a_bare_oci_program_without_relaxing_static_or_relative_paths() {
+        let mut request = valid();
+        request.spec.argv[0] = "sleep".into();
+        assert_eq!(request.spec.validate().err(), Some(SpecError::Path));
+        assert!(request.validate_oci().is_ok());
+        let mut request = valid();
+        request.spec.argv[0] = "bin/sleep".into();
+        assert_eq!(request.validate_oci().err(), Some(SpecError::Path));
     }
 
     #[test]

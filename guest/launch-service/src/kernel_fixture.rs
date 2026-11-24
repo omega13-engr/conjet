@@ -349,11 +349,17 @@ fn clone_and_reap(
             .collect()
     };
     let oci = process
-        .map(|spec| Ok::<_, io::Error>((encode(&spec.argv)?, encode(&spec.env)?)))
+        .map(|spec| {
+            Ok::<_, io::Error>((
+                encode(&spec.argv)?,
+                encode(&spec.env)?,
+                crate::exec_fixture::program_paths(spec)?,
+            ))
+        })
         .transpose()?;
     // Allocate the pointer vectors before clone and keep their strings alive
     // through execve. The pointers reference only the helper's own allocations.
-    let oci_pointers = oci.as_ref().map(|(args, env)| {
+    let oci_pointers = oci.as_ref().map(|(args, env, paths)| {
         let ptrs = |values: &[std::ffi::CString]| {
             values
                 .iter()
@@ -361,7 +367,7 @@ fn clone_and_reap(
                 .chain([std::ptr::null()])
                 .collect::<Vec<_>>()
         };
-        (ptrs(args), ptrs(env))
+        (ptrs(args), ptrs(env), paths)
     });
     let mut barrier = [-1; 2];
     // pipe2 writes two fresh descriptors which are each taken by one File.
@@ -450,8 +456,10 @@ fn clone_and_reap(
                 eprintln!("workload sandbox setup failed: {error}");
                 unsafe { libc::_exit(126) }
             }
-            if let Some((args, env)) = &oci_pointers {
-                unsafe { libc::execve(args[0], args.as_ptr(), env.as_ptr()) };
+            if let Some((args, env, paths)) = &oci_pointers {
+                for path in *paths {
+                    unsafe { libc::execve(path.as_ptr(), args.as_ptr(), env.as_ptr()) };
+                }
                 unsafe { libc::_exit(127) }
             }
             let args = [

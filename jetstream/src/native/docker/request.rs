@@ -297,7 +297,7 @@ impl Image {
             limits,
             docker_resource_defaults: limits.has_unlimited(),
         };
-        spec.validate()
+        spec.validate_exec()
             .map_err(|error| Rejected::bad(error.to_string()))?;
         serde_json::to_value(spec)
             .map_err(|_| Rejected::internal("cannot encode native process spec"))

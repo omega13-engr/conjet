@@ -1672,9 +1672,12 @@ impl FreshFixture {
             Kind::Launch | Kind::Prepare => {
                 drop(guard);
                 let request: LaunchRequest = parse(frame)?;
-                let ready = request
-                    .validate()
-                    .map_err(|err| (err.code(), "invalid native launch spec"))?;
+                let ready = if self.oci {
+                    request.validate_oci()
+                } else {
+                    request.validate()
+                }
+                .map_err(|err| (err.code(), "invalid native launch spec"))?;
                 let expires = deadline(ready.request().budget_ms)?;
                 self.admit(ready, boot, expires, frame.kind == Kind::Prepare, false)
             }

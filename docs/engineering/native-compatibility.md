@@ -180,6 +180,21 @@ and the logs. Forced removal verified output drain and guest teardown.
 The canary used the frozen explicit lifecycle resource settings.
 Evidence is under `SPEED-112/` on ExternalSSD.
 
+## SPEED-113 launch PATH resolution
+
+The OCI launch path and exec share bounded executable lookup. The guest
+tries candidates inside the authenticated workload root, after sandbox
+and identity setup. Bare `sleep` worked in each resource case. The
+original absolute lifecycle canaries passed, and slash-relative
+commands were rejected.
+
+The first entrypoint probe hit a Docker Hub timeout. A separate boot from
+the verified pinned Redis layout reached line 19 of its declared
+entrypoint, where the guest blocked a pipe for command substitution.
+That verifies dispatch to the original script. The original Redis
+service still requires shell and process support. Evidence is under
+`SPEED-113/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

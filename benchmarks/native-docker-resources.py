@@ -44,7 +44,7 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
             for case, flags, requested, limits in cases:
                 name = 'cj-resource-' + case
                 request = ['run', '-d', '--network', 'none', '--pull', 'never', '--name', name,
-                           *flags, image, '/bin/sleep', '1800']
+                           *flags, image, 'sleep', '1800']
                 call(request)
                 record = records[case] = {'argv': request}
                 try:
@@ -71,6 +71,7 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
                     raise RuntimeError('removed resource test still owns a guest cgroup')
         call(['create', '--network', 'none', '--memory', '257m', image, '/bin/true'], expected=1)
         call(['create', '--network', 'none', '--pids-limit', '65', image, '/bin/true'], expected=1)
+        call(['create', '--network', 'none', image, 'bin/sleep', '1800'], expected=1)
         if observe()['active_workloads']:
             raise RuntimeError('rejected resource tests entered the guest')
     finally:
