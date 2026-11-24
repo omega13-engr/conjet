@@ -202,7 +202,8 @@ def run_pair(args, root, pair, participants):
         evidence = root / 'native-launcher' / 'launcher.json'
         if engine == 'native':
             command += ['--image', IMAGE['ref'], '--native-evidence', evidence.parent]
-            for key in ('swift_bin', 'core', 'native_kernel', 'native_guest', 'native_package', 'native_receipt'):
+            for key in ('swift_bin', 'core', 'native_kernel', 'native_guest', 'native_package', 'native_receipt',
+                        'native_memd', 'native_reclaimd'):
                 command += ['--' + key.replace('_', '-'), getattr(args, key)]
         else:
             evidence = participants['KIRI_ROOT'] / 'last-session.json'
@@ -238,7 +239,8 @@ def interrupt(_signum, _frame):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for key in ('swift-bin', 'core', 'native-kernel', 'native-guest', 'native-package', 'native-receipt', 'output'):
+    for key in ('swift-bin', 'core', 'native-kernel', 'native-guest', 'native-package', 'native-receipt',
+                'native-memd', 'native-reclaimd', 'output'):
         parser.add_argument('--' + key, type=Path, required=True)
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument('--pair', type=int, choices=range(1, 6), default=1)

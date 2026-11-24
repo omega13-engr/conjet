@@ -196,6 +196,7 @@ python3 benchmarks/native-docker-comparison.py --all-pairs \
   --native-kernel "$kernel" \
   --native-guest "$speed_build/cargo/aarch64-unknown-linux-musl/release/conjet-launchd" \
   --native-package "$native_package" --native-receipt "$oci_receipt" \
+  --native-memd "$native_memd" --native-reclaimd "$native_reclaimd" \
   --output "$evidence/native-kiri-release"
 ```
 
@@ -209,6 +210,11 @@ lane checks the unique guest workload and verified cleanup after recording
 each sample. Kiri guest cleanup is unobservable in this suite. Report
 percentiles, failures and throughput per independent session before
 computing paired uncertainty.
+
+The native launcher requires both static Core memory helpers. It audits the
+initramfs, boots the Core governor and records its policy and ownership
+metrics immediately before and after measurement. The pressure fixture is
+available only in the separate `dynamic-pressure` diagnostic.
 
 The [frozen protocol](../docs/engineering/docker-benchmark-plan.md) controls
 the Docker comparison. Use the build outputs and verified Core assets from

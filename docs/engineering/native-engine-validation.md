@@ -116,3 +116,44 @@ recorded PSI recovery directly with the governor's policy unchanged.
 The launcher verified clean guest shutdown, socket and session removal,
 and production preservation. Raw evidence and artifact hashes are under
 `/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-057/core-pressure-final/`.
+
+## SPEED-059
+
+Both release boot pairs ran pinned Alpine ARM64 with UID/GID 65532,
+16 MiB, four PIDs, 0.5 CPU and no networking. Each leg passed 200 timed
+operations and ten warmups in each API and CLI lane. The initial pair ran
+Conjet then official Kiri 0.2.2. The second reversed that order. The native
+VMM confirmed the Core governor and backing ledger before and after both
+measurement windows. The workload was warm at 2 GiB in those snapshots.
+The same release artifacts passed the reduced-capacity pressure diagnostic.
+
+| Pair | Engine | Lane | p50 ms | p95 ms | p99 ms | Verified ops/s |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| 1 | Conjet native | API | 77.49 | 86.75 | 97.47 | 12.69 |
+| 1 | Kiri | API | 3.67 | 4.27 | 5.47 | 263.98 |
+| 1 | Conjet native | CLI | 67.20 | 74.89 | 76.43 | 14.65 |
+| 1 | Kiri | CLI | 19.96 | 20.75 | 21.21 | 49.96 |
+| 2 | Conjet native | API | 77.15 | 86.93 | 90.40 | 12.68 |
+| 2 | Kiri | API | 3.70 | 4.24 | 4.56 | 264.28 |
+| 2 | Conjet native | CLI | 68.45 | 76.41 | 79.91 | 14.29 |
+| 2 | Kiri | CLI | 20.16 | 21.33 | 27.32 | 48.70 |
+
+Conjet's API medians were 20.85–21.09× Kiri's. CLI medians were 3.37–3.39×.
+No boot met the sub-5-ms native API target. The two-pair pilot has no formal
+paired 95% bound and establishes no parity. The host API wait median was
+75.08–75.58 ms. Create was 0.43–0.44 ms, start 0.35–0.37 ms, and remove
+0.94–0.99 ms. These API client spans do not yet attribute guest execution
+or the Core admission exchange.
+
+The Conjet VMM finished each leg at about 159 MiB RSS and 5.4–5.5 CPU
+seconds. The Docker owner finished around 8.3 MiB and 0.54–0.56 CPU seconds.
+Kiri's VM finished at 186 and 230 MiB RSS and 1.69–1.73 CPU seconds.
+The longer Conjet windows prevent treating these snapshot totals as a
+matched energy comparison. Conjet verified terminal guest cleanup for
+each lifecycle. Kiri's guest-level teardown remains unobservable with
+this harness. Both launcher pairs verified host cleanup and production
+preservation. Independent-host and privileged energy results remain open.
+
+Raw samples, stage data, host observations, launcher commands and hashes
+are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-059/`.

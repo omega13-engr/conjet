@@ -220,7 +220,7 @@ Title: Measure the current native fresh lifecycle against pinned Kiri
 
 Description: Freeze a release native baseline at the existing API and CLI boundaries.
 
-Is blocked by task: SPEED-058.
+Is blocked by task: SPEED-058 isolated qualification, complete.
 
 Acceptance Criteria:
 
@@ -230,13 +230,17 @@ Problem and Evidence: Historical native measurements predate this candidate.
 
 Approach: Use the existing comparison harness and private native owner, with tracing disabled for timings and separate attribution runs.
 
-Evidence: Pending; no new candidate result.
+Evidence: Both alternating release boot pairs passed 200 API and 200 CLI
+operations plus ten warmups per lane and leg. Native API p50 was 77.15–77.49
+ms versus Kiri 3.67–3.70 ms. Native CLI p50 was 67.20–68.45 ms versus Kiri
+19.96–20.16 ms. See [the release pilot](native-engine-validation.md#speed-059).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
-Review: Pending implementation, validation and independent evidence review.
+Review: Release pilot and self-review complete. Independent evidence review
+and five-pair qualification remain pending.
 
-Next Action: Freeze artifact hashes and run the matched no-network lifecycle.
+Next Action: Attribute the native wait span before selecting the SPEED-060 change.
 
 ### SPEED-060
 
@@ -250,7 +254,9 @@ Acceptance Criteria:
 
 - Name the exact delayed transition and clock-local evidence before editing. Preserve readiness, output and cleanup boundaries; add focused failure/race coverage. Run two alternating 200-operation A/B pairs and all affected memory gates; reject a non-improving candidate.
 
-Problem and Evidence: Select the bottleneck from SPEED-059, not language preference.
+Problem and Evidence: The native API wait step had a 75.08–75.58 ms median
+and dominated both boot pairs. Host create, start and remove together
+accounted for less than 2 ms of per-stage medians.
 
 Approach: Prefer event completion over measured polling. Use typed ownership, bounded queues and a clone-safe launch boundary; do not perform broad cosmetic rewrites.
 
@@ -260,7 +266,8 @@ Source: [Native engine plan](native-engine-v2-plan.md) and current native host/g
 
 Review: Pending implementation, validation and independent evidence review.
 
-Next Action: Select and document the single confirmed bottleneck, then implement and validate it.
+Next Action: Split wait into authenticated admission observation and grant,
+guest execution and teardown, and terminal reply delivery.
 
 ### SPEED-061
 

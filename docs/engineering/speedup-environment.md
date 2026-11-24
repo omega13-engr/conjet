@@ -75,6 +75,17 @@ SIGTERM enter cleanup. Use `--hold-seconds 60` to
 exercise cancellation after the smoke fixture prints its success marker.
 Production and the competitor must stay outside the candidate session.
 
+For native memory validation, pass `--native-memd "$native_memd"` and
+`--native-reclaimd "$native_reclaimd"` from the current Core sources. Build
+both as static Linux ARM64 executables under the ExternalSSD build root. On
+an ARM64 Linux build environment, use `gcc -static -O2 -Wall -Wextra -pthread`
+with each source from `guest/image/conjet-core/src`. The launcher accepts
+`--diagnostics dynamic-memory` for workload-driven growth, idle shrink
+and backing ownership, and `--diagnostics dynamic-pressure` for an
+independent service pressure run. The matched Kiri comparison requires the
+dynamic governor and accepts the same helpers. Run memory verification before
+comparative timing.
+
 For the retained Docker/containerd lane, pass `--legacy-baseline` and
 `--network-helper`, and omit the native arguments. To reuse the release downloads,
 pass `--core-assets` with the earlier
