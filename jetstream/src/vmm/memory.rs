@@ -470,13 +470,21 @@ mod tests {
         use crate::vmm::macos_memory::{nonreusable_backing_pages, reusable_backing_pages};
 
         let page = page_size();
-        let memory = GuestMemory::anonymous(page * 4).unwrap();
-        for offset in (0..memory.len()).step_by(page) {
+        let size = page * 4;
+        let memory = GuestMemory::anonymous(size + 2 * page).unwrap();
+        // VM_REGION_TOP_INFO reports the VM object's counts. Guard the test
+        // range so Darwin cannot coalesce it with a neighboring mapping.
+        for offset in [0, page + size] {
+            let guard = memory.host_address_at(0, offset as u64, page).unwrap();
+            assert_eq!(unsafe { libc::mprotect(guard, page, libc::PROT_NONE) }, 0);
+        }
+        let address = memory.host_address_at(0, page as u64, size).unwrap();
+        for offset in (page..page + size).step_by(page) {
             memory.write(offset, &[0x7f]);
         }
         let error = memory
-            .replace_backing_at(0, 0, memory.len(), |_| {
-                assert_eq!(nonreusable_backing_pages(memory.as_ptr()), 0);
+            .replace_backing_at(0, page as u64, size, |_| {
+                assert_eq!(nonreusable_backing_pages(address), 0);
                 Err(GuestMemoryError::MapFailed(
                     std::io::Error::from_raw_os_error(libc::ENOMEM),
                 ))
@@ -489,12 +497,9 @@ mod tests {
         // A restored HVF mapping must never expose still-reusable live pages.
         // Some pages may already have been evicted while reusable, so inspect
         // their disposition instead of assuming they all remain resident.
-        assert_eq!(
-            reusable_backing_pages(memory.as_ptr(), memory.len(), page),
-            0
-        );
-        memory.write(0, &[0x5a]);
-        assert_eq!(memory.read_at(0, 0, 1).unwrap(), [0x5a]);
+        assert_eq!(reusable_backing_pages(address, size, page), 0);
+        memory.write(page, &[0x5a]);
+        assert_eq!(memory.read_at(0, page as u64, 1).unwrap(), [0x5a]);
     }
 
     #[cfg(target_os = "macos")]
