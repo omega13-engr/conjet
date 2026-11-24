@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
@@ -7,8 +7,125 @@ use base64::Engine;
 use conjet_launch_service::wire::{Kind, WireError, COPY_LIMIT};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::{client, events, Item, Owner, Rejected, CHUNK};
+
+pub(super) const UPLOAD_LIMIT: usize = COPY_LIMIT as usize + 64 * 1024;
+
+struct Upload {
+    name: String,
+    size: u64,
+    mode: u32,
+    offset: u64,
+    digest: [u8; 32],
+}
+
+impl Upload {
+    fn parse(mut file: &File) -> anyhow::Result<Self> {
+        let mut archive = tar::Archive::new(file);
+        let mut entries = archive.entries()?;
+        let mut entry = entries.next().context("workload archive is empty")??;
+        ensure!(
+            entry.header().entry_type().is_file(),
+            "workload archive requires a regular file"
+        );
+        let size = entry.size();
+        let offset = entry.raw_file_position();
+        let mode = entry.header().mode()?;
+        let name = std::str::from_utf8(entry.path_bytes().as_ref())?.to_owned();
+        ensure!(
+            size <= COPY_LIMIT && mode & !0o777 == 0,
+            "unsupported workload archive size or mode"
+        );
+        ensure!(
+            name.len() <= 255
+                && !name.contains(['/', '\0'])
+                && !matches!(name.as_str(), "" | "." | ".."),
+            "workload archive requires one unqualified file name"
+        );
+        let mut hash = Sha256::new();
+        ensure!(
+            std::io::copy(&mut entry, &mut hash)? == size,
+            "incomplete workload archive entry"
+        );
+        ensure!(
+            entries.next().transpose()?.is_none(),
+            "workload archive requires exactly one file"
+        );
+        file.seek(SeekFrom::Start(offset + size.div_ceil(512) * 512))?;
+        let mut trailer = [0; 1024];
+        file.read_exact(&mut trailer)?;
+        ensure!(
+            trailer.iter().all(|byte| *byte == 0),
+            "invalid workload archive trailer"
+        );
+        loop {
+            let count = file.read(&mut trailer)?;
+            ensure!(
+                trailer[..count].iter().all(|byte| *byte == 0),
+                "invalid workload archive trailer"
+            );
+            if count == 0 {
+                break;
+            }
+        }
+        Ok(Self {
+            name,
+            size,
+            mode,
+            offset,
+            digest: hash.finalize().into(),
+        })
+    }
+
+    fn send(
+        &self,
+        mut file: &File,
+        peer: &mut client::Connection,
+        handle: &Value,
+        path: &str,
+    ) -> anyhow::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        exchange(
+            peer,
+            handle,
+            json!({
+                "action":"begin","path":path,"name":self.name,"size":self.size,"mode":self.mode,"digest":self.digest,
+            }),
+        ).context("begin workload archive upload")?;
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut offset = 0;
+        let mut bytes = [0; CHUNK];
+        while offset < self.size {
+            ensure!(
+                Instant::now() < deadline,
+                "workload archive upload timed out"
+            );
+            let count = (self.size - offset).min(CHUNK as u64) as usize;
+            file.read_exact(&mut bytes[..count])?;
+            let result = exchange(
+                peer,
+                handle,
+                json!({
+                    "action":"write","offset":offset,"data":base64::engine::general_purpose::STANDARD.encode(&bytes[..count]),
+                }),
+            ).context("write workload archive chunk")?;
+            offset += count as u64;
+            ensure!(
+                result["offset"].as_u64() == Some(offset),
+                "invalid archive upload cursor"
+            );
+        }
+        let result = exchange(peer, handle, json!({"action":"commit"}))
+            .context("commit workload archive upload")?;
+        ensure!(
+            result["offset"].as_u64() == Some(self.size),
+            "invalid archive upload acknowledgement"
+        );
+        Ok(())
+    }
+}
 
 #[derive(Deserialize)]
 struct Info {
@@ -147,31 +264,8 @@ impl Owner {
         head: bool,
     ) -> Result<(String, Option<File>), Rejected> {
         let _control = item.control.lock().unwrap();
-        let handle = {
-            let state = item.state();
-            if state.removed || state.terminal.is_some() || state.error.is_some() {
-                return Err(Rejected(
-                    409,
-                    "archive requires a running native workload".into(),
-                ));
-            }
-            state
-                .native_handle
-                .clone()
-                .ok_or_else(|| Rejected(409, "native workload is still preparing".into()))?
-        };
-        let trimmed = path.trim_end_matches('/');
-        let path = if path.starts_with('/') {
-            if trimmed.is_empty() {
-                "/".into()
-            } else {
-                trimmed.to_owned()
-            }
-        } else if trimmed.is_empty() {
-            return Err(Rejected::bad("missing workload archive path"));
-        } else {
-            format!("/{trimmed}")
-        };
+        let handle = archive_handle(item)?;
+        let path = archive_path(path)?;
         let mut peer = self.archive_peer()?;
         let stat = exchange(&mut peer, &handle, json!({"action":"stat","path":path})).map_err(
             |error| match error {
@@ -202,5 +296,58 @@ impl Owner {
         let archive = file_archive(&mut peer, &handle, scratch, &info, &path)
             .map_err(|error| Rejected::internal(format!("{error:#}")))?;
         Ok((stat, Some(archive)))
+    }
+
+    pub(super) fn workload_upload(
+        &self,
+        item: &Item,
+        path: &str,
+        file: &File,
+    ) -> Result<(), Rejected> {
+        let upload = Upload::parse(file)
+            .map_err(|error| Rejected::bad(format!("invalid workload archive: {error}")))?;
+        let path = archive_path(path)?;
+        let _control = item.control.lock().unwrap();
+        let handle = archive_handle(item)?;
+        let mut peer = self.archive_peer()?;
+        upload
+            .send(file, &mut peer, &handle, &path)
+            .map_err(|error| match error.downcast_ref::<WireError>() {
+                Some(WireError::PeerError(code)) if code == "not_found" => {
+                    Rejected(404, "native archive destination was not found".into())
+                }
+                Some(WireError::PeerError(_)) => Rejected::bad(format!("{error:#}")),
+                _ => Rejected::internal(format!("{error:#}")),
+            })
+    }
+}
+
+fn archive_handle(item: &Item) -> Result<Value, Rejected> {
+    let state = item.state();
+    if state.removed || state.terminal.is_some() || state.error.is_some() {
+        return Err(Rejected(
+            409,
+            "archive requires a running native workload".into(),
+        ));
+    }
+    state
+        .native_handle
+        .clone()
+        .ok_or_else(|| Rejected(409, "native workload is still preparing".into()))
+}
+
+fn archive_path(path: &str) -> Result<String, Rejected> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return if path.starts_with('/') {
+            Ok("/".into())
+        } else {
+            Err(Rejected::bad("missing workload archive path"))
+        };
+    }
+    if path.starts_with('/') {
+        Ok(trimmed.into())
+    } else {
+        Ok(format!("/{trimmed}"))
     }
 }

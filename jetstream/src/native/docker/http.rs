@@ -197,8 +197,8 @@ fn copy_chunks(
     reader: &mut BufReader<UnixStream>,
     writer: &mut File,
     deadline: Instant,
+    mut budget: usize,
 ) -> Result<()> {
-    let mut budget = super::archive::LIMIT;
     // Bound framing overhead independently of the decoded archive.
     let mut framing = 1024 * 1024;
     loop {
@@ -248,8 +248,18 @@ fn parse(
     }
     let (path, raw_query) = target.split_once('?').unwrap_or((target, ""));
     let load = method == "POST" && matches!(path, "/v1.44/images/load" | "/images/load");
+    let copy = method == "PUT"
+        && path
+            .strip_prefix("/v1.44")
+            .unwrap_or(path)
+            .strip_prefix("/containers/")
+            .and_then(|route| route.strip_suffix("/archive"))
+            .is_some_and(super::request::name);
+    let spooled = load || copy;
     let body_limit = if load {
         super::archive::LIMIT
+    } else if copy {
+        super::workload_copy::UPLOAD_LIMIT
     } else {
         MAX_BODY
     };
@@ -280,13 +290,13 @@ fn parse(
         }
         let value = value.trim();
         if key.eq_ignore_ascii_case("transfer-encoding") {
-            if !load || chunked || !value.eq_ignore_ascii_case("chunked") {
+            if !spooled || chunked || !value.eq_ignore_ascii_case("chunked") {
                 return Err(Rejected::bad("unsupported Docker request body framing"));
             }
             chunked = true;
         }
         if key.eq_ignore_ascii_case("expect") {
-            if !load || expect || !value.eq_ignore_ascii_case("100-continue") {
+            if !spooled || expect || !value.eq_ignore_ascii_case("100-continue") {
                 return Err(Rejected::bad("unsupported Docker request expectation"));
             }
             expect = true;
@@ -332,15 +342,15 @@ fn parse(
         }
     }
     let mut body = Vec::new();
-    let archive = if load {
+    let archive = if spooled {
         use std::io::Seek;
         if (chunked && size.is_some()) || (!chunked && size.unwrap_or(0) == 0) {
             return Err(Rejected::bad("invalid Docker archive framing"));
         }
         let root = archive_root
-            .ok_or_else(|| Rejected(501, "native image store is not configured".into()))?;
+            .ok_or_else(|| Rejected(501, "native archive scratch is not configured".into()))?;
         let mut spool = tempfile::tempfile_in(root)
-            .map_err(|_| Rejected::internal("cannot spool Docker image archive"))?;
+            .map_err(|_| Rejected::internal("cannot spool Docker archive"))?;
         if expect {
             reader
                 .get_ref()
@@ -349,7 +359,7 @@ fn parse(
         }
         let deadline = Instant::now() + ARCHIVE_READ_TIMEOUT;
         if chunked {
-            copy_chunks(reader, &mut spool, deadline)?;
+            copy_chunks(reader, &mut spool, deadline, body_limit)?;
         } else {
             copy_body(reader, &mut spool, size.unwrap_or(0), deadline)?;
         }
@@ -760,18 +770,15 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 _ => return Err(Rejected(501, "unsupported native exec operation".into())),
             }
         }
-        _ => return container(owner, method, path, query, &request.body),
+        _ => return container(owner, path, request),
     };
     Ok(Action::Reply(reply))
 }
 
-fn container(
-    owner: &Arc<Owner>,
-    method: &str,
-    path: &str,
-    query: &BTreeMap<String, String>,
-    body: &[u8],
-) -> Result<Action> {
+fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action> {
+    let method = request.method.as_str();
+    let query = &request.query;
+    let body = request.body.as_slice();
     let route = path
         .strip_prefix("/containers/")
         .ok_or_else(|| Rejected(501, "unsupported Docker API operation".into()))?;
@@ -782,6 +789,7 @@ fn container(
     let item = owner.lookup(id)?;
     let allowed_query: &[&str] = match (method, action) {
         ("HEAD" | "GET", "archive") => &["path"],
+        ("PUT", "archive") => &["path", "noOverwriteDirNonDir", "copyUIDGID"],
         ("POST", "attach") => &["stdin", "stdout", "stderr", "logs", "stream"],
         ("GET", "logs") => &[
             "stdout",
@@ -815,6 +823,28 @@ fn container(
                 .ok_or_else(|| Rejected::bad("missing workload archive path"))?;
             let (stat, archive) = owner.workload_archive(&item, path, method == "HEAD")?;
             return Ok(Action::WorkloadArchive(stat, archive));
+        }
+        ("PUT", "archive") => {
+            if query
+                .get("copyUIDGID")
+                .is_some_and(|value| !matches!(value.as_str(), "0" | "false"))
+                || query
+                    .get("noOverwriteDirNonDir")
+                    .is_some_and(|value| !matches!(value.as_str(), "0" | "false" | "1" | "true"))
+            {
+                return Err(Rejected::bad(
+                    "unsupported workload archive ownership or overwrite option",
+                ));
+            }
+            let path = query
+                .get("path")
+                .ok_or_else(|| Rejected::bad("missing workload archive path"))?;
+            let archive = request
+                .archive
+                .as_ref()
+                .ok_or_else(|| Rejected::bad("missing workload archive body"))?;
+            owner.workload_upload(&item, path, archive)?;
+            Reply::empty(200)
         }
         ("POST", "exec") => {
             let data = serde_json::from_slice(body)

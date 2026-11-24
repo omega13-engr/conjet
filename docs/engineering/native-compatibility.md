@@ -386,6 +386,16 @@ request privilege or add capabilities. Worker provisioning and
 
 ## Exact release gate result
 
+SPEED-123 and SPEED-124 added single-file Docker copy in both
+directions for owned running workloads. The optimized live copy canary
+used the frozen 4 KiB and 8 MiB payloads with the pinned CLI and
+matched both SHA-256 hashes. The upload uses bounded tar framing, a
+generation-scoped staging file inside the private workload mount,
+mapped file ownership, and atomic replacement after digest validation.
+The final run denied escape paths and symlinks, rejected corrupt
+content, preserved the previous bytes after a disconnected write, and
+verified native teardown. See `SPEED-124/live-copy-final/` on ExternalSSD.
+
 Revision `fa1cbad84f30482d08862aee051914a0bd4a8c9b` ran the native
 preflights and regressions against a single optimized release artifact
 set. Evaluating the 71 requirements produced **19 PASS and 52 FAIL**.

@@ -1,11 +1,14 @@
 """Exercise a bounded Docker file archive in a live, owned guest."""
 
 from contextlib import closing
+import base64
 import hashlib
+import io
 import json
 from pathlib import Path
 import runpy
 import subprocess
+import tarfile
 import time
 
 
@@ -20,6 +23,22 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
     archive = '/tmp/control'
     image = MATCHED['IMAGE']['ref']
     api = MATCHED['TOOLS']['api']
+
+    def tar_bytes(member, data):
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w') as archive_file:
+            entry = tarfile.TarInfo(member)
+            entry.size = len(data)
+            archive_file.addfile(entry, io.BytesIO(data))
+        return stream.getvalue()
+
+    def put(connection, path, archive_data, expected):
+        connection.request('PUT', path, archive_data, {'Content-Type': 'application/x-tar'})
+        with connection.getresponse() as response:
+            if response.status != expected:
+                raise RuntimeError(f'expected copy HTTP {expected}, got {response.status}: {response.read()!r}')
+            response.read()
+            return response.status
 
     def call(label, args, expected=0):
         result = subprocess.run([*docker, *args], env=env, capture_output=True, timeout=30)
@@ -68,6 +87,39 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
                     cases['symlink_denied'] = api(connection, 'GET', route + '/bin/sh', (400,))
                     cases['parent_path_denied'] = api(connection, 'GET', route + '/tmp/../etc/passwd', (400,))
                     cases['missing_denied'] = api(connection, 'GET', route + '/tmp/cj-does-not-exist', (404,))
+                    cases['upload_parent_denied'] = put(connection, route + '/tmp',
+                                                         tar_bytes('../control', b'escape'), 400)
+                    cases['upload_symlink_denied'] = put(connection, route + '/bin',
+                                                          tar_bytes('sh', b'escape'), 400)
+                    cases['upload_trailing_data_denied'] = put(connection, route + '/tmp',
+                                                                tar_bytes('control', b'invalid') + b'x', 400)
+                begin = {'action': 'begin', 'path': '/tmp', 'name': 'control',
+                         'size': 4, 'mode': 0o644, 'digest': [0] * 32}
+                chunk = {'action': 'write', 'offset': 0,
+                         'data': base64.b64encode(b'test').decode()}
+                for op in (begin, chunk):
+                    GUEST['exchange'](guest, 29, {**request, 'operation': op}, 29)
+                cases['bad_digest_denied'] = GUEST['exchange'](
+                    guest, 29, {**request, 'operation': {'action': 'commit'}}, 15, 'archive_rejected')
+                for op in (begin, dict(chunk, data='dGU=')):
+                    GUEST['exchange'](guest, 29, {**request, 'operation': op}, 29)
+            source, restored = (output / 'control-input', output / 'control-output')
+            try:
+                call('after_aborted_upload', ['cp', f'{name}:{archive}', restored])
+                if hashlib.sha256(restored.read_bytes()).hexdigest() != cases['copy_out_8388608']['sha256']:
+                    raise RuntimeError('uncommitted upload changed the existing file')
+                for size in (4096, 8 * 1024 * 1024):
+                    expected = b'conjet-control-1' * (size // 16)
+                    source.write_bytes(expected)
+                    call(f'upload_{size}', ['cp', source, f'{name}:{archive}'])
+                    call(f'roundtrip_{size}', ['cp', f'{name}:{archive}', restored])
+                    digest = hashlib.sha256(restored.read_bytes()).hexdigest()
+                    if restored.stat().st_size != size or digest != hashlib.sha256(expected).hexdigest():
+                        raise RuntimeError('Docker copy round trip differed from the frozen fixture')
+                    cases[f'roundtrip_{size}']['sha256'] = digest
+            finally:
+                source.unlink(missing_ok=True)
+                restored.unlink(missing_ok=True)
         finally:
             call('remove', ['rm', '-f', name])
         with closing(MATCHED['TOOLS']['UnixHTTP'](endpoint, peer)) as connection:

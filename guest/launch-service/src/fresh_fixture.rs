@@ -437,6 +437,7 @@ impl Record {
 #[derive(Default)]
 struct Ledger {
     images: image_store::Store,
+    copies: crate::workload_copy::Store,
     highest_sequence: u64,
     closing: bool,
     waiting: usize,
@@ -707,6 +708,7 @@ impl Drop for ConnectionLease<'_> {
     fn drop(&mut self) {
         let mut ledger = self.fresh.ledger.lock().expect("fresh ledger");
         ledger.images.disconnect(self.id);
+        ledger.copies.disconnect(self.id);
         if ledger
             .exec_output
             .as_ref()
@@ -2061,20 +2063,38 @@ impl FreshFixture {
                 if guard.closing {
                     return Err(("busy", "native archive service is draining"));
                 }
-                let target = guard
+                let (spec, pidfd) = guard
                     .record(&request.handle.workload_id)
                     .filter(|record| record.phase == Phase::Running)
                     .and_then(|record| record.exec_context.as_ref())
-                    .ok_or(("not_running", "archive requires a running native workload"))?
-                    .1
+                    .ok_or(("not_running", "archive requires a running native workload"))?;
+                let uid = spec.uid;
+                let target = pidfd
                     .try_clone()
                     .map_err(|_| ("busy", "cannot retain native archive target"))?;
-                drop(guard);
                 let root = crate::exec_fixture::target_root(&target)
                     .map_err(|_| ("not_running", "cannot retain native archive root"))?;
-                let reply =
-                    crate::workload_copy::operate(&root, request.operation).map_err(|error| {
-                        if error.kind() == io::ErrorKind::NotFound {
+                if Instant::now() >= expires {
+                    return Err((
+                        "deadline_exceeded",
+                        "native workload archive request expired",
+                    ));
+                }
+                let reply = guard
+                    .copies
+                    .operate(
+                        &root,
+                        request.operation,
+                        connection,
+                        &request.handle.workload_id,
+                        uid,
+                    )
+                    .map_err(|error| {
+                        if let Some(publish) = error.get_ref().and_then(|cause| {
+                            cause.downcast_ref::<crate::workload_copy::PublishError>()
+                        }) {
+                            (publish.0, "native workload archive publication failed")
+                        } else if error.kind() == io::ErrorKind::NotFound {
                             ("not_found", "native workload archive path was not found")
                         } else {
                             (
@@ -2083,12 +2103,6 @@ impl FreshFixture {
                             )
                         }
                     })?;
-                if Instant::now() >= expires {
-                    return Err((
-                        "deadline_exceeded",
-                        "native workload archive request expired",
-                    ));
-                }
                 Ok((Kind::Copy, reply))
             }
             Kind::Status | Kind::Cancel => {

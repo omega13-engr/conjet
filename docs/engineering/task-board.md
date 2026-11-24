@@ -1202,6 +1202,13 @@ layout. Stage a single-file upload, verify contents, publish atomically
 and prove the frozen round trips by SHA-256. Reject escapes and discard
 partial writes.
 
+Evidence: The optimized candidate passed the frozen 4 KiB and 8 MiB
+copy round trips with the pinned Docker CLI. The live guest rejected
+traversal, a symlink destination, trailing tar data, and an invalid
+digest. Reuse after disconnect confirmed partial data was discarded.
+See `SPEED-124/live-copy-final/` on ExternalSSD. The full control
+preflight also covers the separate interactive attach requirement.
+
 ### SPEED-125
 
 Title: Relay attached stdin to an owned native container
