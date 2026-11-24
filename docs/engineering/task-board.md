@@ -98,13 +98,17 @@ Problem and Evidence: Existing SPEED-060 timing starts after demand observation 
 
 Approach: Instrument existing session, guest lifecycle and Docker wait boundaries; flush bounded trace buffers after timing.
 
-Evidence: Pending; source review only.
+Evidence: Two compact-observer release pairs recorded 420 joined API
+operations with zero overflow and median observer overhead of
+0.65% and 3.35%. Pending discovery was the largest warm median stage.
+See [the latency report](native-latency-diagnostic-results.md#speed-081).
 
 Source: [Native latency diagnostic plan](native-latency-diagnostic-plan.md).
 
-Review: Pending.
+Review: Isolated warm attribution and self-review passed. Independent
+review pending.
 
-Next Action: Add timestamps and trace-join validation, then run isolated controls.
+Next Action: Test discovery cadence independently under SPEED-082.
 
 ### SPEED-082
 

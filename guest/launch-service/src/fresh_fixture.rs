@@ -275,6 +275,7 @@ struct Record {
 struct Trace {
     admitted: Instant,
     events: BTreeMap<&'static str, u128>,
+    core: bool,
 }
 
 impl Record {
@@ -285,10 +286,15 @@ impl Record {
     }
 
     fn mark(&mut self, milestone: &'static str) {
-        if let Some(trace) = &mut self.trace {
-            trace
-                .events
-                .insert(milestone, trace.admitted.elapsed().as_nanos());
+        self.mark_at(milestone, self.trace.as_ref().map(|_| Instant::now()));
+    }
+
+    fn mark_at(&mut self, milestone: &'static str, time: Option<Instant>) {
+        if let (Some(trace), Some(time)) = (&mut self.trace, time) {
+            trace.events.insert(
+                milestone,
+                time.saturating_duration_since(trace.admitted).as_nanos(),
+            );
         }
     }
 
@@ -303,8 +309,13 @@ impl Record {
                 _ => "pending",
             }
         });
-        if let Some(trace) = &self.trace {
+        if let Some(trace) = &self.trace
+            && (!trace.core || self.phase.terminal())
+        {
             state["guest_phase_ns"] = json!(trace.events);
+            if trace.core {
+                state["trace_sequence"] = json!(self.sequence);
+            }
         }
         if let Some(snapshot) = &self.build_snapshot {
             state["build_snapshot"] = json!(snapshot);
@@ -434,9 +445,15 @@ impl Ledger {
         snapshot
     }
 
-    fn core_admission(&self, now: Instant) -> crate::core_admission::Observation {
+    fn core_admission(
+        &mut self,
+        now: Instant,
+        observing: bool,
+    ) -> crate::core_admission::Observation {
+        let owned = self.active().count();
         let pending = self
-            .active()
+            .records
+            .iter_mut()
             .filter(|record| {
                 record.phase == Phase::Accepted
                     && !record.terminate_requested
@@ -444,15 +461,19 @@ impl Ledger {
                         .core_admission_deadline
                         .is_some_and(|deadline| now < deadline)
             })
-            .map(|record| crate::core_admission::Admission {
-                workload_id: record.handle.workload_id.clone(),
-                sequence: record.sequence,
+            .map(|record| {
+                if observing && let Some(trace) = &mut record.trace {
+                    trace.events.entry("observed").or_insert_with(|| {
+                        now.saturating_duration_since(trace.admitted).as_nanos()
+                    });
+                }
+                crate::core_admission::Admission {
+                    workload_id: record.handle.workload_id.clone(),
+                    sequence: record.sequence,
+                }
             })
             .collect();
-        crate::core_admission::Observation {
-            owned: self.active().count(),
-            pending,
-        }
+        crate::core_admission::Observation { owned, pending }
     }
 
     fn grant_core_admission(
@@ -474,6 +495,7 @@ impl Ledger {
             return Err(("not_pending", "workload has no live Core admission"));
         }
         record.core_admission_deadline = None;
+        record.mark("granted");
         Ok(())
     }
 
@@ -520,6 +542,7 @@ pub(crate) struct FreshFixture {
     core_admission: bool,
     core_pressure_fixture: bool,
     trace_benchmark: bool,
+    trace_core_latency: bool,
     bridge_available: bool,
     allow_crash: bool,
     intent: Intent,
@@ -611,6 +634,8 @@ impl FreshFixture {
         let core_admission = oci && Path::new(crate::core_admission::MARKER).try_exists()?;
         let core_pressure_fixture =
             core_admission && Path::new(crate::core_admission::PRESSURE_MARKER).try_exists()?;
+        let trace_core_latency =
+            core_admission && Path::new(crate::core_admission::TRACE_MARKER).try_exists()?;
         let image_digest = if let Some(digest) = oci_marker {
             let hex = digest
                 .strip_prefix("sha256:")
@@ -687,6 +712,7 @@ impl FreshFixture {
             core_admission,
             core_pressure_fixture,
             trace_benchmark,
+            trace_core_latency,
             bridge_available,
             allow_crash,
             intent,
@@ -926,9 +952,12 @@ impl FreshFixture {
             network_cleanup: if bridge { "pending" } else { "not_applicable" },
             network_aliases: spec.aliases().cloned().collect(),
             network_address: None,
-            trace: (benchmark && self.trace_benchmark).then(|| Trace {
-                admitted: Instant::now(),
-                events: BTreeMap::new(),
+            trace: ((benchmark && self.trace_benchmark) || self.trace_core_latency).then(|| {
+                Trace {
+                    admitted: Instant::now(),
+                    events: BTreeMap::new(),
+                    core: self.trace_core_latency,
+                }
             }),
             slot: prepared.then(|| Slot::new(spec_digest(spec))),
             slot_expires: prepared.then(|| Instant::now() + SLOT_TTL),
@@ -1026,19 +1055,29 @@ impl FreshFixture {
         } else {
             &self.intent
         };
+        let mut intent_recorded = None;
+        let mut output_drained = None;
+        let mut intent_completed = None;
+        let trace_stamp = || self.trace_core_latency.then(Instant::now);
         let result = intent.record(id).and_then(|()| {
+            intent_recorded = trace_stamp();
             let output = self.run_helper(id, limits, mode, bridge, prepared, oci_process)?;
+            output_drained = trace_stamp();
             if oci_process.is_some() {
                 crate::kernel_fixture::assert_owned_cgroup_absent(id)?;
                 crate::sandbox_fixture::assert_owned_absent(id)?;
             }
             intent.complete(id)?;
+            intent_completed = trace_stamp();
             Ok(output)
         });
         if let Err(error) = &result {
             eprintln!("fresh fixture did not confirm cleanup: {error}");
         }
         self.update(&workload, |record| {
+            record.mark_at("intent_recorded", intent_recorded);
+            record.mark_at("helper_reaped_output_drained", output_drained);
+            record.mark_at("intent_completed", intent_completed);
             record.control = None;
             record.exec_context = None;
             record.network_address = None;
@@ -1124,6 +1163,7 @@ impl FreshFixture {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        let helper_spawned = self.trace_core_latency.then(Instant::now);
         let process_group = -(child.id() as libc::pid_t);
         let out = child.stdout.take().expect("piped stdout");
         let err = child.stderr.take().expect("piped stderr");
@@ -1142,6 +1182,7 @@ impl FreshFixture {
             })
         });
         self.update(&workload, |record| {
+            record.mark_at("helper_spawned", helper_spawned);
             record.control = Some(owner);
             if record.cancelled {
                 let _ = record.control.as_mut().unwrap().write_all(&[CANCEL]);
@@ -1594,6 +1635,7 @@ impl FreshFixture {
             }
             Kind::Memory => {
                 let request: MemoryRequest = parse(frame)?;
+                let observing = request.core_only && request.core_grant.is_none();
                 let expires = deadline(request.budget_ms)?;
                 if request.boot_id != boot {
                     return Err(("stale_generation", "unexpected boot ID"));
@@ -1623,7 +1665,8 @@ impl FreshFixture {
                     guard.memory_snapshot(self.oci)
                 };
                 if self.core_admission {
-                    snapshot["core_admission"] = json!(guard.core_admission(Instant::now()));
+                    snapshot["core_admission"] =
+                        json!(guard.core_admission(Instant::now(), observing));
                 }
                 Ok((Kind::Memory, snapshot))
             }
@@ -1774,6 +1817,13 @@ impl FreshFixture {
                             let (stdout, stderr) =
                                 cursors.map_or((0, 0), |cursors| (cursors.stdout, cursors.stderr));
                             state["terminal_output"] = output_bundle(record, stdout, stderr, true);
+                        }
+                        if record.phase.terminal()
+                            && self.trace_core_latency
+                            && let Some(trace) = &record.trace
+                        {
+                            state["guest_phase_ns"]["terminal_reply"] =
+                                json!(trace.admitted.elapsed().as_nanos());
                         }
                         break Ok((Kind::State, state));
                     }

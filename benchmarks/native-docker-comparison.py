@@ -82,7 +82,8 @@ def host_observation(engine, config, peer, vm_pid, output):
             'process_cpu_time_and_rss': TOOLS['run'](['/bin/ps', '-p', pids, '-o', 'pid=,time=,rss='])}
 
 
-def measure(engine, endpoint, peer, docker, env, output, samples, vm_pid=None):
+def measure(engine, endpoint, peer, docker, env, output, samples, vm_pid=None, *,
+            lane=None, latency_trace=False):
     output = output.parent.resolve(strict=True) / output.name
     if not output.is_relative_to(TOOLS['SCRATCH']):
         raise ValueError('benchmark output must reside on ExternalSSD')
@@ -98,7 +99,8 @@ def measure(engine, endpoint, peer, docker, env, output, samples, vm_pid=None):
               'harness_revision': TOOLS['run'](['/usr/bin/git', '-C', HERE.parent, 'rev-parse', 'HEAD']),
               'harness_sha256': TOOLS['file_hash'](Path(__file__)),
               'docker_sha256': TOOLS['file_hash'](Path(docker[0])),
-              'host_load_before': os.getloadavg(), 'lanes': {}, 'passed': False}
+              'host_load_before': os.getloadavg(), 'lanes': {}, 'passed': False,
+              'latency_trace': latency_trace}
     connection = TOOLS['UnixHTTP'](endpoint, peer)
     handles = set()
     token = uuid.uuid4().hex[:12]
@@ -133,7 +135,7 @@ def measure(engine, endpoint, peer, docker, env, output, samples, vm_pid=None):
         else:
             report['limit_witness'] = 'authenticated guest admission and checked cgroup setup'
         report['host_before'] = host_observation(engine, config, peer, vm_pid, output / 'footprint-before.json')
-        for lane in ('api', 'cli'):
+        for lane in (lane,) if lane else ('api', 'cli'):
             data = {'samples': [], 'warmups': []}
             report['lanes'][lane] = data
             for phase, count in [('warmups', 10), ('samples', samples)]:
@@ -150,9 +152,14 @@ def measure(engine, endpoint, peer, docker, env, output, samples, vm_pid=None):
                         else:
                             invoke(docker, env, ['run', *FLAGS, '--name', name, IMAGE['ref'], '/bin/true'])
                         row['elapsed_ns'] = time.monotonic_ns() - start
+                        if latency_trace:
+                            row['h5_ns'] = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
                         if engine == 'native':
                             row['guest_witness'] = native_terminal(connection, name, handles)
                             row['verified_guest_cleanup'] = True
+                            if latency_trace:
+                                row['latency_trace'] = json.loads(
+                                    row['guest_witness']['conjet.latency_trace'])
                     except (OSError, RuntimeError, ValueError, KeyError, http.client.HTTPException,
                             subprocess.SubprocessError) as error:
                         row['error'] = str(error)

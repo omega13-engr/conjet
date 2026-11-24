@@ -2,6 +2,7 @@
 """Run the isolated Conjet native Docker candidate in the foreground."""
 import argparse
 from contextlib import ExitStack
+import errno
 import fcntl
 import hashlib
 import json
@@ -104,11 +105,24 @@ def production():
                               '--format', '{{.Endpoints.docker.Host}}'], env=env)
     if not endpoint.startswith('unix://'):
         raise RuntimeError('expected a local production Docker endpoint')
-    server = run(prefix + ['--host', endpoint, 'version',
-                            '--format', '{{json .Server}}'], env=env)
+    endpoint_path = Path(endpoint.removeprefix('unix://'))
+    if not endpoint_path.is_absolute():
+        raise RuntimeError('expected an absolute production Docker socket')
     runtime = {pid: str(path) for pid, path in processes().items()
                if path.name in ('Conjet', 'conjetd', 'Conjet Core', 'conjet-network')}
-    return {'current_context': current, 'endpoint': endpoint, 'server': json.loads(server),
+    files.append(endpoint_path)
+    server = None
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1)
+        try:
+            probe.connect(str(endpoint_path))
+        except OSError as error:
+            if runtime or error.errno not in (errno.ENOENT, errno.ECONNREFUSED):
+                raise
+        else:
+            server = json.loads(run(prefix + ['--host', endpoint, 'version',
+                                              '--format', '{{json .Server}}'], env=env))
+    return {'current_context': current, 'endpoint': endpoint, 'server': server,
             'processes': runtime, 'files': {str(path): fingerprint(path) for path in files}}
 
 
@@ -476,8 +490,9 @@ def native_session(args, root):
         if dynamic_memory:
             vm_command.append('--core-dynamic-memory')
             markers.append('etc/conjet/native-core-admission')
-        if args.diagnostics == 'admission-trace':
+        if args.diagnostics == 'admission-trace' or args.native_latency_trace:
             vm_command.append('--trace-core-admission')
+            markers.append('etc/conjet/native-core-latency-trace')
         if args.native_admission_wake:
             vm_command += ['--core-admission-wake', args.native_admission_wake]
         if pressure_fixture:
@@ -625,7 +640,8 @@ def native_session(args, root):
             report['core_memory_before_timing'] = probe(directory, vm.pid)
             bench = runpy.run_path(str(REPO / 'benchmarks/native-docker-comparison.py'))
             bench['measure']('native', endpoint, bridge.pid, docker, env, args.matched_output,
-                             args.matched_samples, vm.pid)
+                             args.matched_samples, vm.pid, lane=args.native_latency_lane,
+                             latency_trace=args.native_latency_trace)
             report['core_memory_after_timing'] = probe(directory, vm.pid)
         if args.docker_args:
             command = docker + args.docker_args
@@ -723,6 +739,8 @@ def main():
                         help='use the Rust owner or the Python A/B reference')
     parser.add_argument('--volume-phase', choices=('create', 'inspect', 'remove'))
     parser.add_argument('--native-admission-wake', choices=('poll', 'event'))
+    parser.add_argument('--native-latency-trace', action='store_true')
+    parser.add_argument('--native-latency-lane', choices=('api', 'cli'))
     parser.add_argument('--image', default='alpine:3.22')
     parser.add_argument('--comparison-output', type=Path)
     parser.add_argument('--comparison-group')
@@ -752,6 +770,11 @@ def main():
         native_assets += ('native_memd', 'native_reclaimd')
     if args.native_admission_wake and (not args.native_memd or args.diagnostics == 'memory-telemetry'):
         parser.error('admission wake comparison requires the native Core governor')
+    if args.native_latency_lane and not args.matched_output:
+        parser.error('latency lane requires matched output')
+    if args.native_latency_trace and not (args.native_memd and
+            (args.matched_output or args.diagnostics in ('dynamic-memory', 'dynamic-pressure'))):
+        parser.error('collect native latency traces only with matched timing or Core memory canaries')
     if args.diagnostics in VOLUME_DIAGNOSTICS:
         if (not args.native_volume_disk
                 or args.native_volume_disk.resolve(strict=True) != args.native_volume_disk):

@@ -475,6 +475,15 @@ fn wait_for_native(
         }
     }
     let terminal = Instant::now();
+    if state.get("trace_sequence").is_some() {
+        let mut stamp = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        // The benchmark driver reads the same macOS monotonic clock.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, stamp.as_mut_ptr()) } == 0 {
+            let stamp = unsafe { stamp.assume_init() };
+            state["host_terminal_ns"] =
+                json!(stamp.tv_sec as u64 * 1_000_000_000 + stamp.tv_nsec as u64);
+        }
+    }
     let code = if sent_signal != 0 && state["exit"].is_null() && state["helper_failed"] == false {
         128 + i64::from(sent_signal)
     } else {
@@ -1106,6 +1115,15 @@ impl Owner {
                 json!(state["cleanup"].as_str().unwrap_or("not_admitted"));
             attributes["conjet.native_handle"] =
                 json!(state["handle"]["workload_id"].as_str().unwrap_or(""));
+            if let Some(sequence) = state["trace_sequence"].as_u64() {
+                let trace = json!({
+                    "boot_id": state["handle"]["boot_id"],
+                    "sequence": sequence,
+                    "guest_phase_ns": state["guest_phase_ns"],
+                    "h4_ns": state["host_terminal_ns"],
+                });
+                attributes["conjet.latency_trace"] = json!(trace.to_string());
+            }
             for key in ["authenticate", "admit", "terminal", "output"] {
                 if let Some(value) = state["adapter_timings_ns"][key].as_u64() {
                     attributes[format!("conjet.timing.{key}")] = json!(value.to_string());

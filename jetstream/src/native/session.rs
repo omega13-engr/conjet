@@ -63,7 +63,7 @@ pub(super) struct Options {
     /// Enable the Core controller and require its per-workload admission grant.
     #[arg(long, requires = "guest_memd")]
     core_dynamic_memory: bool,
-    /// Emit host-monotonic Core admission spans to stderr for diagnostics.
+    /// Collect bounded host and guest Core latency spans for diagnostics.
     #[arg(long, requires = "core_dynamic_memory")]
     trace_core_admission: bool,
     /// Select the admission delivery mechanism for isolated comparison.
@@ -97,6 +97,7 @@ struct MemoryHelpers {
     reclaimd: Vec<u8>,
     core_admission: bool,
     core_pressure_fixture: bool,
+    trace_core_admission: bool,
 }
 
 struct GuestBootFiles<'a> {
@@ -108,6 +109,84 @@ struct AdmissionControl<'a> {
     gate: &'a NativeMemoryAdmission,
     trace: bool,
     wake: AdmissionWake,
+}
+
+const TRACE_LIMIT: usize = 8192;
+
+struct AdmissionTrace {
+    origin: Instant,
+    rows: Vec<AdmissionSpan>,
+    lost: usize,
+    polls: usize,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "event")]
+enum AdmissionSpan {
+    #[serde(rename = "core_observation")]
+    Observation {
+        boot_id: String,
+        id: String,
+        sequence: u64,
+        h0_ns: u128,
+        h1_ns: u128,
+        owned: usize,
+        pending: usize,
+    },
+    #[serde(rename = "core_admission")]
+    Grant {
+        boot_id: String,
+        id: String,
+        sequence: u64,
+        h1_ns: u128,
+        h2_ns: u128,
+        h3_ns: u128,
+        observed_to_approval_ns: u128,
+        approval_to_send_ns: u128,
+        reply_ns: u128,
+        accepted: bool,
+    },
+}
+
+impl AdmissionTrace {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            rows: Vec::with_capacity(TRACE_LIMIT),
+            lost: 0,
+            polls: 0,
+        }
+    }
+
+    fn push(&mut self, row: AdmissionSpan) {
+        if self.rows.len() < TRACE_LIMIT {
+            self.rows.push(row);
+        } else {
+            self.lost += 1;
+        }
+    }
+
+    fn ns(&self, stamp: Instant) -> u128 {
+        stamp.saturating_duration_since(self.origin).as_nanos()
+    }
+}
+
+impl Drop for AdmissionTrace {
+    fn drop(&mut self) {
+        let mut output = std::io::stderr().lock();
+        for row in &self.rows {
+            let _ = serde_json::to_writer(&mut output, row);
+            let _ = writeln!(output);
+        }
+        let _ = writeln!(
+            output,
+            "{}",
+            json!({
+                "event": "core_trace_summary", "rows": self.rows.len(), "lost": self.lost,
+                "polls": self.polls,
+            })
+        );
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -176,6 +255,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
                 reclaimd,
                 core_admission: options.core_dynamic_memory,
                 core_pressure_fixture: options.core_pressure_fixture,
+                trace_core_admission: options.trace_core_admission,
             })
         })
         .transpose()?;
@@ -354,6 +434,10 @@ fn manage_session(
     lifetime: u64,
     admission: Option<AdmissionControl<'_>>,
 ) -> anyhow::Result<bool> {
+    let mut trace = admission
+        .as_ref()
+        .is_some_and(|control| control.trace)
+        .then(AdmissionTrace::new);
     let start = Instant::now();
     let startup = start + Duration::from_secs(15);
     let deadline = start + Duration::from_secs(lifetime);
@@ -376,7 +460,7 @@ fn manage_session(
                     force_stop.store(true, Ordering::Release);
                     bail!("native admission supervisor generation changed");
                 }
-                if poll_native_admission(&mut peer, control).is_ok() {
+                if poll_native_admission(&mut peer, control, trace.as_mut()).is_ok() {
                     admission_boot = Some(peer.boot.clone());
                     admission_peer = Some(peer);
                     authenticated = true;
@@ -419,7 +503,7 @@ fn manage_session(
             break;
         }
         if let (Some(control), Some(peer)) = (&admission, admission_peer.as_mut()) {
-            if poll_native_admission(peer, control).is_err() {
+            if poll_native_admission(peer, control, trace.as_mut()).is_err() {
                 control.gate.invalidate();
                 admission_peer = None;
             }
@@ -438,6 +522,7 @@ fn manage_session(
 fn poll_native_admission(
     peer: &mut client::Connection,
     control: &AdmissionControl<'_>,
+    mut trace: Option<&mut AdmissionTrace>,
 ) -> anyhow::Result<()> {
     let request = |grant: Option<&core_admission::Admission>, boot: &str| {
         json!({
@@ -455,33 +540,50 @@ fn poll_native_admission(
             &request(Some(&grant.admission), &peer.boot),
             timeout,
         );
-        if control.trace {
-            eprintln!(
-                "{}",
-                json!({
-                    "event": "core_admission",
-                    "id": grant.admission.workload_id,
-                    "observed_to_approval_ns": grant.approved_at.saturating_duration_since(grant.observed_at).as_nanos(),
-                    "approval_to_send_ns": sent.saturating_duration_since(grant.approved_at).as_nanos(),
-                    "reply_ns": sent.elapsed().as_nanos(),
-                    "accepted": result.is_ok(),
-                })
-            );
+        if let Some(trace) = trace.as_mut() {
+            trace.push(AdmissionSpan::Grant {
+                boot_id: peer.boot.clone(),
+                id: grant.admission.workload_id,
+                sequence: grant.admission.sequence,
+                h1_ns: trace.ns(grant.observed_at),
+                h2_ns: trace.ns(grant.approved_at),
+                h3_ns: trace.ns(sent),
+                observed_to_approval_ns: grant
+                    .approved_at
+                    .saturating_duration_since(grant.observed_at)
+                    .as_nanos(),
+                approval_to_send_ns: sent.saturating_duration_since(grant.approved_at).as_nanos(),
+                reply_ns: sent.elapsed().as_nanos(),
+                accepted: result.is_ok(),
+            });
         }
         match result {
             Ok(_) | Err(conjet_launch_service::wire::WireError::PeerError(_)) => {}
             Err(error) => return Err(error.into()),
         }
     }
-    let value = peer.exchange(
-        Kind::Memory,
-        Kind::Memory,
-        &request(None, &peer.boot),
-        timeout,
-    )?;
-    let report = serde_json::from_value(value["core_admission"].clone())?;
+    let request = request(None, &peer.boot);
+    let sent = trace.as_ref().map(|_| Instant::now());
+    let value = peer.exchange(Kind::Memory, Kind::Memory, &request, timeout)?;
+    let report: core_admission::Observation =
+        serde_json::from_value(value["core_admission"].clone())?;
+    let received = Instant::now();
+    if let (Some(trace), Some(sent)) = (trace, sent) {
+        trace.polls += 1;
+        for pending in &report.pending {
+            trace.push(AdmissionSpan::Observation {
+                boot_id: peer.boot.clone(),
+                id: pending.workload_id.clone(),
+                sequence: pending.sequence,
+                h0_ns: trace.ns(sent),
+                h1_ns: trace.ns(received),
+                owned: report.owned,
+                pending: report.pending.len(),
+            });
+        }
+    }
     ensure!(
-        control.gate.publish(report, Instant::now()),
+        control.gate.publish(report, received),
         "invalid native admission observation"
     );
     Ok(())
@@ -642,6 +744,17 @@ fn build_archive(
         if helpers.core_admission {
             append(
                 core_admission::MARKER.trim_start_matches('/'),
+                0o100400,
+                &[],
+                0,
+                0,
+                0,
+                0,
+            )?;
+        }
+        if helpers.trace_core_admission {
+            append(
+                core_admission::TRACE_MARKER.trim_start_matches('/'),
                 0o100400,
                 &[],
                 0,
