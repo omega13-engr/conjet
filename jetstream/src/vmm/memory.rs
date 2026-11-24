@@ -482,7 +482,10 @@ mod tests {
                 ))
             })
             .unwrap_err();
-        assert!(matches!(error, GuestMemoryError::MapFailed(_)));
+        assert!(
+            matches!(error, GuestMemoryError::MapFailed(_)),
+            "replacement fault was not reached: {error:?}"
+        );
         // A restored HVF mapping must never expose still-reusable live pages.
         // Some pages may already have been evicted while reusable, so inspect
         // their disposition instead of assuming they all remain resident.

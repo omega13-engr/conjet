@@ -1821,6 +1821,21 @@ cgroup hierarchy during the private disk-backed build, or document the
 exact kernel capability that prevents collection. Keep VM-wide I/O out
 of the worker measurements.
 
+### SPEED-166
+
+Title: Diagnose the Core backing replacement failure in macOS CI
+
+Acceptance: Identify the actual error that precedes the injected
+replacement failure and restore the hosted check with its original
+rollback and page disposition assertions. Preserve the production
+backing ownership guard.
+
+Evidence: CI run `45409876930` on `ee163ae` failed
+`failed_replacement_cancels_reusability_before_returning`. The first
+assertion was reached with an unexpected error variant. The local ARM64
+workspace passed the same check. The next CI attempt reports the
+actual returned error without changing the assertion.
+
 ### SPEED-091
 
 Title: Qualify workload credentials and the frozen lifecycle
