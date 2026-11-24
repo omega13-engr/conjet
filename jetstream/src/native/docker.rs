@@ -12,6 +12,7 @@ mod public_registry;
 mod registry;
 mod request;
 mod volume;
+mod workload_copy;
 
 pub(super) use image::{install, InstallOptions};
 

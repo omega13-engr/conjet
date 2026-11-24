@@ -1188,6 +1188,11 @@ Acceptance: Implement Docker path stat and single-file export from the
 verified workload root. Verify the 4 KiB and 8 MiB data paths, bounded
 transfer and symlink rejection.
 
+Evidence: The pinned Docker CLI exported both 4 KiB and 8 MiB with
+matching SHA-256. A stale file revision, symlink and parent traversal
+were rejected. Native teardown passed. See `SPEED-123/export-dedicated-peer/`
+on ExternalSSD.
+
 ### SPEED-124
 
 Title: Upload bounded Docker copy archives into an owned running workload

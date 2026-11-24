@@ -16,6 +16,10 @@ pub(super) fn daemon_time() -> Result<String, Rejected> {
         .as_secs()
         .try_into()
         .map_err(|_| Rejected::internal("host clock is out of range"))?;
+    format_time(seconds, now.subsec_nanos())
+}
+
+pub(super) fn format_time(seconds: libc::time_t, nanos: u32) -> Result<String, Rejected> {
     let mut time = std::mem::MaybeUninit::<libc::tm>::uninit();
     if unsafe { libc::gmtime_r(&seconds, time.as_mut_ptr()) }.is_null() {
         return Err(Rejected::internal("could not read UTC daemon time"));
@@ -29,7 +33,7 @@ pub(super) fn daemon_time() -> Result<String, Rejected> {
         time.tm_hour,
         time.tm_min,
         time.tm_sec,
-        now.subsec_nanos()
+        nanos
     ))
 }
 

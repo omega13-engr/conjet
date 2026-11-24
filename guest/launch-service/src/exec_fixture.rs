@@ -135,7 +135,7 @@ fn pinned_target(pidfd: &OwnedFd, open: impl FnOnce(i32) -> io::Result<File>) ->
     Ok(file)
 }
 
-fn target_root(pidfd: &OwnedFd) -> io::Result<File> {
+pub(crate) fn target_root(pidfd: &OwnedFd) -> io::Result<File> {
     pinned_target(pidfd, |pid| {
         OpenOptions::new()
             .read(true)

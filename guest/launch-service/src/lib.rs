@@ -35,6 +35,8 @@ pub mod socket;
 pub mod spec;
 pub mod volume_disk;
 pub mod wire;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod workload_copy;
 
 #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 mod output;

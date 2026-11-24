@@ -27,7 +27,7 @@ CONTEXT = 'conjet-speedup'
 DOCKER = Path('/opt/homebrew/bin/docker')
 VOLUME_DIAGNOSTICS = ('volume-disk', 'mounted-volume', 'compose', 'build-snapshot', 'build-bundle')
 CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'admission-trace', 'pending-watch',
-                    'resources', 'sustained-service', *VOLUME_DIAGNOSTICS)
+                    'resources', 'sustained-service', 'copy', *VOLUME_DIAGNOSTICS)
 
 
 class SessionInterrupted(KeyboardInterrupt):
@@ -611,6 +611,9 @@ def native_session(args, root):
             elif args.diagnostics == 'exec':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-exec.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
+            elif args.diagnostics == 'copy':
+                diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-copy.py'))
+                diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
             elif args.diagnostics == 'credentials':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-credentials.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
@@ -792,7 +795,7 @@ def main():
     parser.add_argument('--matched-samples', type=int, choices=range(1, 2001), default=2000, metavar='1..2000')
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec', 'credentials', 'archive',
-                                                  'public-images', 'resources', 'sustained-service',
+                                                  'public-images', 'resources', 'sustained-service', 'copy',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
                                                   'memory-telemetry', 'dynamic-memory', 'dynamic-pressure',
                                                   'volume-disk', 'mounted-volume', 'admission-trace', 'compose',

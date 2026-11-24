@@ -444,6 +444,7 @@ impl Reply {
 enum Action {
     Reply(Reply),
     Archive(File),
+    WorkloadArchive(String, Option<File>),
     Wait(Arc<Item>, String, u64),
     Attach(Arc<Item>, [bool; 2], u64),
     Logs(Arc<Item>, [bool; 2], u64, bool),
@@ -780,6 +781,7 @@ fn container(
     }
     let item = owner.lookup(id)?;
     let allowed_query: &[&str] = match (method, action) {
+        ("HEAD" | "GET", "archive") => &["path"],
         ("POST", "attach") => &["stdin", "stdout", "stderr", "logs", "stream"],
         ("GET", "logs") => &[
             "stdout",
@@ -804,6 +806,16 @@ fn container(
         return Err(Rejected::bad("unsupported Docker container query"));
     }
     let mut reply = match (method, action) {
+        ("HEAD" | "GET", "archive") => {
+            if !body.is_empty() {
+                return Err(Rejected::bad("unexpected Docker archive request body"));
+            }
+            let path = query
+                .get("path")
+                .ok_or_else(|| Rejected::bad("missing workload archive path"))?;
+            let (stat, archive) = owner.workload_archive(&item, path, method == "HEAD")?;
+            return Ok(Action::WorkloadArchive(stat, archive));
+        }
         ("POST", "exec") => {
             let data = serde_json::from_slice(body)
                 .map_err(|_| Rejected::bad("invalid Docker exec body"))?;
@@ -1144,6 +1156,20 @@ pub(super) fn serve(
                     spool.metadata()?.len()
                 ))?;
                 io::copy(&mut spool, &mut stream)?;
+                break;
+            }
+            Ok(Action::WorkloadArchive(stat, mut spool)) => {
+                let bytes = spool
+                    .as_ref()
+                    .map(File::metadata)
+                    .transpose()?
+                    .map_or(0, |info| info.len());
+                header(&mut stream, 200, &format!(
+                    "Content-Type: application/x-tar\r\nContent-Length: {bytes}\r\nX-Docker-Container-Path-Stat: {stat}\r\nConnection: close\r\n"
+                ))?;
+                if let Some(spool) = &mut spool {
+                    io::copy(spool, &mut stream)?;
+                }
                 break;
             }
             Err(Rejected(status, message)) => Reply::json(status, json!({"message":message}))

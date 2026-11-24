@@ -128,6 +128,15 @@ struct ExecOutput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WorkloadCopy {
+    boot_id: String,
+    handle: Handle,
+    budget_ms: u64,
+    operation: crate::workload_copy::Operation,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NetworkRequest {
     boot_id: String,
     budget_ms: u64,
@@ -2041,6 +2050,46 @@ impl FreshFixture {
                     ));
                 }
                 guard.read_exec_output(request, connection)
+            }
+            Kind::Copy if self.oci => {
+                let request: WorkloadCopy = parse(frame)?;
+                if request.boot_id != boot {
+                    return Err(("stale_generation", "unexpected native archive boot ID"));
+                }
+                let expires = deadline(request.budget_ms)?;
+                check(&guard, &request.handle)?;
+                if guard.closing {
+                    return Err(("busy", "native archive service is draining"));
+                }
+                let target = guard
+                    .record(&request.handle.workload_id)
+                    .filter(|record| record.phase == Phase::Running)
+                    .and_then(|record| record.exec_context.as_ref())
+                    .ok_or(("not_running", "archive requires a running native workload"))?
+                    .1
+                    .try_clone()
+                    .map_err(|_| ("busy", "cannot retain native archive target"))?;
+                drop(guard);
+                let root = crate::exec_fixture::target_root(&target)
+                    .map_err(|_| ("not_running", "cannot retain native archive root"))?;
+                let reply =
+                    crate::workload_copy::operate(&root, request.operation).map_err(|error| {
+                        if error.kind() == io::ErrorKind::NotFound {
+                            ("not_found", "native workload archive path was not found")
+                        } else {
+                            (
+                                "archive_rejected",
+                                "native workload archive path or file is unsupported",
+                            )
+                        }
+                    })?;
+                if Instant::now() >= expires {
+                    return Err((
+                        "deadline_exceeded",
+                        "native workload archive request expired",
+                    ));
+                }
+                Ok((Kind::Copy, reply))
             }
             Kind::Status | Kind::Cancel => {
                 let request: Control = parse(frame)?;
