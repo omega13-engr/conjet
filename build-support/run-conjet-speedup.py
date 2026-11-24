@@ -364,7 +364,7 @@ def stop_child(process, timeout):
     return process.returncode
 
 
-def audit_native_boot(directory, guest, helpers=(), dynamic_memory=False):
+def audit_native_boot(directory, guest, helpers=(), markers=()):
     """Read the boot archive manifest without recording its private payloads."""
     root = 'etc/conjet/oci-root'
     allowed_top_level = {
@@ -378,8 +378,7 @@ def audit_native_boot(directory, guest, helpers=(), dynamic_memory=False):
         ('etc/conjet/conjet-memd', 'etc/conjet/conjet-reclaimd'), helpers))}
     observed_executables = {}
     allowed_top_level.update(expected_executables)
-    if dynamic_memory:
-        allowed_top_level.add('etc/conjet/native-core-admission')
+    allowed_top_level.update(markers)
     with (directory / 'init.cpio').open('rb') as archive:
         while True:
             header = archive.read(110)
@@ -415,7 +414,7 @@ def audit_native_boot(directory, guest, helpers=(), dynamic_memory=False):
     if (observed_executables != {name: fingerprint(source)['sha256']
                                 for name, source in expected_executables.items()}
             or root not in entries
-            or (dynamic_memory and 'etc/conjet/native-core-admission' not in entries)):
+            or not set(markers).issubset(entries)):
         raise RuntimeError('native boot archive does not match the trusted guest and OCI fixture')
     disk = directory / 'blank.raw'
     if disk.stat().st_size != 16 * 1024 * 1024:
@@ -450,7 +449,10 @@ def native_session(args, root):
     registry_scope = ExitStack()
     registry = None
     helpers = (args.native_memd, args.native_reclaimd) if args.native_memd else ()
-    dynamic_memory = args.diagnostics == 'dynamic-memory' or args.matched_output is not None
+    pressure_fixture = args.diagnostics == 'dynamic-pressure'
+    dynamic_memory = (args.diagnostics in ('dynamic-memory', 'dynamic-pressure')
+                      or args.matched_output is not None)
+    markers = []
     try:
         if host == before['endpoint']:
             raise RuntimeError('candidate endpoint overlaps production')
@@ -468,6 +470,10 @@ def native_session(args, root):
             vm_command += ['--guest-memd', helpers[0], '--guest-reclaimd', helpers[1]]
         if dynamic_memory:
             vm_command.append('--core-dynamic-memory')
+            markers.append('etc/conjet/native-core-admission')
+        if pressure_fixture:
+            vm_command.append('--core-pressure-fixture')
+            markers.append('etc/conjet/native-core-pressure-fixture')
         report['vm_command'] = list(map(str, vm_command))
         with (output / 'vmm.stderr').open('w') as log:
             vm = subprocess.Popen(vm_command, env=env, stdin=subprocess.DEVNULL,
@@ -483,7 +489,7 @@ def native_session(args, root):
         report['native_session'] = str(directory)
         if dynamic_memory or args.diagnostics in ('control', 'memory-telemetry'):
             report['native_boot_audit'] = audit_native_boot(
-                directory, args.native_guest, helpers, dynamic_memory)
+                directory, args.native_guest, helpers, markers)
         if args.diagnostics == 'oci-import':
             diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-live-install.py'))
             config_digest = json.loads(args.import_receipt.read_text())['config_digest']
@@ -565,10 +571,11 @@ def native_session(args, root):
             elif args.diagnostics == 'published-port':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-published-port.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, directory, vm.pid)
-            elif args.diagnostics in ('memory-telemetry', 'dynamic-memory'):
+            elif args.diagnostics in ('memory-telemetry', 'dynamic-memory', 'dynamic-pressure'):
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-core-memory.py'))
                 if dynamic_memory:
-                    diagnostic['check_growth'](endpoint, bridge.pid, directory, vm.pid, output, docker, env)
+                    diagnostic['check_growth'](
+                        endpoint, bridge.pid, directory, vm.pid, output, docker, env, pressure_fixture)
                 else:
                     diagnostic['collect'](endpoint, bridge.pid, directory, vm.pid, output)
             elif args.diagnostics in ('oci', 'oci-import'):
@@ -582,9 +589,12 @@ def native_session(args, root):
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-docker-diagnostic.py'))
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output)
         elif args.matched_output:
+            probe = runpy.run_path(str(REPO / 'benchmarks/native-core-memory.py'))['controller_snapshot']
+            report['core_memory_before_timing'] = probe(directory, vm.pid)
             bench = runpy.run_path(str(REPO / 'benchmarks/native-docker-comparison.py'))
             bench['measure']('native', endpoint, bridge.pid, docker, env, args.matched_output,
                              args.matched_samples, vm.pid)
+            report['core_memory_after_timing'] = probe(directory, vm.pid)
         if args.docker_args:
             command = docker + args.docker_args
             child = subprocess.Popen(command, env=env)
@@ -663,7 +673,7 @@ def main():
     parser.add_argument('--diagnostics', choices=('trace', 'control', 'oci', 'oci-import', 'registry',
                                                   'concurrency', 'concurrency-loss', 'streaming', 'exec',
                                                   'guest-bridge', 'docker-network', 'tcp-relay', 'published-port',
-                                                  'memory-telemetry', 'dynamic-memory'),
+                                                  'memory-telemetry', 'dynamic-memory', 'dynamic-pressure'),
                         help='run native-only diagnostic canaries')
     parser.add_argument('--docker-owner', choices=('rust', 'python'), default='rust',
                         help='use the Rust owner or the Python A/B reference')
@@ -689,7 +699,7 @@ def main():
     if args.docker_args[:1] == ['--']:
         args.docker_args.pop(0)
     native_assets = ('native_kernel', 'native_guest', 'native_package', 'native_receipt')
-    if args.matched_output or args.diagnostics in ('memory-telemetry', 'dynamic-memory'):
+    if args.matched_output or args.diagnostics in ('memory-telemetry', 'dynamic-memory', 'dynamic-pressure'):
         if not (args.native_memd and args.native_reclaimd and args.docker_owner == 'rust'):
             parser.error('native timing and memory canaries require both static Core helpers and the Rust owner')
         native_assets += ('native_memd', 'native_reclaimd')

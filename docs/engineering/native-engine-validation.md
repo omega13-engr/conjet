@@ -90,3 +90,29 @@ Raw samples and launcher identity are under
 Independent service pressure and a live fault at the unresolved cleanup
 boundary have separate acceptance evidence. Growth from workload demand
 alone does not meet the pressure gate.
+
+## SPEED-068
+
+The pressure diagnostic boot enabled a guest-only service in the existing
+Core service cgroup. It used the kernel's `memory.high` throttle at 16 MiB,
+with a 96 MiB hard bound and a 30-second helper lifetime. The helper is
+absent from the normal workload and benchmark boots.
+
+There were no containers when Core grew from a converged 448 MiB to 2,048
+MiB. The independent service had generated 153 `memory.high` events and
+Core reported one service expansion. The same 4 MiB payload matched its
+SHA-256 before and after 12 fresh native launches, with 272 high events and
+13.22% guest full PSI average recorded by the end of churn. After both
+owners drained, the original PSI guard deferred idle shrink. The guest fell
+below the idle PSI thresholds at 86.54 seconds from boot observation, and
+the 448 MiB target converged at 105.68 seconds, about 19.1 seconds later.
+Both shrink cycles authorized about 3.12 GiB of cumulative balloon-owned
+backing release. Ownership violations and reclaim failures remained zero.
+
+Earlier runs retained their failures. One collection predicate counted
+only workload expansions, and a shorter observation ended before the
+existing PSI threshold and retry interval permitted shrink. The final run
+recorded PSI recovery directly with the governor's policy unchanged.
+The launcher verified clean guest shutdown, socket and session removal,
+and production preservation. Raw evidence and artifact hashes are under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-speedup-evidence/SPEED-057/core-pressure-final/`.

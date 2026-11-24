@@ -123,18 +123,18 @@ Problem and Evidence: Native memory RPCs are not proof of complete Core controll
 
 Approach: Map native workload/cgroup lifecycle to existing memory inputs; use actual Core policy and ownership ledger. Start the growth fixture below full capacity.
 
-Evidence: Core admission and the data canary passed reduced capacity,
-full-capacity convergence and a second idle shrink with ownership evidence.
-Independent service pressure is tracked in SPEED-068. See
-[SPEED-067 evidence](native-engine-validation.md#speed-067).
+Evidence: Workload demand and independent service pressure both restored
+2,048 MiB from a converged 448 MiB target. Data integrity, idle shrink,
+balloon ownership and stale-generation tests passed. See
+[SPEED-067](native-engine-validation.md#speed-067) and
+[SPEED-068](native-engine-validation.md#speed-068).
 
 Source: [Native engine plan](native-engine-v2-plan.md) and current native host/guest sources.
 
-Review: Pending implementation, validation and independent evidence review.
+Review: Isolated memory qualification and self-review passed. Independent
+evidence review and production qualification remain pending.
 
-Next Action: Qualify the guest telemetry transport in SPEED-066, then connect
-authenticated admission and terminal cleanup to the governor and run the
-pressure and idle qualification.
+Next Action: Start the release pilot and independent volume work.
 
 ### SPEED-066
 
@@ -195,7 +195,7 @@ kernel-observed pressure independently of native launch admission. Verify
 the restored target, reclaim ownership, live canary integrity during churn,
 and idle shrink once both the service and the workloads are gone.
 
-Is blocked by task: SPEED-067 implementation and live admission canary.
+Is blocked by task: SPEED-067 validation, complete.
 
 Acceptance Criteria:
 
@@ -204,6 +204,15 @@ Acceptance Criteria:
   diagnostic boot and preserve production and launch fixture limits.
 - A pressure-only run must observe a Core target transition before submitting
   Docker launches. Preserve raw samples and cleanup results.
+
+Evidence: The pressure-only service recorded 153 kernel memory.high events
+and growth to 2 GiB while the native workload count was zero. Memory.high
+events reached 272 during 12 fresh lifecycles while the 4 MiB payload stayed
+intact. After the service and workload drained, the idle target converged
+19.1 seconds after the PSI gate cleared, within the existing retry window.
+See [SPEED-068 evidence](native-engine-validation.md#speed-068).
+
+Review: Isolated validation and self-review passed. Independent review pending.
 
 ### SPEED-059
 

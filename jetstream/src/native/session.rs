@@ -62,6 +62,9 @@ pub(super) struct Options {
     /// Enable the Core controller and require its per-workload admission grant.
     #[arg(long, requires = "guest_memd")]
     core_dynamic_memory: bool,
+    /// Enable the bounded service pressure fixture on this diagnostic boot.
+    #[arg(long, requires = "core_dynamic_memory")]
+    core_pressure_fixture: bool,
     /// Maximum lifetime of the disposable VM.
     #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(30..=1800))]
     lifetime_seconds: u64,
@@ -71,6 +74,7 @@ struct MemoryHelpers {
     memd: Vec<u8>,
     reclaimd: Vec<u8>,
     core_admission: bool,
+    core_pressure_fixture: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -132,6 +136,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
                 memd,
                 reclaimd,
                 core_admission: options.core_dynamic_memory,
+                core_pressure_fixture: options.core_pressure_fixture,
             })
         })
         .transpose()?;
@@ -561,6 +566,17 @@ fn build_archive(
         if helpers.core_admission {
             append(
                 core_admission::MARKER.trim_start_matches('/'),
+                0o100400,
+                &[],
+                0,
+                0,
+                0,
+                0,
+            )?;
+        }
+        if helpers.core_pressure_fixture {
+            append(
+                core_admission::PRESSURE_MARKER.trim_start_matches('/'),
                 0o100400,
                 &[],
                 0,

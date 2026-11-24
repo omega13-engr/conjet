@@ -62,6 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return conjet_launch_service::exec_fixture::run_helper(args);
         }
         #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--verify-core-pressure-fixture" && args.next().is_none() => {
+            return Ok(conjet_launch_service::pressure_fixture::run()?);
+        }
+        #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--check-fresh-kernel" && args.next().is_none() => {
             conjet_launch_service::kernel_fixture::check(false)?;
         }

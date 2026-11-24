@@ -308,6 +308,7 @@ struct Ledger {
     waiting: usize,
     records: VecDeque<Record>,
     pressure: bool,
+    pressure_helper: Option<std::process::Child>,
     evictions: u64,
     exec_active: bool,
 }
@@ -433,6 +434,27 @@ impl Ledger {
             self.evictions = self.evictions.saturating_add(1);
         }
     }
+
+    fn set_pressure_fixture(&mut self, pressure: bool) -> io::Result<()> {
+        if let Some(helper) = self.pressure_helper.as_mut() {
+            if helper.try_wait()?.is_none() {
+                if pressure {
+                    return Ok(());
+                }
+                helper.kill()?;
+                helper.wait()?;
+            }
+            self.pressure_helper = None;
+        }
+        if pressure {
+            self.pressure_helper = Some(
+                Command::new("/init")
+                    .arg("--verify-core-pressure-fixture")
+                    .spawn()?,
+            );
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct FreshFixture {
@@ -441,6 +463,7 @@ pub(crate) struct FreshFixture {
     native: bool,
     oci: bool,
     core_admission: bool,
+    core_pressure_fixture: bool,
     trace_benchmark: bool,
     bridge_available: bool,
     allow_crash: bool,
@@ -531,6 +554,8 @@ impl FreshFixture {
         };
         let oci = oci_marker.is_some();
         let core_admission = oci && Path::new(crate::core_admission::MARKER).try_exists()?;
+        let core_pressure_fixture =
+            core_admission && Path::new(crate::core_admission::PRESSURE_MARKER).try_exists()?;
         let image_digest = if let Some(digest) = oci_marker {
             let hex = digest
                 .strip_prefix("sha256:")
@@ -605,6 +630,7 @@ impl FreshFixture {
             native,
             oci,
             core_admission,
+            core_pressure_fixture,
             trace_benchmark,
             bridge_available,
             allow_crash,
@@ -1490,6 +1516,11 @@ impl FreshFixture {
                     return Err(("unsupported_option", "Core admission is disabled"));
                 }
                 if let Some(pressure) = request.pressure {
+                    if self.core_pressure_fixture {
+                        guard.set_pressure_fixture(pressure).map_err(|_| {
+                            ("fixture_failed", "could not update Core pressure helper")
+                        })?;
+                    }
                     guard.set_pressure(pressure);
                     self.changed.notify_all();
                 }

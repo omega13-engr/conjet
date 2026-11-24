@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const MARKER: &str = "/etc/conjet/native-core-admission";
+pub const PRESSURE_MARKER: &str = "/etc/conjet/native-core-pressure-fixture";
 pub const CAPACITY: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

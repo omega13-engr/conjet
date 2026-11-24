@@ -17,6 +17,8 @@ mod image_store;
 pub mod kernel_fixture;
 pub mod oci;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub mod pressure_fixture;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub mod recovery_fixture;
 pub mod relay;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
