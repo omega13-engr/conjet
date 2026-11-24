@@ -378,6 +378,8 @@ pub(crate) mod guest {
         guest_uid: u32,
         guest_gid: u32,
         mode: u32,
+        #[serde(skip)]
+        pub(crate) device: u64,
         pub(crate) inode: u64,
         labels: VolumeLabels,
     }
@@ -492,6 +494,7 @@ pub(crate) mod guest {
             guest_uid: owner.0.expect("validated volume UID"),
             guest_gid: owner.1.expect("validated volume GID"),
             mode: info.mode() & 0o777,
+            device: info.dev(),
             inode: info.ino(),
             labels: VolumeLabels::new(),
         })

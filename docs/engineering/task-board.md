@@ -1758,6 +1758,14 @@ processes in the owned build instead of attributing daemon-only
 counters as the whole workload. Prove snapshot writes and teardown for
 RUN, kill and delete, including a canceled worker.
 
+Evidence: `SPEED-165/node-owned-volume/` verified the configured
+cache's device, inode and mapped root ownership from the live worker.
+It opened the bundle without following path symlinks, verified that
+the rootfs is a distinct mount on the same leased disk and read its
+bounded single-link OCI configuration. The original Node RUN reported
+UID/GID 0, eight mounts and six namespaces. The rootless bundle omitted
+a cgroup path. The native launch and teardown remain open.
+
 ### SPEED-161
 
 Title: Preserve frozen Dockerfile and base-layer metadata in the worker

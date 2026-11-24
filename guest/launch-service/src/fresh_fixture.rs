@@ -518,6 +518,15 @@ struct PendingExecOutput {
 }
 
 impl Ledger {
+    fn build_worker(&self, cgroup: &str) -> Option<&Record> {
+        self.active().find(|record| {
+            let id = &record.handle.workload_id;
+            record.buildkit_worker
+                && record.phase == Phase::Running
+                && cgroup == format!("conjet-native-{id}/workloads/active/{id}")
+        })
+    }
+
     fn exec_target(
         &self,
         handle: &Handle,
@@ -2620,13 +2629,50 @@ impl FreshFixture {
     }
 
     pub(crate) fn owns_build_worker(&self, cgroup: &str) -> bool {
-        let ledger = self.ledger.lock().expect("fresh ledger");
-        ledger.active().any(|record| {
-            let id = &record.handle.workload_id;
-            record.buildkit_worker
-                && record.phase == Phase::Running
-                && cgroup == format!("conjet-native-{id}/workloads/active/{id}")
-        })
+        self.ledger
+            .lock()
+            .expect("fresh ledger")
+            .build_worker(cgroup)
+            .is_some()
+    }
+
+    pub(crate) fn inspect_build_worker_bundle(
+        &self,
+        frame: &Frame,
+        boot: &str,
+        cgroup: &str,
+    ) -> io::Result<Value> {
+        let request: BuildRuntimeRequest = frame.decode().map_err(io::Error::other)?;
+        if request.boot_id != boot || !matches!(request.operation, BuildOperation::Run) {
+            return Err(io::Error::other(
+                "live BuildKit bundle inspection requires a current RUN",
+            ));
+        }
+        let (pidfd, volume) = {
+            let ledger = self.ledger.lock().expect("fresh ledger");
+            let record = ledger
+                .build_worker(cgroup)
+                .ok_or_else(|| io::Error::other("BuildKit worker lease ended"))?;
+            let (_, pidfd) = record
+                .exec_context
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing BuildKit worker process lease"))?;
+            let volume = record
+                .volume
+                .clone()
+                .ok_or_else(|| io::Error::other("missing BuildKit worker cache lease"))?;
+            (pidfd.try_clone()?, volume)
+        };
+        let root = crate::exec_fixture::target_root(&pidfd)?;
+        let bytes = crate::build_snapshot::guest::read_worker_config(&root, &volume, &request.id)?;
+        let config: Value = serde_json::from_slice(&bytes)?;
+        Ok(json!({
+            "uid": config["process"]["user"]["uid"].as_u64(),
+            "gid": config["process"]["user"]["gid"].as_u64(),
+            "mounts": config["mounts"].as_array().map(Vec::len),
+            "namespaces": config["linux"]["namespaces"].as_array().map(Vec::len),
+            "cgroup_set": config["linux"]["cgroupsPath"].as_str().is_some_and(|value| !value.is_empty()),
+        }))
     }
 
     fn build_operation(

@@ -47,6 +47,7 @@ pub(crate) mod guest {
     use std::path::Path;
 
     use super::{MARKER, Snapshot, valid_id};
+    use crate::spec::{GID_BASE, UID_BASE, VolumeMount};
 
     pub(crate) const ROOT: &std::ffi::CStr = c"/run/conjet/buildkit";
     const OPEN_TREE: libc::c_int =
@@ -119,6 +120,65 @@ pub(crate) mod guest {
 
     pub(crate) fn inspect(id: &str) -> io::Result<Snapshot> {
         open(id).map(|open| open.identity)
+    }
+
+    pub(crate) fn read_worker_config(
+        root: &File,
+        volume: &VolumeMount,
+        id: &str,
+    ) -> io::Result<Vec<u8>> {
+        if !valid_id(id) || volume.target != "/var/lib/buildkit" || volume.read_only {
+            return Err(io::Error::other("invalid live BuildKit bundle scope"));
+        }
+        let var = open_directory(root, "var")?;
+        let lib = open_directory(&var, "lib")?;
+        let cache = open_directory(&lib, "buildkit")?;
+        let expected = crate::volume_disk::guest::inspect(&volume.name)?;
+        let actual = cache.metadata()?;
+        if expected.inode != volume.inode
+            || (expected.device, expected.inode) != (actual.dev(), actual.ino())
+            || (actual.uid(), actual.gid()) != (UID_BASE, GID_BASE)
+        {
+            return Err(io::Error::other("BuildKit worker cache identity changed"));
+        }
+        let native = open_directory(&cache, "runc-native")?;
+        let executor = open_directory(&native, "executor")?;
+        let bundle = open_directory(&executor, id)?;
+        let rootfs = open_directory(&bundle, "rootfs")?;
+        if rootfs.metadata()?.dev() != actual.dev() || mount_id(&rootfs)? == mount_id(&bundle)? {
+            return Err(io::Error::other(
+                "BuildKit rootfs is not mounted from its cache disk",
+            ));
+        }
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+        let fd = unsafe { libc::openat(bundle.as_raw_fd(), c"config.json".as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let info = file.metadata()?;
+        if !info.is_file()
+            || info.dev() != actual.dev()
+            || (info.uid(), info.gid()) != (UID_BASE, GID_BASE)
+            || info.nlink() != 1
+            || info.len() > super::bundle::MAX_CONFIG_BYTES
+        {
+            return Err(io::Error::other("invalid live BuildKit config identity"));
+        }
+        let mut bytes = Vec::new();
+        file.take(super::bundle::MAX_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > super::bundle::MAX_CONFIG_BYTES {
+            return Err(io::Error::other("live BuildKit config exceeds its bound"));
+        }
+        Ok(bytes)
+    }
+
+    fn mount_id(file: &File) -> io::Result<u64> {
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd()))?;
+        info.lines()
+            .find_map(|line| line.strip_prefix("mnt_id:")?.trim().parse().ok())
+            .ok_or_else(|| io::Error::other("could not verify BuildKit snapshot mount ID"))
     }
 
     pub(crate) fn inspect_bundle(
