@@ -987,14 +987,16 @@ pub(crate) fn cgroup_observation(id: &str, prepared: bool, oci: bool) -> io::Res
     crate::cgroups::observation(&cgroup_scope(id, prepared, oci))
 }
 
-pub(crate) fn cgroup_effective_limits(id: &str) -> io::Result<serde_json::Value> {
+pub(crate) fn cgroup_effective_limits(id: &str) -> io::Result<(serde_json::Value, u64)> {
     let dir = cgroup_scope(id, false, true);
     let read = |file| std::fs::read_to_string(dir.join(file)).map(|value| value.trim().to_owned());
-    Ok(serde_json::json!({
+    let limits = serde_json::json!({
         "memory_max":read("memory.max")?,
         "pids_max":read("pids.max")?,
         "cpu_max":read("cpu.max")?,
-    }))
+    });
+    let active = read("pids.current")?.parse().map_err(io::Error::other)?;
+    Ok((limits, active))
 }
 
 fn cgroup_scope(id: &str, prepared: bool, oci: bool) -> std::path::PathBuf {

@@ -1062,6 +1062,11 @@ Acceptance: Exercise exec in a workload with omitted Docker resources
 and in a workload with the frozen service limits. Join the existing
 owned cgroup and retain its credentials and exit behavior.
 
+Evidence: Four resource cases observed the same guest handle and
+unchanged kernel limits during exec. `pids.current` rose from one to
+three in each owned cgroup. Exec and cleanup passed, as did the native
+exec regression. Logs are under `SPEED-115/` on ExternalSSD.
+
 ### SPEED-116
 
 Title: Support ordinary shell subprocesses inside the native OCI sandbox

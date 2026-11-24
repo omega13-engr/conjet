@@ -481,10 +481,11 @@ impl Ledger {
                     "cgroup_mount":mount,"cgroup_scope":scope,"overlay":overlay,
                     "overlay_present":overlay.is_dir(),
                 });
-                if let Ok(limits) =
+                if let Ok((limits, active_pids)) =
                     crate::kernel_fixture::cgroup_effective_limits(&record.handle.workload_id)
                 {
                     state["effective_limits"] = limits;
+                    state["active_pids"] = json!(active_pids);
                 }
             }
             if oci && active {

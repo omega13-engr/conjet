@@ -27,6 +27,29 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
         with GUEST['channel'](session, vm_pid) as (guest, boot):
             return GUEST['exchange'](guest, 19, {'boot_id': boot, 'budget_ms': 1000}, 19)
 
+    def exec_in_group(name, workload):
+        args = [*docker, 'exec', name, '/bin/sleep', '1']
+        with subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as task:
+            try:
+                deadline = time.monotonic() + 3
+                while task.poll() is None and time.monotonic() < deadline:
+                    owned = observe()['active_workloads']
+                    if (len(owned) == 1 and owned[0]['handle'] == workload['handle']
+                            and owned[0]['active_pids'] > workload['active_pids']):
+                        member = owned[0]
+                        break
+                    time.sleep(0.025)
+                else:
+                    raise RuntimeError('exec did not join the active workload cgroup')
+                stdout, stderr = task.communicate(timeout=5)
+                if task.returncode or stdout or stderr:
+                    raise RuntimeError(f'exec in the owned cgroup failed: {task.returncode} {stderr}')
+                return member
+            finally:
+                if task.poll() is None:
+                    task.kill()
+                    task.wait()
+
     try:
         cases = [
             ('defaults', [], (0, 0, 0), ('max', 'max', 'max 100000')),
@@ -64,6 +87,7 @@ def collect(endpoint, peer, docker, env, output, session, vm_pid):
                     if (tuple(record['host_limits']) != requested
                             or tuple(effective[key] for key in ('memory_max', 'pids_max', 'cpu_max')) != limits):
                         raise RuntimeError(f'{case} reported resource policy differs from the kernel')
+                    record['exec_membership'] = exec_in_group(name, active[0])
                 finally:
                     call(['rm', '--force', name])
                 record['cleanup'] = MATCHED['native_terminal'](connection, name, set(), code=137)

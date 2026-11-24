@@ -207,6 +207,14 @@ layer regression passed on both profiles. The reloaded Node application
 still needs its original execution case. Evidence is under
 `SPEED-114/` on ExternalSSD.
 
+## SPEED-115 exec cgroup inheritance
+
+Exec uses the current workload's verified cgroup for both omitted and
+explicit Docker resources. In the default, partial, lifecycle and service
+cases, the guest kept the same workload handle and limits while the
+actual PID count rose from one to three. Exec output and teardown
+regressions passed. Evidence is under `SPEED-115/` on ExternalSSD.
+
 ## SPEED-091 mapped OCI credentials
 
 The guest advertises mapped credentials on its OCI handshake. The

@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::handshake::{hex, unhex};
 use crate::output::{Capture, drain};
 use crate::security::{self, checked};
-use crate::spec::{LaunchSpec, NATIVE_LIMITS};
+use crate::spec::LaunchSpec;
 
 const TARGET_PIDFD: libc::c_int = 3;
 const TARGET_ROOT: libc::c_int = 4;
@@ -335,9 +335,6 @@ pub fn run_helper(
     }
     let spec: LaunchSpec = serde_json::from_str(&specification)?;
     spec.validate_exec()?;
-    if spec.limits != NATIVE_LIMITS {
-        return Err("unsupported exec resources".into());
-    }
 
     let args: Vec<_> = spec
         .argv
