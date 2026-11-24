@@ -24,6 +24,7 @@ pub const NATIVE_LIMITS: ResourceLimits = ResourceLimits {
 };
 const MAX_ENTRIES: usize = 32;
 const MAX_VALUE_BYTES: usize = 1_024;
+const MAX_OCI_ARGUMENT_BYTES: usize = 4_096;
 const MAX_ARG_ENV_BYTES: usize = 8 * 1_024;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -282,9 +283,19 @@ impl LaunchSpec {
         if spec.argv.is_empty() || spec.argv.len() > MAX_ENTRIES || spec.env.len() > MAX_ENTRIES {
             return Err(SpecError::Strings);
         }
+        let argument_bound = if search_path && spec.build_snapshot.is_none() {
+            MAX_OCI_ARGUMENT_BYTES
+        } else {
+            MAX_VALUE_BYTES
+        };
         let mut strings = 0;
-        for entry in spec.argv.iter().chain(&spec.env) {
-            if entry.len() > MAX_VALUE_BYTES || entry.as_bytes().contains(&0) {
+        let bounded_values = spec.argv[..1]
+            .iter()
+            .chain(&spec.env)
+            .map(|value| (value, MAX_VALUE_BYTES))
+            .chain(spec.argv[1..].iter().map(|value| (value, argument_bound)));
+        for (entry, bound) in bounded_values {
+            if entry.len() > bound || entry.as_bytes().contains(&0) {
                 return Err(SpecError::Strings);
             }
             strings += entry.len() + 1;
@@ -422,6 +433,19 @@ mod tests {
         let mut request = valid();
         request.spec.argv[0] = "bin/sleep".into();
         assert_eq!(request.validate_oci().err(), Some(SpecError::Path));
+    }
+
+    #[test]
+    fn admits_storage_program_size_only_as_a_bounded_ordinary_oci_argument() {
+        let mut request = valid();
+        request.spec.argv.push("x".repeat(2121));
+        assert_eq!(request.spec.validate().err(), Some(SpecError::Strings));
+        assert!(request.spec.validate_exec().is_ok());
+        request.spec.argv[1] = "x".repeat(4097);
+        assert_eq!(request.spec.validate_exec().err(), Some(SpecError::Strings));
+        request.spec.argv[1] = "x".repeat(4096);
+        request.spec.env = vec![format!("NAME={}", "x".repeat(1024))];
+        assert_eq!(request.spec.validate_exec().err(), Some(SpecError::Strings));
     }
 
     #[test]

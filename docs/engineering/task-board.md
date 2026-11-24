@@ -1312,6 +1312,12 @@ pinned Node image. Verify sequential and random data plus small-file
 metadata. Retain total spec size, executable paths, build snapshots
 and static argument bounds.
 
+Evidence: All six original writable-layer runs passed with the frozen
+Node image and matched the expected 16 MiB trace. The pinned Alpine musl
+`pwrite` uses `pwritev2` with `RWF_NOAPPEND`. The guest checks that flag
+and keeps the new filesystem calls in the ordinary OCI profile. See
+`SPEED-134/storage-frozen/` on ExternalSSD.
+
 ### SPEED-133
 
 Title: Preserve Docker labels on native named volumes
@@ -1325,6 +1331,35 @@ Evidence: Both optimized boots returned the original label by inspect
 and exact filter. The frozen Node storage preflight passed all six
 labeled creates and removals. Compose progressed past volume creation.
 See `SPEED-133/` and `SPEED-132/storage-positional-vector/` on ExternalSSD.
+
+### SPEED-134
+
+Title: Initialize new volumes for the first mapped root workload
+
+Acceptance: The frozen Node workload can write and read back its named
+volume using its default identity. Keep legacy volume ownership,
+preserve bytes across subsequent mounts, and serialize the first use
+of a new volume against competing admissions.
+
+Evidence: All six original named-volume runs and independent readbacks
+passed using the default Node identity. The final SHA-256 matched the
+writable-layer trace in every run. See `SPEED-134/storage-frozen/`.
+
+### SPEED-135
+
+Title: Serve scoped host bind mounts in the native guest
+
+Acceptance: Use a live filesystem backed by the declared, owned
+ExternalSSD source directory. Keep the host and guest views coherent,
+verify the original host checksum, and revoke the mount and its
+transport on teardown. Deny paths outside the configured share.
+
+### SPEED-136
+
+Title: Honor Compose volume removal framing
+
+Acceptance: Accept the pinned client's force query on local removal.
+Keep referenced volumes protected and verify scoped teardown.
 
 ### SPEED-091
 

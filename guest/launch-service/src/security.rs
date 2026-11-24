@@ -274,6 +274,21 @@ impl WorkloadFilter {
             // libc retry through the checked clone ABI.
             program.push(next_or_skip(libc::SYS_clone3 as u32));
             program.push(statement(BPF_RETURN, RET_ERRNO | libc::ENOSYS as u32));
+            // The pinned Alpine musl implements pwrite using pwritev2 with
+            // RWF_NOAPPEND. Check the Linux ABI's sixth argument (flags).
+            let positional_write = [
+                statement(BPF_LOAD_WORD, 16 + 5 * 8),
+                next_or_skip(0x20), // RWF_NOAPPEND
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, RET_ERRNO | libc::EPERM as u32),
+            ];
+            program.push(libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                k: libc::SYS_pwritev2 as u32,
+                jt: 0,
+                jf: positional_write.len() as u8,
+            });
+            program.extend(positional_write);
             for syscall in [
                 libc::SYS_pipe2,
                 libc::SYS_wait4,
@@ -281,6 +296,10 @@ impl WorkloadFilter {
                 libc::SYS_umask,
                 libc::SYS_getdents64,
                 libc::SYS_unlinkat,
+                libc::SYS_mkdirat,
+                libc::SYS_pread64,
+                libc::SYS_pwrite64,
+                libc::SYS_fsync,
                 libc::SYS_epoll_create1,
                 libc::SYS_epoll_ctl,
                 libc::SYS_epoll_pwait,
