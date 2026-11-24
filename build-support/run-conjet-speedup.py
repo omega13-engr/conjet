@@ -575,6 +575,11 @@ def native_session(args, root):
                 bridge_command += ['--boot-layout', args.native_boot_layout]
             if args.native_public_images:
                 bridge_command.append('--pinned-public-registry')
+                if (args.compatibility_suite == 'builds' and args.native_disk_images
+                        and not args.compatibility_build_bases and not args.offline_oci_layout):
+                    bridge_command.append('--pinned-build-registry')
+                    if args.compatibility_build_api:
+                        bridge_command += ['--build-client-docker', DOCKER, '--build-client-config', config]
             for layout in args.offline_oci_layout:
                 bridge_command += ['--seed-layout', layout]
             if args.offline_oci_layout:
@@ -653,7 +658,12 @@ def native_session(args, root):
                     report['compatibility_build_bases'] = str(args.compatibility_build_bases)
                 diagnostic['collect'](endpoint, bridge.pid, docker, env, output, args.compatibility_suite,
                                       lifecycle_group=args.compatibility_lifecycle_group,
-                                      build_bases=args.compatibility_build_bases)
+                                      build_bases=args.compatibility_build_bases,
+                                      build_language=args.compatibility_build_language,
+                                      build_api=args.compatibility_build_api,
+                                      direct_tools=(args.compatibility_direct_buildctl, args.compatibility_direct_probe)
+                                      if args.compatibility_direct_buildctl else None,
+                                      session=directory, vm_pid=vm.pid)
             elif args.diagnostics == 'guest-bridge':
                 diagnostic = runpy.run_path(str(REPO / 'benchmarks/native-oci-bridge.py'))
                 diagnostic['collect'](directory, vm.pid, output)
@@ -828,6 +838,12 @@ def main():
                         help='run one complete frozen lifecycle group in its own Core boot')
     parser.add_argument('--compatibility-build-bases', type=Path,
                         help='use verified OCI layouts for a separate offline build diagnostic')
+    parser.add_argument('--compatibility-build-language', choices=('node', 'go', 'rust'),
+                        help='run all frozen repetitions for one language in a separate Core boot')
+    parser.add_argument('--compatibility-build-api', action='store_true',
+                        help='verify the native Docker archive build API in a separate Core boot')
+    parser.add_argument('--compatibility-direct-buildctl', type=Path)
+    parser.add_argument('--compatibility-direct-probe', type=Path)
     parser.add_argument('--native-bind-storage', action='store_true')
     parser.add_argument('--native-routed-bridge', action='store_true')
     parser.add_argument('--offline-oci-layout', type=Path, action='append', default=[])
@@ -863,6 +879,20 @@ def main():
     args = parser.parse_args()
     if bool(args.compatibility_suite) != (args.diagnostics == 'compatibility-preflight'):
         parser.error('select one frozen suite for the native compatibility preflight')
+    if args.compatibility_build_language and args.compatibility_suite != 'builds':
+        parser.error('select a build language only for the frozen builds suite')
+    if args.compatibility_build_api and (
+            args.compatibility_suite != 'builds' or args.compatibility_build_language
+            or not args.native_public_images or not args.native_disk_images
+            or args.compatibility_build_bases or args.offline_oci_layout or args.docker_owner != 'rust'):
+        parser.error('the native build API requires the public Rust-owned builds suite in its own boot')
+    direct = (args.compatibility_direct_buildctl, args.compatibility_direct_probe)
+    if any(direct) and (
+            not all(direct) or args.compatibility_suite != 'builds' or args.compatibility_build_language
+            or args.compatibility_build_api or args.compatibility_build_bases or args.offline_oci_layout
+            or args.docker_owner != 'rust' or not args.native_public_images or not args.native_disk_images
+            or any(tool.resolve(strict=True) != tool or not tool.is_relative_to(SCRATCH) for tool in direct)):
+        parser.error('direct BuildKit qualification requires both ExternalSSD tools and the public native builds suite')
     if args.compatibility_build_bases and (
             args.compatibility_suite != 'builds' or not args.native_disk_images
             or args.compatibility_build_bases.resolve(strict=True) != args.compatibility_build_bases

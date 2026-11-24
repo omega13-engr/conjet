@@ -273,6 +273,51 @@ impl Server {
                 return Ok(());
             }
             #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            if frame.kind == Kind::BuildRegistry
+                && scope == Scope::Host
+                && let Some(fresh) = &self.fresh
+            {
+                let request: serde_json::Value = frame.decode()?;
+                if request["boot_id"].as_str() != Some(boot_id.as_str()) {
+                    write_error(
+                        &mut stream,
+                        frame.id,
+                        "stale_generation",
+                        "unexpected registry boot",
+                    )?;
+                    continue;
+                }
+                let Some(_slot) = RelaySlot::reserve(&self.relays) else {
+                    write_error(
+                        &mut stream,
+                        frame.id,
+                        "busy",
+                        "native relay slots are occupied",
+                    )?;
+                    continue;
+                };
+                if let Ok((owner, registry)) = fresh.accept_build_registry() {
+                    Frame::write(
+                        &mut stream,
+                        Kind::BuildRegistry,
+                        frame.id,
+                        &serde_json::json!({"connected":true}),
+                    )?;
+                    let _ =
+                        crate::relay::pump(&stream, &registry, Duration::from_secs(180), || {
+                            self.shutdown.requested() || !fresh.build_registry_current(&owner)
+                        });
+                    return Ok(());
+                }
+                write_error(
+                    &mut stream,
+                    frame.id,
+                    "not_found",
+                    "no pending BuildKit registry connection",
+                )?;
+                continue;
+            }
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
             if let Some(fresh) = &self.fresh
                 && fresh.is_oci()
                 && frame.kind == Kind::ExecStream

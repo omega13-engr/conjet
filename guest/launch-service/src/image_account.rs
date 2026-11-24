@@ -47,6 +47,21 @@ pub(crate) fn resolve_image(digest: &str, account: &Account) -> io::Result<(u32,
     resolve(&root, account)
 }
 
+pub(crate) fn home(root: &std::fs::File, uid: u32) -> io::Result<String> {
+    let passwd = read(root, "/etc/passwd")?;
+    let mut homes = passwd.lines().filter_map(|row| {
+        let mut fields = row.split(':');
+        (fields.nth(2)?.parse::<u32>() == Ok(uid))
+            .then(|| fields.nth(2))
+            .flatten()
+    });
+    let home = homes.next().filter(|home| !home.is_empty()).unwrap_or("/");
+    if homes.next().is_some() || !crate::spec::canonical_absolute(home, true) {
+        return Err(io::Error::other("invalid image home directory"));
+    }
+    Ok(home.to_owned())
+}
+
 fn resolve(root: &Path, account: &Account) -> io::Result<(u32, u32)> {
     let root = OpenOptions::new()
         .read(true)

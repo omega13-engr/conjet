@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use super::{request, volume, Rejected};
 
-const IMAGE: &str =
+pub(super) const IMAGE: &str =
     "docker.io/moby/buildkit@sha256:771795ae105f698c5a354aecb1a1be2cf1f1c17c97b348c8b19f7cded83fb97c";
 
 pub(super) fn requested(

@@ -656,8 +656,7 @@ fn clone_and_reap(
                     .snapshot_mount(pid)?
                     .ok_or_else(|| io::Error::other("missing detached build snapshot"))?;
                 let sysfs = process
-                    .and_then(|spec| spec.build_snapshot.as_ref())
-                    .filter(|snapshot| snapshot.bundle_policy && !snapshot.live_worker)
+                    .filter(|spec| spec.build_sysfs_view())
                     .map(|_| crate::build_snapshot::mounts::detached_sysfs(&pidfd))
                     .transpose()?;
                 let mut descriptors = vec![mount.as_raw_fd()];

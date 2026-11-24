@@ -804,6 +804,14 @@ container create request. Each pinned Buildx worker bootstrap failed at
 image provisioning; all three builder definitions were removed. The
 constrained native OCI profile has no privileged worker mode.
 
+The opt-in native build endpoint now accepts a bounded local Docker
+context archive and uses the pinned Docker-container driver in the
+launcher-owned client configuration. The private guest executed the
+failure and success Dockerfiles. The API surfaced exit 23, then published
+the successful archive under the requested tag and ran its output canary.
+Both exact worker/RUN generations and the tag inventory confirmed
+cleanup. See `SPEED-089/cj-compat.tMPK1e-unpacked-archive/`.
+
 Child tasks are frozen in the [native compatibility manifest](../../benchmarks/scenarios/native-compatibility-v1.json).
 An unsupported, missing, skipped, flaky or failed required case fails
 SPEED-098 and gates a new SPEED-065 matrix.
@@ -1868,6 +1876,16 @@ transferred and parsed, then public registry DNS timed out at
 layout run used the original ARM64 image digests and reached actual
 layer extraction. It cannot qualify the public route.
 
+The public worker uses the private built-in bridge listener. The host
+downloads the frozen Docker Hub pins over TLS and relays verified
+manifest members through authenticated Core transport. Source identity,
+object digest and transferred bytes are recorded. The Buildx Dockerfiles
+retain their public references and network-none RUN policy. Initial Node
+and Go build solves, exports, loads and execution canaries completed
+through this route. See
+`SPEED-165/cj-compat.tMPK1e-node-witness-retry/` and
+`SPEED-165/cj-compat.tMPK1e-public-spawn/go/`.
+
 ### SPEED-160
 
 Title: Qualify RUN, cancellation and cache through the original Buildx client
@@ -1887,6 +1905,14 @@ limit stays enforced. The standalone common, Alpine and Node archive
 regressions, including corrupt-layer rejection, passed. See
 `SPEED-165/cj-compat.tMPK1e-offline-builds/node/` and
 `SPEED-165/cj-compat.tMPK1e-archive-regression/`.
+
+The public Node run recorded each worker generation, exact snapshot
+identity, RUN exit, archive digest, loaded OCI config, and image teardown.
+It verified zero new RUNs for the unchanged build, one RUN for the source
+change and two for the dependency change in each repetition. A failing
+RUN returned 23. Interrupting the live solve returned client status 130
+and guest signal 9 with teardown of the observed RUN generation. See
+`SPEED-165/cj-compat.tMPK1e-node-witness-retry/`.
 
 ### SPEED-163
 
@@ -1928,6 +1954,13 @@ Evidence: CI run `45409876930` on `ee163ae` failed
 assertion was reached with an unexpected error variant. The local ARM64
 workspace passed the same check. The next CI attempt reports the
 actual returned error without changing the assertion.
+
+CI run `45429655803` and a local workspace run both reproduced the
+region-wide assertion reporting one nonreusable page before the injected
+failure. The test now brackets the exact four-page range with inaccessible
+guard pages, keeping the original zero-count assertion and rollback check.
+The local workspace and 100 focused repetitions passed. The production
+backing guard and Core memory policy are unchanged.
 
 ### SPEED-167
 
@@ -1984,6 +2017,14 @@ Acceptance: Run the frozen Rust, Go and Node source/cache variants,
 export/load/run the resulting images and verify native executor
 ownership. Cover failure and cancellation and the Docker build API.
 
+The standalone v0.23.2 BuildKit client independently solved a scratch
+Dockerfile through the native worker at mapped UID/GID 65532. The RUN
+verified the mount contract and emitted both output streams. Fresh and
+cached exports produced the same proof, with zero RUNs on the cached solve.
+An interrupted solve terminated the recorded native generation and
+released worker and cache ownership. See
+`SPEED-088/cj-compat.tMPK1e-direct-mount-policy/`.
+
 ### SPEED-094
 
 Title: Qualify the frozen Node and Redis Compose fixture
@@ -2020,6 +2061,13 @@ Evidence: The original stress runner passed 400 measured fixture
 launches and 40 warmups across concurrency 1, 2, 4 and 8 with the
 mapped Alpine default. The Node prepull failed before the original
 OOM and recovery fixture. Completion remains open.
+
+A later public run passed the unchanged stress and OOM fixtures and
+verified seven cancellations among eight simultaneously running
+containers. The eighth retained its exact data through cancellation.
+All nine workload generations including recovery had native teardown
+witnesses. See `SPEED-098/cj-compat.tMPK1e-stress-cancel/`. The
+release gate still requires the same evidence on its frozen artifacts.
 
 ### SPEED-098
 

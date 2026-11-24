@@ -675,6 +675,15 @@ pub(crate) struct NetworkOwner {
 }
 
 impl NetworkOwner {
+    pub(crate) fn build_registry_listener(&self) -> io::Result<TcpListener> {
+        self.in_bridge(|links| {
+            let listener =
+                TcpListener::bind((links.scope.gateway(), crate::spec::BUILDKIT_REGISTRY_PORT))?;
+            listener.set_nonblocking(true)?;
+            Ok(listener)
+        })
+    }
+
     pub(crate) fn new(scope: crate::spec::BridgeScope) -> io::Result<Self> {
         let original = File::open("/proc/thread-self/ns/net")?;
         let setup = (|| {

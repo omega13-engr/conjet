@@ -77,6 +77,29 @@ pub(super) struct Connection {
 }
 
 impl Connection {
+    pub(super) fn poll_build_registry(&mut self) -> anyhow::Result<bool> {
+        let result = self.exchange(
+            Kind::BuildRegistry,
+            Kind::BuildRegistry,
+            &json!({"boot_id":self.boot.clone()}),
+            Duration::from_secs(2),
+        );
+        match result {
+            Ok(response) if response["connected"] == true => Ok(true),
+            Err(WireError::PeerError(code)) if matches!(code.as_str(), "not_found" | "busy") => {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+            _ => anyhow::bail!("invalid BuildKit registry connection acknowledgement"),
+        }
+    }
+
+    pub(super) fn into_build_registry(mut self) -> Stream {
+        self.stream
+            .deadline(Some(Instant::now() + Duration::from_secs(180)));
+        self.stream
+    }
+
     pub(super) fn open(directory: &Path, identity: &Identity, key: &Key) -> anyhow::Result<Self> {
         let unix = UnixStream::connect(directory.join(ENDPOINT))?;
         let mut pid: libc::pid_t = 0;

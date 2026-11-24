@@ -31,6 +31,8 @@ pub const BUILDKIT_NATIVE_ARGS: &[&str] = &[
     "--otel-socket-path=/var/lib/buildkit/otel-grpc.sock",
 ];
 pub const BUILDKIT_NETWORK_ENTITLEMENT: &str = "--allow-insecure-entitlement=network.host";
+pub const BUILDKIT_REGISTRY_CONFIG: &str = "--config=/run/conjet/buildkit-registry.toml";
+pub const BUILDKIT_REGISTRY_PORT: u16 = 5001;
 
 pub fn buildkit_control_exec(image: &str, argv: &[String]) -> bool {
     image == BUILDKIT_CONFIG
@@ -370,6 +372,13 @@ impl LaunchRequest {
 }
 
 impl LaunchSpec {
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) fn build_sysfs_view(&self) -> bool {
+        self.build_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.bundle_policy && (!snapshot.live_worker || self.fixture_identity())
+        })
+    }
+
     pub fn can_start_buildkit(&self) -> bool {
         self.image_digest == BUILDKIT_CONFIG
             && self.uid == 0
@@ -393,7 +402,22 @@ impl LaunchSpec {
             && self
                 .argv
                 .get(BUILDKIT_NATIVE_ARGS.len()..)
-                .is_some_and(|extra| extra.is_empty() || extra == [BUILDKIT_NETWORK_ENTITLEMENT])
+                .is_some_and(|extra| {
+                    let extra = match extra {
+                        [flag, rest @ ..] if flag == BUILDKIT_REGISTRY_CONFIG => rest,
+                        _ => extra,
+                    };
+                    extra.is_empty() || extra == [BUILDKIT_NETWORK_ENTITLEMENT]
+                })
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) fn buildkit_registry(&self) -> bool {
+        self.buildkit_worker
+            && self
+                .argv
+                .get(BUILDKIT_NATIVE_ARGS.len())
+                .is_some_and(|arg| arg == BUILDKIT_REGISTRY_CONFIG)
     }
 
     pub fn can_bootstrap_redis(&self) -> bool {
@@ -535,7 +559,7 @@ impl LaunchSpec {
             || spec.gid >= ID_MAP_WIDTH
             || spec.build_snapshot.as_ref().is_some_and(|snapshot| {
                 if snapshot.live_worker {
-                    spec.uid != 0 || spec.gid != 0
+                    (spec.uid != 0 || spec.gid != 0) && !spec.fixture_identity()
                 } else {
                     !spec.fixture_identity()
                 }
@@ -594,7 +618,7 @@ impl LaunchSpec {
     }
 }
 
-fn canonical_absolute(path: &str, allow_root: bool) -> bool {
+pub(crate) fn canonical_absolute(path: &str, allow_root: bool) -> bool {
     if path.len() > MAX_VALUE_BYTES || path.as_bytes().contains(&0) {
         return false;
     }

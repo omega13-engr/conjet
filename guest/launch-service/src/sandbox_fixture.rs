@@ -45,12 +45,14 @@ pub(crate) struct Sandbox {
     stdin: File,
     volume: Option<FileBinding>,
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
+    build_sysfs_view: bool,
     live_mounts: Option<crate::build_snapshot::mounts::LiveMounts>,
     groups: &'static [u32],
     uid: u32,
     gid: u32,
     redis_bootstrap: bool,
     buildkit_image: bool,
+    buildkit_registry: bool,
     policy: WorkloadPolicy,
 }
 
@@ -187,7 +189,7 @@ fn mount_workload_proc(root: &CStr, pid_only: bool) -> io::Result<()> {
     })
 }
 
-fn prepare_buildkit_worker(root: &CStr) -> io::Result<()> {
+fn prepare_buildkit_worker(root: &CStr, registry: bool) -> io::Result<()> {
     let root = Path::new(std::ffi::OsStr::from_bytes(root.to_bytes()));
     for relative in ["usr", "usr/bin", "run", "run/conjet", "run/conjet/buildkit"] {
         let path = root.join(relative);
@@ -204,6 +206,21 @@ fn prepare_buildkit_worker(root: &CStr) -> io::Result<()> {
         .mode(0o555)
         .open(root.join("usr/bin/conjet-buildkit-runtime"))?;
     io::copy(&mut File::open("/init")?, &mut runtime)?;
+    if registry {
+        use std::io::Write;
+        let address = crate::spec::BridgeScope::BuiltIn.gateway();
+        let port = crate::spec::BUILDKIT_REGISTRY_PORT;
+        let mut config = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o444)
+            .open(root.join("run/conjet/buildkit-registry.toml"))?;
+        writeln!(
+            config,
+            "[registry.\"docker.io\"]\nmirrors = [\"{address}:{port}\"]"
+        )?;
+        writeln!(config, "[registry.\"{address}:{port}\"]\nhttp = true")?;
+    }
     std::os::unix::fs::symlink("/var/lib/buildkit", root.join("run/conjet/buildkit/worker"))?;
     crate::build_snapshot::worker_control::mount(root)
 }
@@ -366,13 +383,14 @@ impl Sandbox {
             if snapshot.is_some_and(|snapshot| snapshot.live_worker) != live_mounts.is_some() {
                 return Err(io::Error::other("unexpected live snapshot mount lease"));
             }
-            let groups: &'static [u32] = if live_mounts.is_some() {
-                crate::build_snapshot::bundle::LIVE_GROUPS
-            } else if worker_mounts.is_some() {
-                &[WORKLOAD_GID]
-            } else {
-                &[]
-            };
+            let groups: &'static [u32] =
+                if live_mounts.is_some() && oci.is_some_and(|spec| spec.uid == 0) {
+                    crate::build_snapshot::bundle::LIVE_GROUPS
+                } else if worker_mounts.is_some() || live_mounts.is_some() {
+                    &[WORKLOAD_GID]
+                } else {
+                    &[]
+                };
             let lower = if snapshot.is_some() {
                 base.join("lower")
             } else if let Some(spec) = oci {
@@ -459,6 +477,7 @@ impl Sandbox {
                     .transpose()?
                     .flatten(),
                 worker_mounts,
+                build_sysfs_view: oci.is_some_and(LaunchSpec::build_sysfs_view),
                 live_mounts,
                 groups,
                 uid: oci.map_or(WORKLOAD_UID, |spec| spec.uid),
@@ -466,6 +485,7 @@ impl Sandbox {
                 redis_bootstrap: oci.is_some_and(|spec| spec.redis_bootstrap),
                 buildkit_image: oci
                     .is_some_and(|spec| spec.image_digest == crate::spec::BUILDKIT_CONFIG),
+                buildkit_registry: oci.is_some_and(LaunchSpec::buildkit_registry),
                 policy,
             })
         })();
@@ -616,7 +636,7 @@ impl Sandbox {
             )?;
             step(
                 "BuildKit native runtime",
-                prepare_buildkit_worker(&self.new_root),
+                prepare_buildkit_worker(&self.new_root, self.buildkit_registry),
             )?;
         } else if self.buildkit_image {
             step(
@@ -631,7 +651,7 @@ impl Sandbox {
             )?;
         }
         if let Some(worker) = worker {
-            if sysfs.is_some() != self.worker_mounts.is_some() {
+            if sysfs.is_some() != self.build_sysfs_view {
                 return Err(io::Error::other("unexpected worker sysfs mount"));
             }
             let root = Path::new(std::ffi::OsStr::from_bytes(self.new_root.as_bytes()));

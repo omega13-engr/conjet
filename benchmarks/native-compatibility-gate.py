@@ -308,6 +308,50 @@ def stress_oom(report):
     return True
 
 
+def stress_cancellation(report, concurrency):
+    data = report.get('cancellation', {})
+    cancelled, survivor = data.get('cancelled', []), data.get('survivor', '')
+    if (data.get('error') or len(cancelled) != concurrency - 1
+            or len(set([*cancelled, survivor])) != concurrency
+            or any(not re.fullmatch(r'[0-9a-f]{64}', ident) for ident in [*cancelled, survivor])):
+        return False
+    rows = data.get('operations', [])
+    if any(row.get('error') is not None or row.get('exit_code') != 0 for row in rows):
+        return False
+    operations = {row['scenario']: row.get('stdout') for row in rows if row['scenario'] != 'create'}
+    content = 'active-data-through-cancellation'
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    if (data.get('data_sha256') != digest or operations.get('inventory') != ''
+            or operations.get('all-running') != ''.join(f'{ident} true\n' for ident in [survivor, *cancelled])
+            or operations.get('survivor-running') != f'{survivor} true\n'
+            or operations.get('survivor-before') != content
+            or operations.get('survivor-after') != operations['survivor-before']
+            or operations.get('cancelled-exits') != '137\n' * len(cancelled)
+            or operations.get('recovery') != 'cancellation-recovered\n'):
+        return False
+    events = {}
+    for event in data.get('events', []):
+        events.setdefault(event['Actor']['ID'], []).append(event)
+    recovery = set(events) - {*cancelled, survivor}
+    if len(recovery) != 1 or set(events) != {*cancelled, survivor, *recovery}:
+        return False
+    handles = set()
+    for ident, chain in events.items():
+        if [event['Action'] for event in chain][-2:] != ['die', 'destroy']:
+            return False
+        died = chain[-2]['Actor']['Attributes']
+        handle = died.get('conjet.native_handle', '')
+        if (died.get('conjet.backend') != 'jetstream-native-oci'
+                or died.get('conjet.guest_cleanup') != 'complete'
+                or not re.fullmatch(r'[0-9a-f]{32}', handle) or handle in handles
+                or (ident in recovery and (died.get('name') != data.get('recovery_name')
+                                           or died.get('exitCode') != '0'))
+                or (ident not in recovery and died.get('exitCode') != '137')):
+            return False
+        handles.add(handle)
+    return True
+
+
 def image_cases(report, budget):
     rows = report.get('operations', [])
     samples = budget['samples_per_session']
@@ -374,6 +418,246 @@ def controlled_registry_cases(report, budget):
     return results
 
 
+def build_cases(report, budget, images):
+    if report.get('error') or report.get('input_source'):
+        return []
+    rows = report.get('operations', [])
+    inventories = [row for row in rows if row['scenario'] == 'fixture-leak-inventory']
+    if (len(inventories) != 1 or inventories[0].get('error') is not None
+            or inventories[0].get('stdout') != ''):
+        return []
+
+    def clean(state):
+        return (state.get('phase') == 'removed' and state.get('cleanup') == 'complete'
+                and state.get('helper_failed') is False)
+
+    def handle_id(handle):
+        return (handle.get('boot_id', ''), handle.get('workload_id', ''))
+
+    def valid_handle(handle):
+        return all(re.fullmatch(r'[0-9a-f]{32}', value) for value in handle)
+
+    builders = {}
+    current = None
+    for row in rows:
+        scenario = row['scenario']
+        if scenario == 'builder-create':
+            name = row['argv'][row['argv'].index('--name') + 1]
+            language = name.rsplit('-', 2)[-2]
+            current = {}
+            builders.setdefault(language, []).append(current)
+        if current is not None:
+            current.setdefault(scenario, []).append(row)
+        if scenario == 'builder-remove':
+            current = None
+
+    def operation(builder, name):
+        operations = builder.get(name, [])
+        if len(operations) != 1 or operations[0].get('error') is not None:
+            return {}
+        return operations[0]
+
+    def worker_handle(builder):
+        backing = operation(builder, 'builder-backing').get('worker', {})
+        handle = handle_id(backing.get('handle', {}))
+        terminal = operation(builder, 'builder-remove').get('native_worker', {})
+        bootstrap = operation(builder, 'builder-bootstrap').get('stdout', '')
+        mounts = backing.get('mounts', [])
+        if (not operation(builder, 'builder-create') or not valid_handle(handle)
+                or not clean(terminal) or terminal.get('worker') is not True
+                or handle_id(terminal.get('handle', {})) != handle
+                or not re.fullmatch(r'[0-9a-f]{64}', backing.get('id', ''))
+                or backing.get('image') != images['buildkit']['ref']
+                or backing.get('privileged') is not True
+                or not re.search(r'^Driver:\s+docker-container$', bootstrap, re.MULTILINE)
+                or not re.search(r'^BuildKit version:\s+' + re.escape(images['buildkit']['tag'])
+                                 + r'$', bootstrap, re.MULTILINE)
+                or not any(mount['Type'] == 'volume'
+                           and mount['Destination'] == '/var/lib/buildkit'
+                           and mount['Name'] == backing['name'] + '_state' for mount in mounts)
+                or not operation(builder, 'preload-builder-bases')
+                or not all(operation(builder, f'builder.cgroup.{point}') for point in ('after-preload', 'after-builds'))):
+            return None
+        return handle
+
+    def valid_export(builder, language, change, worker, seen):
+        prefix = f'{language}.{change}'
+        export = operation(builder, prefix + '.build-export')
+        load = operation(builder, prefix + '.load')
+        canary = operation(builder, prefix + '.built-image-canary')
+        expected = {'empty': 'source-one dep-one', 'unchanged': 'source-one dep-one',
+                    'source': 'source-two dep-one', 'dependency': 'source-two dep-two'}
+        count = ({'empty': 2, 'unchanged': 0, 'source': 1, 'dependency': 2} if language == 'node'
+                 else {'empty': 1, 'unchanged': 0, 'source': 1, 'dependency': 1})
+        witness = canary.get('guest_witness', {})
+        handles = {witness.get('conjet.native_handle', '')}
+        runs = export.get('native_runs')
+        if (not isinstance(runs, list) or len(runs) != count[change]
+                or export.get('archive_bytes', 0) <= 0
+                or not re.fullmatch(r'[0-9a-f]{64}', export.get('archive_sha256', ''))
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', export.get('config_digest', ''))
+                or export.get('config_digest') != load.get('config_digest')
+                or canary.get('stdout') != expected[change] + '\n'
+                or witness.get('conjet.backend') != 'jetstream-native-oci'
+                or witness.get('conjet.guest_cleanup') != 'complete'
+                or witness.get('exitCode') != '0'):
+            return False
+        if change == 'unchanged':
+            progress = export.get('stderr', '')
+            cached = re.findall(r'^#(\d+) \[compiler [^\]]+\] RUN .+$', progress, re.MULTILINE)
+            if (len(cached) != count['empty']
+                    or any(f'#{step} CACHED' not in progress.splitlines() for step in cached)
+                    or operation(builder, f'{language}.empty.build-export').get('config_digest')
+                       != export['config_digest']):
+                return False
+        for run in runs:
+            boot, ident = handle_id(run.get('handle', {}))
+            snapshot = run.get('build_snapshot', {})
+            if (boot != worker[0] or ident in handles or run.get('parent') != worker[1]
+                    or not clean(run) or run.get('exec') != 'confirmed' or run.get('exit') != {'code': 0}
+                    or not snapshot.get('live_worker') or not snapshot.get('bundle_policy')
+                    or not snapshot.get('id') or not snapshot.get('inode') or not snapshot.get('device')):
+                return False
+            handles.add(ident)
+        if (not all(re.fullmatch(r'[0-9a-f]{32}', handle) for handle in handles)
+                or worker[1] in handles or handles & seen):
+            return False
+        seen.update(handles)
+        return True
+
+    results = []
+    seen = set()
+    languages = [report['build_language']] if report.get('build_language') else budget['workloads']
+    for language in languages:
+        samples = builders.get(language, [])
+        if len(samples) != budget['samples_per_session']:
+            continue
+        workers = [worker_handle(builder) for builder in samples]
+        if None in workers or len(set(workers)) != len(workers):
+            continue
+        if 'bootstrap' not in results:
+            results.append('bootstrap')
+        for change in ('empty', 'unchanged', 'source', 'dependency'):
+            if all(valid_export(builder, language, change, worker, seen)
+                   for builder, worker in zip(samples, workers, strict=True)):
+                results.append(f'{language}/{change}')
+    return results
+
+
+def build_failure_cancel(report):
+    witness = report.get('failure_cancellation', {})
+    failed, active, terminal = (witness.get(key, {}) for key in ('failed', 'active', 'terminal'))
+    worker = witness.get('worker', {})
+    worker_id, boot = worker.get('workload_id'), worker.get('boot_id')
+    if (witness.get('error') or not worker_id or not boot or witness.get('client_exit') != 130
+            or not all(row.get('parent') == worker_id and row.get('handle', {}).get('boot_id') == boot
+                       for row in (failed, active, terminal))
+            or failed.get('handle') == terminal.get('handle')
+            or active.get('handle') != terminal.get('handle')
+            or active.get('phase') != 'running'):
+        return False
+    return (failed.get('exit') == {'code': 23} and terminal.get('exit') == {'signal': 9}
+            and all(row.get('cleanup') == 'complete' and row.get('helper_failed') is False
+                    for row in (failed, terminal))
+            and any(row['scenario'] == 'build-failure' and row.get('exit_code') == 1
+                    and row.get('error') is None and 'expected-build-failure' in row.get('stderr', '')
+                    for row in report.get('operations', [])))
+
+
+def public_build_bases(folder, language, images):
+    sources = []
+    with (folder / 'adapter.stderr').open() as trace:
+        for line in trace:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get('event') == 'build_registry':
+                sources.append(row)
+    refs = [images['golang' if language == 'go' else language]['ref']]
+    if language != 'node':
+        refs.append(images['alpine']['ref'])
+    for ref in refs:
+        repository, digest = ref.removeprefix('docker.io/').split('@')
+        transfers = [row for row in sources if row.get('repository') == repository]
+        if (not any(row.get('manifest') is True and row.get('digest') == digest
+                    and row.get('source') == 'public-https' for row in transfers)
+                or not any(row.get('manifest') is True and row.get('digest') == digest
+                           and row.get('bytes', 0) > 0 for row in transfers)
+                or not any(row.get('manifest') is False and row.get('bytes', 0) > 4096
+                           for row in transfers)):
+            return False
+    return True
+
+
+def docker_build_api(report, witness):
+    if witness.get('error') or witness.get('failure_tag_published'):
+        return False
+    rows = report.get('operations', [])
+    if (any(row.get('error') is not None or row.get('exit_code') != 0 for row in rows)
+            or sum(row['scenario'] == 'api-image-absent' and row.get('stdout') == '' for row in rows) != 2
+            or sum(row['scenario'] == 'api-built-image' and row.get('stdout') == 'native-build-api\n'
+                   for row in rows) != 1):
+        return False
+    owners = set()
+    for kind, expected in (('failed', 23), ('ready', 0)):
+        request = witness.get(kind, {})
+        children = request.get('native', [])
+        if request.get('status') != 200 or len(children) != 2:
+            return False
+        worker, run = sorted(children, key=lambda child: not child['worker'])
+        owner = worker['handle']['workload_id']
+        if (not worker['worker'] or run['worker'] or owner in owners or run['parent'] != owner
+                or run['exit'] != {'code': expected} or run['exec'] != 'confirmed'
+                or run['handle']['boot_id'] != worker['handle']['boot_id']
+                or not all(child['phase'] == 'removed' and child['cleanup'] == 'complete'
+                           and child['helper_failed'] is False for child in children)
+                or not run.get('build_snapshot', {}).get('live_worker')):
+            return False
+        owners.add(owner)
+    body = witness['failed'].get('body', [])
+    terminal = witness.get('guest_witness', {})
+    return (any('api-failure' in event.get('error', '') for event in body)
+            and re.fullmatch(r'sha256:[0-9a-f]{64}', witness.get('image', '')) is not None
+            and terminal.get('conjet.backend') == 'jetstream-native-oci'
+            and terminal.get('conjet.guest_cleanup') == 'complete'
+            and terminal.get('exitCode') == '0')
+
+
+def direct_buildkit(report, data):
+    direct = runpy.run_path(str(HERE / 'native-buildkit-direct.py'))
+    if (data.get('error') or data.get('buildctl_sha256') != direct['CLIENT_SHA256']
+            or data.get('version') != direct['CLIENT_VERSION']):
+        return False
+    rows = report.get('operations', [])
+    if (any(row.get('error') is not None for row in rows)
+            or sum(row['scenario'] == 'direct-absent' and row.get('exit_code') == 1 for row in rows) != 2
+            or sum(row['scenario'] == 'direct-remove' and row.get('exit_code') == 0 for row in rows) != 1):
+        return False
+    fresh, cached = data.get('fresh', {}), data.get('cached', {})
+    proof = hashlib.sha256(direct['PROOF']).hexdigest()
+    for export in (fresh, cached):
+        if export.get('code') != 0 or export.get('sha256') != proof:
+            return False
+    runs = fresh.get('runs', [])
+    if (len(runs) != 1 or fresh.get('streams') != [True, True]
+            or cached.get('runs') != [] or cached.get('cached') is not True):
+        return False
+    active, terminal = data.get('active', {}), data.get('terminal', {})
+    worker, stopped = data.get('worker', {}), data.get('worker_terminal', {})
+    if (active.get('handle') != terminal.get('handle') or active.get('phase') != 'running'
+            or data.get('cancel_exit') not in (1, 130, -2) or data.get('cancel_export_absent') is not True
+            or stopped.get('handle') != worker or stopped.get('worker') is not True
+            or stopped.get('cleanup') != 'complete' or stopped.get('helper_failed') is not False):
+        return False
+    return all(row.get('parent') == worker.get('workload_id') and row.get('exec') == 'confirmed'
+               and row.get('handle', {}).get('boot_id') == worker.get('boot_id')
+               and row.get('exit') == exit_status and row.get('cleanup') == 'complete'
+               and row.get('helper_failed') is False
+               and row.get('build_snapshot', {}).get('live_worker') is True
+               for row, exit_status in ((runs[0], {'code': 0}), (terminal, {'signal': 9})))
+
+
 def evaluate(root, revision, release):
     manifest = PREFLIGHT['contract']()
     required = {case['id']: {
@@ -415,6 +699,8 @@ def evaluate(root, revision, release):
                         for case in required if case.startswith('lifecycle/')}
     sessions = [(suite, suite, None) for suite in MATRIX]
     sessions += [('lifecycle', name, case) for case, name in lifecycle_groups.items()]
+    sessions += [('builds', f'builds-{language}', language)
+                 for language in scenarios['suites']['builds']['workloads']]
     lifecycle_evidence = set()
     for suite, name, subgroup in sessions:
         folder, verified = lane(name)
@@ -429,7 +715,8 @@ def evaluate(root, revision, release):
         if not verified:
             reason = 'release artifact or launcher cleanup could not be verified'
         for case, result in required.items():
-            if case == subgroup or subgroup is None and case.startswith(suite + '/'):
+            if (case == subgroup or subgroup is None and case.startswith(suite + '/')
+                    or suite == 'builds' and subgroup and case.startswith(f'builds/{subgroup}/')):
                 result.update(reason=reason, evidence=[str(folder / path)])
         if suite == 'lifecycle' and verified:
             for series in report.get('groups', []):
@@ -469,9 +756,24 @@ def evaluate(root, revision, release):
                               f'{count} original runs and {warmups} warmups passed', suite)
             if stress_oom(report):
                 pass_case('stress/oom-recover', 'kernel OOM, survivor and recovery verified with teardown', suite)
+            if stress_cancellation(report, max(scenarios['concurrency'])):
+                pass_case('stress/cancellation', 'active cancellations, surviving data and recovery verified', suite)
         if suite == 'control' and verified:
             for case in control_cases(report, scenarios['suites']['control']):
                 pass_case(f'control/{case}', 'original control runs passed with native teardown', suite)
+        if suite == 'builds' and verified:
+            launcher = read(folder, 'launcher.json')
+            if (not launcher.get('offline_oci_layouts') and not launcher.get('compatibility_build_bases')
+                    and '--pinned-build-registry' in launcher.get('adapter_command', [])
+                    and launcher.get('volume_lease_released') is True
+                    and report.get('build_language') == subgroup):
+                qualified = build_cases(report, scenarios['suites']['builds'], scenarios['images'])
+                for case in qualified:
+                    language = case.split('/', 1)[0]
+                    if case == 'bootstrap' or public_build_bases(folder, language, scenarios['images']):
+                        pass_case(f'builds/{case}', 'original public Buildx client, executor and cleanup verified', name)
+                if 'bootstrap' in qualified and build_failure_cancel(report):
+                    pass_case('builds/failure-cancel', 'failed and cancelled RUN generations verified with cleanup', name)
         if suite == 'compose' and verified:
             for case in compose_cases(report, scenarios['suites']['compose']):
                 pass_case(f'compose/{case}', 'original Compose fixture and project cleanup verified', suite)
@@ -578,8 +880,25 @@ def evaluate(root, revision, release):
               'volume-create', 'volume-inspect')
     pass_case('regression/native-compose', 'existing pinned native Compose project canary passed',
               'native-compose')
+    folder, verified = lane('buildkit-direct')
+    direct = read(folder, 'buildkit-direct.json')
+    if verified and direct_buildkit(read(folder, 'matrix/session.json'), direct):
+        pass_case('regression/buildkit-direct', 'pinned standalone BuildKit client verified export, cache and cancellation',
+                  'buildkit-direct')
+    elif verified and direct:
+        required['regression/buildkit-direct'].update(
+            reason=direct.get('error', 'direct BuildKit lacks a cache, export or native cleanup witness'),
+            evidence=[str(folder / 'buildkit-direct.json')])
 
     folder, verified = lane('docker-build-api')
+    current = read(folder, 'docker-build-api.json')
+    if verified and docker_build_api(read(folder, 'matrix/session.json'), current):
+        pass_case('builds/docker-build-api', 'native Docker API compiled the archive, ran it and verified teardown',
+                  'docker-build-api')
+    elif verified and current:
+        required['builds/docker-build-api'].update(
+            reason=current.get('error', 'Docker API build lacks its native generation or export witness'),
+            evidence=[str(folder / 'docker-build-api.json')])
     response_path = folder.parent / 'response.json'
     response = read(folder.parent, response_path.name)
     if verified and response and response['status'] != 200:

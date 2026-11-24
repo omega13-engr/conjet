@@ -419,12 +419,56 @@ impl WorkloadFilter {
             WorkloadPolicy::BuildKitWorker | WorkloadPolicy::BuildKitControl
         );
         if policy == WorkloadPolicy::BuildKitRun {
-            // Preserve modes when the pinned toolchain copies in the writable
-            // snapshot. The RUN retains its empty capability set and nosuid.
-            for syscall in [libc::SYS_fchmod, libc::SYS_fchmodat] {
+            // Compilers lock files and spawn helpers from the build directory.
+            // Session changes leave the helper in the RUN's PID namespace and
+            // cgroup. The RUN retains its empty capability set and nosuid.
+            for syscall in [
+                libc::SYS_fchmod,
+                libc::SYS_fchmodat,
+                libc::SYS_faccessat,
+                libc::SYS_faccessat2,
+                libc::SYS_flock,
+                libc::SYS_chdir,
+                libc::SYS_recvfrom,
+                libc::SYS_sendto,
+                libc::SYS_setsid,
+                libc::SYS_waitid,
+            ] {
                 program.push(next_or_skip(syscall as u32));
                 program.push(statement(BPF_RETURN, RET_ALLOW));
             }
+            // Rust uses a connected Unix pair to report child exec errors.
+            let denied = RET_ERRNO | libc::EPERM as u32;
+            let exec_pair = [
+                statement(BPF_LOAD_WORD, 16),
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: libc::AF_UNIX as u32,
+                    jt: 1,
+                    jf: 0,
+                },
+                statement(BPF_RETURN, denied),
+                statement(BPF_LOAD_WORD, 24),
+                statement(BPF_AND, !(libc::SOCK_CLOEXEC as u32)),
+                libc::sock_filter {
+                    code: BPF_JUMP_EQUAL,
+                    k: libc::SOCK_SEQPACKET as u32,
+                    jt: 1,
+                    jf: 0,
+                },
+                statement(BPF_RETURN, denied),
+                statement(BPF_LOAD_WORD, 32),
+                next_or_skip(0),
+                statement(BPF_RETURN, RET_ALLOW),
+                statement(BPF_RETURN, denied),
+            ];
+            program.push(libc::sock_filter {
+                code: BPF_JUMP_EQUAL,
+                k: libc::SYS_socketpair as u32,
+                jt: 0,
+                jf: exec_pair.len() as u8,
+            });
+            program.extend(exec_pair);
         }
         if policy == WorkloadPolicy::BuildKitWorker {
             let denied = RET_ERRNO | libc::EPERM as u32;

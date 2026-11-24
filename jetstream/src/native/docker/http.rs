@@ -290,6 +290,7 @@ fn parse(
     }
     let (path, raw_query) = target.split_once('?').unwrap_or((target, ""));
     let load = method == "POST" && matches!(path, "/v1.44/images/load" | "/images/load");
+    let build = method == "POST" && matches!(path, "/v1.44/build" | "/build");
     let copy = method == "PUT"
         && path
             .strip_prefix("/v1.44")
@@ -297,11 +298,13 @@ fn parse(
             .strip_prefix("/containers/")
             .and_then(|route| route.strip_suffix("/archive"))
             .is_some_and(super::request::name);
-    let spooled = load || copy;
+    let spooled = load || copy || build;
     let body_limit = if load {
         super::archive::LIMIT
     } else if copy {
         super::workload_copy::UPLOAD_LIMIT
+    } else if build {
+        super::build_api::CONTEXT_LIMIT
     } else {
         MAX_BODY
     };
@@ -495,6 +498,7 @@ impl Reply {
 
 enum Action {
     Reply(Reply),
+    Build(File, super::build_api::Options),
     Archive(File),
     WorkloadArchive(String, Option<File>),
     Wait(Arc<Item>, String, u64),
@@ -537,6 +541,24 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
         }
     }
     let reply = match (method, path) {
+        ("POST", "/build") => {
+            if owner.build_client.is_none() {
+                return Err(Rejected(
+                    501,
+                    "native Docker build client is not configured".into(),
+                ));
+            }
+            let archive = request
+                .archive
+                .as_ref()
+                .ok_or_else(|| Rejected::bad("missing Docker build upload"))?
+                .try_clone()
+                .map_err(|error| Rejected::internal(error.to_string()))?;
+            return Ok(Action::Build(
+                archive,
+                super::build_api::Options::parse(query)?,
+            ));
+        }
         ("HEAD" | "GET", "/_ping") => {
             let mut reply = Reply::empty(200);
             if method == "GET" {
@@ -1322,6 +1344,22 @@ pub(super) fn serve(
         }
         match dispatch(owner, &request) {
             Ok(Action::Reply(reply)) => reply.send(&mut stream, request.method == "HEAD", close)?,
+            Ok(Action::Build(context, options)) => {
+                let client = owner.build_client.as_ref().expect("validated build client");
+                let reply = match client.build(owner, context, options, &stream) {
+                    Ok(data) => Reply {
+                        status: 200,
+                        content_type: "application/json",
+                        data,
+                        attributed: false,
+                    },
+                    Err(Rejected(status, message)) => {
+                        Reply::json(status, json!({"message": message}))
+                    }
+                };
+                reply.send(&mut stream, false, true)?;
+                break;
+            }
             Ok(Action::Archive(mut spool)) => {
                 header(&mut stream, 200, &format!(
                     "Content-Type: application/x-tar\r\nContent-Length: {}\r\nConnection: close\r\n",

@@ -133,6 +133,8 @@ struct Inspect {
     budget_ms: u64,
     #[serde(default)]
     workload: Option<Handle>,
+    #[serde(default)]
+    include_builds: bool,
 }
 
 #[derive(Deserialize)]
@@ -402,6 +404,7 @@ struct Record {
     build_runtime_owned: bool,
     build_parent: Option<String>,
     buildkit_worker: bool,
+    buildkit_registry: bool,
     core_admission_deadline: Option<Instant>,
     cancelled: bool,
     terminate_requested: bool,
@@ -834,8 +837,15 @@ pub(crate) struct FreshFixture {
     intent: Intent,
     ledger: Mutex<Ledger>,
     build_runtime: Mutex<BuildRuntime>,
+    build_registry: Mutex<Option<BuildRegistry>>,
     private_networks: Mutex<[Option<crate::bridge_fixture::NetworkOwner>; 2]>,
     changed: Condvar,
+}
+
+struct BuildRegistry {
+    owner: String,
+    address: std::net::Ipv4Addr,
+    listener: std::net::TcpListener,
 }
 
 pub(crate) struct ConnectionLease<'a> {
@@ -1009,6 +1019,7 @@ impl FreshFixture {
             intent,
             ledger: Mutex::new(Ledger::default()),
             build_runtime: Mutex::default(),
+            build_registry: Mutex::default(),
             private_networks: Mutex::new(Default::default()),
             changed: Condvar::new(),
         }))
@@ -1064,6 +1075,12 @@ impl FreshFixture {
             return Err((
                 "unsupported_option",
                 "BuildKit requires the leased native workspace",
+            ));
+        }
+        if spec.buildkit_registry() && spec.bridge_scope() != Some(BridgeScope::BuiltIn) {
+            return Err((
+                "unsupported_option",
+                "BuildKit registry requires the private built-in bridge",
             ));
         }
         if !self.oci && !spec.fixture_identity() {
@@ -1383,6 +1400,7 @@ impl FreshFixture {
             build_runtime_owned: build,
             build_parent: live.as_ref().map(|build| build.owner.clone()),
             buildkit_worker: spec.buildkit_worker,
+            buildkit_registry: spec.buildkit_registry(),
             core_admission_deadline: self.core_admission.then_some(deadline),
             cancelled: false,
             terminate_requested: false,
@@ -1566,6 +1584,14 @@ impl FreshFixture {
     }
 
     fn drain_worker_builds(&self, owner: &str) -> io::Result<()> {
+        let mut registry = self.build_registry.lock().expect("build registry");
+        if registry
+            .as_ref()
+            .is_some_and(|registry| registry.owner == owner)
+        {
+            *registry = None;
+        }
+        drop(registry);
         let deadline = Instant::now() + Duration::from_secs(32);
         {
             let mut ledger = self.ledger.lock().expect("fresh ledger");
@@ -1800,13 +1826,14 @@ impl FreshFixture {
                         let mut response =
                             UnixStream::from(descriptors.pop().expect("bridge response"));
                         let target = fs::File::from(descriptors.pop().expect("bridge target"));
-                        let (scope, aliases, project) = {
+                        let (scope, aliases, project, buildkit_registry) = {
                             let ledger = self.ledger.lock().expect("fresh ledger");
                             let record = ledger.record(&workload).expect("owned workload");
                             (
                                 record.network_scope.expect("leased bridge scope"),
                                 record.network_aliases.clone(),
                                 record.network_alias_project.clone(),
+                                record.buildkit_registry,
                             )
                         };
                         let mut networks = self.private_networks.lock().expect("private bridges");
@@ -1814,12 +1841,19 @@ impl FreshFixture {
                         if private.is_none() {
                             *private = Some(crate::bridge_fixture::NetworkOwner::new(scope)?);
                         }
-                        let address = private.as_mut().expect("private bridge").attach(
-                            id,
-                            target,
-                            &aliases,
-                            project.as_deref(),
-                        )?;
+                        let private = private.as_mut().expect("private bridge");
+                        let listener = buildkit_registry
+                            .then(|| private.build_registry_listener())
+                            .transpose()?;
+                        let address = private.attach(id, target, &aliases, project.as_deref())?;
+                        if let Some(listener) = listener {
+                            *self.build_registry.lock().expect("build registry") =
+                                Some(BuildRegistry {
+                                    owner: workload.clone(),
+                                    address,
+                                    listener,
+                                });
+                        }
                         self.update(&workload, |record| {
                             record.network_address = Some(address);
                             record.revision += 1;
@@ -2316,6 +2350,28 @@ impl FreshFixture {
                         return Err(("deadline_exceeded", "workload statistics budget elapsed"));
                     }
                     return Ok((Kind::Inspect, json!({"handle":handle,"usage":usage})));
+                }
+                if request.include_builds {
+                    let builds = guard
+                        .records
+                        .iter()
+                        .filter(|record| record.buildkit_worker || record.build_parent.is_some())
+                        .map(|record| {
+                            let mut state = record.state();
+                            state["sequence"] = json!(record.sequence);
+                            state["worker"] = json!(record.buildkit_worker);
+                            state["parent"] = json!(record.build_parent);
+                            state
+                        })
+                        .collect::<Vec<_>>();
+                    return Ok((
+                        Kind::Inspect,
+                        json!({
+                            "boot_id": boot,
+                            "last_sequence": guard.highest_sequence,
+                            "builds": builds,
+                        }),
+                    ));
                 }
                 Ok((
                     Kind::Inspect,
@@ -2840,6 +2896,44 @@ impl FreshFixture {
             .is_some()
     }
 
+    pub(crate) fn build_registry_current(&self, owner: &str) -> bool {
+        self.build_registry
+            .lock()
+            .expect("build registry")
+            .as_ref()
+            .is_some_and(|registry| registry.owner == owner)
+            && self
+                .ledger
+                .lock()
+                .expect("fresh ledger")
+                .record(owner)
+                .is_some_and(|record| {
+                    record.buildkit_registry
+                        && !record.cancelled
+                        && !record.terminate_requested
+                        && !record.phase.terminal()
+                })
+    }
+
+    pub(crate) fn accept_build_registry(&self) -> io::Result<(String, std::net::TcpStream)> {
+        let (owner, expected, stream, peer) = {
+            let registry = self.build_registry.lock().expect("build registry");
+            let registry = registry.as_ref().ok_or(io::ErrorKind::WouldBlock)?;
+            crate::socket::wait(
+                registry.listener.as_raw_fd(),
+                libc::POLLIN,
+                None,
+                Some(Instant::now() + Duration::from_millis(150)),
+            )?;
+            let (stream, peer) = registry.listener.accept()?;
+            (registry.owner.clone(), registry.address, stream, peer)
+        };
+        if peer.ip() != std::net::IpAddr::V4(expected) || !self.build_registry_current(&owner) {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        Ok((owner, stream))
+    }
+
     fn prepare_worker_build(
         &self,
         owner: &str,
@@ -2897,9 +2991,24 @@ impl FreshFixture {
                 "could not retain live BuildKit root identity",
             )
         })?;
-        let (spec, hosts) =
+        let (mut spec, hosts) =
             crate::build_snapshot::bundle::parse_live(&bundle.config, snapshot, &self.image_digest)
                 .map_err(|reason| ("unsupported_option", reason))?;
+        let home = spec.env.iter().position(|value| value.starts_with("HOME="));
+        if home.is_none_or(|index| spec.env[index] == "HOME=") {
+            let home_value = bundle.default_home(spec.uid).map_err(|_| {
+                (
+                    "invalid_spec",
+                    "could not read BuildKit snapshot home directory",
+                )
+            })?;
+            let home_value = format!("HOME={home_value}");
+            if let Some(index) = home {
+                spec.env[index] = home_value;
+            } else {
+                spec.env.push(home_value);
+            }
+        }
         let detached = bundle.clone_root().map_err(|_| {
             (
                 "invalid_spec",

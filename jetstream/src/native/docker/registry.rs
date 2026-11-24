@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -383,6 +383,67 @@ impl Store {
 
     pub(super) fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub(super) fn worker_registry_file(
+        &mut self,
+        repository: &str,
+        digest: &str,
+        manifest_request: bool,
+    ) -> anyhow::Result<(File, &'static str, bool)> {
+        let manifest = self
+            .public
+            .manifest_for(repository)
+            .context("registry repository is outside the frozen pins")?
+            .to_owned();
+        ensure!(
+            request::digest(digest),
+            "registry request requires a SHA-256 digest"
+        );
+        if manifest_request {
+            ensure!(
+                manifest == digest,
+                "registry manifest differs from its frozen pin"
+            );
+        }
+        let cached = self.path(&manifest)?.try_exists()?;
+        let image = self.prepare(&format!("docker.io/{repository}@{manifest}"))?;
+        ensure!(
+            Self::references(&image.receipt)?.contains(digest),
+            "registry blob is outside the frozen manifest"
+        );
+        let suffix = suffix(digest)?;
+        let path = self.root.join("blobs/sha256").join(suffix);
+        let bound = if manifest_request {
+            METADATA as u64
+        } else {
+            oci_stage::DISK_COMPRESSED_BUDGET
+        };
+        let mut file = oci_stage::open_bounded(&self.root, &path, bound)?;
+        let size = file.metadata()?.len();
+        ensure!(
+            oci_stage::digest_file(&mut file, size)? == suffix,
+            "registry object digest differs"
+        );
+        let content_type = if manifest_request {
+            let mut bytes = Vec::new();
+            (&mut file).take(size + 1).read_to_end(&mut bytes)?;
+            ensure!(bytes.len() as u64 == size, "registry manifest size changed");
+            file.rewind()?;
+            let value: Value = serde_json::from_slice(&bytes)?;
+            match value["mediaType"].as_str() {
+                Some("application/vnd.oci.image.manifest.v1+json") => {
+                    "application/vnd.oci.image.manifest.v1+json"
+                }
+                Some("application/vnd.docker.distribution.manifest.v2+json") => {
+                    "application/vnd.docker.distribution.manifest.v2+json"
+                }
+                _ => anyhow::bail!("unsupported pinned registry manifest type"),
+            }
+        } else {
+            "application/octet-stream"
+        };
+        Ok((file, content_type, cached))
     }
 
     pub(super) fn archive_layer_limit(&self) -> u64 {

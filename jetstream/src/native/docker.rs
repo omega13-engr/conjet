@@ -2,6 +2,8 @@
 mod archive;
 mod bind;
 mod bind_fuse;
+mod build_api;
+mod build_registry;
 mod buildkit;
 mod discovery;
 mod events;
@@ -70,6 +72,15 @@ pub(super) struct Options {
     /// Enable the isolated comparison's immutable public image references.
     #[arg(long, requires = "image_store")]
     pinned_public_registry: bool,
+    /// Allow the pinned BuildKit worker to retrieve immutable public objects.
+    #[arg(long, requires = "pinned_public_registry")]
+    pinned_build_registry: bool,
+    /// Pinned local Docker client for translating uploaded build contexts.
+    #[arg(long, requires_all = ["pinned_build_registry", "build_client_config"])]
+    build_client_docker: Option<PathBuf>,
+    /// Private Docker configuration holding the pinned Buildx plug-in.
+    #[arg(long, requires = "build_client_docker")]
+    build_client_config: Option<PathBuf>,
     /// Retain verified source layers for exporting the base image.
     #[arg(long, requires = "image_store")]
     boot_layout: Option<PathBuf>,
@@ -225,6 +236,11 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         pending: BTreeMap::new(),
         broken: false,
     };
+    let build_client = options
+        .build_client_docker
+        .zip(options.build_client_config)
+        .map(|(docker, config)| build_api::Client::new(docker, config, &options.socket))
+        .transpose()?;
     serve_endpoint(
         options.socket,
         metadata,
@@ -232,6 +248,8 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
         store,
         options.bind_root.map(bind::Root::open).transpose()?,
         options.trace_requests,
+        options.pinned_build_registry,
+        build_client,
     )
 }
 
@@ -250,6 +268,8 @@ fn serve_endpoint(
     store: Option<registry::Store>,
     bind_root: Option<bind::Root>,
     trace_requests: bool,
+    pinned_build_registry: bool,
+    build_client: Option<build_api::Client>,
 ) -> anyhow::Result<()> {
     let boot = &native.boot;
     signal_handlers()?;
@@ -257,11 +277,19 @@ fn serve_endpoint(
     let _socket = OwnedSocket(socket);
     fs::set_permissions(&_socket.0, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
-    println!(
-        "{}",
-        json!({"socket":_socket.0, "boot_id":boot, "backend":BACKEND})
-    );
-    let owner = Arc::new(Owner::new(metadata, native, store, bind_root));
+    let ready = json!({"socket":_socket.0, "boot_id":boot, "backend":BACKEND});
+    let owner = Arc::new(Owner::new(
+        metadata,
+        native,
+        store,
+        bind_root,
+        pinned_build_registry,
+        build_client,
+    ));
+    let _registry = pinned_build_registry
+        .then(|| build_registry::Relay::start(&owner, trace_requests))
+        .transpose()?;
+    println!("{ready}");
     let mut handlers: Vec<JoinHandle<()>> = Vec::with_capacity(CONNECTIONS);
     let result = loop {
         for i in (0..handlers.len()).rev() {
@@ -518,7 +546,7 @@ fn wait_for_native(
         };
         match result {
             Err(WireError::PeerError(code)) if code == "deadline_exceeded" => continue,
-            other => state = other?,
+            other => state = other.context("observe native workload generation")?,
         }
         ensure!(
             state["handle"] == handle,
@@ -596,7 +624,8 @@ fn wait_for_native(
         live_stdout,
         &mut calls,
         capacity,
-    )?;
+    )
+    .context("drain native workload stdout")?;
     let (stderr, stderr_dropped) = read_stream(
         peer,
         &handle,
@@ -605,7 +634,8 @@ fn wait_for_native(
         live_stderr,
         &mut calls,
         capacity,
-    )?;
+    )
+    .context("drain native workload stderr")?;
     let delivery_error = (stdout_dropped || stderr_dropped)
         .then(|| "OCI output exceeds the Docker adapter limit".into());
     state["adapter_timings_ns"] = json!({
@@ -820,6 +850,8 @@ struct Owner {
     store: Option<Mutex<registry::Store>>,
     archive_root: Option<PathBuf>,
     bind_root: Option<bind::Root>,
+    pinned_build_registry: bool,
+    build_client: Option<build_api::Client>,
     built_in_bridge: network::Network,
     exec_peer: Mutex<Option<client::Connection>>,
     event_changed: Condvar,
@@ -831,12 +863,16 @@ impl Owner {
         native: Native,
         store: Option<registry::Store>,
         bind_root: Option<bind::Root>,
+        pinned_build_registry: bool,
+        build_client: Option<build_api::Client>,
     ) -> Self {
         Self {
             image,
             mapped_ids: native.mapped_ids,
             archive_root: store.as_ref().map(|store| store.root().to_owned()),
             bind_root,
+            pinned_build_registry,
+            build_client,
             built_in_bridge: network::Network::built_in(&native.boot),
             native: Mutex::new(native),
             ledger: Mutex::new(Ledger::default()),
@@ -859,6 +895,15 @@ impl Owner {
         });
         let address = addresses.next()?;
         addresses.next().is_none().then_some(address)
+    }
+
+    fn has_build_registry_worker(&self) -> bool {
+        let ledger = self.ledger.lock().unwrap();
+        !ledger.closing
+            && ledger
+                .active
+                .iter()
+                .any(|item| item.container.buildkit_worker && item.state().started)
     }
 
     fn image_store(&self, ledger: &Ledger) -> Result<MutexGuard<'_, registry::Store>, Rejected> {
@@ -1738,8 +1783,13 @@ impl Owner {
             spec["volume"] = json!(volume);
         }
         if buildkit_worker {
-            use conjet_launch_service::spec::{BUILDKIT_NATIVE_ARGS, BUILDKIT_PATH};
+            use conjet_launch_service::spec::{
+                BUILDKIT_NATIVE_ARGS, BUILDKIT_PATH, BUILDKIT_REGISTRY_CONFIG,
+            };
             let mut args = BUILDKIT_NATIVE_ARGS.iter().copied().collect::<Vec<_>>();
+            if self.pinned_build_registry {
+                args.push(BUILDKIT_REGISTRY_CONFIG);
+            }
             if let Some(flags) = config["Cmd"].as_array() {
                 args.extend(flags.iter().filter_map(Value::as_str));
             }
@@ -2110,7 +2160,7 @@ impl Owner {
             }
             Err(error) => {
                 ledger.poisoned = true;
-                state.error = Some(error.to_string());
+                state.error = Some(format!("{error:#}"));
             }
         }
         item.changed.notify_all();

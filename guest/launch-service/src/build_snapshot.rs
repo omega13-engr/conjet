@@ -155,6 +155,10 @@ pub(crate) mod guest {
     }
 
     impl LiveBundle {
+        pub(crate) fn default_home(&self, uid: u32) -> io::Result<String> {
+            crate::image_account::home(&self.root, uid)
+        }
+
         pub(crate) fn identity(&self, id: String) -> io::Result<Snapshot> {
             let info = self.root.metadata()?;
             Ok(Snapshot {

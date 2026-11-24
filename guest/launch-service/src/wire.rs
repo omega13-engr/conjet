@@ -64,6 +64,7 @@ pub enum Kind {
     Bind = 31,
     Account = 32,
     ExecStream = 33,
+    BuildRegistry = 34,
 }
 
 impl TryFrom<u8> for Kind {
@@ -105,6 +106,7 @@ impl TryFrom<u8> for Kind {
             31 => Ok(Bind),
             32 => Ok(Account),
             33 => Ok(ExecStream),
+            34 => Ok(BuildRegistry),
             _ => Err(WireError::BadHeader),
         }
     }

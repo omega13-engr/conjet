@@ -71,7 +71,12 @@ pub(crate) fn parse(
     let mount_count = mounts.len();
     let mut selected = snapshot.clone();
     selected.bundle_policy = true;
-    let spec = process_spec(&mut bundle, selected, image_digest)?;
+    let spec = process_spec(
+        &mut bundle,
+        selected,
+        image_digest,
+        (WORKLOAD_UID, WORKLOAD_GID),
+    )?;
 
     // The pinned preset includes user credentials, namespaces, device rules,
     // seccomp, capabilities, and the complete ordered mount contract.
@@ -110,7 +115,21 @@ pub(crate) fn parse_live(
         .filter(|suffix| valid_id(suffix))
         .ok_or("live BuildKit hosts source changed")?;
     let hosts = format!("hosts.{hosts}");
-    let spec = process_spec(&mut bundle, snapshot, image_digest)?;
+    let fixture = serde_json::json!({
+        "uid":WORKLOAD_UID, "gid":WORKLOAD_GID, "additionalGids":[WORKLOAD_GID],
+    });
+    let process_user = bundle
+        .get_mut("process")
+        .and_then(|process| process.get_mut("user"));
+    let identity = if let Some(process_user) = process_user.filter(|value| **value == fixture) {
+        // This pinned numeric identity carries only its own primary group.
+        // Compare the remaining OCI fields against the same rootless preset.
+        *process_user = serde_json::json!({"uid":0, "gid":0, "additionalGids":LIVE_GROUPS});
+        (WORKLOAD_UID, WORKLOAD_GID)
+    } else {
+        (0, 0)
+    };
+    let spec = process_spec(&mut bundle, snapshot, image_digest, identity)?;
     // Bind the dynamic paths to the verified lease before comparing all
     // remaining requested OCI semantics against the pinned rootless preset.
     bundle["root"]["path"] = "<root>".into();
@@ -141,6 +160,7 @@ fn process_spec(
     bundle: &mut Value,
     snapshot: Snapshot,
     image_digest: &str,
+    (uid, gid): (u32, u32),
 ) -> Result<LaunchSpec, &'static str> {
     let process = bundle["process"]
         .as_object_mut()
@@ -158,8 +178,8 @@ fn process_spec(
         env: serde_json::from_value(field("env")?).map_err(|_| "invalid build environment")?,
         cwd: serde_json::from_value(field("cwd")?)
             .map_err(|_| "invalid build working directory")?,
-        uid: if live { 0 } else { WORKLOAD_UID },
-        gid: if live { 0 } else { WORKLOAD_GID },
+        uid,
+        gid,
         account: None,
         network: "none".into(),
         network_alias: None,

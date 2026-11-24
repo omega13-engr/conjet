@@ -67,6 +67,10 @@ impl Pins {
             .find(|(_, digest)| digest.as_str() == manifest)
             .map(|(name, _)| format!("docker.io/{name}@{manifest}"))
     }
+
+    pub(super) fn manifest_for(&self, repository: &str) -> Option<&str> {
+        self.0.get(repository).map(String::as_str)
+    }
 }
 
 pub(super) struct Token(String);
