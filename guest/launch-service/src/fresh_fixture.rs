@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -2252,6 +2252,36 @@ impl FreshFixture {
         Ok(())
     }
 
+    fn wait_for_archive_start<'a>(
+        &self,
+        ledger: MutexGuard<'a, Ledger>,
+        handle: &Handle,
+        expires: Instant,
+    ) -> MutexGuard<'a, Ledger> {
+        self.changed
+            .wait_timeout_while(
+                ledger,
+                expires.saturating_duration_since(Instant::now()),
+                |ledger| {
+                    !ledger.closing
+                        && ledger.record(&handle.workload_id).is_some_and(|record| {
+                            record.handle == *handle
+                                && !record.cancelled
+                                && !record.terminate_requested
+                                && matches!(
+                                    record.phase,
+                                    Phase::Accepted
+                                        | Phase::Preparing
+                                        | Phase::ChildCreated
+                                        | Phase::Claimed
+                                )
+                        })
+                },
+            )
+            .expect("fresh ledger")
+            .0
+    }
+
     pub(crate) fn serve_copy_download(
         &self,
         frame: &Frame,
@@ -2722,8 +2752,22 @@ impl FreshFixture {
                 }
                 let expires = deadline(request.budget_ms)?;
                 check(&guard, &request.handle)?;
+                if matches!(
+                    &request.operation,
+                    crate::workload_copy::Operation::Stat { .. }
+                        | crate::workload_copy::Operation::Begin { .. }
+                ) {
+                    guard = self.wait_for_archive_start(guard, &request.handle, expires);
+                    check(&guard, &request.handle)?;
+                }
                 if guard.closing {
                     return Err(("busy", "native archive service is draining"));
+                }
+                if Instant::now() >= expires {
+                    return Err((
+                        "deadline_exceeded",
+                        "native workload archive request expired",
+                    ));
                 }
                 let (spec, pidfd) = guard
                     .record(&request.handle.workload_id)

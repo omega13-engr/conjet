@@ -330,8 +330,17 @@ impl Owner {
 }
 
 fn archive_handle(item: &Item) -> Result<Value, Rejected> {
-    let state = item.state();
-    if state.removed || state.terminal.is_some() || state.error.is_some() {
+    let state = item.wait_for(
+        |state| {
+            !state.started
+                || state.native_handle.is_some()
+                || state.removed
+                || state.terminal.is_some()
+                || state.error.is_some()
+        },
+        2,
+    )?;
+    if !state.started || state.removed || state.terminal.is_some() || state.error.is_some() {
         return Err(Rejected(
             409,
             "archive requires a running native workload".into(),

@@ -3587,6 +3587,50 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-174
+
+Title: Wait for an owned workload before an immediate Docker archive copy
+
+Description: Close the startup window between a successful detached
+start response and the native workload becoming ready for archive I/O.
+
+Is blocked by task: SPEED-173 passed its scoped download checks.
+
+Acceptance Criteria:
+
+- Immediately submit the existing archive upload after Docker API start.
+  Every successful start must support the existing 4 KiB upload and
+  exact tar readback. Preserve bounded waits, rejected inactive targets
+  and original workload generation checks.
+- Keep the startup wait outside the guest ledger lock. Keep any upload
+  staging outside an unresolved target and avoid replaying requests.
+
+Problem and Evidence: The first short-copy warmup returned
+`not_running` after a successful detached start. Thirty direct
+create/start/upload attempts returned 23 guest `not_running` errors
+and two host `still preparing` errors. The five accepted attempts
+returned the exact tar.
+
+Approach: Wait for the admitted handle on the host. Use the guest's
+existing state-change condition and the request's deadline to wait
+for an already-starting workload before stat or upload begin.
+
+Evidence: The rebuilt candidate passed all 30 immediate uploads and
+tar readbacks with the same byte, filename and mode checks. It rejected
+an unstarted workload. The original 4 KiB and 8 MiB CLI round trips also
+passed. ExternalSSD retains the input, both exact executable sets'
+checksums, API outputs and detached disk checks in
+`SPEED-174/cj-perf.LBoyR4-copy-start/`.
+
+Source: `jetstream/src/native/docker/workload_copy.rs` and
+`guest/launch-service/src/fresh_fixture.rs`.
+
+Review: The guest condition releases the ledger while waiting and
+rechecks the exact handle before upload staging or file access. Rust
+workspace, strict ARM64 Clippy and isolated teardown passed.
+
+Next Action: Remove the measured per-chunk RPC cost from 8 MiB uploads.
+
 ### SPEED-173
 
 Title: Remove per-chunk RPC delay from bounded Docker archive downloads
