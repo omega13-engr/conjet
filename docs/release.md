@@ -19,14 +19,13 @@ GitHub Releases, renders the Homebrew formula and cask from the final DMG checks
 commits `Formula/conjet.rb` and `Casks/conjet.rb` back to the default branch, and
 uploads the generated Homebrew package files to the release.
 
-If Developer ID signing secrets are configured, the workflow signs with
-Developer ID. If Apple notarization secrets are also configured, the workflow
-notarizes and staples the DMG before computing the published checksum. If those
-secrets are absent, the workflow intentionally falls back to ad-hoc signing and
-publishes a non-notarized DMG for early distribution.
+The current production workflow requires Developer ID signing and Apple
+notarization credentials. It notarizes and staples the DMG before
+computing the published checksum. Ad-hoc signing is available for local
+packaging validation.
 
-The current major-release request explicitly permits ad-hoc signing. In that
-mode, persistent privileged-port authorization is unavailable; the existing
+Conjet 3.0.0 was authorized for ad-hoc signing. In that mode, persistent
+privileged-port authorization is unavailable. The existing
 sudo-authorized one-shot helper remains the fallback. After reviewing the known
 limitations, the user explicitly requested publishing the current implementation.
 Conjet 3.0.0 therefore documents the unresolved host-bind failure and unvalidated
@@ -76,6 +75,14 @@ The native Docker candidate passed 71 compatibility cases on
 incomplete pairs include public registry setup timeouts and Kiri OOM
 verification failures. Benchmark scope and engine limits apply to any
 release notes. [Qualification and results](engineering/docker-benchmark-results.md#speed-065-docker-29101-comparison)
+
+The staged CLI can now boot and serve the candidate inside a private,
+profile-owned directory. A two-boot test exercised Docker no-network
+and bridge workloads, verified Core retained-backing accounting, and
+read back a named volume after restart. It rejected a stop request
+from a different profile root. This test used the low-level native
+CLI. The standard `conjet start` and app lifecycle still use the Docker
+appliance.
 
 Default promotion requires a profile-owned native lifecycle through
 the installed CLI, daemon, and app. Qualify a fresh profile and prove

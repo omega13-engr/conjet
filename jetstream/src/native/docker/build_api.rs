@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{ensure, Context};
 use serde_json::json;
 
-use super::{buildkit, image, private_scratch, Owner, Rejected, STOP};
+use super::{buildkit, image, private_directory, Owner, Rejected, STOP};
 
 pub(super) const CONTEXT_LIMIT: usize = 32 * 1024 * 1024;
 const CONTEXT_ENTRIES: usize = 4096;
@@ -67,8 +67,13 @@ impl Options {
 }
 
 impl Client {
-    pub(super) fn new(docker: PathBuf, config: PathBuf, socket: &Path) -> anyhow::Result<Self> {
-        private_scratch(&config)?;
+    pub(super) fn new(
+        docker: PathBuf,
+        config: PathBuf,
+        socket: &Path,
+        root: &Path,
+    ) -> anyhow::Result<Self> {
+        private_directory(&config, root)?;
         ensure!(
             docker.is_absolute() && docker.is_file(),
             "expected a local Docker executable"

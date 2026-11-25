@@ -15,6 +15,9 @@ pub struct Arguments {
     /// Explicitly opt in to the unsupported-by-default native runtime.
     #[arg(long, global = true)]
     experimental: bool,
+    /// Canonical private profile directory for a managed Docker session.
+    #[arg(long, global = true)]
+    profile_root: Option<PathBuf>,
     #[command(subcommand)]
     command: Action,
 }
@@ -81,13 +84,19 @@ pub fn run(args: Arguments) -> anyhow::Result<()> {
         args.experimental || docker_command,
         "native command requires --experimental"
     );
+    ensure!(
+        args.profile_root.is_none()
+            || (docker_command && !matches!(args.command, Action::DockerStage(_))),
+        "profile root applies only to running native Docker sessions"
+    );
+    let root = docker::session_root(args.profile_root.as_deref())?;
     match args.command {
-        Action::DockerBoot(options) => docker::boot(options),
-        Action::DockerServe(options) => docker::serve(options),
+        Action::DockerBoot(options) => docker::boot(options, root),
+        Action::DockerServe(options) => docker::serve(options, root),
         Action::DockerStage(options) => oci_stage::stage(options),
-        Action::DockerInstall(options) => docker::install(options),
-        Action::DockerStop { session } => docker::stop(&session),
-        Action::Serve(options) => session::serve(options),
+        Action::DockerInstall(options) => docker::install(options, root),
+        Action::DockerStop { session } => docker::stop(&session, root),
+        Action::Serve(options) => session::serve(options, None),
         Action::Run(target) => client::invoke(target, client::Operation::Run),
         Action::Prepare(target) => client::invoke(target, client::Operation::Prepare),
         Action::Claim { target, token } => client::invoke(target, client::Operation::Claim(token)),

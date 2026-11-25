@@ -88,13 +88,11 @@ makes no superiority claim.
 
 ## Native Docker candidate
 
-The replacement Docker engine is under isolated validation on the
-`enhancement/speed-up` branch. Its release evidence covers the native
-lifecycle, Core dynamic memory, named-volume recovery, the pinned Compose
-fixture and a bounded direct BuildKit RUN with cancellation and cache.
-The frozen Docker Buildx, image and service matrix still has unsupported
-rows. Track those separately from the standalone API and CLI timing gates.
-[Native engine validation](native-engine-validation.md)
+The native Docker candidate passed all 71 frozen compatibility cases
+with Core dynamic memory and the pinned public Docker, Buildx, image,
+and service fixtures. The separate Kiri comparison passed 81 of 91
+pairs. The frozen suite covers a bounded ARM64 capability profile.
+[Compatibility proof and limits](native-compatibility.md#docker-29101-optimized-candidate)
 
 Production promotion requires the compatible workload matrix, independent
 review, required CI and the app release lane's signing and notarization

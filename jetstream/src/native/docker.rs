@@ -45,7 +45,7 @@ use serde_json::{json, Value};
 
 use super::{client, session};
 
-const SCRATCH: &str = "/Volumes/ExternalSSD/dev_workspace/tmp";
+pub(super) const COMPARISON_SCRATCH: &str = "/Volumes/ExternalSSD/dev_workspace/tmp";
 const BACKEND: &str = "jetstream-native-oci";
 const PLATFORM: &str = "Conjet Native OCI";
 const CONNECTIONS: usize = 32;
@@ -110,33 +110,66 @@ fn signal_handlers() -> io::Result<()> {
     Ok(())
 }
 
-fn private_scratch(directory: &Path) -> anyhow::Result<()> {
+pub(super) fn session_root(profile: Option<&Path>) -> anyhow::Result<&Path> {
+    let Some(profile) = profile else {
+        return Ok(Path::new(COMPARISON_SCRATCH));
+    };
+    private_directory(profile, profile)?;
+    Ok(profile)
+}
+
+fn private_directory(directory: &Path, root: &Path) -> anyhow::Result<()> {
     let info = directory.symlink_metadata()?;
     ensure!(
-        directory.starts_with(SCRATCH)
+        directory.starts_with(root)
             && directory.canonicalize()? == directory
             && info.is_dir()
             && info.uid() == unsafe { libc::geteuid() }
             && info.mode() & 0o077 == 0,
-        "expected a private ExternalSSD directory"
+        "expected a canonical private directory inside the native Docker root"
     );
     Ok(())
 }
 
-pub(super) fn stop(directory: &Path) -> anyhow::Result<()> {
-    private_scratch(directory)?;
+#[cfg(test)]
+#[test]
+fn managed_paths_require_the_same_canonical_private_profile_root() {
+    use std::os::unix::fs::{symlink, DirBuilderExt};
+
+    let workspace = tempfile::tempdir().unwrap();
+    let directory = workspace.path().canonicalize().unwrap();
+    let profile = directory.join("profile");
+    let session = profile.join("session");
+    let other = directory.join("profile-other");
+    for directory in [&profile, &session, &other] {
+        fs::DirBuilder::new().mode(0o700).create(directory).unwrap();
+    }
+    assert_eq!(session_root(Some(&profile)).unwrap(), profile);
+    private_directory(&session, &profile).unwrap();
+    assert!(private_directory(&other, &profile).is_err());
+
+    let alias = profile.join("alias");
+    symlink(&session, &alias).unwrap();
+    assert!(private_directory(&alias, &profile).is_err());
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(private_directory(&session, &profile).is_err());
+    assert_eq!(session_root(None).unwrap(), Path::new(COMPARISON_SCRATCH));
+}
+
+pub(super) fn stop(directory: &Path, root: &Path) -> anyhow::Result<()> {
+    private_directory(directory, root)?;
     let (identity, key) = client::load(directory)?;
     let peer = client::Connection::open(directory, &identity, &key)?;
     ensure!(peer.oci, "Docker stop requires an OCI guest");
     client::stop_peer(peer)
 }
 
-pub(super) fn boot(options: session::Options) -> anyhow::Result<()> {
+pub(super) fn boot(options: session::Options, root: &Path) -> anyhow::Result<()> {
     ensure!(
-        options.oci_package.is_some() && options.scratch.canonicalize()? == Path::new(SCRATCH),
-        "Docker boot requires an OCI package and ExternalSSD scratch"
+        options.oci_package.is_some() && options.scratch.canonicalize()? == root,
+        "Docker boot requires an OCI package and the configured native Docker root"
     );
-    session::serve(options)
+    session::serve(options, Some(root))
 }
 
 struct OwnedSocket(PathBuf);
@@ -147,13 +180,14 @@ impl Drop for OwnedSocket {
     }
 }
 
-pub(super) fn serve(options: Options) -> anyhow::Result<()> {
-    private_scratch(&options.native_session)?;
-    private_scratch(
+pub(super) fn serve(options: Options, root: &Path) -> anyhow::Result<()> {
+    private_directory(&options.native_session, root)?;
+    private_directory(
         options
             .socket
             .parent()
             .context("missing Docker socket directory")?,
+        root,
     )?;
     ensure!(
         options
@@ -164,8 +198,8 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     );
     let receipt = options.receipt.canonicalize()?;
     ensure!(
-        receipt == options.receipt && receipt.starts_with(SCRATCH),
-        "receipt must reside on ExternalSSD"
+        receipt == options.receipt && receipt.starts_with(root),
+        "receipt must reside inside the native Docker root"
     );
     let admitted = fs::File::open(&receipt)?;
     ensure!(
@@ -198,8 +232,9 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     );
     let store = options
         .image_store
-        .map(|root| {
+        .map(|store_root| {
             registry::Store::open(
+                store_root,
                 root,
                 options.registry,
                 options.pinned_public_registry,
@@ -239,14 +274,17 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
     let build_client = options
         .build_client_docker
         .zip(options.build_client_config)
-        .map(|(docker, config)| build_api::Client::new(docker, config, &options.socket))
+        .map(|(docker, config)| build_api::Client::new(docker, config, &options.socket, root))
         .transpose()?;
     serve_endpoint(
         options.socket,
         metadata,
         native,
         store,
-        options.bind_root.map(bind::Root::open).transpose()?,
+        options
+            .bind_root
+            .map(|path| bind::Root::open(path, root))
+            .transpose()?,
         options.trace_requests,
         options.pinned_build_registry,
         build_client,

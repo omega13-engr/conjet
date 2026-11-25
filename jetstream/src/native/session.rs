@@ -308,7 +308,7 @@ extern "C" fn interrupted(_: libc::c_int) {
     INTERRUPTED.store(true, Ordering::Release);
 }
 
-pub(super) fn serve(options: Options) -> anyhow::Result<()> {
+pub(super) fn serve(options: Options, docker_root: Option<&Path>) -> anyhow::Result<()> {
     let kernel_expected = unhex::<64>(&options.kernel_sha512).context("invalid kernel SHA-512")?;
     let expected = unhex::<32>(&options.sha256).context("invalid executable SHA-256")?;
     let (workload, oci, image_digest) = if let Some(path) = options.oci_package {
@@ -374,6 +374,7 @@ pub(super) fn serve(options: Options) -> anyhow::Result<()> {
             VolumeDisk::lease(
                 path,
                 &scratch,
+                docker_root,
                 options.disk_image_store,
                 options.build_snapshot_disk,
             )

@@ -16,7 +16,7 @@ use conjet_launch_service::socket::Stream;
 use conjet_launch_service::spec::BindMount;
 use serde_json::{json, Value};
 
-use super::{private_scratch, Owner, Rejected, SCRATCH};
+use super::{private_directory, Owner, Rejected};
 
 const DIRECTORY: libc::c_int = libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
 
@@ -26,10 +26,9 @@ pub(super) struct Root {
 }
 
 impl Root {
-    pub(super) fn open(path: PathBuf) -> anyhow::Result<Self> {
-        private_scratch(&path)?;
-        let scratch = Path::new(SCRATCH);
-        let relative = path.strip_prefix(scratch)?;
+    pub(super) fn open(path: PathBuf, root: &Path) -> anyhow::Result<Self> {
+        private_directory(&path, root)?;
+        let relative = path.strip_prefix(root)?;
         anyhow::ensure!(
             !relative.as_os_str().is_empty(),
             "bind root requires an owned scratch subdirectory"
@@ -37,7 +36,7 @@ impl Root {
         let anchor = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(DIRECTORY)
-            .open(scratch)?;
+            .open(root)?;
         let directory = descend(&anchor, relative)?;
         let metadata = directory.metadata()?;
         anyhow::ensure!(

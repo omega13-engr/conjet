@@ -13,7 +13,7 @@ use conjet_launch_service::handshake::unhex;
 use conjet_launch_service::oci::PackageEncoding;
 use serde_json::Value;
 
-use super::{archive, client, image, private_scratch, public_registry, request, STOP};
+use super::{archive, client, image, private_directory, public_registry, request, STOP};
 use crate::native::oci_stage;
 
 const MAX_STORED: u64 = 256 * 1024 * 1024;
@@ -27,6 +27,7 @@ const STORE_VERSION: &[u8] = b"conjet-native-image-store-1\n";
 
 pub(super) struct Store {
     root: PathBuf,
+    session_root: PathBuf,
     registry: Option<SocketAddr>,
     owned_registry: Option<SocketAddr>,
     public: public_registry::Pins,
@@ -88,11 +89,12 @@ fn package_name(encoding: PackageEncoding) -> &'static str {
 impl Store {
     pub(super) fn open(
         root: PathBuf,
+        session_root: &Path,
         registry: Option<SocketAddr>,
         allow_public: bool,
         status: &Value,
     ) -> anyhow::Result<Self> {
-        private_scratch(&root)?;
+        private_directory(&root, session_root)?;
         ensure!(
             registry.is_none_or(|address| address.ip().is_loopback() && address.port() > 0),
             "registry must be an explicit loopback socket"
@@ -153,6 +155,7 @@ impl Store {
             .collect();
         let store = Self {
             root,
+            session_root: session_root.to_owned(),
             registry,
             owned_registry: None,
             public: if allow_public {
@@ -463,7 +466,7 @@ impl Store {
         reference: &str,
         config: &str,
     ) -> anyhow::Result<()> {
-        private_scratch(layout)?;
+        private_directory(layout, &self.session_root)?;
         let (_, manifest) = reference
             .rsplit_once('@')
             .context("missing boot manifest digest")?;
@@ -513,7 +516,7 @@ impl Store {
     }
 
     pub(super) fn seed_frozen_layout(&self, layout: &Path) -> anyhow::Result<()> {
-        private_scratch(layout)?;
+        private_directory(layout, &self.session_root)?;
         let index: Value = serde_json::from_slice(&oci_stage::read_bounded(
             layout,
             &layout.join("index.json"),
@@ -923,6 +926,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = Store {
             root: root.path().to_owned(),
+            session_root: root.path().to_owned(),
             registry: None,
             owned_registry: None,
             public: public_registry::Pins::default(),

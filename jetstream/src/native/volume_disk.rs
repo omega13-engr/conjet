@@ -18,14 +18,15 @@ impl VolumeDisk {
     pub fn lease(
         path: PathBuf,
         scratch: &Path,
+        docker_root: Option<&Path>,
         disk_image_store: bool,
         build_workspace: bool,
     ) -> Result<Self> {
         ensure!(
-            scratch == Path::new("/Volumes/ExternalSSD/dev_workspace/tmp")
+            scratch == docker_root.unwrap_or_else(|| Path::new(super::docker::COMPARISON_SCRATCH))
                 && path.starts_with(scratch)
                 && path.canonicalize()? == path,
-            "volume disk must be a canonical ExternalSSD scratch path"
+            "volume disk must be inside the canonical native Docker root"
         );
         let file = OpenOptions::new()
             .read(true)

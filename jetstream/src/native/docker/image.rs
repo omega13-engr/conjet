@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, Read, Seek};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context};
@@ -12,7 +12,7 @@ use conjet_launch_service::wire::Kind;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::{admission_lock, client, private_scratch, Rejected, CHUNK, SCRATCH};
+use super::{admission_lock, client, private_directory, Rejected, CHUNK};
 
 const MAX_TAGS: usize = 64;
 
@@ -157,12 +157,12 @@ pub(in crate::native) struct InstallOptions {
     disk_package: bool,
 }
 
-pub(in crate::native) fn install(options: InstallOptions) -> anyhow::Result<()> {
-    private_scratch(&options.session)?;
+pub(in crate::native) fn install(options: InstallOptions, root: &Path) -> anyhow::Result<()> {
+    private_directory(&options.session, root)?;
     let path = options.package.canonicalize()?;
     ensure!(
-        path == options.package && path.starts_with(SCRATCH),
-        "expected ExternalSSD OCI package"
+        path == options.package && path.starts_with(root),
+        "expected an OCI package inside the native Docker root"
     );
     let encoding = if options.disk_package {
         PackageEncoding::DiskV2
