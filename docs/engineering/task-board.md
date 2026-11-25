@@ -3587,6 +3587,53 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-180
+
+Title: Attribute the original no-network lifecycle p99 gaps
+
+Description: Trace both API and CLI tails for Alpine true and common
+static through the original sample and cleanup boundaries.
+
+Is blocked by task: SPEED-179 completed the scoped bind trials.
+
+Acceptance Criteria:
+
+- Retain 2,000 measured operations and ten warmups per diagnostic boot.
+  Join each sample to its own guest and Core timing records. Keep the
+  25 ms Core safety tick and the original teardown witness.
+- Use matched uninstrumented boots for any source change. Preserve wake
+  authentication, admission limits, pressure recovery and cleanup.
+
+Problem and Evidence: The former full comparison missed the 1.05 upper
+paired p99 ratio in Alpine true API and CLI and common static API and
+CLI. An earlier first-evaluation stall was fixed under SPEED-085.
+
+Approach: Use the existing Core latency trace and stage-clock join on
+the four original rows. Reduce an attributable cost only if the trace
+supports a scoped change.
+
+Evidence: All 8,000 measured requests and 40 warmups passed and
+joined to unique Core and guest records. The four traced lifecycle
+p99s were 8.316 ms for Alpine API, 37.852 ms for Alpine CLI, 6.011 ms
+for common static API and 31.191 ms for common static CLI. Publication
+to first Core evaluation was 0.067–0.068 ms at p99. The traces recorded
+zero capacity holds and zero lost records. The largest deltas moved
+among helper spawn, child creation, exec confirmation, output drain
+and the host completion boundary. ExternalSSD retains
+`SPEED-180/cj-perf.LBoyR4-lifecycle-tails-traced/`.
+
+Source: `benchmarks/native-latency-trace.py` and
+`benchmarks/docker-comparison-workloads.py`.
+
+Review: The first launcher rejected the trace flag with this fixture
+combination. The isolated runner admitted it only for the audited
+private lifecycle group and used the original samples. The traces
+justify keeping the current Core controller and safety tick. The
+timed release comparison will measure the remaining lifecycle gap.
+
+Next Action: Freeze the final optimized set and run all 71 cases before
+starting the full comparison.
+
 ### SPEED-179
 
 Title: Submit FUSE response headers and data in one bounded write
