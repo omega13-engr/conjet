@@ -24,7 +24,7 @@ SSD = Path('/Volumes/ExternalSSD')
 SCRATCH = SSD / 'dev_workspace/tmp'
 REPO = Path(__file__).resolve().parents[1]
 CONTEXT = 'conjet-speedup'
-DOCKER = Path('/opt/homebrew/bin/docker')
+DOCKER = runpy.run_path(str(REPO / 'benchmarks/docker-comparison.py'))['client_paths']()['docker']
 VOLUME_DIAGNOSTICS = ('volume-disk', 'mounted-volume', 'compose', 'build-snapshot', 'build-bundle')
 CORE_DIAGNOSTICS = ('dynamic-memory', 'dynamic-pressure', 'admission-trace', 'pending-watch',
                     'resources', 'sustained-service', 'copy', *VOLUME_DIAGNOSTICS)

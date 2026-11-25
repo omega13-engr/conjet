@@ -22,8 +22,8 @@
   },
   "clients": {
     "docker": {
-      "version": "29.10.0",
-      "sha256": "cd9e0b149e447af504421ac7117044d8e17d695d66846a5c4df1312c417c22a3"
+      "version": "29.10.1",
+      "sha256": "cb59cf76741a247388e6a84f8defa5054c12dcd5e05d84a3ed8638dac2f34077"
     },
     "buildx": {
       "version": "0.39.1",

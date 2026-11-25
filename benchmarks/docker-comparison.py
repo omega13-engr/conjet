@@ -19,9 +19,27 @@ REPO = Path(__file__).resolve().parents[1]
 SCRATCH = Path('/Volumes/ExternalSSD/dev_workspace/tmp')
 MANIFEST = REPO / 'benchmarks/scenarios/docker-comparison-v1.json'
 TOOLS = runpy.run_path(str(REPO / 'benchmarks/fresh-lifecycle.py'))
-DOCKER = Path('/opt/homebrew/bin/docker')
-PLUGINS = Path('/opt/homebrew/lib/docker/cli-plugins')
 KIRI_ROOT = SCRATCH / 'conjet-speedup-kiri'
+
+
+def client_paths():
+    configured = os.environ.get('CONJET_BENCHMARK_CLIENTS')
+    if configured is None:
+        plugins = Path('/opt/homebrew/lib/docker/cli-plugins')
+        return {'docker': Path('/opt/homebrew/bin/docker'),
+                'buildx': plugins / 'docker-buildx', 'compose': plugins / 'docker-compose'}
+    root = Path(configured)
+    if (not root.is_absolute() or not root.is_relative_to(SCRATCH)
+            or not root.is_dir() or root.resolve() != root
+            or root.stat().st_uid != os.geteuid() or root.stat().st_mode & 0o077):
+        raise RuntimeError('benchmark clients require a private canonical ExternalSSD directory')
+    clients = {'docker': root / 'docker', 'buildx': root / 'docker-buildx',
+               'compose': root / 'docker-compose'}
+    for path in clients.values():
+        if (not path.is_file() or path.is_symlink() or path.stat().st_uid != os.geteuid()
+                or path.stat().st_mode & 0o222 or not os.access(path, os.X_OK)):
+            raise RuntimeError(f'expected a frozen benchmark executable: {path}')
+    return clients
 
 
 def contract():
@@ -52,8 +70,7 @@ def holders(path):
 
 
 def configure_clients(directory, manifest, resources):
-    clients = {'docker': DOCKER, 'buildx': PLUGINS / 'docker-buildx',
-               'compose': PLUGINS / 'docker-compose'}
+    clients = client_paths()
     for name, path in clients.items():
         if TOOLS['file_hash'](path) != manifest['clients'][name]['sha256']:
             raise RuntimeError(f'pinned {name} executable changed: {path}')
@@ -123,8 +140,9 @@ def run_suite(engine, endpoint, config, peer, output, mode, vm_paths=None, group
               'harness_revision': TOOLS['run'](['/usr/bin/git', '-C', REPO, 'rev-parse', 'HEAD']),
               'passed': False}
     resources = ExitStack()
-    peer_args = SimpleNamespace(engine=engine, socket=endpoint, config=config, peer_pid=peer, docker=DOCKER)
     try:
+        peer_args = SimpleNamespace(engine=engine, socket=endpoint, config=config, peer_pid=peer,
+                                    docker=client_paths()['docker'])
         docker, env, executable = TOOLS['verify_endpoint'](peer_args)
         report['engine_sha256'] = TOOLS['file_hash'](executable)
         if engine == 'kiri' and report['engine_sha256'] != manifest['participants']['kiri']['executable_sha256']:

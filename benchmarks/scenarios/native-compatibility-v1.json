@@ -2,7 +2,7 @@
   "schema_version": 1,
   "source_revision": "4a6ec46021591dd8585a1d760d348ecf4e9eb146",
   "sources": {
-    "benchmarks/scenarios/docker-comparison-v1.json": "572fa7ec2ff060d488daa8adaccc0bb5ffeb9ed0adcd6d009873f86f36826d19",
+    "benchmarks/scenarios/docker-comparison-v1.json": "2c0875bcd984e256ba25717455ed50360bc7902ed1aa4f7e42794e5279048f68",
     "benchmarks/docker-comparison-workloads.py": "413e689977d4d146d01ac5e1125569a8f032a42a02db3cfa1ec00f3484d071ce",
     "benchmarks/docker-comparison-matrix.py": "b3a3a38fb61b4ab5e3302a113e8e1c55832779b39b37b8df599e5abf790161ff"
   },

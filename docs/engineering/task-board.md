@@ -747,6 +747,42 @@ Next Action: Set matching version metadata and release notes for the reviewed pa
 
 ## INPROGRESS
 
+### SPEED-181
+
+Title: Adopt Docker 29.10.1 and isolate the frozen comparison clients
+
+Description: Update the Docker CLI pin and place comparison executables
+under the task-owned ExternalSSD root before launching either engine.
+
+Is blocked by task: The first optimized cohort lost the pinned Docker
+29.10.0 executable during Alpine bridge CLI pair 3.
+
+Acceptance Criteria:
+
+- Freeze Docker 29.10.1, Buildx 0.39.1 and Compose 5.8.0 by executable
+  checksum. Preserve the existing workload, resource and timing rules.
+- Keep the interrupted cohort and its raw successful and failed pairs.
+  Qualify the new client pin and run a fresh full comparison cohort.
+
+Problem and Evidence: Homebrew replaced the old executable after 17
+passing lifecycle pairs and one passing pilot pair. Later attempts
+recorded a missing executable or a changed SHA-256 pin. The managed
+runtimes and backing leases closed.
+
+Approach: Use regular read-only executable copies under an explicitly
+configured private ExternalSSD directory and verify each manifest hash.
+
+Evidence: `SPEED-065/cj-perf.LBoyR4-full-0e28023a99db/interruption/`.
+
+Source: `benchmarks/docker-comparison.py`,
+`benchmarks/scenarios/docker-comparison-v1.json` and
+`build-support/run-conjet-speedup.py`.
+
+Review: The updated Docker pin changes the comparison manifest digest.
+The prior cohort retains its original revision and inputs.
+
+Next Action: Verify the new pin and refresh exact-artifact qualification.
+
 ### SPEED-065
 
 Title: Qualify native speed and memory against official Kiri

@@ -9,6 +9,12 @@ and record hashes of the actual executables in every report.
 
 [Scenario manifest](../../benchmarks/scenarios/docker-comparison-v1.json)
 
+For a full comparison, copy the manifest's Docker 29.10.1, Buildx and
+Compose executables into a private ExternalSSD scratch directory. Remove
+write permissions on the executable copies and set
+`CONJET_BENCHMARK_CLIENTS` to the canonical directory. Both measured
+launchers verify all three hashes and use the private plugin links.
+
 ## Execution paths and capability matrix
 
 ```text
