@@ -3587,6 +3587,44 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-179
+
+Title: Submit FUSE response headers and data in one bounded write
+
+Description: Reduce bind read transport wakeups without changing
+filesystem or cache behavior.
+
+Is blocked by task: SPEED-178 identified the read-ahead tradeoff.
+
+Acceptance Criteria:
+
+- Preserve response IDs, lengths, error codes, boundaries and existing
+  short-write handling. Reuse one bounded buffer per bind.
+- Check the original read, random I/O and SHA-256 scenarios, mount
+  teardown and live host-update and read-only behavior.
+
+Problem and Evidence: The bound socket fixes write credit stalls, while
+the original read trace still issues 9,216 separate replies. Each data
+reply uses a header write followed by a payload write across vsock.
+
+Approach: Submit the unchanged frame together and compare against the
+existing split write on matched boots.
+
+Evidence: Two alternating pairs passed every original storage canary,
+with five measured runs and one warmup per boot. The complete bind
+medians were 1,346.728 and 1,353.625 ms. The read-and-hash medians were
+438.013 and 451.270 ms. The random-read medians were 130.957 and
+128.042 ms. Both pairs verified host hashes, guest cleanup and exact
+bind teardown. ExternalSSD retains `SPEED-179/cj-perf.LBoyR4-bind-frame-ab/`.
+
+Source: `jetstream/src/native/docker/bind_fuse.rs`.
+
+Review: Workspace tests, live host updates and read-only checks passed.
+Reverted the prototype after the mixed timing result. The separate
+Darwin socket-buffer improvement remains qualified.
+
+Next Action: Trace the four previously slow no-network lifecycle tails.
+
 ### SPEED-178
 
 Title: Batch ExternalSSD bind reads with host-change invalidation
