@@ -798,15 +798,23 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             Bundle.main.resourceURL?.appendingPathComponent("ConjetTools", isDirectory: true),
             Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent()
         ]
-        let manager = FileManager.default
-        return tools.compactMap { $0 }.contains { directory in
-            let bundle = directory.appendingPathComponent("ConjetCoreVMM", isDirectory: true)
-            return manager.isExecutableFile(atPath: bundle.appendingPathComponent("Conjet Core").path)
-                && manager.isReadableFile(atPath: bundle.appendingPathComponent("NativeCore/boot-image").path)
-        }
+        return tools.compactMap { $0 }.contains(where: toolsSelectNativeDocker)
         #else
         return false
         #endif
+    }
+
+    static func toolsSelectNativeDocker(_ directory: URL) -> Bool {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: directory.appendingPathComponent("native-docker-default").path) {
+            return true
+        }
+        // Preserve the native selection for packages built before the marker was introduced.
+        var isDirectory = ObjCBool(false)
+        return manager.fileExists(
+            atPath: directory.appendingPathComponent("ConjetCoreVMM/NativeCore").path,
+            isDirectory: &isDirectory
+        ) && isDirectory.boolValue
     }
 
     public func save(paths: ConjetPaths = .default()) throws {

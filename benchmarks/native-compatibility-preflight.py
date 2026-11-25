@@ -693,14 +693,20 @@ def qualified_build_api(matrix, manifest, report, fixture, connection, docker, e
 
 def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None,
             build_bases=None, build_language=None, build_api=False, direct_tools=None,
-            session=None, vm_pid=None):
+            session=None, vm_pid=None, storage_fixture=None):
     contract()
     comparison = runpy.run_path(str(HERE / 'docker-comparison.py'))
     tools = comparison['TOOLS']
     manifest = comparison['contract']()
     config = Path(env['DOCKER_CONFIG'])
-    fixture = output / 'matrix'
-    fixture.mkdir(mode=0o700, exist_ok=suite == 'storage_network')
+    if storage_fixture is not None and suite != 'storage_network':
+        raise ValueError('a private bind fixture requires the storage suite')
+    report_dir = output / 'matrix'
+    report_dir.mkdir(mode=0o700, exist_ok=suite == 'storage_network')
+    fixture = storage_fixture if storage_fixture is not None else report_dir
+    if storage_fixture is not None:
+        # The packaged daemon authorizes its own private bind directory.
+        fixture.mkdir(mode=0o700)
     if fixture.resolve(strict=True) != fixture or fixture.stat().st_mode & 0o077:
         raise RuntimeError('the frozen matrix requires a private fixture directory')
     # The original controlled registry uses this index to seed fixture bytes.
@@ -761,4 +767,4 @@ def collect(endpoint, peer, docker, env, output, suite, *, lifecycle_group=None,
         report['error'] = str(error)
     finally:
         connection.close()
-        comparison['save'](fixture / 'session.json', report)
+        comparison['save'](report_dir / 'session.json', report)

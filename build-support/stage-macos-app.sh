@@ -220,6 +220,10 @@ if [ -x "$RUST_TARGET_DIR/release/jetstream" ]; then
         install -m 0644 "$ROOT_DIR/build-support/native-core-kernel.sha512" "$tools/NativeCore/kernel.sha512"
       fi
     done
+    if [ -n "$NATIVE_CORE_ASSETS" ]; then
+      printf 'native-docker\n' > "$APP_TOOLS/native-docker-default"
+      printf 'native-docker\n' > "$HELPER_TOOLS/native-docker-default"
+    fi
   fi
 fi
 

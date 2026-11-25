@@ -156,6 +156,10 @@ jobs:
           cmp "${mount_dir}/Conjet.app/${guest}" "${mount_dir}/bin/ConjetCoreVMM/conjet-launchd-linux-arm64"
           helper="${mount_dir}/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app"
           cmp "${mount_dir}/Conjet.app/${guest}" "${helper}/${guest}"
+          marker="Contents/Resources/ConjetTools/native-docker-default"
+          test "$(cat "${mount_dir}/bin/native-docker-default")" = native-docker
+          cmp "${mount_dir}/bin/native-docker-default" "${mount_dir}/Conjet.app/${marker}"
+          cmp "${mount_dir}/bin/native-docker-default" "${helper}/${marker}"
           native="Contents/Resources/ConjetTools/ConjetCoreVMM/NativeCore"
           for asset in Image conjet-memd conjet-reclaimd kernel.sha512 boot-image volume.tar.gz; do
             cmp "native-core-assets/${asset}" "${mount_dir}/Conjet.app/${native}/${asset}"

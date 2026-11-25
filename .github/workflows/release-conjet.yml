@@ -192,6 +192,7 @@ jobs:
           /usr/bin/codesign -dvvv --entitlements :- "dist/Conjet.app/Contents/Resources/ConjetTools/conjetd"
           /usr/bin/codesign -dvvv --entitlements :- "dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core"
           test -x "dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core"
+          test "$(cat dist/Conjet.app/Contents/Resources/ConjetTools/native-docker-default)" = native-docker
           cmp target/aarch64-unknown-linux-musl/release/conjet-launchd \
             dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-launchd-linux-arm64
 
@@ -207,6 +208,8 @@ jobs:
             --dist-dir dist \
             --arch "${arch}"
           test -x "dist/dmg-staging/${artifact_base}/bin/ConjetCoreVMM/Conjet Core"
+          cmp "dist/dmg-staging/${artifact_base}/bin/native-docker-default" \
+            "dist/Conjet.app/Contents/Resources/ConjetTools/native-docker-default"
           echo "artifact_base=${artifact_base}" >> "${GITHUB_OUTPUT}"
 
       - name: Finalize DMG notarization and checksum

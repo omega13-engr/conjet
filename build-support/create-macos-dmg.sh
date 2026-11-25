@@ -85,6 +85,10 @@ mkdir -p "$STAGING_ROOT/bin"
 /usr/bin/ditto "$APP_BUNDLE/Contents/Resources/ConjetTools/conjet" "$STAGING_ROOT/bin/conjet"
 /usr/bin/ditto "$APP_BUNDLE/Contents/Resources/ConjetTools/conjetd" "$STAGING_ROOT/bin/conjetd"
 /usr/bin/ditto "$APP_BUNDLE/Contents/Resources/ConjetTools/ConjetCoreVMM" "$STAGING_ROOT/bin/ConjetCoreVMM"
+native_default="$APP_BUNDLE/Contents/Resources/ConjetTools/native-docker-default"
+if [ -f "$native_default" ]; then
+  install -m 0644 "$native_default" "$STAGING_ROOT/bin/native-docker-default"
+fi
 ln -s /Applications "$STAGING_ROOT/Applications"
 
 if [ -f "$ROOT_DIR/README.md" ]; then

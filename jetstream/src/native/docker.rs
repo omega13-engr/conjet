@@ -407,8 +407,10 @@ fn serve_endpoint(
         pinned_build_registry,
         build_client,
     ));
+    // Managed boot logs retain the pinned registry's source and digest without
+    // enabling the standalone diagnostic trace for general Docker requests.
     let _registry = pinned_build_registry
-        .then(|| build_registry::Relay::start(&owner, trace_requests))
+        .then(|| build_registry::Relay::start(&owner, trace_requests || supervisor_pid.is_some()))
         .transpose()?;
     println!("{ready}");
     let mut handlers: Vec<JoinHandle<()>> = Vec::with_capacity(CONNECTIONS);

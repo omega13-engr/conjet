@@ -233,7 +233,12 @@ final class ManagedNativeDocker {
     }
 
     private func contents(_ url: URL) throws -> String {
-        try String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            return try String(contentsOf: url, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            throw ConjetError.filesystem("Cannot read packaged native Core asset \(url.lastPathComponent): \(error.localizedDescription)")
+        }
     }
 
     private struct BootReceipt: Decodable {
