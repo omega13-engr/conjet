@@ -14,6 +14,7 @@ use crate::image_store::ConnectionId;
 use crate::wire::COPY_LIMIT;
 
 const CHUNK: usize = 8192;
+const STREAM_CHUNK: usize = 64 * 1024;
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -26,13 +27,7 @@ pub(crate) enum Operation {
         identity: Identity,
         offset: u64,
     },
-    Begin {
-        path: String,
-        name: String,
-        size: u64,
-        mode: u32,
-        digest: [u8; 32],
-    },
+    Begin(UploadSpec),
     Write {
         offset: u64,
         data: String,
@@ -95,7 +90,7 @@ impl DownloadRequest {
         mut send: impl FnMut(&[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
         let mut left = self.size();
-        let mut chunk = [0; 64 * 1024];
+        let mut chunk = [0; STREAM_CHUNK];
         while left != 0 {
             let count = left.min(chunk.len() as u64) as usize;
             file.read_exact(&mut chunk[..count])?;
@@ -159,9 +154,22 @@ fn open_beneath(root: &File, path: &str, flags: i32, same_mount: bool) -> io::Re
 }
 
 #[derive(Default)]
-pub(crate) struct Store(Option<Upload>);
+pub(crate) struct Store {
+    pending: Option<Upload>,
+    stream_active: bool,
+}
 
-struct Upload {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UploadSpec {
+    path: String,
+    name: String,
+    size: u64,
+    mode: u32,
+    digest: [u8; 32],
+}
+
+pub(crate) struct Upload {
     owner: ConnectionId,
     workload: String,
     expires: Instant,
@@ -248,6 +256,53 @@ fn destination(parent: &File, name: &CString) -> io::Result<bool> {
 }
 
 impl Upload {
+    fn open(
+        root: &File,
+        spec: UploadSpec,
+        owner: ConnectionId,
+        workload: &str,
+        workload_uid: u32,
+    ) -> io::Result<Self> {
+        if spec.size > COPY_LIMIT
+            || spec.mode & !0o777 != 0
+            || spec.name.len() > 255
+            || spec.name.contains('/')
+            || matches!(spec.name.as_str(), "" | "." | "..")
+        {
+            return Err(rejected());
+        }
+        let name = CString::new(spec.name)?;
+        let parent = open_beneath(root, &spec.path, libc::O_PATH | libc::O_DIRECTORY, true)?;
+        destination(&parent, &name)?;
+        let (staging, file) = Staging::create(&parent, owner, workload_uid)?;
+        Ok(Self {
+            owner,
+            workload: workload.into(),
+            expires: Instant::now() + Duration::from_secs(30),
+            parent,
+            path: spec.path,
+            name,
+            file,
+            size: spec.size,
+            mode: spec.mode,
+            digest: spec.digest,
+            offset: 0,
+            hash: Sha256::new(),
+            staging,
+        })
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let next = self.offset + bytes.len() as u64;
+        if bytes.is_empty() || next > self.size {
+            return Err(rejected());
+        }
+        self.file.write_all(bytes)?;
+        self.hash.update(bytes);
+        self.offset = next;
+        Ok(())
+    }
+
     fn write(&mut self, offset: u64, data: &str) -> io::Result<Value> {
         if offset != self.offset || data.is_empty() || data.len() > CHUNK.div_ceil(3) * 4 {
             return Err(rejected());
@@ -255,17 +310,27 @@ impl Upload {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(data)
             .map_err(|_| rejected())?;
-        let next = offset + bytes.len() as u64;
-        if bytes.is_empty() || bytes.len() > CHUNK || next > self.size {
+        if bytes.len() > CHUNK {
             return Err(rejected());
         }
-        self.file.write_all(&bytes)?;
-        self.hash.update(bytes);
-        self.offset = next;
-        Ok(json!({"offset":next}))
+        self.write_bytes(&bytes)?;
+        Ok(json!({"offset":self.offset}))
     }
 
-    fn commit(mut self, root: &File) -> io::Result<Value> {
+    pub(crate) fn receive(
+        &mut self,
+        mut read: impl FnMut(&mut [u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut chunk = [0; STREAM_CHUNK];
+        while self.offset < self.size {
+            let count = (self.size - self.offset).min(chunk.len() as u64) as usize;
+            read(&mut chunk[..count])?;
+            self.write_bytes(&chunk[..count])?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit(mut self, root: &File) -> io::Result<Value> {
         if self.offset != self.size || <[u8; 32]>::from(self.hash.finalize_reset()) != self.digest {
             return Err(rejected());
         }
@@ -432,9 +497,59 @@ impl Drop for Staging {
 
 impl Store {
     pub(crate) fn disconnect(&mut self, owner: ConnectionId) {
-        if self.0.as_ref().is_some_and(|upload| upload.owner == owner) {
-            self.0 = None;
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|upload| upload.owner == owner)
+        {
+            self.pending = None;
         }
+    }
+
+    fn expire(&mut self) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|upload| Instant::now() >= upload.expires)
+        {
+            self.pending = None;
+        }
+    }
+
+    fn open(
+        &self,
+        root: &File,
+        spec: UploadSpec,
+        owner: ConnectionId,
+        workload: &str,
+        workload_uid: u32,
+    ) -> io::Result<Upload> {
+        if self.pending.is_some() || self.stream_active {
+            return Err(rejected());
+        }
+        Upload::open(root, spec, owner, workload, workload_uid)
+    }
+
+    pub(crate) fn begin_stream(
+        &mut self,
+        root: &File,
+        spec: UploadSpec,
+        owner: ConnectionId,
+        workload: &str,
+        uid: u32,
+    ) -> io::Result<Upload> {
+        self.expire();
+        let upload = self.open(root, spec, owner, workload, uid)?;
+        self.stream_active = true;
+        Ok(upload)
+    }
+
+    pub(crate) fn finish_stream(&mut self) {
+        self.stream_active = false;
+    }
+
+    pub(crate) fn stream_active(&self) -> bool {
+        self.stream_active
     }
 
     pub(crate) fn operate(
@@ -445,13 +560,7 @@ impl Store {
         workload: &str,
         workload_uid: u32,
     ) -> io::Result<Value> {
-        if self
-            .0
-            .as_ref()
-            .is_some_and(|upload| Instant::now() >= upload.expires)
-        {
-            self.0 = None;
-        }
+        self.expire();
         match operation {
             Operation::Stat { path } => {
                 let info = open_path(root, &path, libc::O_PATH)?.metadata()?;
@@ -488,64 +597,31 @@ impl Store {
                     "data":base64::engine::general_purpose::STANDARD.encode(&chunk[..count]),
                 }))
             }
-            Operation::Begin {
-                path,
-                name,
-                size,
-                mode,
-                digest,
-            } => {
-                if self.0.is_some()
-                    || size > COPY_LIMIT
-                    || mode & !0o777 != 0
-                    || name.len() > 255
-                    || name.contains('/')
-                    || matches!(name.as_str(), "" | "." | "..")
-                {
-                    return Err(rejected());
-                }
-                let name = CString::new(name)?;
-                let parent = open_beneath(root, &path, libc::O_PATH | libc::O_DIRECTORY, true)?;
-                destination(&parent, &name)?;
-                let (staging, file) = Staging::create(&parent, owner, workload_uid)?;
-                self.0 = Some(Upload {
-                    owner,
-                    workload: workload.into(),
-                    expires: Instant::now() + Duration::from_secs(30),
-                    parent,
-                    path,
-                    name,
-                    file,
-                    size,
-                    mode,
-                    digest,
-                    offset: 0,
-                    hash: Sha256::new(),
-                    staging,
-                });
+            Operation::Begin(spec) => {
+                self.pending = Some(self.open(root, spec, owner, workload, workload_uid)?);
                 Ok(json!({"offset":0}))
             }
             Operation::Write { offset, data } => {
                 let upload = self
-                    .0
+                    .pending
                     .as_mut()
                     .filter(|upload| upload.owner == owner && upload.workload == workload)
                     .ok_or_else(rejected)?;
                 let result = upload.write(offset, &data);
                 if result.is_err() {
-                    self.0 = None;
+                    self.pending = None;
                 }
                 result
             }
             Operation::Commit => {
                 if self
-                    .0
+                    .pending
                     .as_ref()
                     .is_none_or(|upload| upload.owner != owner || upload.workload != workload)
                 {
                     return Err(rejected());
                 }
-                self.0
+                self.pending
                     .take()
                     .expect("verified workload archive upload")
                     .commit(root)

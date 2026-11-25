@@ -3587,6 +3587,58 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-175
+
+Title: Remove per-chunk RPC delay from bounded Docker archive uploads
+
+Description: Optimize the original Docker copy-in path for regular files
+up to the current archive size limit.
+
+Is blocked by task: SPEED-174 passed the immediate copy startup check.
+
+Acceptance Criteria:
+
+- Keep guest staging private, validate the declared bytes and SHA-256,
+  and require a correlated commit request before publication. Preserve
+  same-mount path checks, owner and mode, atomic replacement, fsync and
+  original cleanup. Retain the legacy transfer for older peers.
+- Check digest failure, partial or uncommitted disconnect, wrong request
+  identity, and destination replacement. Re-run both original sizes with
+  the frozen copy checksums and matched diagnostics.
+
+Problem and Evidence: Trace boots charged 170–180 ms to 1,024 upload
+RPCs. The latest matched download screen put the unchanged 8 MiB
+upload near 240 ms. The measured begin and commit operations were
+each below 1 ms in the trace.
+
+Approach: Transfer a bounded binary payload under the existing guest
+staging reservation. Use the existing archive publish function after a
+correlated commit, exact digest verification and current workload check.
+
+Evidence: Two alternating pairs with the original control setup and
+copy checks recorded 100 measured requests and ten warmups per case and
+boot. The pooled 8 MiB upload median fell from 231.822 to 79.520 ms.
+The pooled 8 MiB download medians were 65.858 and 66.977 ms. Both 4 KiB
+paths and all copy checksums passed. The matched data are in
+`SPEED-173/cj-perf.LBoyR4-copy-upload-matched-ab/` on ExternalSSD.
+
+Source: `guest/launch-service/src/workload_copy.rs`,
+`guest/launch-service/src/fresh_fixture.rs`,
+`guest/launch-service/src/server.rs`, `guest/launch-service/src/wire.rs`,
+`jetstream/src/native/client.rs`, and
+`jetstream/src/native/docker/workload_copy.rs`.
+
+Review: The stream shares the legacy upload reservation and calls the
+same commit function. Live verification covered failed digest, partial
+and uncommitted disconnect, a mismatched commit identity, destination
+replacement, denied staging in a private directory, and 16 MiB
+round-trip SHA-256 and mode. Two fixture setup attempts are retained
+with the successful repeat in `SPEED-175/cj-perf.LBoyR4-copy-upload/`.
+Rust workspace tests, strict ARM64 Clippy and isolated cleanup passed.
+
+Next Action: Check archive download concurrency against the existing
+authenticated peer limit, then trace the ExternalSSD bind workload.
+
 ### SPEED-174
 
 Title: Wait for an owned workload before an immediate Docker archive copy

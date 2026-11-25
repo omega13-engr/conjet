@@ -167,6 +167,14 @@ struct CopyDownload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CopyUpload {
+    handle: Handle,
+    budget_ms: u64,
+    archive: crate::workload_copy::UploadSpec,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkloadInput {
     handle: Handle,
     budget_ms: u64,
@@ -563,7 +571,7 @@ struct PendingExecOutput {
 }
 
 impl Ledger {
-    fn download_target(&self, handle: &Handle) -> Result<&OwnedFd, Failure> {
+    fn archive_target(&self, handle: &Handle) -> Result<&(LaunchSpec, OwnedFd), Failure> {
         if self.closing {
             return Err(("busy", "native archive service is draining"));
         }
@@ -574,9 +582,9 @@ impl Ledger {
         if record.phase == Phase::Running
             && !record.cancelled
             && !record.terminate_requested
-            && let Some((_, pidfd)) = &record.exec_context
+            && let Some(target) = &record.exec_context
         {
-            return Ok(pidfd);
+            return Ok(target);
         }
         Err(("not_running", "archive requires a running native workload"))
     }
@@ -898,6 +906,22 @@ impl Drop for ConnectionLease<'_> {
 
 type Failure = (&'static str, &'static str);
 type Reply = Result<(Kind, Value), Failure>;
+
+fn archive_failure(error: io::Error) -> Failure {
+    if let Some(publish) = error
+        .get_ref()
+        .and_then(|cause| cause.downcast_ref::<crate::workload_copy::PublishError>())
+    {
+        (publish.0, "native workload archive publication failed")
+    } else if error.kind() == io::ErrorKind::NotFound {
+        ("not_found", "native workload archive path was not found")
+    } else {
+        (
+            "archive_rejected",
+            "native workload archive path or file is unsupported",
+        )
+    }
+}
 
 fn bounded_file(path: &str, limit: u64) -> io::Result<Vec<u8>> {
     let mut buffer = Vec::new();
@@ -2307,8 +2331,8 @@ impl FreshFixture {
             if ledger.archive_downloads >= 2 {
                 return Err(("busy", "native archive download slots are occupied"));
             }
-            let target = ledger
-                .download_target(&request.handle)?
+            let (_, pidfd) = ledger.archive_target(&request.handle)?;
+            let target = pidfd
                 .try_clone()
                 .map_err(|_| ("busy", "cannot retain native archive target"))?;
             let root = crate::exec_fixture::target_root(&target)
@@ -2334,7 +2358,7 @@ impl FreshFixture {
             self.ledger
                 .lock()
                 .expect("fresh ledger")
-                .download_target(&handle)
+                .archive_target(&handle)
                 .map(|_| ())
         };
         let result = (|| {
@@ -2373,6 +2397,102 @@ impl FreshFixture {
         })();
         drop((file, target));
         self.ledger.lock().expect("fresh ledger").archive_downloads -= 1;
+        self.changed.notify_all();
+        result
+    }
+
+    pub(crate) fn serve_copy_upload(
+        &self,
+        frame: &Frame,
+        boot: &str,
+        stream: &mut Stream,
+        connection: ConnectionId,
+    ) -> Result<(), WireError> {
+        let prepare = || -> Result<_, Failure> {
+            let request: CopyUpload = frame
+                .decode()
+                .map_err(|_| ("malformed", "invalid archive upload payload"))?;
+            if request.handle.boot_id != boot {
+                return Err(("stale_generation", "unexpected native archive boot ID"));
+            }
+            if !(1..=30_000).contains(&request.budget_ms) {
+                return Err(("malformed", "invalid archive upload budget"));
+            }
+            let started = Instant::now();
+            let deadline = started + Duration::from_millis(request.budget_ms);
+            let ready_by = deadline.min(started + Duration::from_secs(1));
+            let ledger = self.ledger.lock().expect("fresh ledger");
+            let mut ledger = self.wait_for_archive_start(ledger, &request.handle, ready_by);
+            if Instant::now() >= ready_by {
+                return Err(("deadline_exceeded", "native archive startup expired"));
+            }
+            let (spec, pidfd) = ledger.archive_target(&request.handle)?;
+            let uid = spec.uid;
+            let target = pidfd
+                .try_clone()
+                .map_err(|_| ("busy", "cannot retain native archive target"))?;
+            let root = crate::exec_fixture::target_root(&target)
+                .map_err(|_| ("not_running", "cannot retain native archive root"))?;
+            let upload = ledger
+                .copies
+                .begin_stream(
+                    &root,
+                    request.archive,
+                    connection,
+                    &request.handle.workload_id,
+                    uid,
+                )
+                .map_err(archive_failure)?;
+            Ok((request.handle, deadline, target, upload))
+        };
+        let (handle, deadline, target, mut upload) = match prepare() {
+            Ok(prepared) => prepared,
+            Err((code, detail)) => return write_error(stream, frame.id, code, detail),
+        };
+        let result = (|| {
+            let idle_deadline = || deadline.min(Instant::now() + Duration::from_secs(2));
+            stream.deadline(Some(idle_deadline()));
+            Frame::write(
+                &mut *stream,
+                Kind::CopyUpload,
+                frame.id,
+                &json!({"offset":0}),
+            )?;
+            upload.receive(|bytes| {
+                self.ledger
+                    .lock()
+                    .expect("fresh ledger")
+                    .archive_target(&handle)
+                    .map_err(|(_, detail)| io::Error::other(detail))?;
+                stream.deadline(Some(idle_deadline()));
+                stream.read_exact(bytes)
+            })?;
+            stream.deadline(Some(idle_deadline()));
+            let commit: Value = Frame::read(&mut *stream)?.expect(Kind::CopyUpload, frame.id)?;
+            if commit != json!({"commit":true}) {
+                return write_error(stream, frame.id, "malformed", "invalid archive commit");
+            }
+            let committed = (|| {
+                let ledger = self.ledger.lock().expect("fresh ledger");
+                ledger.archive_target(&handle)?;
+                if Instant::now() >= deadline {
+                    return Err(("deadline_exceeded", "native archive upload expired"));
+                }
+                let root = crate::exec_fixture::target_root(&target)
+                    .map_err(|_| ("not_running", "cannot retain native archive root"))?;
+                upload.commit(&root).map_err(archive_failure)
+            })();
+            match committed {
+                Ok(reply) => Frame::write(stream, Kind::CopyUpload, frame.id, &reply),
+                Err((code, detail)) => write_error(stream, frame.id, code, detail),
+            }
+        })();
+        drop(target);
+        self.ledger
+            .lock()
+            .expect("fresh ledger")
+            .copies
+            .finish_stream();
         self.changed.notify_all();
         result
     }
@@ -2755,7 +2875,7 @@ impl FreshFixture {
                 if matches!(
                     &request.operation,
                     crate::workload_copy::Operation::Stat { .. }
-                        | crate::workload_copy::Operation::Begin { .. }
+                        | crate::workload_copy::Operation::Begin(_)
                 ) {
                     guard = self.wait_for_archive_start(guard, &request.handle, expires);
                     check(&guard, &request.handle)?;
@@ -2795,20 +2915,7 @@ impl FreshFixture {
                         &request.handle.workload_id,
                         uid,
                     )
-                    .map_err(|error| {
-                        if let Some(publish) = error.get_ref().and_then(|cause| {
-                            cause.downcast_ref::<crate::workload_copy::PublishError>()
-                        }) {
-                            (publish.0, "native workload archive publication failed")
-                        } else if error.kind() == io::ErrorKind::NotFound {
-                            ("not_found", "native workload archive path was not found")
-                        } else {
-                            (
-                                "archive_rejected",
-                                "native workload archive path or file is unsupported",
-                            )
-                        }
-                    })?;
+                    .map_err(archive_failure)?;
                 Ok((Kind::Copy, reply))
             }
             Kind::Account if self.oci => {
@@ -3331,6 +3438,7 @@ impl FreshFixture {
             if !ledger.exec_active
                 && ledger.exec_streams == 0
                 && ledger.archive_downloads == 0
+                && !ledger.copies.stream_active()
                 && ledger.records.iter().all(|record| record.phase.terminal())
             {
                 let cleaned = !ledger

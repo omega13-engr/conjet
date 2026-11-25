@@ -86,6 +86,14 @@ impl Upload {
         handle: &Value,
         path: &str,
     ) -> anyhow::Result<()> {
+        if peer.copy_upload && self.size > CHUNK as u64 {
+            let request = json!({
+                "handle":handle,"budget_ms":30000,
+                "archive":{"path":path,"name":self.name,"size":self.size,"mode":self.mode,"digest":self.digest},
+            });
+            file.seek(SeekFrom::Start(self.offset))?;
+            return peer.copy_upload(&request, self.size, file);
+        }
         let deadline = Instant::now() + Duration::from_secs(30);
         exchange(
             peer,

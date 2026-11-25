@@ -15,7 +15,7 @@ use conjet_launch_service::spec::{
     LaunchRequest, LaunchSpec, NATIVE_LIMITS, WORKLOAD_GID, WORKLOAD_UID,
 };
 use conjet_launch_service::wire::{
-    Frame, Kind, RequestId, WireError, COPY_DOWNLOAD_CAPABILITY, COPY_LIMIT,
+    Frame, Kind, RequestId, WireError, COPY_DOWNLOAD_CAPABILITY, COPY_LIMIT, COPY_UPLOAD_CAPABILITY,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -76,6 +76,7 @@ pub(super) struct Connection {
     pub(super) mapped_ids: bool,
     pub(super) pending_watch: bool,
     pub(super) copy_download: bool,
+    pub(super) copy_upload: bool,
     stream: Stream,
 }
 
@@ -190,6 +191,10 @@ impl Connection {
                 .capabilities
                 .iter()
                 .any(|value| value == COPY_DOWNLOAD_CAPABILITY),
+            copy_upload: hello
+                .capabilities
+                .iter()
+                .any(|value| value == COPY_UPLOAD_CAPABILITY),
             stream,
         })
     }
@@ -226,6 +231,43 @@ impl Connection {
         let id = random()?;
         Frame::write(&mut self.stream, Kind::CopyDownload, id, request)?;
         read_copy_download(&mut self.stream, id, size, output)
+    }
+
+    pub(super) fn copy_upload(
+        &mut self,
+        request: &Value,
+        size: u64,
+        input: impl Read,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            self.copy_upload && size <= COPY_LIMIT,
+            "unsupported copy upload"
+        );
+        self.stream
+            .deadline(Some(Instant::now() + Duration::from_secs(30)));
+        let id = random()?;
+        Frame::write(&mut self.stream, Kind::CopyUpload, id, request)?;
+        let ready: Value = Frame::read(&mut self.stream)?.expect(Kind::CopyUpload, id)?;
+        ensure!(
+            ready["offset"].as_u64() == Some(0),
+            "invalid archive upload staging acknowledgement"
+        );
+        ensure!(
+            io::copy(&mut input.take(size), &mut self.stream)? == size,
+            "incomplete archive upload source"
+        );
+        Frame::write(
+            &mut self.stream,
+            Kind::CopyUpload,
+            id,
+            &json!({"commit":true}),
+        )?;
+        let done: Value = Frame::read(&mut self.stream)?.expect(Kind::CopyUpload, id)?;
+        ensure!(
+            done["offset"].as_u64() == Some(size),
+            "invalid archive upload acknowledgement"
+        );
+        Ok(())
     }
 
     pub(super) fn inspect(&mut self) -> anyhow::Result<Value> {

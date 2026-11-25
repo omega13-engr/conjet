@@ -68,6 +68,7 @@ impl Server {
                     "memory",
                     crate::core_admission::PENDING_WATCH_CAPABILITY,
                     crate::wire::COPY_DOWNLOAD_CAPABILITY,
+                    crate::wire::COPY_UPLOAD_CAPABILITY,
                 ];
             }
             if fresh.is_oci() {
@@ -78,6 +79,7 @@ impl Server {
                     crate::spec::MAPPED_IDS_CAPABILITY,
                     "memory",
                     crate::wire::COPY_DOWNLOAD_CAPABILITY,
+                    crate::wire::COPY_UPLOAD_CAPABILITY,
                 ];
             }
             if fresh.is_native() {
@@ -326,6 +328,19 @@ impl Server {
                 && frame.kind == Kind::CopyDownload
             {
                 return fresh.serve_copy_download(&frame, &boot_id, &mut stream);
+            }
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            if let Some(fresh) = &self.fresh
+                && scope == Scope::Host
+                && fresh.is_oci()
+                && frame.kind == Kind::CopyUpload
+            {
+                return fresh.serve_copy_upload(
+                    &frame,
+                    &boot_id,
+                    &mut stream,
+                    lease.as_ref().expect("fixture lease").id,
+                );
             }
             #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
             if let Some(fresh) = &self.fresh
