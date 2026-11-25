@@ -3587,6 +3587,61 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-177
+
+Title: Attribute the ExternalSSD bind workload and reduce its transport cost
+
+Description: Trace the original 16 MiB storage workload through Linux
+FUSE, the native vsock relay and operations on the ExternalSSD.
+
+Is blocked by task: SPEED-176 completed the copy concurrency regression.
+
+Acceptance Criteria:
+
+- Preserve the original write, fsync, read, random access, metadata and
+  host SHA-256 witnesses. Keep source inode validation, permission checks
+  and teardown. Preserve the copy and Core memory results.
+- Use a separate trace build to distinguish file operations, transport
+  and mount lifecycle. Use exact input and matched clean boots for any
+  runtime change.
+
+Problem and Evidence: The retained 66a8a90 cohorts measured bind medians
+of 2,004.974 ms for Conjet and 191.846 ms for Kiri. Guest sequential
+write and fsync measured 936.342 and 22.485 ms. Read and SHA-256 measured
+376.162 and 21.463 ms. Each median covers 25 original observations.
+
+Approach: Attribute the largest stages using opcode counts, bytes and
+bounded phase timers on both sides of the actual FUSE relay.
+
+Evidence: The 64 KiB FUSE trace spent a median 1,028.657 ms in
+host write-body receipt and 28.010 ms in the corresponding host disk
+writes. A 60 KiB negotiation trial increased write and fsync from
+925.880 to 1,220.339 ms. That trial was reverted and the two matched
+pairs are retained in `SPEED-177/cj-perf.LBoyR4-bind-write-ab/`.
+
+Darwin's native socket accepted only 8 KiB before a reader drained the
+default queue. On the actual binds, the VMM recorded 3,248–3,653 blocked
+writes per mount. A 128 KiB send buffer on the existing native bridge
+eliminated those blocked writes in six matched trace mounts, with the
+same 18,678,408 guest bytes forwarded per mount. Two uninstrumented
+alternating pairs measured pooled bind write and fsync medians of
+1,088.012 and 69.186 ms. The full bind medians were 2,254.282 and
+1,306.679 ms. Each mount confirmed its guest and bind cleanup, and the
+original host and guest file digests matched. Evidence is in
+`SPEED-177/cj-perf.LBoyR4-bind-profile/` and
+`SPEED-177/cj-perf.LBoyR4-bind-buffer-ab/` on ExternalSSD.
+
+Source: `jetstream/src/devices/vsock.rs`.
+
+Review: The buffer change applies to the Darwin native launch port.
+The existing ten-stream limit, credit accounting and short-write handling
+remain in the transport. The new unit test queues both packets of a full
+FUSE request before reading. Workspace tests and live output recovery
+passed. [Linux virtio-vsock packet sizing](https://raw.githubusercontent.com/torvalds/linux/v6.12/include/linux/virtio_vsock.h)
+
+Next Action: Investigate bounded FUSE read-ahead with an open-handle
+host-update regression.
+
 ### SPEED-176
 
 Title: Preserve download concurrency within the existing guest connection bound

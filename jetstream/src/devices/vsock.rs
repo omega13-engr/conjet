@@ -30,6 +30,8 @@ pub const DOCKER_BRIDGE_PORT: u32 = 2375;
 pub const MEMORY_BRIDGE_PORT: u32 = 2376;
 const NATIVE_LAUNCH_PORT: u32 = 2380;
 const MAX_NATIVE_BRIDGE_STREAMS: usize = 10;
+#[cfg(target_os = "macos")]
+const NATIVE_BRIDGE_SEND_BUFFER: libc::c_int = 128 * 1024;
 const STREAM_TYPE: u16 = 1;
 const OP_REQUEST: u16 = 1;
 const OP_RESPONSE: u16 = 2;
@@ -998,6 +1000,27 @@ impl HostUnixVsockBridgeState {
         let _ = stream.set_nonblocking(true);
         let mut stream = HostUnixVsockStream::new(stream);
         if self.guest_port == NATIVE_LAUNCH_PORT {
+            // A synchronous guest request can fill Darwin's default 8 KiB
+            // buffer before the host consumer reads. Give the bounded native
+            // socket space for two full guest packets.
+            #[cfg(target_os = "macos")]
+            {
+                let result = unsafe {
+                    libc::setsockopt(
+                        stream.socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        (&NATIVE_BRIDGE_SEND_BUFFER as *const libc::c_int).cast(),
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                };
+                if result != 0 {
+                    eprintln!(
+                        "native bridge retained its default send buffer: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
             // The launch protocol is explicitly raw. HTTP body and close
             // inference belongs to the Docker-facing transport.
             stream.host_protocol_known = true;
@@ -2665,6 +2688,38 @@ mod tests {
         let credit = bridge.pending_guest_packets.pop_front().unwrap();
         assert_eq!(credit.op, OP_CREDIT_UPDATE);
         assert_eq!(credit.fwd_cnt, count as u32);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_bridge_queues_a_full_fuse_write_before_the_client_reads() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut bridge = HostUnixVsockBridgeState::new(NATIVE_LAUNCH_PORT, 55_000, false);
+        bridge.accept_stream(server);
+        let request = vec![0x63; 64 * 1024 + 80];
+        for part in request.chunks(64 * 1024) {
+            assert!(bridge.handle_guest_packet(VsockPacket {
+                src_cid: DEFAULT_GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: NATIVE_LAUNCH_PORT,
+                dst_port: 55_000,
+                op: OP_RW,
+                flags: 0,
+                buf_alloc: DEFAULT_BUF_ALLOC,
+                fwd_cnt: 0,
+                payload: part.to_vec(),
+            }));
+        }
+        assert_eq!(
+            bridge.streams[&55_000].forward_count(),
+            request.len() as u32
+        );
+        let mut output = vec![0; request.len()];
+        client.read_exact(&mut output).unwrap();
+        assert_eq!(output, request);
     }
 
     #[test]
