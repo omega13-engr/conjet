@@ -231,7 +231,7 @@ final class ConjetAppState: ObservableObject {
     @Published var dockerEditorSource: String
     @Published var dockerEditorImageTag = "conjet-editor:latest"
     @Published var dockerEditorRunArguments = ""
-    @Published var pullImage = "ubuntu:24.04"
+    @Published var pullImage = ""
     @Published var containerTerminalDebugEnabled = false
     @Published private(set) var containerTerminalError: String?
     @Published var composeDirectory = ""
