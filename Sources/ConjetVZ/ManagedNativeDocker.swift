@@ -15,13 +15,12 @@ final class ManagedNativeDocker {
     private var session: URL?
 
     init(paths: ConjetPaths, enableHostMounts: Bool) throws {
-        let tool = ConjetCoreRustVMMTool.resolve()
-        guard tool.path != "/usr/bin/env" else {
-            throw ConjetError.unavailable("Native Docker requires the packaged Conjet Core VMM")
+        guard let executable = ConjetCoreRustVMMTool.packagedNative() else {
+            throw ConjetError.unavailable("The packaged Conjet Core VMM for Native Docker is missing")
         }
         self.paths = paths
-        self.executable = tool.path
-        self.assets = URL(fileURLWithPath: tool.path).deletingLastPathComponent().appendingPathComponent("NativeCore")
+        self.executable = executable
+        self.assets = URL(fileURLWithPath: executable).deletingLastPathComponent().appendingPathComponent("NativeCore")
         self.root = paths.runDirectory.resolvingSymlinksInPath()
         self.state = root.appendingPathComponent("native-data", isDirectory: true)
         self.enableHostMounts = enableHostMounts
@@ -129,14 +128,37 @@ final class ManagedNativeDocker {
     }
 
     func stop() -> Bool {
+        let bootWasLost = boot.map { !$0.isRunning } ?? false
         let adapterStopped = endpoint.map { !$0.isRunning || $0.stop(timeoutSeconds: 15) } ?? true
         let bootStopped = boot.map { !$0.isRunning || $0.stop(timeoutSeconds: 15) } ?? true
         guard adapterStopped && bootStopped else { return false }
-        let drained = session.map { !FileManager.default.fileExists(atPath: $0.path) } ?? true
+        if let session, !Self.sessionRemoved(session),
+           (!bootWasLost || !Self.reapLostSession(session, in: root)) {
+            return false
+        }
         endpoint = nil
         boot = nil
         session = nil
-        return drained
+        return true
+    }
+
+    private static func sessionRemoved(_ session: URL) -> Bool {
+        var info = stat()
+        return lstat(session.path, &info) == -1 && errno == ENOENT
+    }
+
+    static func reapLostSession(_ session: URL, in root: URL) -> Bool {
+        guard session.deletingLastPathComponent().path == root.path,
+              session.lastPathComponent.hasPrefix("cn-") else { return false }
+        var info = stat()
+        guard lstat(session.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+              info.st_uid == geteuid(), info.st_mode & 0o077 == 0 else { return false }
+        do {
+            try FileManager.default.removeItem(at: session)
+            return true
+        } catch {
+            return false
+        }
     }
 
     var memoryControlSocketPath: String? {

@@ -483,6 +483,10 @@ extension DynamicMemoryVMMRuntimeMetrics {
 }
 
 enum ConjetCoreRustVMMTool {
+    static func packagedNative() -> String? {
+        bundledTool() ?? siblingTool(environment: [:], includeCommandLineCandidates: false)
+    }
+
     static func resolve(environment: [String: String] = ProcessInfo.processInfo.environment) -> (path: String, source: String) {
         if let override = environment["CONJET_CORE_VMM_PATH"],
            !override.isEmpty,
@@ -530,8 +534,12 @@ enum ConjetCoreRustVMMTool {
         return FileManager.default.isExecutableFile(atPath: candidate) ? candidate : nil
     }
 
-    private static func siblingTool(environment: [String: String]) -> String? {
-        let executables = ([currentExecutableURL(), Bundle.main.executableURL] + commandLineExecutableCandidates(environment: environment).map(Optional.some))
+    private static func siblingTool(
+        environment: [String: String],
+        includeCommandLineCandidates: Bool = true
+    ) -> String? {
+        let commandLineCandidates = includeCommandLineCandidates ? commandLineExecutableCandidates(environment: environment) : []
+        let executables = ([currentExecutableURL(), Bundle.main.executableURL] + commandLineCandidates.map(Optional.some))
             .compactMap { $0 }
         var seen = Set<String>()
         for executable in executables {
