@@ -747,6 +747,57 @@ Next Action: Set matching version metadata and release notes for the reviewed pa
 
 ## INPROGRESS
 
+### SPEED-170
+
+Title: Attribute archive load and remove redundant blob I/O
+
+Description: Measure the original Buildx export and Docker archive load
+boundary on OverlayFS. Optimize verified archive publication where the
+measured cost justifies a change.
+
+Is blocked by task: SPEED-169 passed the scoped build and memory checks.
+
+Acceptance Criteria:
+
+- Separate upload spooling, tar extent hashing, blob publication, package
+  creation and durability costs in a dedicated diagnostic run.
+- Preserve content verification, atomic publication, source mutation
+  rejection, limits, cache ownership and durable cleanup. Use unchanged
+  archive inputs and output canaries for any follow-on comparison.
+
+Problem and Evidence: The Rust OverlayFS A/B left dependency archive load
+at a pooled median of 219.361 ms. The importer hashes archive extents,
+writes new content to a temporary blob, reopens it for verification,
+and creates a separately verified OCI package.
+
+Approach: Measure the passes inside the actual pinned Docker load path.
+Test a single-pass verified write if rereads contribute measurable latency.
+
+Evidence: The scoped import trace recorded 1,973 ms in package creation
+and 184 ms in blob rereading during an empty-cache Node load. The macOS
+ARM64 adapter now enables RustCrypto's hardware SHA-256 backend. Two
+alternating diagnostic pairs measured pooled Node empty-load medians of
+2,647.993 and 1,358.796 ms, and Rust dependency-load medians of 234.516
+and 147.546 ms. All 96 output checks passed. The archive regression also
+passed corruption rejection. Data are in
+`SPEED-170/cj-perf.LBoyR4-archive-profile/`,
+`SPEED-170/cj-perf.LBoyR4-archive-profile-sha/`, and
+`SPEED-170/cj-perf.LBoyR4-archive-sha-ab/` on ExternalSSD.
+
+Source: `jetstream/src/native/docker/archive.rs`,
+`jetstream/src/native/docker/registry.rs`, and
+`jetstream/src/native/oci_stage.rs`.
+
+Review: The host feature uses the existing SHA-256 implementation on the
+macOS ARM64 build. Rust workspace tests, archive regression, and private
+teardown passed. The first OverlayFS hosted run failed an existing Darwin
+backing-check test. The unchanged test passed 100 local repetitions.
+[RustCrypto SHA-2 sources](https://docs.rs/crate/sha2/0.10.9/source/CHANGELOG.md)
+
+Next Action: Hash verified blob and OCI package writes while copying.
+Repeat the original archive load comparison after checking source mutation
+and bounded decoding.
+
 ### SPEED-065
 
 Title: Qualify native speed and memory against official Kiri
