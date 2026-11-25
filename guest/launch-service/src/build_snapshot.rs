@@ -13,6 +13,37 @@ pub const MARKER: &str = "/etc/conjet/native-build-snapshot";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub const CONTROL_ADDRESS: &[u8] = b"conjet-build-snapshot-v1";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Snapshotter {
+    Native,
+    Overlay,
+}
+
+impl Snapshotter {
+    pub const fn worker_arg(self) -> &'static str {
+        match self {
+            Self::Native => "--oci-worker-snapshotter=native",
+            Self::Overlay => "--oci-worker-snapshotter=overlayfs",
+        }
+    }
+
+    #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+    const fn worker_directory(self) -> &'static str {
+        match self {
+            Self::Native => "runc-native",
+            Self::Overlay => "runc-overlayfs",
+        }
+    }
+
+    #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+    pub(crate) const fn executor(self) -> &'static str {
+        match self {
+            Self::Native => "/var/lib/buildkit/runc-native/executor",
+            Self::Overlay => "/var/lib/buildkit/runc-overlayfs/executor",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
@@ -43,22 +74,110 @@ pub fn valid_id(id: &str) -> bool {
 }
 
 #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
-fn snapshot_leaf<'a>(mountinfo: &'a str, bind_id: u64, volume: &str, id: &str) -> Option<&'a str> {
-    let mountpoint = format!("/var/lib/buildkit/runc-native/executor/{id}/rootfs");
-    let prefix = format!("/volumes/{volume}/runc-native/snapshots/snapshots/");
+struct SnapshotMount<'a> {
+    parent: u64,
+    root: &'a str,
+    filesystem: &'a str,
+    options: &'a str,
+}
+
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+fn mount_entry<'a>(
+    mountinfo: &'a str,
+    mount_id: u64,
+    snapshotter: Snapshotter,
+    id: &str,
+) -> Option<SnapshotMount<'a>> {
+    let mountpoint = format!("{}/{id}/rootfs", snapshotter.executor());
     mountinfo.lines().find_map(|line| {
-        let mut fields = line.split_ascii_whitespace();
-        if fields.next()?.parse::<u64>().ok()? != bind_id {
-            return None;
-        }
-        let root = fields.nth(2)?;
-        if fields.next()? != mountpoint {
-            return None;
-        }
-        let leaf = root.strip_prefix(&prefix)?;
-        (leaf.parse::<u64>().is_ok() && leaf.bytes().all(|byte| byte.is_ascii_digit()))
-            .then_some(leaf)
+        let (location, filesystem) = line.split_once(" - ")?;
+        let mut fields = location.split_ascii_whitespace();
+        (fields.next()?.parse::<u64>().ok()? == mount_id).then_some(())?;
+        let parent = fields.next()?.parse().ok()?;
+        let root = fields.nth(1)?;
+        (fields.next()? == mountpoint).then_some(())?;
+        let mut fields = filesystem.split_ascii_whitespace();
+        let kind = fields.next()?;
+        fields.next()?;
+        Some(SnapshotMount {
+            parent,
+            root,
+            filesystem: kind,
+            options: fields.next()?,
+        })
     })
+}
+
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+fn numeric_leaf(value: &str) -> Option<&str> {
+    (value.parse::<u64>().is_ok() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(value)
+}
+
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+fn snapshot_leaf<'a>(root: &'a str, volume: &str, snapshotter: Snapshotter) -> Option<&'a str> {
+    let prefix = format!(
+        "/volumes/{volume}/{}/snapshots/snapshots/",
+        snapshotter.worker_directory()
+    );
+    let leaf = root.strip_prefix(&prefix)?;
+    numeric_leaf(match snapshotter {
+        Snapshotter::Native => leaf,
+        Snapshotter::Overlay => leaf.strip_suffix("/fs")?,
+    })
+}
+
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+struct OverlayLayers<'a> {
+    upper: &'a str,
+    lowers: Vec<&'a str>,
+}
+
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+fn overlay_layers(options: &str) -> Option<OverlayLayers<'_>> {
+    // Linux OverlayFS caps the stack at OVL_MAX_STACK. The complete
+    // kernel mount table is already bounded by target_mountinfo.
+    const MAX_LOWER_LAYERS: usize = 500;
+    fn layer<'a>(path: &'a str, kind: &str) -> Option<&'a str> {
+        let relative = path.strip_prefix("/run/conjet/buildkit/worker/")?;
+        let leaf = relative.strip_prefix("runc-overlayfs/snapshots/snapshots/")?;
+        numeric_leaf(leaf.strip_suffix(kind)?)
+    }
+    let mut upper = None;
+    let mut work = None;
+    let mut lower = None;
+    let mut userxattr = false;
+    let mut writable = false;
+    for option in options.split(',') {
+        match option {
+            "rw" if !writable => writable = true,
+            "userxattr" if !userxattr => userxattr = true,
+            "uuid=on" => {}
+            _ if option.starts_with("upperdir=") && upper.is_none() => {
+                upper = Some(layer(&option["upperdir=".len()..], "/fs")?);
+            }
+            _ if option.starts_with("workdir=") && work.is_none() => {
+                work = Some(layer(&option["workdir=".len()..], "/work")?);
+            }
+            _ if option.starts_with("lowerdir=") && lower.is_none() => {
+                lower = Some(&option["lowerdir=".len()..]);
+            }
+            _ => return None,
+        }
+    }
+    let upper = upper?;
+    if !writable || !userxattr || work? != upper {
+        return None;
+    }
+    let mut lowers = Vec::new();
+    for path in lower?.split(':') {
+        let id = layer(path, "/fs")?;
+        if lowers.len() >= MAX_LOWER_LAYERS || id == upper || lowers.contains(&id) {
+            return None;
+        }
+        lowers.push(id);
+    }
+    Some(OverlayLayers { upper, lowers })
 }
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -70,7 +189,9 @@ pub(crate) mod guest {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::path::Path;
 
-    use super::{MARKER, Snapshot, snapshot_leaf, valid_id};
+    use super::{
+        MARKER, Snapshot, Snapshotter, mount_entry, overlay_layers, snapshot_leaf, valid_id,
+    };
     use crate::spec::{GID_BASE, UID_BASE, VolumeMount};
 
     pub(crate) const ROOT: &std::ffi::CStr = c"/run/conjet/buildkit";
@@ -152,6 +273,11 @@ pub(crate) mod guest {
         pub(crate) cache: File,
         pub(crate) executor: File,
         root: File,
+        worker_overlay: bool,
+        // Keep the reviewed layer directories pinned until the detached
+        // root is handed off. The resulting kernel mount retains its layer
+        // references, and the child holds the original worker cache lease.
+        _layer_descriptors: Vec<File>,
     }
 
     impl LiveBundle {
@@ -170,9 +296,14 @@ pub(crate) mod guest {
             })
         }
 
-        pub(crate) fn clone_root(&self) -> io::Result<OwnedFd> {
-            let tree = clone_tree(&self.root)
-                .map_err(|error| io::Error::other(format!("clone owned snapshot: {error}")))?;
+        pub(crate) fn clone_root(&self, pidfd: &OwnedFd) -> io::Result<OwnedFd> {
+            let tree = if self.worker_overlay {
+                let namespace = crate::exec_fixture::target_mount_namespace(pidfd)?;
+                clone_worker_overlay(&namespace, &self.root)
+            } else {
+                clone_tree(&self.root)
+            }
+            .map_err(|error| io::Error::other(format!("clone owned snapshot: {error}")))?;
             let attributes = libc::mount_attr {
                 attr_set: libc::MOUNT_ATTR_NOSUID | libc::MOUNT_ATTR_NODEV,
                 attr_clr: libc::MOUNT_ATTR_NOEXEC,
@@ -186,11 +317,30 @@ pub(crate) mod guest {
         }
     }
 
+    fn clone_worker_overlay(namespace: &File, root: &File) -> io::Result<OwnedFd> {
+        use crate::security::checked;
+        // open_tree can only clone an attached mount from its owning mount
+        // namespace. Join it on a short-lived thread with private fs state.
+        // Only the detached descriptor returns to the launch supervisor.
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .name("buildkit-overlay-mount".into())
+                .spawn_scoped(scope, || {
+                    checked(unsafe { libc::unshare(libc::CLONE_FS) })?;
+                    checked(unsafe { libc::setns(namespace.as_raw_fd(), libc::CLONE_NEWNS) })?;
+                    clone_tree(root)
+                })?
+                .join()
+                .map_err(|_| io::Error::other("worker overlay clone thread failed"))?
+        })
+    }
+
     pub(crate) fn read_worker_config(
         root: &File,
         mountinfo: &str,
         volume: &VolumeMount,
         id: &str,
+        snapshotter: Snapshotter,
     ) -> io::Result<LiveBundle> {
         if !valid_id(id) || volume.target != "/var/lib/buildkit" || volume.read_only {
             return Err(io::Error::other("invalid live BuildKit bundle scope"));
@@ -206,33 +356,76 @@ pub(crate) mod guest {
         {
             return Err(io::Error::other("BuildKit worker cache identity changed"));
         }
-        let native = open_directory(&cache, "runc-native")?;
-        let executor = open_directory(&native, "executor")?;
+        let cache_mount = mount_id(&cache)?;
+        let worker = open_directory(&cache, snapshotter.worker_directory())?;
+        let executor = open_directory(&worker, "executor")?;
         let bundle = open_directory(&executor, id)?;
+        if mount_id(&worker)? != cache_mount
+            || mount_id(&executor)? != cache_mount
+            || mount_id(&bundle)? != cache_mount
+        {
+            return Err(io::Error::other("BuildKit bundle crossed the cache mount"));
+        }
         let rootfs = open_directory(&bundle, "rootfs")?;
         let mounted = rootfs.metadata()?;
         let bind_id = mount_id(&rootfs)?;
-        if mounted.dev() != actual.dev() || bind_id == mount_id(&bundle)? {
+        if bind_id == cache_mount {
+            return Err(io::Error::other("BuildKit rootfs is not mounted"));
+        }
+        let entry = mount_entry(mountinfo, bind_id, snapshotter, id)
+            .ok_or_else(|| io::Error::other("missing BuildKit rootfs mount identity"))?;
+        if entry.parent != cache_mount {
             return Err(io::Error::other(
-                "BuildKit rootfs is not mounted from its cache disk",
+                "BuildKit rootfs is outside the cache mount",
             ));
         }
-        let leaf = snapshot_leaf(mountinfo, bind_id, &volume.name, id).ok_or_else(|| {
-            io::Error::other("worker rootfs bind is outside its native snapshots")
-        })?;
-        let native = open_directory(&leased_cache, "runc-native")?;
-        let leased_executor = open_directory(&native, "executor")?;
-        let snapshots = open_directory(&native, "snapshots")?;
+        let leased_worker = open_directory(&leased_cache, snapshotter.worker_directory())?;
+        let leased_executor = open_directory(&leased_worker, "executor")?;
+        let snapshots = open_directory(&leased_worker, "snapshots")?;
         let snapshots = open_directory(&snapshots, "snapshots")?;
-        let source = open_directory(&snapshots, leaf)?;
-        let info = source.metadata()?;
+        let worker_overlay = entry.filesystem == "overlay" && snapshotter == Snapshotter::Overlay;
+        let (source, layer_descriptors) = if worker_overlay {
+            if entry.root != "/" || !is_overlay(&rootfs)? {
+                return Err(io::Error::other(
+                    "BuildKit overlay is not mounted at its root",
+                ));
+            }
+            let run = open_directory(root, "run")?;
+            let conjet = open_directory(&run, "conjet")?;
+            let alias = open_directory(&conjet, "buildkit")?;
+            let link = std::fs::read_link(format!("/proc/self/fd/{}/worker", alias.as_raw_fd()))?;
+            if link != Path::new(&volume.target) {
+                return Err(io::Error::other("BuildKit snapshot cache alias changed"));
+            }
+            let layers = overlay_layers(entry.options)
+                .ok_or_else(|| io::Error::other("invalid BuildKit overlay layer layout"))?;
+            (
+                rootfs,
+                overlay_descriptors(&leased_cache, &snapshots, layers)?,
+            )
+        } else {
+            if entry.filesystem != "ext4" {
+                return Err(io::Error::other("unexpected BuildKit bind filesystem"));
+            }
+            let leaf = snapshot_leaf(entry.root, &volume.name, snapshotter).ok_or_else(|| {
+                io::Error::other("worker rootfs bind is outside its pinned snapshots")
+            })?;
+            let mut source = open_directory(&snapshots, leaf)?;
+            if snapshotter == Snapshotter::Overlay {
+                source = open_directory(&source, "fs")?;
+            }
+            let info = source.metadata()?;
+            if mounted.dev() != actual.dev()
+                || (info.dev(), info.ino()) != (mounted.dev(), mounted.ino())
+            {
+                return Err(io::Error::other(
+                    "leased snapshot did not match the active rootfs",
+                ));
+            }
+            (source, Vec::new())
+        };
         let worker_executor = executor.metadata()?;
         let original_executor = leased_executor.metadata()?;
-        if (info.dev(), info.ino()) != (mounted.dev(), mounted.ino()) {
-            return Err(io::Error::other(
-                "leased snapshot did not match the active rootfs",
-            ));
-        }
         if (worker_executor.dev(), worker_executor.ino())
             != (original_executor.dev(), original_executor.ino())
         {
@@ -266,7 +459,40 @@ pub(crate) mod guest {
             cache: leased_cache,
             executor: leased_executor,
             root: source,
+            worker_overlay,
+            _layer_descriptors: layer_descriptors,
         })
+    }
+
+    fn overlay_descriptors(
+        lease: &File,
+        snapshots: &File,
+        layers: super::OverlayLayers<'_>,
+    ) -> io::Result<Vec<File>> {
+        let mount = mount_id(lease)?;
+        let device = lease.metadata()?.dev();
+        let checked_dir = |parent: &File, name| {
+            let directory = open_directory(parent, name)?;
+            let info = directory.metadata()?;
+            if info.dev() != device
+                || mount_id(&directory)? != mount
+                || (info.uid(), info.gid()) != (UID_BASE, GID_BASE)
+            {
+                return Err(io::Error::other(
+                    "BuildKit overlay layer is outside the cache lease",
+                ));
+            }
+            Ok(directory)
+        };
+        let upper = checked_dir(snapshots, layers.upper)?;
+        let mut descriptors = Vec::with_capacity(2 + layers.lowers.len());
+        descriptors.push(checked_dir(&upper, "fs")?);
+        descriptors.push(checked_dir(&upper, "work")?);
+        for lower in layers.lowers {
+            let snapshot = checked_dir(snapshots, lower)?;
+            descriptors.push(checked_dir(&snapshot, "fs")?);
+        }
+        Ok(descriptors)
     }
 
     fn mount_id(file: &File) -> io::Result<u64> {
@@ -274,6 +500,15 @@ pub(crate) mod guest {
         info.lines()
             .find_map(|line| line.strip_prefix("mnt_id:")?.trim().parse().ok())
             .ok_or_else(|| io::Error::other("could not verify BuildKit snapshot mount ID"))
+    }
+
+    fn is_overlay(file: &File) -> io::Result<bool> {
+        let mut info = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        if unsafe { libc::fstatfs(file.as_raw_fd(), info.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(u32::try_from(unsafe { info.assume_init() }.f_type)
+            == Ok(libc::OVERLAYFS_SUPER_MAGIC as u32))
     }
 
     pub(crate) fn inspect_bundle(
@@ -469,13 +704,42 @@ mod tests {
     fn worker_snapshot_paths_bind_the_exact_volume_bundle_and_mount() {
         let example = "50 21 8:0 /volumes/cache/runc-native/snapshots/snapshots/72 \
             /var/lib/buildkit/runc-native/executor/run1/rootfs rw - ext4 /dev/vda rw";
-        assert_eq!(snapshot_leaf(example, 50, "cache", "run1"), Some("72"));
-        assert_eq!(snapshot_leaf(example, 49, "cache", "run1"), None);
-        assert_eq!(snapshot_leaf(example, 50, "other", "run1"), None);
-        assert_eq!(snapshot_leaf(example, 50, "cache", "run2"), None);
+        let native = Snapshotter::Native;
+        let entry = mount_entry(example, 50, native, "run1").unwrap();
+        assert_eq!(entry.parent, 21);
+        assert_eq!(entry.filesystem, "ext4");
+        assert_eq!(entry.options, "rw");
+        let root = entry.root;
+        assert_eq!(snapshot_leaf(root, "cache", native), Some("72"));
+        assert!(mount_entry(example, 49, native, "run1").is_none());
+        assert_eq!(snapshot_leaf(root, "other", native), None);
+        assert!(mount_entry(example, 50, native, "run2").is_none());
         assert_eq!(
-            snapshot_leaf(&example.replace("/72 ", "/72/extra "), 50, "cache", "run1"),
+            snapshot_leaf(&format!("{root}/extra"), "cache", native),
             None,
         );
+    }
+
+    #[test]
+    fn overlay_snapshot_layers_require_an_owned_ordered_writable_mount() {
+        let base = "/run/conjet/buildkit/worker/runc-overlayfs/snapshots/snapshots";
+        let options = format!(
+            "rw,lowerdir={base}/4/fs:{base}/3/fs,upperdir={base}/7/fs,workdir={base}/7/work,uuid=on,userxattr"
+        );
+        let layers = overlay_layers(&options).unwrap();
+        assert_eq!(layers.upper, "7");
+        assert_eq!(layers.lowers, ["4", "3"]);
+        for bad in [
+            options.replace("/7/work", "/3/work"),
+            options.replace("/4/fs", "/4/../3/fs"),
+            options.replace("/4/fs", "/7/fs"),
+            options.replace("/4/fs", "/3/fs"),
+            options.replace(&format!("{base}/4/fs"), "4/fs"),
+            options.replace("/run/conjet/buildkit/worker/", "/private/"),
+            options.replace("userxattr", "metacopy=on"),
+            options.replace("rw,", "ro,"),
+        ] {
+            assert!(overlay_layers(&bad).is_none(), "{bad}");
+        }
     }
 }

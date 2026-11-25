@@ -1917,8 +1917,11 @@ impl Owner {
         if buildkit_worker {
             use conjet_launch_service::spec::{
                 BUILDKIT_NATIVE_ARGS, BUILDKIT_PATH, BUILDKIT_REGISTRY_CONFIG,
+                BUILDKIT_SNAPSHOTTER_ARG,
             };
             let mut args = BUILDKIT_NATIVE_ARGS.iter().copied().collect::<Vec<_>>();
+            args[BUILDKIT_SNAPSHOTTER_ARG] =
+                conjet_launch_service::build_snapshot::Snapshotter::Overlay.worker_arg();
             if self.pinned_build_registry {
                 args.push(BUILDKIT_REGISTRY_CONFIG);
             }

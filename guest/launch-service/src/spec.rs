@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::handshake;
+use crate::{build_snapshot::Snapshotter, handshake};
 
 pub const WORKLOAD_UID: u32 = 65_532;
 pub const WORKLOAD_GID: u32 = 65_532;
@@ -19,13 +19,14 @@ pub const REGISTRY_CONFIG: &str =
 pub const BUILDKIT_CONFIG: &str =
     "sha256:8ff6bca64af355cd0434480a0fd583a7c571211750a5eb806b992017148bab55";
 pub const BUILDKIT_PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+pub const BUILDKIT_SNAPSHOTTER_ARG: usize = 5;
 pub const BUILDKIT_NATIVE_ARGS: &[&str] = &[
     "buildkitd",
     "--root=/run/conjet/buildkit/worker",
     "--containerd-worker=false",
     "--oci-worker=true",
     "--oci-worker-rootless",
-    "--oci-worker-snapshotter=native",
+    Snapshotter::Native.worker_arg(),
     "--oci-worker-binary=/usr/bin/conjet-buildkit-runtime",
     "--oci-worker-net=host",
     "--otel-socket-path=/var/lib/buildkit/otel-grpc.sock",
@@ -393,12 +394,7 @@ impl LaunchSpec {
                 .volume
                 .as_ref()
                 .is_some_and(|volume| volume.target == "/var/lib/buildkit" && !volume.read_only)
-            && self
-                .argv
-                .iter()
-                .take(BUILDKIT_NATIVE_ARGS.len())
-                .map(String::as_str)
-                .eq(BUILDKIT_NATIVE_ARGS.iter().copied())
+            && self.buildkit_snapshotter().is_some()
             && self
                 .argv
                 .get(BUILDKIT_NATIVE_ARGS.len()..)
@@ -409,6 +405,21 @@ impl LaunchSpec {
                     };
                     extra.is_empty() || extra == [BUILDKIT_NETWORK_ENTITLEMENT]
                 })
+    }
+
+    pub(crate) fn buildkit_snapshotter(&self) -> Option<Snapshotter> {
+        let prefix = self.argv.get(..BUILDKIT_NATIVE_ARGS.len())?;
+        let snapshotter = [Snapshotter::Native, Snapshotter::Overlay]
+            .into_iter()
+            .find(|snapshotter| prefix[BUILDKIT_SNAPSHOTTER_ARG] == snapshotter.worker_arg())?;
+        prefix
+            .iter()
+            .zip(BUILDKIT_NATIVE_ARGS)
+            .enumerate()
+            .all(|(index, (actual, expected))| {
+                index == BUILDKIT_SNAPSHOTTER_ARG || actual == expected
+            })
+            .then_some(snapshotter)
     }
 
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -835,6 +846,11 @@ mod tests {
         });
         let validate = |spec| LaunchRequest { spec, ..valid() }.validate_oci();
         assert!(validate(spec.clone()).is_ok());
+        let mut overlay = spec.clone();
+        overlay.argv[BUILDKIT_SNAPSHOTTER_ARG] = Snapshotter::Overlay.worker_arg().into();
+        assert!(validate(overlay.clone()).is_ok());
+        overlay.argv[BUILDKIT_SNAPSHOTTER_ARG] = "--oci-worker-snapshotter=auto".into();
+        assert_eq!(validate(overlay).err(), Some(SpecError::Identity));
 
         let mut control = spec.clone();
         control.set_exec_argv(["buildctl", "debug", "workers"].map(String::from).to_vec());

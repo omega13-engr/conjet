@@ -3587,6 +3587,61 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-169
+
+Title: Qualify OverlayFS snapshots for the isolated BuildKit worker
+
+Description: Measure the pinned worker's snapshot cost and qualify an
+OverlayFS-backed RUN root through the native executor and cache lease.
+
+Is blocked by task: None. The pinned Buildx path passed SPEED-160 and SPEED-098.
+
+Acceptance Criteria:
+
+- Admit the actual pinned rootless worker on the release guest kernel. Bind
+  the root mount and layer descriptors to the authenticated worker and its
+  private cache. Preserve the ordinary workload profile and teardown rules.
+- Compare the two snapshotters on the original Rust dependency-change build
+  with the same digests, bounds, Core policy and correctness checks. Cover
+  OverlayFS metadata, copy-up, whiteouts and cleanup before promotion.
+
+Problem and Evidence: Each engine ran 45 builders in the verified five-pair
+baseline. Conjet used the native snapshotter and Kiri used OverlayFS. The
+15 Rust dependency exports per engine recorded median rounded COPY sums of
+14,000 and 0 ms, and RUN sums of 6,200 and 200 ms. The latter sums combine
+preparation and execution. Node unchanged export spent 800 versus 300 ms
+sending the tarball. That independent boundary remains a later increment.
+
+Approach: Keep the worker identity and resource policy fixed. Qualify
+snapshot mount ownership and release before comparing the same fixture with
+native and OverlayFS snapshots. Resolve unobserved stage boundaries with
+diagnostic builds on separate artifacts.
+
+Evidence: `SPEED-169/cj-perf.LBoyR4-snapshot-ab/` holds the timings,
+CPU, I/O, memory and teardown receipts. Public build and pressure
+witnesses are under `SPEED-169/cj-perf.LBoyR4-overlay-builds/`.
+`SPEED-169/cj-perf.LBoyR4-baseline-16a05e0/` on ExternalSSD
+contains the extraction script and 360 per-build rows from the retained raw
+progress. Command durations and archive load are directly observed. The
+rounded stage sums overlap and cannot isolate snapshot preparation, runtime
+admission, commit, compression, transport, or image publication.
+
+Source: [BuildKit executor](native-buildkit-executor.md) and
+[performance mandate](native-performance-worker-prompt.md).
+
+Review: The baseline agrees with all worker labels and measured row counts
+in the five passing pairs. The two-pair A/B passed 48
+exported-image canaries and observed a pooled Rust dependency solve/export
+median of 514.647 ms with OverlayFS and 16,494.886 ms with native snapshots.
+The scoped public build compatibility predicates, Docker build API, direct
+BuildKit, metadata, fsynced writeback, active lease rejection, worker loss
+and replacement passed. Native Core admitted the exact RUN while a separate
+guest cgroup reported pressure. Formatting, Rust workspace tests and
+strict ARM64 guest Clippy passed. Strict host Clippy reproduced the
+baseline diagnostic counts.
+
+Next Action: Profile archive import on the OverlayFS candidate.
+
 ### SPEED-048
 
 Title: Evaluate event-driven ingress on the retained Docker VSOCK bridge

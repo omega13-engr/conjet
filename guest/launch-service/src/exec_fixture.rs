@@ -154,6 +154,10 @@ pub(crate) fn target_network(pidfd: &OwnedFd) -> io::Result<File> {
     pinned_target(pidfd, |pid| File::open(format!("/proc/{pid}/ns/net")))
 }
 
+pub(crate) fn target_mount_namespace(pidfd: &OwnedFd) -> io::Result<File> {
+    pinned_target(pidfd, |pid| File::open(format!("/proc/{pid}/ns/mnt")))
+}
+
 pub(crate) fn target_mountinfo(pidfd: &OwnedFd) -> io::Result<String> {
     const LIMIT: u64 = 64 * 1024;
     let info = pinned_target(pidfd, |pid| File::open(format!("/proc/{pid}/mountinfo")))?;

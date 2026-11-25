@@ -11,13 +11,12 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 use crate::build_snapshot::worker_control;
-use crate::build_snapshot::{CONTROL_ADDRESS, valid_id};
+use crate::build_snapshot::{CONTROL_ADDRESS, Snapshotter, valid_id};
 use crate::handshake::{host, random};
 use crate::socket::{Stream, read_key};
 use crate::wire::{ErrorReply, Frame, Kind, WireError};
 
 const EXECUTOR: &str = "/run/conjet/buildkit/worker/runc-native/executor";
-const WORKER_EXECUTOR: &str = "/var/lib/buildkit/runc-native/executor";
 const KEY: &str = "/etc/conjet/launch.key";
 const POLL: Duration = Duration::from_millis(10);
 
@@ -33,15 +32,21 @@ enum RuntimeError {
 
 pub fn run() -> Result<i32, Box<dyn Error>> {
     let worker = Path::new(worker_control::KEY).try_exists()?;
-    let executor = if worker { WORKER_EXECUTOR } else { EXECUTOR };
     let args: Vec<_> = std::env::args().skip(1).collect();
     let words: Vec<_> = args.iter().map(String::as_str).collect();
     let ["--log", log, "--log-format", "json", command @ ..] = words.as_slice() else {
         return Err("unsupported BuildKit runtime global options".into());
     };
-    if *log != format!("{executor}/runc-log.json") {
-        return Err("unexpected BuildKit log path".into());
+    let matches_log = |executor| *log == format!("{executor}/runc-log.json");
+    let executor = if worker {
+        [Snapshotter::Native, Snapshotter::Overlay]
+            .into_iter()
+            .map(Snapshotter::executor)
+            .find(|&executor| matches_log(executor))
+    } else {
+        matches_log(EXECUTOR).then_some(EXECUTOR)
     }
+    .ok_or("unexpected BuildKit log path")?;
     match command {
         ["run", "--bundle", bundle, "--keep", id]
             if valid_id(id) && *bundle == format!("{executor}/{id}") =>

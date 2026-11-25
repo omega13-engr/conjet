@@ -183,3 +183,52 @@ profile supports one active build per boot at a time, closes stdin and
 rejects interactive exec, extra mounts and policy variants. BuildKit's
 stock OOM monitor looks for its original cgroup path, which differs from
 the native Core-owned cgroup namespace.
+
+## SPEED-169 authenticated OverlayFS snapshots
+
+The pinned Docker-container BuildKit worker now selects OverlayFS.
+BuildKit still owns its content, cache, lower layers and writeback.
+The guest supervisor verifies the worker's authenticated process and
+private ext4 cache before admitting a RUN. It matches the root
+descriptor to the bundle's exact mount ID and verifies its mount
+parent, filesystem type, ordered lower layers and upper/work pair.
+The layer directories have the mapped root ownership and remain
+descriptor-pinned through mount handoff.
+
+Linux 6.12 requires an attached mount to be cloned from its owning
+namespace. A short-lived thread unshares its filesystem state, joins
+the authenticated worker's mount namespace, and returns a detached
+root descriptor. The native executor applies its existing executable,
+nosuid and nodev root policy and retains the worker cache lease until
+the native RUN reaches cleanup. Standalone diagnostic native bundles
+retain their original scope. The live OverlayFS profile admits the
+absolute snapshot sources attested in the worker mount table. A
+compact relative layer list lacks that source witness and fails
+admission. [OverlayFS kernel documentation](https://docs.kernel.org/filesystems/overlayfs.html)
+
+Two alternating Rust diagnostic boot pairs changed the worker
+snapshotter selection with an identical optimized guest, pinned
+worker and bases, and original Core memory policy. Both paths passed
+every export, load, and execution check in the four cache conditions.
+The pooled median dependency solve/export fell from 16,494.886 ms
+to 514.647 ms over six samples per snapshotter. Rounded COPY and RUN
+stage sums and worker CPU, block I/O and peak memory are in
+`SPEED-169/cj-perf.LBoyR4-snapshot-ab/` on ExternalSSD. This controlled
+screen uses two pairs. The frozen Kiri comparison requires five.
+
+Public Node, Go and Rust, Docker build API, and direct BuildKit
+qualification passed the scoped build checks. The layer fixture
+verified copy-up, links, ownership, mode, hiding entries from a
+replaced directory, archive load and executable output. Cache removal
+was refused during an active RUN. Killing the worker cancelled that
+exact RUN with signal 9 and complete cleanup. The first public Node
+bootstrap encountered Docker Hub exit 28 and is retained alongside the
+passing exact-artifact replay.
+
+A separate pressure diagnostic kept a native BuildKit RUN active while
+the guest service pressure counter advanced from 0 to 19. Core remained
+enabled with a 2,048 MiB target. The output included fsynced file data.
+The owned worker and RUN drained after signal 9, then a replacement
+worker completed a solve in the same boot. The diagnostic host enabled
+the existing pressure fixture alongside the leased disk. The normal
+launcher guard stayed intact. [Task evidence](task-board.md#speed-169)

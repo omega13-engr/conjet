@@ -4,12 +4,11 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{Snapshot, valid_id};
+use super::{Snapshot, Snapshotter, valid_id};
 use crate::handshake::hex;
 use crate::spec::{LaunchSpec, NATIVE_LIMITS, ResourceLimits, WORKLOAD_GID, WORKLOAD_UID};
 
 pub(super) const EXECUTOR: &str = "/run/conjet/buildkit/worker/runc-native/executor";
-pub(crate) const LIVE_EXECUTOR: &str = "/var/lib/buildkit/runc-native/executor";
 pub(crate) const LIVE_GROUPS: &[u32] = &[0, 1, 2, 3, 4, 6, 10, 11, 20, 26, 27];
 pub(crate) const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
@@ -98,19 +97,21 @@ pub(crate) fn parse_live(
     bytes: &[u8],
     snapshot: Snapshot,
     image_digest: &str,
+    snapshotter: Snapshotter,
 ) -> Result<(LaunchSpec, String), &'static str> {
     if bytes.len() as u64 > MAX_CONFIG_BYTES || !snapshot.live_worker || !valid_id(&snapshot.id) {
         return Err("invalid live build bundle bounds");
     }
     let mut bundle: Value =
         serde_json::from_slice(bytes).map_err(|_| "invalid live BuildKit bundle JSON")?;
-    let root = format!("{LIVE_EXECUTOR}/{}/rootfs", snapshot.id);
+    let executor = snapshotter.executor();
+    let root = format!("{executor}/{}/rootfs", snapshot.id);
     if bundle["root"]["path"].as_str() != Some(root.as_str()) {
         return Err("live BuildKit root does not match the snapshot");
     }
     let hosts = bundle["mounts"][6]["source"]
         .as_str()
-        .and_then(|source| source.strip_prefix(LIVE_EXECUTOR))
+        .and_then(|source| source.strip_prefix(executor))
         .and_then(|name| name.strip_prefix("/hosts."))
         .filter(|suffix| valid_id(suffix))
         .ok_or("live BuildKit hosts source changed")?;
@@ -130,10 +131,16 @@ pub(crate) fn parse_live(
         (0, 0)
     };
     let spec = process_spec(&mut bundle, snapshot, image_digest, identity)?;
+    let resolver = format!("{executor}/resolv.conf");
+    if bundle["mounts"][5]["source"].as_str() != Some(resolver.as_str()) {
+        return Err("live BuildKit resolver source changed");
+    }
     // Bind the dynamic paths to the verified lease before comparing all
     // remaining requested OCI semantics against the pinned rootless preset.
     bundle["root"]["path"] = "<root>".into();
     bundle["mounts"][6]["source"] = "<hosts>".into();
+    bundle["mounts"][5]["source"] =
+        format!("{}/resolv.conf", Snapshotter::Native.executor()).into();
     // BuildKit appends the bind flags by iterating a Go map. The accepted
     // flags only add restrictions, so their order does not affect the mount.
     for index in [5, 6, 7] {
@@ -206,6 +213,7 @@ mod tests {
 
     #[test]
     fn live_bundle_rejects_missing_or_malformed_bind_flags() {
+        let executor = Snapshotter::Native.executor();
         let snapshot = Snapshot {
             id: "nativeRun".into(),
             device: 1,
@@ -214,18 +222,19 @@ mod tests {
             live_worker: true,
         };
         let mut bundle = serde_json::json!({
-            "root": {"path": format!("{LIVE_EXECUTOR}/nativeRun/rootfs")},
+            "root": {"path": format!("{executor}/nativeRun/rootfs")},
             "process": {"args": ["/bin/true"], "env": [], "cwd": "/"},
             "mounts": [
                 null, null, null, null, null,
-                {"options": ["ro"]},
-                {"source": format!("{LIVE_EXECUTOR}/hosts.test"), "options": ["ro"]}
+                {"source": format!("{executor}/resolv.conf"), "options": ["ro"]},
+                {"source": format!("{executor}/hosts.test"), "options": ["ro"]}
             ]
         });
         let error = |bundle: &Value| match parse_live(
             &serde_json::to_vec(bundle).unwrap(),
             snapshot.clone(),
             crate::spec::BUILDKIT_CONFIG,
+            Snapshotter::Native,
         ) {
             Ok(_) => panic!("invalid bind flags were accepted"),
             Err(error) => error,

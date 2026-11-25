@@ -2939,7 +2939,7 @@ impl FreshFixture {
         owner: &str,
         id: &str,
     ) -> Result<(LaunchSpec, WorkerBuild), Failure> {
-        let (pidfd, volume) = {
+        let (pidfd, volume, snapshotter) = {
             let ledger = self.ledger.lock().expect("fresh ledger");
             let record = ledger
                 .record(owner)
@@ -2950,10 +2950,13 @@ impl FreshFixture {
                         && !record.terminate_requested
                 })
                 .ok_or(("stale_generation", "BuildKit worker lease ended"))?;
-            let (_, pidfd) = record
+            let (worker, pidfd) = record
                 .exec_context
                 .as_ref()
                 .ok_or(("stale_generation", "missing BuildKit worker process lease"))?;
+            let snapshotter = worker
+                .buildkit_snapshotter()
+                .ok_or(("stale_generation", "missing BuildKit snapshotter identity"))?;
             let volume = record
                 .volume
                 .clone()
@@ -2963,6 +2966,7 @@ impl FreshFixture {
                     .try_clone()
                     .map_err(|_| ("busy", "could not retain BuildKit process lease"))?,
                 volume,
+                snapshotter,
             )
         };
         let root = crate::exec_fixture::target_root(&pidfd).map_err(|_| {
@@ -2977,23 +2981,33 @@ impl FreshFixture {
                 "could not open live BuildKit worker mounts",
             )
         })?;
-        let bundle =
-            crate::build_snapshot::guest::read_worker_config(&root, &mountinfo, &volume, id)
-                .map_err(|_| {
-                    (
-                        "stale_generation",
-                        "could not verify live BuildKit bundle and rootfs",
-                    )
-                })?;
+        let bundle = crate::build_snapshot::guest::read_worker_config(
+            &root,
+            &mountinfo,
+            &volume,
+            id,
+            snapshotter,
+        )
+        .map_err(|error| {
+            eprintln!("BuildKit bundle verification failed: {error}");
+            (
+                "stale_generation",
+                "could not verify live BuildKit bundle and rootfs",
+            )
+        })?;
         let snapshot = bundle.identity(id.to_owned()).map_err(|_| {
             (
                 "stale_generation",
                 "could not retain live BuildKit root identity",
             )
         })?;
-        let (mut spec, hosts) =
-            crate::build_snapshot::bundle::parse_live(&bundle.config, snapshot, &self.image_digest)
-                .map_err(|reason| ("unsupported_option", reason))?;
+        let (mut spec, hosts) = crate::build_snapshot::bundle::parse_live(
+            &bundle.config,
+            snapshot,
+            &self.image_digest,
+            snapshotter,
+        )
+        .map_err(|reason| ("unsupported_option", reason))?;
         let home = spec.env.iter().position(|value| value.starts_with("HOME="));
         if home.is_none_or(|index| spec.env[index] == "HOME=") {
             let home_value = bundle.default_home(spec.uid).map_err(|_| {
@@ -3009,7 +3023,8 @@ impl FreshFixture {
                 spec.env.push(home_value);
             }
         }
-        let detached = bundle.clone_root().map_err(|_| {
+        let detached = bundle.clone_root(&pidfd).map_err(|error| {
+            eprintln!("BuildKit detach verification failed: {error}");
             (
                 "invalid_spec",
                 "could not detach verified BuildKit snapshot",
