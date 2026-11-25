@@ -43,6 +43,69 @@ Kiri's per-workload guest teardown, second-host replication and energy
 remain unmeasured. Production fingerprints and isolated host cleanup
 passed.
 
+## SPEED-065 build-only rerun
+
+The `16a05e0` [optimized candidate](native-compatibility.md#buildx-recovery-candidate)
+passed the frozen compatibility gate before all five fresh alternating
+Buildx pairs against official Kiri 0.2.2. Each engine completed 180
+measured solves and exports, 180 archive loads, and 180 executable-image
+canaries with zero workload failures. The same digest-pinned BuildKit
+0.23.2 worker, clients, input layouts, cache conditions and bounds applied
+for every boot. Core dynamic memory remained active. The original Rust
+stall did not recur. The upstream fix was verified in a focused source
+regression, separate from the timed artifacts.
+
+Selected Conjet/Kiri latency ratios use the five paired boots. With
+three measurements per row per boot, nearest-rank p95 and p99 both
+represent that boot's maximum.
+
+| Workload | p50 ratio | p99 ratio | 95% paired p99 interval |
+| --- | ---: | ---: | ---: |
+| Rust dependency change, solve and export | 34.706 | 37.022 | 32.554–43.042 |
+| Node source change, solve and export | 6.042 | 5.977 | 4.963–6.979 |
+| Node source change, archive load | 11.131 | 10.167 | 9.686–11.006 |
+| Go unchanged, solve and export | 1.249 | 1.658 | 1.300–2.209 |
+
+The complete report, per-boot percentiles and resource observations,
+all paired intervals, artifact and client hashes, and cleanup receipts
+are in `SPEED-065/cj-full.lQbpSK-build-rerun-16a05e00d07d/` under the
+ExternalSSD evidence root. Production fingerprints matched, and private
+cleanup passed in all ten boots.
+The previous lifecycle, image and service measurements retain their
+original revisions. Full single-revision Kiri parity remains unqualified.
+
+### Interrupted predecessor
+
+A subsequent run reused the exact `66a8a90` source artifacts with the
+`d537487` harness revision and repeated the 71-case gate. It completed
+all 60 lifecycle pairs with 240,000 measured operations and 1,200
+warmups, plus five image pairs with 100 verified first-pull transfers.
+Both suites completed without workload failures. Four network-none
+lifecycle p99 upper bounds exceeded 1.05.
+
+| Workload | Path | Upper 95% p99 ratio |
+| --- | --- | ---: |
+| Alpine stream/exit | CLI | 1.077084 |
+| Alpine true | API | 1.070346 |
+| Alpine true | CLI | 1.156717 |
+| Common static | CLI | 1.108870 |
+
+Build pairs one and three passed. In pair two, Node's source-change
+export returned successfully, then the native adapter rejected the
+archive and lost worker control. A delayed-VM regression reproduced
+that sequence, and `16a05e0` recovered the authenticated observation
+and passed the same test. In pair four, the Rust dependency export
+reached the expected archive size and hit the 600-second client bound
+while the worker accumulated 648.061 seconds of user CPU. The public
+BuildKit 0.23.2 regression reproduces a cache-export spin on a missing
+cache record. There is no original worker stack to confirm that path.
+[Upstream regression and fix](https://github.com/moby/buildkit/pull/6186)
+
+The run stopped after pair four. Its raw timings, failed and partial
+runs, production checks and detached-disk checks remain in
+`SPEED-065/cj-full.lQbpSK-full-d537487f49d3/` under the ExternalSSD
+evidence root.
+
 ## SPEED-056 retained guest start attribution
 
 Two disposable Core 1.3.1 boots ran the pinned guest-local API lifecycle

@@ -479,3 +479,25 @@ benchmark-harness tests passed. Strict macOS workspace Clippy reproduced
 the baseline diagnostics. The changes affect the headless engine.
 Structured native runtime witnesses provide end-to-end evidence.
 [Hosted macOS CI](https://github.com/omega13-engr/conjet/actions/runs/45473119435)
+
+## Buildx recovery candidate
+
+Optimized commit `16a05e00d07dce825319b832dd248bdd2a861d05` passed
+all **71 frozen compatibility cases**. The optimized host executable
+includes authenticated recovery for a lost read-only BuildKit worker
+observation. The five other executables matched the qualified
+`66a8a90` hashes. The six retained files and checksums, complete 71-case
+ledger, launcher witnesses, and detached disk checks are in
+`SPEED-098/cj-full.lQbpSK-release-16a05e00d07d/` under the ExternalSSD
+evidence root.
+
+The isolated 2.45-second VM delay reproduced the previous build pair's
+archive rejection and loss of worker control. The fixed host completed
+all twelve Node export, archive load, and execution canaries with the
+same injected delay. The public Rust, Go and Node qualification, Docker
+build API, and direct BuildKit routes passed on the optimized artifacts.
+Core passed both the workload admission and independent pressure
+checks with verified data and recovery to 448 MiB. Rust workspace tests,
+formatting, ARM64 guest Clippy and hosted macOS checks passed. Strict
+host Clippy reproduced the baseline diagnostics.
+[Hosted macOS CI](https://github.com/omega13-engr/conjet/actions/runs/45530432842)

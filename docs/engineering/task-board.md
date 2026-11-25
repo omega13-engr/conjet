@@ -807,6 +807,17 @@ four was retained alongside the passing same-artifact replay. The lifecycle
 and image cohorts retain their original `21171de` hashes.
 [Current comparison and limits](docker-benchmark-results.md#speed-065-optimized-native-comparison)
 
+The later `d537487` harness rerun of the `66a8a90` source artifacts
+completed 60 lifecycle and five image pairs. Its Node pair two and
+Rust pair four failures remain in
+`SPEED-065/cj-full.lQbpSK-full-d537487f49d3/`. After the authenticated
+worker-observation fix, `16a05e0` passed 71/71 and all five fresh
+Buildx pairs. Each engine completed 180 solves and exports, 180 loads,
+and 180 executable-image canaries. Both prior failures were absent.
+The new timing scope is Buildx. The other suites retain their original
+artifacts, and full parity remains unqualified.
+[Build-only rerun](docker-benchmark-results.md#speed-065-build-only-rerun)
+
 ### SPEED-089
 
 Title: Qualify the Docker builder gateway for the frozen matrix
@@ -1687,6 +1698,19 @@ reported exit 0. It read the actual guest ARM64 CPU information. See
 `SPEED-156/cache-gateway-cpu-info/`. The worker still must run the
 original Buildx `dial-stdio` solve and cancellation.
 
+Build pair four of the subsequent `66a8a90` comparison stalled after
+writing the expected number of bytes in a Rust dependency export.
+The worker accumulated 648.061 seconds of user CPU, compared with
+5.694 to 5.939 seconds for that builder in the preceding three boots.
+The upstream missing-cache-record regression timed out inside BuildKit
+0.23.2's cache exporter and passed on the same source with the upstream
+fix. The original worker stack is unavailable, so its specific loop
+remains unconfirmed. The original pin stays in the frozen comparison.
+See `SPEED-153/cj-full.lQbpSK-buildkit-exporter/` for the focused
+regression and `SPEED-153/cj-full.lQbpSK-rust-export-trace/` for
+twelve diagnostic builders that completed without the stall.
+[Upstream fix and regression](https://github.com/moby/buildkit/pull/6186)
+
 ### SPEED-154
 
 Title: Mount a leased native BuildKit workspace beside the disk image store
@@ -2169,7 +2193,15 @@ pins on a fresh public retry. Production checks, native guest teardown,
 detached ext4 checks, and all six executable hashes passed. The ledger,
 checksums, retained binaries and receipts are in
 `SPEED-098/cj-compat.tMPK1e-release-66a8a908e0ce/`.
-[Current qualifications](native-compatibility.md#qualified-optimized-candidate)
+[Earlier qualification](native-compatibility.md#qualified-optimized-candidate)
+
+The subsequent `16a05e0` BuildKit worker recovery candidate also
+passed **71/71**. Its two Core memory lanes qualified growth to
+2,048 MiB, active data integrity, and recovery to 448 MiB. The
+qualified executable checksums, exact source mapping, witnesses and
+detached ext4 checks are in
+`SPEED-098/cj-full.lQbpSK-release-16a05e00d07d/`.
+[Buildx recovery candidate](native-compatibility.md#buildx-recovery-candidate)
 
 
 ### SPEED-025
