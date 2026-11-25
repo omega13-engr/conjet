@@ -575,9 +575,10 @@ impl Store {
                     .context("ExternalSSD OCI image capacity exceeded")?;
                 let mut pending =
                     tempfile::NamedTempFile::new_in(path.parent().expect("blob parent"))?;
-                blob.copy_to(&mut pending)?;
+                let mut verified = oci_stage::DigestWriter::new(&mut pending);
+                blob.copy_to(&mut verified)?;
                 ensure!(
-                    oci_stage::digest_file(pending.as_file_mut(), blob.len())? == expected,
+                    verified.finish() == expected,
                     "Docker archive blob changed before publication"
                 );
                 pending.as_file().sync_all()?;
@@ -911,4 +912,48 @@ fn receive(
         written += read;
     }
     Ok(written as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extent_mutation_keeps_the_blob_and_image_private() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store {
+            root: root.path().to_owned(),
+            registry: None,
+            owned_registry: None,
+            public: public_registry::Pins::default(),
+            encoding: PackageEncoding::DiskV2,
+            installed: BTreeMap::new(),
+            _lock: tempfile::tempfile().unwrap(),
+        };
+        fs::create_dir(root.path().join("images")).unwrap();
+        fs::create_dir_all(root.path().join("blobs/sha256")).unwrap();
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(b"original").unwrap();
+        let digest = format!("sha256:{}", oci_stage::digest_file(&mut source, 8).unwrap());
+        source.write_all(b"modified").unwrap();
+        let blobs = BTreeMap::from([(
+            digest.clone(),
+            archive::Blob::Extent {
+                file: &source,
+                bytes: 0..8,
+            },
+        )]);
+
+        let error = store.publish_blobs(&digest, blobs).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Docker archive blob changed before publication"
+        );
+        assert_eq!(
+            root.path().join("blobs/sha256").read_dir().unwrap().count(),
+            0
+        );
+        assert_eq!(root.path().join("images").read_dir().unwrap().count(), 0);
+    }
 }

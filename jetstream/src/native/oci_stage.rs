@@ -594,12 +594,42 @@ pub(super) fn digest_file(file: &mut File, size: u64) -> anyhow::Result<String> 
     Ok(hex(&hash.finalize()))
 }
 
+pub(super) struct DigestWriter<W> {
+    output: W,
+    hash: Sha256,
+}
+
+impl<W: Write> DigestWriter<W> {
+    pub(super) fn new(output: W) -> Self {
+        Self {
+            output,
+            hash: Sha256::new(),
+        }
+    }
+
+    pub(super) fn finish(self) -> String {
+        hex(&self.hash.finalize())
+    }
+}
+
+impl<W: Write> Write for DigestWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.output.write(bytes)?;
+        self.hash.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.output.flush()
+    }
+}
+
 fn disk_layer(
     layout: &Path,
     workspace: &Path,
     descriptor: &Descriptor,
     budget: u64,
-) -> anyhow::Result<(File, u64)> {
+) -> anyhow::Result<(File, u64, String)> {
     let digest = descriptor
         .digest
         .strip_prefix("sha256:")
@@ -615,14 +645,15 @@ fn disk_layer(
         "OCI blob digest mismatch"
     );
     let mut output = tempfile::tempfile_in(workspace)?;
+    let mut verified = DigestWriter::new(&mut output);
     let size = match descriptor.media_type.as_str() {
         "application/vnd.oci.image.layer.v1.tar" => {
-            io::copy(&mut source.take(budget + 1), &mut output)?
+            io::copy(&mut source.take(budget + 1), &mut verified)?
         }
         "application/vnd.oci.image.layer.v1.tar+gzip"
         | "application/vnd.docker.image.rootfs.diff.tar.gzip" => {
             let decoder = MultiGzDecoder::new(BufReader::new(source));
-            io::copy(&mut decoder.take(budget + 1), &mut output)?
+            io::copy(&mut decoder.take(budget + 1), &mut verified)?
         }
         _ => anyhow::bail!("unsupported OCI layer media type"),
     };
@@ -630,7 +661,9 @@ fn disk_layer(
         size <= budget,
         "OCI layers exceed the uncompressed byte budget"
     );
-    Ok((output, size))
+    let diff_id = verified.finish();
+    output.rewind()?;
+    Ok((output, size, diff_id))
 }
 
 fn write_disk_package(
@@ -647,9 +680,9 @@ fn write_disk_package(
         compressed_budget = compressed_budget
             .checked_sub(descriptor.size as u64)
             .context("OCI descriptor exceeds its disk byte budget")?;
-        let (mut layer, size) = disk_layer(layout, workspace, descriptor, budget)?;
+        let (mut layer, size, diff_id) = disk_layer(layout, workspace, descriptor, budget)?;
         ensure!(
-            receipt["diff_ids"][index] == format!("sha256:{}", digest_file(&mut layer, size)?),
+            receipt["diff_ids"][index] == format!("sha256:{diff_id}"),
             "uncompressed OCI diff ID mismatch"
         );
         budget -= size;
@@ -669,25 +702,26 @@ fn write_disk_package(
         .create_new(true)
         .mode(0o600)
         .open(workspace.join("package.cjoci"))?;
-    packed::write_header(&mut package, &manifest.config.digest, tree.len())?;
+    let mut verified = DigestWriter::new(&mut package);
+    packed::write_header(&mut verified, &manifest.config.digest, tree.len())?;
     for (record, entry) in records(&tree) {
         if let Some(entry) = entry {
             let layer = &mut layers[entry.layer];
             layer.seek(SeekFrom::Start(entry.data.start))?;
             packed::write_record(
-                &mut package,
+                &mut verified,
                 &record,
                 layer,
                 entry.data.end - entry.data.start,
             )?;
         } else {
-            packed::write_record(&mut package, &record, &mut io::empty(), 0)?;
+            packed::write_record(&mut verified, &record, &mut io::empty(), 0)?;
         }
     }
+    let sha256 = verified.finish();
     let size = package.metadata()?.len();
     package.rewind()?;
     packed::Index::read(&mut BufReader::new(&mut package), size)?;
-    let sha256 = digest_file(&mut package, size)?;
     package.sync_all()?;
     receipt["rootfs_entries"] = json!(tree.len());
     receipt["package_encoding"] = json!(oci::PackageEncoding::DiskV2);
@@ -768,6 +802,32 @@ pub(super) fn publish_with_encoding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_writer_hashes_only_bytes_accepted_by_a_short_writer() {
+        struct ShortWriter(Vec<u8>);
+
+        impl Write for ShortWriter {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                let count = data.len().min(3);
+                self.0.extend_from_slice(&data[..count]);
+                Ok(count)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut output = ShortWriter(Vec::new());
+        let mut verified = DigestWriter::new(&mut output);
+        verified.write_all(b"original contents").unwrap();
+        assert_eq!(
+            verified.finish(),
+            hex(&Sha256::digest(b"original contents"))
+        );
+        assert_eq!(output.0, b"original contents");
+    }
 
     fn read_layer(layer: &[u8]) -> anyhow::Result<BTreeMap<String, Entry>> {
         archive(
