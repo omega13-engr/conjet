@@ -3587,6 +3587,55 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-178
+
+Title: Batch ExternalSSD bind reads with host-change invalidation
+
+Description: Reduce single-page reads on the native bind while preserving
+visibility of ordinary host file changes and the existing FUSE limits.
+
+Is blocked by task: SPEED-177 qualified the VMM write-buffer change.
+
+Acceptance Criteria:
+
+- Bound read-ahead by the existing read limit and require the kernel to
+  support automatic invalidation. Preserve file-open, permission,
+  read-only and write durability behavior.
+- Keep a guest handle open across a host write to the next page. The
+  guest must observe the new bytes through that handle and after reopening.
+- Re-run the original storage samples with exact checksum and bind
+  cleanup witnesses on matched boots.
+
+Problem and Evidence: Each traced bind issued 9,216 read requests averaging
+4 KiB. The FUSE INIT reply advertised zero read-ahead. The trace exposed
+about 673 ms of guest wait time on read replies per mount.
+
+Approach: Use a bounded read-ahead window only with the kernel's
+mtime-based automatic invalidation. Keep the existing write and buffer
+limits and ordinary cache invalidation on open.
+
+Evidence: The exact live regression observed a host write both with a
+guest handle open and after reopening. The read-only check and bind
+teardown also passed. Two alternating uninstrumented pairs reduced the
+complete bind median from 1,246.817 to 760.098 ms and sequential read and
+hashing from 442.524 to 88.466 ms. The same pairs increased random reads
+from 122.402 to 265.742 ms. Separate traces confirmed reads fell from
+9,216 to 1,537 and GETATTR rose from 656 to 1,682 per mount. The extra
+metadata exchanges account for the random-read cost. ExternalSSD retains
+`SPEED-178/cj-perf.LBoyR4-bind-read-ahead/` and
+`SPEED-178/cj-perf.LBoyR4-bind-read-ahead-ab/`.
+
+Source: `jetstream/src/native/docker/bind_fuse.rs`.
+
+Review: Reverted the experiment because it doubled latency at the
+original random-read boundary. The fixture's first polling attempt
+timed out on `existsSync`. The retained baseline and candidate both
+passed after using `statSync` to distinguish missing files from access
+errors. [FUSE read path](https://raw.githubusercontent.com/torvalds/linux/v6.12/fs/fuse/file.c)
+[FUSE initialization and invalidation](https://raw.githubusercontent.com/torvalds/linux/v6.12/fs/fuse/inode.c)
+
+Next Action: Test coalesced FUSE replies with the original cache policy.
+
 ### SPEED-177
 
 Title: Attribute the ExternalSSD bind workload and reduce its transport cost
