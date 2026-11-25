@@ -62,6 +62,30 @@ the stage script with `--native-guest`. The experiment uses the
 existing verified Conjet Core v1.3.1 kernel; no Core release is needed.
 See [experimental native execution](engineering/speed-release-scope.md).
 
+### Native Docker release candidate
+
+CI and release staging build the static ARM64 Core memory helpers from
+the same revision and verify the Conjet Core v1.3.1 Linux 6.12.86 Image
+against the checked-in SHA-512. The staged app, menu bar helper, and
+DMG command-line payload carry the guest supervisor and the verified
+native Core assets. The standalone executable command retains its
+`--experimental` flag.
+
+The native Docker candidate passed 71 compatibility cases on
+`c8cc705`. The separate Kiri comparison passed 81 of 91 pairs. Its
+incomplete pairs include public registry setup timeouts and Kiri OOM
+verification failures. Benchmark scope and engine limits apply to any
+release notes. [Qualification and results](engineering/docker-benchmark-results.md#speed-065-docker-29101-comparison)
+
+Default promotion requires a profile-owned native lifecycle through
+the installed CLI, daemon, and app. Qualify a fresh profile and prove
+upgrade and rollback with the previous Docker disk preserved. Verify
+staged native guest boot, memory pressure and recovery, disk and
+image persistence, socket ownership, and teardown. Require fresh
+compatibility evidence from the packaged path, independent review,
+required CI, Developer ID signing, notarization, stapling, and the
+final DMG checksum before publication.
+
 Production notarized releases require these repository secrets:
 
 - `MACOS_CERTIFICATE_P12`: base64-encoded Developer ID Application `.p12`

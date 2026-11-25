@@ -1,0 +1,24 @@
+name: Build native Core assets
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  native-core-assets:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the static guest compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build memory helpers and verify the kernel pin
+        run: bash build-support/build-native-core-assets.sh native-core-assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conjet-native-core-assets
+          path: native-core-assets/
+          if-no-files-found: error

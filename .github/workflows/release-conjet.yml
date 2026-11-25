@@ -23,9 +23,13 @@ env:
   SWIFT_VERSION: "6.1.0"
 
 jobs:
+  native-core-assets:
+    uses: ./.github/workflows/native-core-assets.yml
+
   build:
     name: Build, sign, notarize DMG
     runs-on: macos-15
+    needs: native-core-assets
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
@@ -160,6 +164,12 @@ jobs:
             cargo build --locked --release --target aarch64-unknown-linux-musl \
             -p conjet-launch-service --bin conjet-launchd
 
+      - name: Download native Core assets
+        uses: actions/download-artifact@v4
+        with:
+          name: conjet-native-core-assets
+          path: native-core-assets
+
       - name: Stage signed Conjet app bundle
         env:
           SIGNING_IDENTITY: ${{ steps.certificate.outputs.identity }}
@@ -170,6 +180,7 @@ jobs:
             --version "${{ steps.meta.outputs.version }}" \
             --dist-dir dist \
             --native-guest target/aarch64-unknown-linux-musl/release/conjet-launchd \
+            --native-core-assets native-core-assets \
             --signing-identity "${SIGNING_IDENTITY}" \
             --entitlements build-support/conjet-release.entitlements
 

@@ -7,6 +7,7 @@ on:
       - dev
     paths:
       - .github/workflows/ci.yml
+      - .github/workflows/native-core-assets.yml
       - Package.swift
       - Package.resolved
       - VERSION
@@ -16,6 +17,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - guest/launch-service/**
+      - guest/image/conjet-core/src/**
       - jetstream/**
       - network-helper/**
       - benchmarks/**
@@ -24,6 +26,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/ci.yml
+      - .github/workflows/native-core-assets.yml
       - Package.swift
       - Package.resolved
       - VERSION
@@ -33,6 +36,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - guest/launch-service/**
+      - guest/image/conjet-core/src/**
       - jetstream/**
       - network-helper/**
       - benchmarks/**
@@ -51,9 +55,13 @@ env:
   SWIFT_VERSION: "6.1.0"
 
 jobs:
+  native-core-assets:
+    uses: ./.github/workflows/native-core-assets.yml
+
   swift:
     name: Swift build and test
     runs-on: macos-15
+    needs: native-core-assets
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -94,6 +102,12 @@ jobs:
             cargo build --locked --release --target aarch64-unknown-linux-musl \
             -p conjet-launch-service --bin conjet-launchd
 
+      - name: Download native Core assets
+        uses: actions/download-artifact@v4
+        with:
+          name: conjet-native-core-assets
+          path: native-core-assets
+
       - name: Stage Conjet app bundle
         run: |
           set -euo pipefail
@@ -102,6 +116,7 @@ jobs:
             --version "$(cat VERSION)" \
             --dist-dir dist \
             --native-guest target/aarch64-unknown-linux-musl/release/conjet-launchd \
+            --native-core-assets native-core-assets \
             --signing-identity - \
             --entitlements build-support/conjet-release.entitlements
 
@@ -138,6 +153,15 @@ jobs:
           test -x "${mount_dir}/bin/ConjetCoreVMM/conjet-network"
           guest="Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-launchd-linux-arm64"
           cmp "${mount_dir}/Conjet.app/${guest}" "${mount_dir}/bin/ConjetCoreVMM/conjet-launchd-linux-arm64"
+          helper="${mount_dir}/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app"
+          cmp "${mount_dir}/Conjet.app/${guest}" "${helper}/${guest}"
+          native="Contents/Resources/ConjetTools/ConjetCoreVMM/NativeCore"
+          for asset in Image conjet-memd conjet-reclaimd kernel.sha512; do
+            cmp "native-core-assets/${asset}" "${mount_dir}/Conjet.app/${native}/${asset}"
+            cmp "${mount_dir}/Conjet.app/${native}/${asset}" "${mount_dir}/bin/ConjetCoreVMM/NativeCore/${asset}"
+            cmp "${mount_dir}/Conjet.app/${native}/${asset}" "${helper}/${native}/${asset}"
+          done
+          (cd "${mount_dir}/bin/ConjetCoreVMM/NativeCore" && shasum -a 512 -c kernel.sha512)
           "${mount_dir}/bin/conjet" native --help
           test -x "${mount_dir}/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-network"
           "${mount_dir}/bin/ConjetCoreVMM/conjet-network" --version
