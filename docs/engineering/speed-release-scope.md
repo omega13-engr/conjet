@@ -88,11 +88,15 @@ makes no superiority claim.
 
 ## Native Docker candidate
 
-The native Docker candidate passed all 71 frozen compatibility cases
-with Core dynamic memory and the pinned public Docker, Buildx, image,
+The optimized benchmark revision `c8cc705` passed all 71 frozen
+compatibility cases with Core dynamic memory and the pinned public Docker, Buildx, image,
 and service fixtures. The separate Kiri comparison passed 81 of 91
 pairs. The frozen suite covers a bounded ARM64 capability profile.
 [Compatibility proof and limits](native-compatibility.md#docker-29101-optimized-candidate)
+
+The [packaged 3.1.0 evaluation](packaged-native-release-evaluation.md)
+passed 58 of 71 frozen cases on its own artifacts. The report records
+the remaining provenance and diagnostic fixture requirements.
 
 Production promotion requires the compatible workload matrix, independent
 review, required CI and the app release lane's signing and notarization

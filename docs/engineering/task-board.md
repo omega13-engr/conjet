@@ -2683,6 +2683,30 @@ acceptance without changing the SPEED-008 verdict.
 
 ## UNDERREVIEW
 
+### SPEED-182
+
+Title: Evaluate the packaged Native Docker default for Conjet 3.1.0
+
+Description: Qualify the exact packaged CLI, daemon, desktop, and menu helper
+on isolated Apple silicon profiles and verify appliance rollback.
+
+Acceptance Criteria:
+
+- Verify the exact staged package, ordinary native-default route, frozen
+  71-case gate, Core memory, crash recovery, persistence, and rollback.
+- Retain the screenshots and raw attempts, verify isolation, and keep
+  Developer ID signing, notarization and independent review in the release gate.
+
+Evidence: Ad-hoc source `5e6c44a` passed the hosted source workflow, all 12
+lifecycle groups, and the desktop, helper, installation, Core growth and
+rollback tests. The frozen gate passed 58/71. The remaining cases and artifact
+checksums are in the [packaged evaluation](packaged-native-release-evaluation.md).
+
+Review: Implementation self-review complete. The frozen gate and independent
+review remain open for [PR #33](https://github.com/omega13-engr/conjet/pull/33).
+
+Next Action: Qualify the outstanding frozen witnesses before production promotion.
+
 ### SPEED-063
 
 Title: Prove one BuildKit RUN through the native executor

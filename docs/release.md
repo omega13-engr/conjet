@@ -75,6 +75,8 @@ The native Docker candidate passed 71 compatibility cases on
 incomplete pairs include public registry setup timeouts and Kiri OOM
 verification failures. Benchmark scope and engine limits apply to any
 release notes. [Qualification and results](engineering/docker-benchmark-results.md#speed-065-docker-29101-comparison)
+The separate [packaged 3.1.0 evaluation](engineering/packaged-native-release-evaluation.md)
+recorded 58/71 frozen cases and retains the remaining release gates.
 
 Fresh packaged Apple Silicon profiles select `native-docker` through the
 ordinary start path. Native profiles use two vCPUs, a 2 GiB memory ceiling,
@@ -104,6 +106,10 @@ enabled. SSH, privileged containers, arbitrary registries, removable host
 binds, and AMD64 images use the Docker appliance profile. The native Docker
 build API uses private copies of Docker 29.10.1 and Buildx 0.39.1 when
 their installed checksums match the packaged pins.
+Create a named volume explicitly before mounting it. Image pulls require
+an idle native guest.
+Use Buildx with the pinned BuildKit worker for Native Docker CLI builds.
+The desktop Dockerfile editor is available in Docker appliance profiles.
 
 Release gates include fresh packaged compatibility, legacy rollback,
 independent review, required CI, Developer ID signing, notarization,

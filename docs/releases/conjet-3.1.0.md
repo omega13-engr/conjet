@@ -1,10 +1,19 @@
-# Conjet 3.1.0
+# Conjet 3.1.0 candidate
 
-Conjet adds an opt-in experiment for launching one static ARM64 Linux
-executable in a foreground Jetstream session. The native API supports
-fresh execution, explicit preparation, one-use claims, cancellation,
-bounded output, and verified guest cleanup. The normal Docker commands
-continue to use the existing Docker runtime.
+Fresh packaged Apple silicon profiles select Native Docker through the
+ordinary Conjet startup path. Existing profiles keep their configured
+runtime and data. Native and appliance volumes use separate disks.
+[Native Docker scope and rollback](../release.md#native-docker-default)
+
+The standalone command for launching a static ARM64 Linux executable
+remains experimental. It supports fresh execution, preparation, one-use
+claims, cancellation, bounded output, and verified guest cleanup in a
+foreground Jetstream session.
+
+The proposed version is 3.1.0. Independent review, Developer ID signing,
+notarization and stapling are production release gates.
+The [packaged evaluation](../engineering/packaged-native-release-evaluation.md)
+records 58/71 frozen cases. Production promotion remains held.
 
 The local verification envelope is a single Apple M1 Pro, with no guest
 network and one active workload or prepared slot per session. In three
