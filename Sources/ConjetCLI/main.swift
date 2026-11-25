@@ -1655,7 +1655,7 @@ struct ConjetCLI {
         var startArgs = args
         let waitMode = try parseVMStartWaitMode(from: &startArgs, defaultMode: .control)
         let config = try updateProfileConfigFromStartArgs(startArgs, paths: paths, json: json)
-        try autoInstallSSHConfig(json: json)
+        if config.containerRuntime != .nativeDocker { try autoInstallSSHConfig(json: json) }
         try ensureVMConfiguredForStart(json: json, config: config)
         let socketPath = try startDaemonOnly(printStatus: !json)
         persistMenuBarRuntimeBinding(paths: paths)
@@ -1663,7 +1663,8 @@ struct ConjetCLI {
             launchContainingAppForMenuBarIfAvailable()
         }
         let response = try startVMIfConfigured(socketPath: socketPath, config: config, json: json, waitMode: waitMode)
-        if response.ok, config.ssh.enabled, FileManager.default.fileExists(atPath: paths.dockerSocket.path) {
+        if response.ok, config.containerRuntime != .nativeDocker, config.ssh.enabled,
+           FileManager.default.fileExists(atPath: paths.dockerSocket.path) {
             _ = try? reconcileSSHKnownHosts()
         }
         return response
@@ -1966,6 +1967,10 @@ struct ConjetCLI {
         }
 
         if config != original {
+            if config.containerRuntime != original.containerRuntime,
+               daemonIsRunning(socketPath: try socketPath(paths: paths)) {
+                throw ConjetError.invalidArgument("Stop the profile before changing its container runtime")
+            }
             try config.save(paths: paths)
             if !json {
                 ConjetFetchUI(enabled: true).step("[profile \(paths.profileName)] updated")
@@ -2120,6 +2125,9 @@ struct ConjetCLI {
 
         let paths = ConjetPaths.default()
         let config = try ConjetConfig.loadOrCreate(paths: paths)
+        guard config.containerRuntime != .nativeDocker else {
+            throw ConjetError.invalidArgument("Native Docker uses bundled Core assets. Update the installed app or Homebrew package.")
+        }
         try autoInstallSSHConfig(json: json)
         let currentSocketPath = try socketPath(paths: paths)
         let wasRunning = daemonIsRunning(socketPath: currentSocketPath)
@@ -2218,13 +2226,16 @@ struct ConjetCLI {
         waitMode: VMStartWaitMode
     ) throws -> DaemonResponse {
         let store = VMImageStore()
-        guard store.manifestExists() else {
+        let nativeDocker = config.containerRuntime == .nativeDocker
+        guard nativeDocker || store.manifestExists() else {
             if !json {
                 ConjetFetchUI(enabled: true).step("[vm 2/2] not configured; no Conjet Core image imported")
             }
             return DaemonResponse(ok: false, message: "VM is not configured", vm: store.status())
         }
-        try prepareBootstrapShare(paths: ConjetPaths.default(), engine: config.networkBridgeEngine)
+        if !nativeDocker {
+            try prepareBootstrapShare(paths: ConjetPaths.default(), engine: config.networkBridgeEngine)
+        }
         let renderer = json ? nil : VMStartLiveRenderer(socketPath: socketPath, serialLogPath: store.status().serialLogPath)
         renderer?.start()
         let response: DaemonResponse
@@ -4682,6 +4693,7 @@ struct ConjetCLI {
     }
 
     private static func ensureVMConfiguredForStart(json: Bool, config: ConjetConfig) throws {
+        if config.containerRuntime == .nativeDocker { return }
         let store = VMImageStore()
         if store.manifestExists() {
             try store.ensureDataDiskIfNeeded(sizeBytes: gibibytes(config.diskGiB))

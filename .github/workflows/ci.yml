@@ -92,6 +92,7 @@ jobs:
           cargo test --locked --workspace
 
       - name: Test Conjet
+        timeout-minutes: 15
         run: swift test
 
       - name: Build native Linux guest supervisor
@@ -156,11 +157,18 @@ jobs:
           helper="${mount_dir}/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app"
           cmp "${mount_dir}/Conjet.app/${guest}" "${helper}/${guest}"
           native="Contents/Resources/ConjetTools/ConjetCoreVMM/NativeCore"
-          for asset in Image conjet-memd conjet-reclaimd kernel.sha512; do
+          for asset in Image conjet-memd conjet-reclaimd kernel.sha512 boot-image volume.tar.gz; do
             cmp "native-core-assets/${asset}" "${mount_dir}/Conjet.app/${native}/${asset}"
             cmp "${mount_dir}/Conjet.app/${native}/${asset}" "${mount_dir}/bin/ConjetCoreVMM/NativeCore/${asset}"
             cmp "${mount_dir}/Conjet.app/${native}/${asset}" "${helper}/${native}/${asset}"
           done
+          diff -r native-core-assets/BootOCI "${mount_dir}/bin/ConjetCoreVMM/NativeCore/BootOCI"
+          diff -r native-core-assets/BootOCI "${mount_dir}/Conjet.app/${native}/BootOCI"
+          diff -r native-core-assets/BootOCI "${helper}/${native}/BootOCI"
+          pins="${mount_dir}/Conjet.app/${native}/docker-client-pins.json"
+          cmp benchmarks/scenarios/docker-comparison-v1.json "$pins"
+          cmp "$pins" "${mount_dir}/bin/ConjetCoreVMM/NativeCore/docker-client-pins.json"
+          cmp "$pins" "${helper}/${native}/docker-client-pins.json"
           (cd "${mount_dir}/bin/ConjetCoreVMM/NativeCore" && shasum -a 512 -c kernel.sha512)
           "${mount_dir}/bin/conjet" native --help
           test -x "${mount_dir}/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-network"

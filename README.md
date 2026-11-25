@@ -69,6 +69,11 @@ Start Conjet:
 conjet start
 ```
 
+Fresh profiles from the Apple Silicon app or DMG use Native Docker.
+Existing profiles continue to use their configured engine. Native Docker
+supports the pinned ARM64 workload profile described in the release guide.
+[Native Docker scope and rollback](docs/release.md#native-docker-default)
+
 Check status:
 
 ```sh
@@ -83,7 +88,8 @@ conjet restart
 
 Restart prunes runtime cache before shutdown when Conjet Core is already running.
 
-Update the Conjet Core VM image:
+Use the app or Homebrew to update bundled Native Docker assets. For an
+appliance profile, update its separate Conjet Core image with:
 
 ```sh
 conjet update
@@ -92,7 +98,7 @@ conjet update
 Run a container:
 
 ```sh
-conjet run hello-world
+conjet run docker.io/library/alpine@sha256:e233f2058b0628266762f745a2c17e623b418e0090f47d223909d1f9a7d4367e /bin/echo 'Hello from Conjet'
 ```
 
 Use Compose:

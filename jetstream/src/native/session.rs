@@ -135,6 +135,12 @@ struct AdmissionControl<'a> {
     discovery: DiscoveryMode,
 }
 
+#[derive(Clone, Copy)]
+enum SessionOwner {
+    Foreground(u64),
+    Supervisor(libc::pid_t),
+}
+
 const TRACE_LIMIT: usize = 8192;
 
 struct AdmissionTrace {
@@ -308,7 +314,11 @@ extern "C" fn interrupted(_: libc::c_int) {
     INTERRUPTED.store(true, Ordering::Release);
 }
 
-pub(super) fn serve(options: Options, docker_root: Option<&Path>) -> anyhow::Result<()> {
+pub(super) fn serve(
+    options: Options,
+    docker_root: Option<&Path>,
+    parent: Option<libc::pid_t>,
+) -> anyhow::Result<()> {
     let kernel_expected = unhex::<64>(&options.kernel_sha512).context("invalid kernel SHA-512")?;
     let expected = unhex::<32>(&options.sha256).context("invalid executable SHA-256")?;
     let (workload, oci, image_digest) = if let Some(path) = options.oci_package {
@@ -423,7 +433,12 @@ pub(super) fn serve(options: Options, docker_root: Option<&Path>) -> anyhow::Res
         memory_mib: 2048,
         vcpu_count: 2,
         boot_source: BootSource {
-            name: "experimental-native".into(),
+            name: if parent.is_some() {
+                "native-docker"
+            } else {
+                "experimental-native"
+            }
+            .into(),
             kernel_path: directory.join("Image"),
             initrd_path: Some(directory.join("init.cpio")),
             root_disk_path: directory.join("blank.raw"),
@@ -452,6 +467,10 @@ pub(super) fn serve(options: Options, docker_root: Option<&Path>) -> anyhow::Res
         ))
     });
     let finished = AtomicBool::new(false);
+    let owner = parent.map_or(
+        SessionOwner::Foreground(options.lifetime_seconds),
+        SessionOwner::Supervisor,
+    );
     let orderly = std::thread::scope(|scope| -> anyhow::Result<bool> {
         let control_stop = Arc::clone(&force_stop);
         let finished_signal = &finished;
@@ -471,13 +490,16 @@ pub(super) fn serve(options: Options, docker_root: Option<&Path>) -> anyhow::Res
                 &key,
                 finished_signal,
                 &control_stop,
-                options.lifetime_seconds,
+                owner,
                 admission_control,
             )
         });
         let report = machine.run(HvfBootOptions {
             max_exits: u64::MAX,
-            max_runtime_ms: (options.lifetime_seconds + 12) * 1_000,
+            max_runtime_ms: match owner {
+                SessionOwner::Supervisor(_) => 0,
+                SessionOwner::Foreground(seconds) => (seconds + 12) * 1_000,
+            },
             host_tick_ms: 25,
             require_conjet_ready: false,
             enable_native_launch: true,
@@ -549,7 +571,7 @@ fn manage_session(
     key: &[u8; 32],
     finished: &AtomicBool,
     force_stop: &AtomicBool,
-    lifetime: u64,
+    owner: SessionOwner,
     admission: Option<AdmissionControl<'_>>,
 ) -> anyhow::Result<bool> {
     let mut trace = admission
@@ -558,7 +580,10 @@ fn manage_session(
         .map(AdmissionTrace::new);
     let start = Instant::now();
     let startup = start + Duration::from_secs(15);
-    let deadline = start + Duration::from_secs(lifetime);
+    let deadline = match owner {
+        SessionOwner::Foreground(seconds) => Some(start + Duration::from_secs(seconds)),
+        SessionOwner::Supervisor(_) => None,
+    };
     let mut ready = false;
     let mut admission_boot = None;
     let mut admission_peer = None;
@@ -597,7 +622,8 @@ fn manage_session(
                 output,
                 "{}",
                 json!({
-                    "experimental": true, "owner": "native", "session": directory,
+                    "experimental": matches!(owner, SessionOwner::Foreground(_)),
+                    "owner": "native", "session": directory,
                     "pid": identity.pid, "image_digest": identity.image_digest,
                 })
             )
@@ -609,7 +635,9 @@ fn manage_session(
             ready = true;
         }
         if INTERRUPTED.load(Ordering::Acquire)
-            || Instant::now() >= if ready { deadline } else { startup }
+            || matches!(owner, SessionOwner::Supervisor(pid) if unsafe { libc::getppid() } != pid)
+            || (if ready { deadline } else { Some(startup) })
+                .is_some_and(|limit| Instant::now() >= limit)
         {
             if client::stop_with_identity(directory, identity, key).is_err() {
                 force_stop.store(true, Ordering::Release);

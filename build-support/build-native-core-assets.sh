@@ -35,6 +35,16 @@ curl --disable --fail --silent --show-error --location --max-redirs 4 \
   'https://github.com/omega13-engr/conjet/releases/download/conjet-core-v1.3.1/conjet-linux-6.12.86-aarch64-Image'
 (cd "$stage" && shasum -a 512 -c "$root/build-support/native-core-kernel.sha512")
 
+python3 "$root/build-support/fetch-native-boot-layout.py" "$stage/BootOCI" > "$stage/boot-image"
+mkdir "$stage/disk"
+truncate -s 16G "$stage/disk/volume.raw"
+chmod 0600 "$stage/disk/volume.raw"
+mke2fs -q -F -t ext4 -L CJ_NATIVE_VOL "$stage/disk/volume.raw"
+e2fsck -fn "$stage/disk/volume.raw"
+"${CONJET_NATIVE_TAR:-bsdtar}" --format pax -czf "$stage/volume.tar.gz" -C "$stage/disk" volume.raw
+
 mkdir -m 0755 "$output"
 install -m 0644 "$stage/Image" "$stage/conjet-memd" "$stage/conjet-reclaimd" "$output/"
 install -m 0644 "$root/build-support/native-core-kernel.sha512" "$output/kernel.sha512"
+install -m 0644 "$stage/boot-image" "$stage/volume.tar.gz" "$output/"
+mv "$stage/BootOCI" "$output/BootOCI"

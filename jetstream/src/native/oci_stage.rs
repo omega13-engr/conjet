@@ -17,7 +17,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const SCRATCH: &str = "/Volumes/ExternalSSD/dev_workspace/tmp";
 pub(super) const METADATA_LIMIT: usize = 64 * 1024;
 pub(super) const LAYER_BUDGET: usize = 40 * 1024 * 1024;
 const LAYERS_LIMIT: usize = 16;
@@ -728,8 +727,7 @@ fn write_disk_package(
     Ok((sha256, receipt))
 }
 
-pub(super) fn stage(options: Options) -> anyhow::Result<()> {
-    let root = Path::new(SCRATCH);
+pub(super) fn stage(options: Options, root: &Path) -> anyhow::Result<()> {
     let layout = options.layout.canonicalize()?;
     let parent = options
         .output
@@ -738,7 +736,7 @@ pub(super) fn stage(options: Options) -> anyhow::Result<()> {
         .canonicalize()?;
     ensure!(
         layout.starts_with(root) && parent.starts_with(root),
-        "OCI staging requires ExternalSSD scratch"
+        "OCI staging requires paths inside the native Docker root"
     );
     let name = options
         .output

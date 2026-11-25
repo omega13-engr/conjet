@@ -61,7 +61,7 @@ the stage script with `--native-guest`. The experiment uses the
 existing verified Conjet Core v1.3.1 kernel; no Core release is needed.
 See [experimental native execution](engineering/speed-release-scope.md).
 
-### Native Docker release candidate
+### Native Docker default
 
 CI and release staging build the static ARM64 Core memory helpers from
 the same revision and verify the Conjet Core v1.3.1 Linux 6.12.86 Image
@@ -76,22 +76,38 @@ incomplete pairs include public registry setup timeouts and Kiri OOM
 verification failures. Benchmark scope and engine limits apply to any
 release notes. [Qualification and results](engineering/docker-benchmark-results.md#speed-065-docker-29101-comparison)
 
-The staged CLI can now boot and serve the candidate inside a private,
-profile-owned directory. A two-boot test exercised Docker no-network
-and bridge workloads, verified Core retained-backing accounting, and
-read back a named volume after restart. It rejected a stop request
-from a different profile root. This test used the low-level native
-CLI. The standard `conjet start` and app lifecycle still use the Docker
-appliance.
+Fresh packaged Apple Silicon profiles select `native-docker` through the
+ordinary start path. Native profiles use two vCPUs, a 2 GiB memory ceiling,
+and a 16 GiB sparse disk. Core owns dynamic admission and reclaim. The
+package provides the verified Alpine OCI layout and a clean disk template
+for first boot. The daemon owns the native VM and its Docker socket and
+drains the guest on stop.
 
-Default promotion requires a profile-owned native lifecycle through
-the installed CLI, daemon, and app. Qualify a fresh profile and prove
-upgrade and rollback with the previous Docker disk preserved. Verify
-staged native guest boot, memory pressure and recovery, disk and
-image persistence, socket ownership, and teardown. Require fresh
-compatibility evidence from the packaged path, independent review,
-required CI, Developer ID signing, notarization, stapling, and the
-final DMG checksum before publication.
+Existing profile settings and Docker appliance disks stay in place. To
+change an engine, first stop that profile. `conjet start --runtime docker`
+selects the appliance. To select Native Docker for an existing profile,
+use `conjet start --runtime native-docker --cpus 2 --memory 2G --disk 16G`
+with packaged boot assets. Native Docker keeps its volume and image data
+under the profile's `run/native-data` directory. Engine selection does
+not convert or copy data between the two disks.
+
+Before installing an older Conjet app, stop the profile and select the
+appliance runtime. The older app can then open the original Docker disk.
+The rollback rehearsal retained a named volume on the appliance and
+verified each inactive engine's disk checksum during the switch.
+
+The native scope covers the pinned Linux ARM64 public images, local image
+archives, named volumes, and the qualified Docker Buildx worker. Writable
+container layers and local image aliases are scoped to a boot. Host binds
+use owned directories inside `run/native-data/binds` when host mounts are
+enabled. SSH, privileged containers, arbitrary registries, removable host
+binds, and AMD64 images use the Docker appliance profile. The native Docker
+build API uses private copies of Docker 29.10.1 and Buildx 0.39.1 when
+their installed checksums match the packaged pins.
+
+Release gates include fresh packaged compatibility, legacy rollback,
+independent review, required CI, Developer ID signing, notarization,
+stapling, and the final DMG checksum.
 
 Production notarized releases require these repository secrets:
 

@@ -85,18 +85,25 @@ pub fn run(args: Arguments) -> anyhow::Result<()> {
         "native command requires --experimental"
     );
     ensure!(
-        args.profile_root.is_none()
-            || (docker_command && !matches!(args.command, Action::DockerStage(_))),
-        "profile root applies only to running native Docker sessions"
+        args.profile_root.is_none() || docker_command,
+        "profile root applies only to native Docker commands"
     );
     let root = docker::session_root(args.profile_root.as_deref())?;
+    let parent = args
+        .profile_root
+        .as_ref()
+        .map(|_| unsafe { libc::getppid() });
+    ensure!(
+        parent.is_none_or(|pid| pid > 1),
+        "managed native Docker requires a live supervisor"
+    );
     match args.command {
-        Action::DockerBoot(options) => docker::boot(options, root),
-        Action::DockerServe(options) => docker::serve(options, root),
-        Action::DockerStage(options) => oci_stage::stage(options),
+        Action::DockerBoot(options) => docker::boot(options, root, parent),
+        Action::DockerServe(options) => docker::serve(options, root, parent),
+        Action::DockerStage(options) => oci_stage::stage(options, root),
         Action::DockerInstall(options) => docker::install(options, root),
         Action::DockerStop { session } => docker::stop(&session, root),
-        Action::Serve(options) => session::serve(options, None),
+        Action::Serve(options) => session::serve(options, None, None),
         Action::Run(target) => client::invoke(target, client::Operation::Run),
         Action::Prepare(target) => client::invoke(target, client::Operation::Prepare),
         Action::Claim { target, token } => client::invoke(target, client::Operation::Claim(token)),

@@ -224,7 +224,8 @@ private final class DaemonRuntime: @unchecked Sendable {
         case .status:
             return response(ok: true, message: "running", status: status(state: .warmIdle, allowCache: true))
         case .vmStatus:
-            let vm = vmController.status(store: vmStore, backend: config.vmBackend)
+            let vm = vmController.status(store: vmStore, backend: config.vmBackend,
+                                         nativeDocker: config.containerRuntime == .nativeDocker)
             return response(ok: vm.configured, message: vm.message, status: status(state: runtimeState(for: vm), vm: vm), vm: vm)
         case .vmStart:
             let waitMode: VMStartWaitMode
@@ -238,17 +239,27 @@ private final class DaemonRuntime: @unchecked Sendable {
             ])
             do {
                 invalidateStatusCache()
-                let manifest = try vmStore.loadManifest()
-                let vm = try vmController.start(manifest: manifest, config: config, store: vmStore, waitMode: waitMode)
+                let vm: VMRuntimeStatus
+                if config.containerRuntime == .nativeDocker {
+                    vm = try vmController.startNativeDocker(config: config, store: vmStore)
+                } else {
+                    let manifest = try vmStore.loadManifest()
+                    vm = try vmController.start(manifest: manifest, config: config, store: vmStore, waitMode: waitMode)
+                    repairClockAsync(reason: "vm-start")
+                }
                 writeFastPathRunningStatus(vm: vm, waitMode: waitMode)
-                repairClockAsync(reason: "vm-start")
                 invalidateStatusCache()
                 publishVMEvent(.vmStarted, vm: vm)
                 startDockerEventAdapterIfPossible()
                 return response(ok: true, message: vm.message, status: status(state: runtimeState(for: vm), vm: vm), vm: vm)
             } catch {
                 invalidateStatusCache()
-                let vm = vmStore.status(state: .error, message: String(describing: error))
+                var vm = vmStore.status(state: .error, message: String(describing: error))
+                if config.containerRuntime == .nativeDocker {
+                    vm = vmController.status(store: vmStore, backend: config.vmBackend, nativeDocker: true)
+                    vm.state = .error
+                    vm.message = String(describing: error)
+                }
                 publishVMEvent(.vmErrored, vm: vm)
                 return response(ok: false, message: vm.message, status: status(state: .warmIdle, vm: vm), vm: vm)
             }
@@ -558,7 +569,8 @@ private final class DaemonRuntime: @unchecked Sendable {
             return cached
         }
 
-        let effectiveVM = vm ?? vmController.status(store: vmStore, backend: config.vmBackend)
+        let effectiveVM = vm ?? vmController.status(store: vmStore, backend: config.vmBackend,
+                                                      nativeDocker: config.containerRuntime == .nativeDocker)
         let snapshot = DaemonStatus(
             pid: getpid(),
             startedAt: startedAt,

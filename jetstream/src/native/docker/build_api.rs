@@ -228,17 +228,27 @@ impl Client {
             self.invoke(&args, Some(client))
         });
         let cleanup = self.invoke(&["rm", &builder], None);
-        if owner
+        let worker_present = owner
             .lookup(&worker)
-            .is_ok_and(|item| !item.state().removed)
-            || !matches!(
-                super::volume::inspect(owner, &(worker + "_state")),
-                Err(Rejected(404, _))
-            )
-        {
-            return Err(Rejected::internal(
-                "native API build left its worker or cache active",
-            ));
+            .is_ok_and(|item| !item.state().removed);
+        let cache_present = !matches!(
+            super::volume::inspect(owner, &(worker + "_state")),
+            Err(Rejected(404, _))
+        );
+        if worker_present || cache_present {
+            let solve_error = solve
+                .as_ref()
+                .err()
+                .map(|error| format!("; solve: {error:#}"));
+            let cleanup_error = cleanup
+                .as_ref()
+                .err()
+                .map(|error| format!("; cleanup: {error:#}"));
+            return Err(Rejected::internal(format!(
+                "native API build left resources active (worker: {worker_present}, cache: {cache_present}){}{}",
+                solve_error.as_deref().unwrap_or_default(),
+                cleanup_error.as_deref().unwrap_or_default()
+            )));
         }
         if created {
             cleanup.map_err(|error| Rejected::internal(format!("{error:#}")))?;

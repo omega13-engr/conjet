@@ -157,6 +157,9 @@ if [ -n "$NATIVE_CORE_ASSETS" ]; then
   (cd "$NATIVE_CORE_ASSETS" && shasum -a 512 -c "$ROOT_DIR/build-support/native-core-kernel.sha512")
   static_arm64_guest "$NATIVE_CORE_ASSETS/conjet-memd"
   static_arm64_guest "$NATIVE_CORE_ASSETS/conjet-reclaimd"
+  test -s "$NATIVE_CORE_ASSETS/boot-image"
+  test -s "$NATIVE_CORE_ASSETS/BootOCI/index.json"
+  test "$(/usr/bin/tar -tzf "$NATIVE_CORE_ASSETS/volume.tar.gz")" = volume.raw
 fi
 
 cd "$ROOT_DIR"
@@ -211,6 +214,9 @@ if [ -x "$RUST_TARGET_DIR/release/jetstream" ]; then
       if [ -n "$NATIVE_CORE_ASSETS" ]; then
         mkdir "$tools/NativeCore"
         install -m 0644 "$NATIVE_CORE_ASSETS/"{Image,conjet-memd,conjet-reclaimd} "$tools/NativeCore/"
+        install -m 0644 "$NATIVE_CORE_ASSETS/"{boot-image,volume.tar.gz} "$tools/NativeCore/"
+        install -m 0644 "$ROOT_DIR/benchmarks/scenarios/docker-comparison-v1.json" "$tools/NativeCore/docker-client-pins.json"
+        /usr/bin/ditto "$NATIVE_CORE_ASSETS/BootOCI" "$tools/NativeCore/BootOCI"
         install -m 0644 "$ROOT_DIR/build-support/native-core-kernel.sha512" "$tools/NativeCore/kernel.sha512"
       fi
     done

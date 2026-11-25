@@ -26,8 +26,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{self, Read};
 use std::net::SocketAddr;
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -164,12 +165,16 @@ pub(super) fn stop(directory: &Path, root: &Path) -> anyhow::Result<()> {
     client::stop_peer(peer)
 }
 
-pub(super) fn boot(options: session::Options, root: &Path) -> anyhow::Result<()> {
+pub(super) fn boot(
+    options: session::Options,
+    root: &Path,
+    parent: Option<libc::pid_t>,
+) -> anyhow::Result<()> {
     ensure!(
         options.oci_package.is_some() && options.scratch.canonicalize()? == root,
         "Docker boot requires an OCI package and the configured native Docker root"
     );
-    session::serve(options, Some(root))
+    session::serve(options, Some(root), parent)
 }
 
 struct OwnedSocket(PathBuf);
@@ -180,7 +185,11 @@ impl Drop for OwnedSocket {
     }
 }
 
-pub(super) fn serve(options: Options, root: &Path) -> anyhow::Result<()> {
+pub(super) fn serve(
+    options: Options,
+    root: &Path,
+    parent: Option<libc::pid_t>,
+) -> anyhow::Result<()> {
     private_directory(&options.native_session, root)?;
     private_directory(
         options
@@ -189,13 +198,7 @@ pub(super) fn serve(options: Options, root: &Path) -> anyhow::Result<()> {
             .context("missing Docker socket directory")?,
         root,
     )?;
-    ensure!(
-        options
-            .socket
-            .symlink_metadata()
-            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
-        "Docker endpoint already exists or is inaccessible"
-    );
+    ensure_endpoint_available(&options.socket, parent.is_some())?;
     let receipt = options.receipt.canonicalize()?;
     ensure!(
         receipt == options.receipt && receipt.starts_with(root),
@@ -270,6 +273,7 @@ pub(super) fn serve(options: Options, root: &Path) -> anyhow::Result<()> {
         sequence,
         pending: BTreeMap::new(),
         broken: false,
+        supervisor_pid: parent,
     };
     let build_client = options
         .build_client_docker
@@ -291,6 +295,84 @@ pub(super) fn serve(options: Options, root: &Path) -> anyhow::Result<()> {
     )
 }
 
+fn ensure_endpoint_available(path: &Path, managed: bool) -> anyhow::Result<()> {
+    let existing = match path.symlink_metadata() {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        metadata => metadata?,
+    };
+    ensure!(
+        managed && existing.file_type().is_socket() && existing.uid() == unsafe { libc::geteuid() },
+        "Docker endpoint already exists or is inaccessible"
+    );
+    ensure!(
+        socket_connection_refused(path)?,
+        "Docker endpoint still has a listener; stop its engine before starting native Docker"
+    );
+    let current = path.symlink_metadata()?;
+    ensure!(
+        current.file_type().is_socket()
+            && current.dev() == existing.dev()
+            && current.ino() == existing.ino(),
+        "Docker endpoint changed during ownership verification"
+    );
+    fs::remove_file(path).context("could not remove the stopped profile's Docker endpoint")
+}
+
+fn socket_connection_refused(path: &Path) -> io::Result<bool> {
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let path = path.as_os_str().as_bytes();
+    if path.contains(&0) || path.len() >= address.sun_path.len() {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (byte, target) in path.iter().zip(&mut address.sun_path) {
+        *target = *byte as libc::c_char;
+    }
+    let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+    #[cfg(target_os = "macos")]
+    {
+        address.sun_len = length as u8;
+    }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    if unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = unsafe {
+        libc::connect(
+            socket.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            length as libc::socklen_t,
+        )
+    };
+    Ok(result < 0 && io::Error::last_os_error().kind() == io::ErrorKind::ConnectionRefused)
+}
+
+#[cfg(test)]
+#[test]
+fn managed_endpoint_recovers_only_a_stopped_socket() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("docker.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    assert!(ensure_endpoint_available(&path, true).is_err());
+    assert!(path.exists());
+    drop(listener);
+    assert!(ensure_endpoint_available(&path, false).is_err());
+    ensure_endpoint_available(&path, true).unwrap();
+    assert!(!path.exists());
+
+    let file = directory.path().join("keep");
+    fs::write(&file, b"retained").unwrap();
+    symlink(&file, &path).unwrap();
+    assert!(ensure_endpoint_available(&path, true).is_err());
+    assert_eq!(fs::read(&file).unwrap(), b"retained");
+}
+
 fn admission_lock(directory: &Path) -> anyhow::Result<fs::File> {
     let lock = client::open_private(&directory.join(session::LOCK))?;
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -310,6 +392,7 @@ fn serve_endpoint(
     build_client: Option<build_api::Client>,
 ) -> anyhow::Result<()> {
     let boot = &native.boot;
+    let supervisor_pid = native.supervisor_pid;
     signal_handlers()?;
     let listener = UnixListener::bind(&socket)?;
     let _socket = OwnedSocket(socket);
@@ -335,7 +418,10 @@ fn serve_endpoint(
                 let _ = handlers.swap_remove(i).join();
             }
         }
-        if STOP.load(Ordering::Acquire) {
+        if STOP.load(Ordering::Acquire)
+            || supervisor_pid.is_some_and(|pid| unsafe { libc::getppid() } != pid)
+        {
+            STOP.store(true, Ordering::Release);
             break Ok(());
         }
         match listener.accept() {
@@ -380,6 +466,7 @@ struct Native {
     sequence: u64,
     pending: BTreeMap<u64, Value>,
     broken: bool,
+    supervisor_pid: Option<libc::pid_t>,
 }
 
 struct Admission {

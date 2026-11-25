@@ -579,6 +579,7 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             json!({
                 "SystemTime":super::events::daemon_time()?,
                 "OSType":"linux","Architecture":"aarch64","NCPU":2,"MemTotal":2147483648u64,
+                "Containers":owner.ledger.lock().unwrap().active.len(),"Driver":BACKEND,
             }),
         ),
         ("POST", "/containers/create") => {

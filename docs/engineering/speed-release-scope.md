@@ -3,8 +3,8 @@
 Conjet's experimental native mode runs a single digest-pinned, statically
 linked ARM64 Linux executable in a temporary network-free Jetstream guest.
 The local verification envelope is the Apple M1 Pro with two virtual CPUs
-and a 2 GiB guest ceiling. The existing Docker/containerd lane continues
-to own all Docker lifecycle operations.
+and a 2 GiB guest ceiling. Docker profiles have their own start and stop
+path through the product daemon. [Native Docker default and rollback](../release.md#native-docker-default)
 
 ## Start a session
 
