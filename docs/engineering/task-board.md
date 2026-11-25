@@ -3587,6 +3587,46 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-176
+
+Title: Preserve download concurrency within the existing guest connection bound
+
+Description: Restore access for multiple simultaneous archive consumers
+on authenticated guest connections.
+
+Is blocked by task: SPEED-175 verified both bounded copy paths.
+
+Acceptance Criteria:
+
+- Accept four slow, independently authenticated archive readers on the
+  same private boot. Keep the workload observable and release their
+  descriptors on disconnect. Confirm the next Docker copy checksum.
+- Retain the fixed buffer, existing guest connection bound and drain
+  accounting.
+
+Problem and Evidence: SPEED-173 verified a new two-reader limit. A third
+reader received `busy` in the live guest. Legacy downloads can share the
+existing authenticated connection budget. The stream needs one fixed
+64 KiB buffer per active connection.
+
+Approach: Use the existing global transport bound for archive readers
+and retain the download count used by guest drain.
+
+Evidence: Four readers held independent authenticated connections
+while an additional connection inspected the live workload. Closing
+them released the transfers and the next 16 MiB Docker copy returned
+the original SHA-256. Both source mutation cases passed again. ExternalSSD
+retains `SPEED-176/cj-perf.LBoyR4-copy-download-concurrency/`.
+
+Source: `guest/launch-service/src/fresh_fixture.rs`.
+
+Review: Each reader remains bounded by the existing guest worker count,
+fixed buffer, current workload check and transfer deadline. Guest drain
+still waits for every retained descriptor to close. Workspace tests,
+strict ARM64 Clippy and detached disk checks passed.
+
+Next Action: Attribute the original 16 MiB ExternalSSD bind stages.
+
 ### SPEED-175
 
 Title: Remove per-chunk RPC delay from bounded Docker archive uploads

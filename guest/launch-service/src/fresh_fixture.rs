@@ -2328,9 +2328,8 @@ impl FreshFixture {
                 identity: request.identity,
             };
             let mut ledger = self.ledger.lock().expect("fresh ledger");
-            if ledger.archive_downloads >= 2 {
-                return Err(("busy", "native archive download slots are occupied"));
-            }
+            // One download can consume this connection. The guest's
+            // existing connection limit also bounds the stream buffers.
             let (_, pidfd) = ledger.archive_target(&request.handle)?;
             let target = pidfd
                 .try_clone()
