@@ -110,7 +110,9 @@ private struct ContainerMasterPanel: View {
                     systemImage: totalCount == 0 ? "shippingbox" : "magnifyingglass",
                     title: totalCount == 0 ? "No Containers" : "No Results",
                     message: totalCount == 0
-                        ? "Build a workload from the Dockerfile editor below."
+                        ? (app.isNativeDockerProfile
+                            ? "Run an image with Docker to create a container in this profile."
+                            : "Build a workload from the Dockerfile editor below.")
                         : "Try a different name, image, status, or state."
                 )
             } else {
@@ -154,8 +156,10 @@ private struct ContainerMasterPanel: View {
                 }
             }
 
-            Divider()
-            ContainerDockerEditorPanel()
+            if !app.isNativeDockerProfile {
+                Divider()
+                ContainerDockerEditorPanel()
+            }
         }
     }
 

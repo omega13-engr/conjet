@@ -602,13 +602,21 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
         ("GET", "/containers/json")
             if query
                 .keys()
-                .all(|key| matches!(key.as_str(), "filters" | "all")) =>
+                .all(|key| matches!(key.as_str(), "filters" | "all" | "size")) =>
         {
             let all = match query.get("all").map(String::as_str) {
                 None | Some("false" | "0") => false,
                 Some("true" | "1") => true,
                 _ => return Err(Rejected::bad("invalid Docker container discovery scope")),
             };
+            // The Docker CLI requests size for JSON formatting. Native OCI
+            // has no layer-size accounting and leaves those fields absent.
+            if !matches!(
+                query.get("size").map(String::as_str),
+                None | Some("true" | "1" | "false" | "0")
+            ) {
+                return Err(Rejected::bad("invalid Docker container size option"));
+            }
             let filters = super::discovery::Filters::parse(query.get("filters"))?;
             Reply::json(200, owner.list_containers(&filters, all))
         }

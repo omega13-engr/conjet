@@ -118,8 +118,9 @@ public final class VirtualMachineController {
         if let nativeRun, !nativeRun.stop() {
             throw ConjetError.unavailable("The previous native Docker session did not fully drain")
         }
-        guard ["aarch64", "arm64"].contains(config.architecture), config.effectiveVMCPUs == 2,
-              config.effectiveMemoryMiB == 2048, config.diskGiB == 16,
+        let native = ConjetConfig.nativeDockerDefault
+        guard ["aarch64", "arm64"].contains(config.architecture), config.effectiveVMCPUs == native.vmCPUs,
+              config.effectiveMemoryMiB == native.memoryMiB, config.diskGiB == native.diskGiB,
               config.diskImagePath == nil, config.kernelImagePath == nil else {
             throw ConjetError.invalidArgument("Native Docker requires ARM64, 2 vCPUs, 2048 MiB, a 16 GiB disk, and packaged boot assets")
         }

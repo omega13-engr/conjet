@@ -340,41 +340,54 @@ private struct ProfileConfigForm: View {
     @EnvironmentObject private var app: ConjetAppState
     @Binding var draft: ProfileConfigDraft
 
+    private var isNativeDocker: Bool {
+        ConjetContainerRuntimeKind.parse(draft.runtime) == .nativeDocker
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             ConfigGroup("VM") {
-                ConfigGrid {
-                    NumberField(title: "CPUs", value: $draft.vmCPUs)
-                    MemorySliderField(
-                        memoryMiB: $draft.memoryMiB,
-                        bounds: app.profileMemoryBounds
-                    )
-                    NumberField(title: "Disk GiB", value: $draft.diskGiB)
-                    FieldStack("Architecture") {
-                        Picker("Architecture", selection: $draft.architecture) {
-                            Text("aarch64").tag("aarch64")
-                            Text("x86_64").tag("x86_64")
+                if isNativeDocker {
+                    let native = ConjetConfig.nativeDockerDefault
+                    Text("ARM64 · \(native.vmCPUs) vCPUs · \(native.memoryMiB / 1024) GiB memory · \(native.diskGiB) GiB disk")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ConfigGrid {
+                        NumberField(title: "CPUs", value: $draft.vmCPUs)
+                        MemorySliderField(
+                            memoryMiB: $draft.memoryMiB,
+                            bounds: app.profileMemoryBounds
+                        )
+                        NumberField(title: "Disk GiB", value: $draft.diskGiB)
+                        FieldStack("Architecture") {
+                            Picker("Architecture", selection: $draft.architecture) {
+                                Text("aarch64").tag("aarch64")
+                                Text("x86_64").tag("x86_64")
+                            }
+                            .labelsHidden()
                         }
-                        .labelsHidden()
                     }
                 }
 
                 ConfigGrid {
-                    FieldStack("Memory") {
-                        Picker("Memory", selection: $draft.memoryProfile) {
-                            ForEach(ConjetMemoryProfile.allCases, id: \.self) { profile in
-                                Text(label(profile.rawValue)).tag(profile)
+                    if !isNativeDocker {
+                        FieldStack("Memory") {
+                            Picker("Memory", selection: $draft.memoryProfile) {
+                                ForEach(ConjetMemoryProfile.allCases, id: \.self) { profile in
+                                    Text(label(profile.rawValue)).tag(profile)
+                                }
                             }
+                            .labelsHidden()
                         }
-                        .labelsHidden()
-                    }
-                    FieldStack("Energy") {
-                        Picker("Energy", selection: $draft.energyMode) {
-                            ForEach(ConjetEnergyMode.allCases, id: \.self) { mode in
-                                Text(label(mode.rawValue)).tag(mode)
+                        FieldStack("Energy") {
+                            Picker("Energy", selection: $draft.energyMode) {
+                                ForEach(ConjetEnergyMode.allCases, id: \.self) { mode in
+                                    Text(label(mode.rawValue)).tag(mode)
+                                }
                             }
+                            .labelsHidden()
                         }
-                        .labelsHidden()
                     }
                     FieldStack("Runtime") {
                         Picker("Runtime", selection: $draft.runtime) {
@@ -387,11 +400,19 @@ private struct ProfileConfigForm: View {
                 }
 
                 ToggleGrid {
-                    Toggle("Host Mounts", isOn: $draft.enableHostMounts)
-                    Toggle("Removable Mounts", isOn: $draft.enableRemovableHostMounts)
+                    Toggle(isNativeDocker ? "Profile Bind Mounts" : "Host Mounts", isOn: $draft.enableHostMounts)
+                    if !isNativeDocker {
+                        Toggle("Removable Mounts", isOn: $draft.enableRemovableHostMounts)
+                    }
                 }
 
-                PathField(title: "Disk Image", text: $draft.diskImagePath)
+                if isNativeDocker {
+                    Text("Binds use the profile’s run/native-data/binds directory. Published ports use loopback. SSH requires the Docker appliance.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    PathField(title: "Disk Image", text: $draft.diskImagePath)
+                }
             }
 
             Divider()
@@ -401,66 +422,70 @@ private struct ProfileConfigForm: View {
                     NumberField(title: "Quiet Stop Min", value: $draft.quietStopMinutes)
                     PathField(title: "Socket", text: $draft.socketPath)
                 }
-                PathField(title: "Core Repo", text: $draft.conjetCoreRepository)
+                if !isNativeDocker {
+                    PathField(title: "Core Repo", text: $draft.conjetCoreRepository)
+                }
             }
 
-            Divider()
+            if !isNativeDocker {
+                Divider()
 
-            ConfigGroup("Network") {
-                FieldStack("Internet Access") {
-                    Picker("Internet Access", selection: $draft.networkEgressMode) {
-                        ForEach(ConjetNetworkEgressMode.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
+                ConfigGroup("Network") {
+                    FieldStack("Internet Access") {
+                        Picker("Internet Access", selection: $draft.networkEgressMode) {
+                            ForEach(ConjetNetworkEgressMode.allCases, id: \.self) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        Text("Applies at the next VM start. Host networking follows your Mac's VPN routes and DNS.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ConfigGrid {
+                        FieldStack("Bind") {
+                            Picker("Bind", selection: $draft.networkBindPolicy) {
+                                ForEach(ConjetNetworkBindPolicy.allCases, id: \.self) { policy in
+                                    Text(label(policy.rawValue)).tag(policy)
+                                }
+                            }
+                            .labelsHidden()
+                        }
+                        FieldStack("Proxy") {
+                            Picker("Proxy", selection: $draft.networkProxyEngine) {
+                                ForEach(ConjetNetworkProxyEngine.allCases, id: \.self) { engine in
+                                    Text(label(engine.rawValue)).tag(engine)
+                                }
+                            }
+                            .labelsHidden()
+                        }
+                        FieldStack("Bridge") {
+                            Picker("Bridge", selection: $draft.networkBridgeEngine) {
+                                ForEach(ConjetNetworkBridgeEngine.allCases, id: \.self) { engine in
+                                    Text(label(engine.rawValue)).tag(engine)
+                                }
+                            }
+                            .labelsHidden()
                         }
                     }
-                    .labelsHidden()
-                    Text("Applies at the next VM start. Host networking follows your Mac's VPN routes and DNS.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    PathField(title: "LAN CIDRs", text: $draft.networkLANAllowedCIDRs)
+                    PathField(title: "LAN Ports", text: $draft.networkLANAllowedPorts)
                 }
-                ConfigGrid {
-                    FieldStack("Bind") {
-                        Picker("Bind", selection: $draft.networkBindPolicy) {
-                            ForEach(ConjetNetworkBindPolicy.allCases, id: \.self) { policy in
-                                Text(label(policy.rawValue)).tag(policy)
-                            }
-                        }
-                        .labelsHidden()
-                    }
-                    FieldStack("Proxy") {
-                        Picker("Proxy", selection: $draft.networkProxyEngine) {
-                            ForEach(ConjetNetworkProxyEngine.allCases, id: \.self) { engine in
-                                Text(label(engine.rawValue)).tag(engine)
-                            }
-                        }
-                        .labelsHidden()
-                    }
-                    FieldStack("Bridge") {
-                        Picker("Bridge", selection: $draft.networkBridgeEngine) {
-                            ForEach(ConjetNetworkBridgeEngine.allCases, id: \.self) { engine in
-                                Text(label(engine.rawValue)).tag(engine)
-                            }
-                        }
-                        .labelsHidden()
-                    }
-                }
-                PathField(title: "LAN CIDRs", text: $draft.networkLANAllowedCIDRs)
-                PathField(title: "LAN Ports", text: $draft.networkLANAllowedPorts)
-            }
 
-            Divider()
+                Divider()
 
-            ConfigGroup("SSH") {
-                ConfigGrid {
-                    Toggle("Enabled", isOn: $draft.sshEnabled)
-                    FieldStack("Transport") {
-                        Picker("Transport", selection: $draft.sshTransport) {
-                            Text("proxy-command").tag("proxy-command")
-                            Text("tcp").tag("tcp")
+                ConfigGroup("SSH") {
+                    ConfigGrid {
+                        Toggle("Enabled", isOn: $draft.sshEnabled)
+                        FieldStack("Transport") {
+                            Picker("Transport", selection: $draft.sshTransport) {
+                                Text("proxy-command").tag("proxy-command")
+                                Text("tcp").tag("tcp")
+                            }
+                            .labelsHidden()
                         }
-                        .labelsHidden()
+                        Toggle("TCP Fallback", isOn: $draft.sshAllowTCPFallback)
                     }
-                    Toggle("TCP Fallback", isOn: $draft.sshAllowTCPFallback)
                 }
             }
         }

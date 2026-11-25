@@ -129,6 +129,7 @@ struct ProfileConfigDraft: Equatable {
     }
 
     mutating func clampMemory(to bounds: ConjetProfileMemoryBounds) {
+        guard ConjetContainerRuntimeKind.parse(runtime) != .nativeDocker else { return }
         memoryMiB = bounds.clampedMiB(memoryMiB)
     }
 
@@ -137,17 +138,18 @@ struct ProfileConfigDraft: Equatable {
         guard let runtime = ConjetContainerRuntimeKind.parse(trimmed(runtime)) else {
             throw ConjetError.invalidArgument("runtime must be \(ConjetContainerRuntimeKind.allowedValuesDescription)")
         }
+        let native = runtime == .nativeDocker ? ConjetConfig.nativeDockerDefault : nil
         let config = ConjetConfig(
-            vmCPUs: vmCPUs,
-            memoryMiB: effectiveMemoryMiB,
-            architecture: trimmed(architecture),
-            diskGiB: diskGiB,
-            diskImagePath: optional(trimmed(diskImagePath)),
+            vmCPUs: native?.vmCPUs ?? vmCPUs,
+            memoryMiB: native?.memoryMiB ?? effectiveMemoryMiB,
+            architecture: native?.architecture ?? trimmed(architecture),
+            diskGiB: native?.diskGiB ?? diskGiB,
+            diskImagePath: native == nil ? optional(trimmed(diskImagePath)) : nil,
             runtime: runtime.rawValue,
             vmBackend: vmBackend,
             quietStopMinutes: quietStopMinutes,
             enableHostMounts: enableHostMounts,
-            enableRemovableHostMounts: enableRemovableHostMounts,
+            enableRemovableHostMounts: native == nil && enableRemovableHostMounts,
             socketPath: optional(trimmed(socketPath)),
             conjetCoreRepository: trimmed(conjetCoreRepository),
             networkBindPolicy: networkBindPolicy,
@@ -317,6 +319,10 @@ final class ConjetAppState: ObservableObject {
 
     var currentProfileContext: ConjetProfileContext? {
         snapshot.profileContexts.first { $0.isCurrent }
+    }
+
+    var isNativeDockerProfile: Bool {
+        (snapshot.daemonResponse?.status?.config.containerRuntime ?? currentProfileContext?.containerRuntime) == .nativeDocker
     }
 
     var currentVMState: VMRunState? {
@@ -712,7 +718,7 @@ final class ConjetAppState: ObservableObject {
     }
 
     func runDockerEditor() async {
-        guard activeCommandLabel == nil else { return }
+        guard activeCommandLabel == nil, !isNativeDockerProfile else { return }
         let source = dockerEditorSource.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !source.isEmpty else { return }
         let runArguments: [String]

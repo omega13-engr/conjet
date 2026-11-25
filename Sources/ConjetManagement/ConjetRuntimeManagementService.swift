@@ -252,9 +252,15 @@ public final class ConjetRuntimeManagementService: @unchecked Sendable {
     }
 
     public func saveProfileConfig(named profileName: String, config: ConjetConfig) throws -> ConjetProfileConfigResult {
-        let context = runtimeContext()
+        var context = runtimeContext()
         let paths = try Self.profilePaths(named: profileName, rootHome: context.paths.rootHome)
+        context.paths = paths
         let validated = try ConjetConfig.parseTOML(config.renderTOML())
+        let original = try ConjetConfig.loadOrCreate(paths: paths)
+        if validated.containerRuntime != original.containerRuntime,
+           daemonIsRunning(socketPath: original.socketPath ?? paths.socket.path, context: context) {
+            throw ConjetError.invalidArgument("Stop the profile before changing its container runtime")
+        }
         try validated.save(paths: paths)
         return ConjetProfileConfigResult(
             profile: paths.profileName,

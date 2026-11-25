@@ -1122,6 +1122,28 @@ final class ConjetAppStateTests: XCTestCase {
         XCTAssertThrowsError(try draft.makeConfig())
     }
 
+    func testProfileConfigDraftUsesNativeRuntimeLimits() throws {
+        var existing = ConjetConfig.default
+        existing.vmCPUs = 4
+        existing.memoryMiB = 4096
+        existing.diskGiB = 40
+        existing.diskImagePath = "/fixture/appliance.raw"
+        existing.enableRemovableHostMounts = true
+        var draft = ProfileConfigDraft(profileName: "default", config: existing)
+        draft.runtime = ConjetContainerRuntimeKind.nativeDocker.rawValue
+        let native = try draft.makeConfig()
+
+        XCTAssertEqual(native.containerRuntime, .nativeDocker)
+        XCTAssertEqual(native.vmCPUs, 2)
+        XCTAssertEqual(native.memoryMiB, 2048)
+        XCTAssertEqual(native.diskGiB, 16)
+        XCTAssertNil(native.diskImagePath)
+        XCTAssertFalse(native.enableRemovableHostMounts)
+
+        draft.runtime = ConjetContainerRuntimeKind.docker.rawValue
+        XCTAssertEqual(try draft.makeConfig(), existing)
+    }
+
     func testProfileConfigDraftPreservesNetworkEgressWhenSavingOtherSettings() throws {
         var config = ConjetConfig.default
         config.networkEgressMode = .vmnet

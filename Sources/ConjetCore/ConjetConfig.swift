@@ -777,13 +777,17 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
     }
 
     static func freshProfileConfig(paths: ConjetPaths, packagedNativeDocker: Bool) -> ConjetConfig {
-        var config = ConjetConfig.default
         let manager = FileManager.default
         guard packagedNativeDocker,
               let bootEntries = try? manager.contentsOfDirectory(atPath: paths.vmDirectory.path),
               bootEntries.allSatisfy({ $0 == paths.bootstrapShare.lastPathComponent }),
               let shareEntries = try? manager.contentsOfDirectory(atPath: paths.bootstrapShare.path),
-              shareEntries.isEmpty else { return config }
+              shareEntries.isEmpty else { return .default }
+        return nativeDockerDefault
+    }
+
+    public static var nativeDockerDefault: ConjetConfig {
+        var config = ConjetConfig.default
         config.runtime = ConjetContainerRuntimeKind.nativeDocker.rawValue
         config.vmCPUs = 2
         config.memoryMiB = 2048
