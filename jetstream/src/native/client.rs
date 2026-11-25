@@ -177,6 +177,10 @@ impl Connection {
         Frame::read(&mut self.stream)?.expect(response, id)
     }
 
+    pub(super) fn disconnect(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+
     pub(super) fn inspect(&mut self) -> anyhow::Result<Value> {
         let status = self.exchange(
             Kind::Inspect,

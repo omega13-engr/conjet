@@ -1955,6 +1955,17 @@ budget and still waits for recursive deletion and directory fsync.
 See `SPEED-160/cj-compat.tMPK1e-mixed-lifetime-seeded-worker/` and
 `SPEED-160/cj-compat.tMPK1e-volume-ack/`.
 
+The exact rerun on the previous artifacts lost control of the Node
+builder after the source-change export. The archive load and subsequent
+builder cleanup failed. Delaying the isolated VM for 2.45 seconds
+reproduced the same sequence and captured a timed-out read-only worker
+observation in Docker inspect. The adapter now reconnects that observation
+to the same authenticated boot and workload handle, with one recovery
+attempt per interruption. The guest resumed and all twelve Node export,
+load and execution canaries passed after the same delay. Builder and disk
+cleanup passed. See `SPEED-160/cj-full.lQbpSK-node-observation-fault/`
+and `SPEED-160/cj-full.lQbpSK-node-observation-fixed/`.
+
 ### SPEED-163
 
 Title: Read actual cgroup counters from the pinned BuildKit worker

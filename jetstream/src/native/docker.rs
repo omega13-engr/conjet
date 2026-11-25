@@ -491,6 +491,7 @@ fn wait_for_native(
     let mut awaiting_health = item.container.healthcheck.is_some();
     let mut next_observation = admitted + OBSERVE_INTERVAL;
     let mut teardown_deadline = None;
+    let mut reconnected = false;
     while state["cleanup"] != "complete" {
         let now = Instant::now();
         let requested = item.container.cancel.load(Ordering::Acquire);
@@ -511,7 +512,8 @@ fn wait_for_native(
             awaiting_health = false;
             health::probe(owner, item, generation, &handle);
         }
-        let result = if requested != 0 && requested != sent_signal {
+        let cancelling = requested != 0 && requested != sent_signal;
+        let result = if cancelling {
             sent_signal = requested;
             peer.exchange(
                 Kind::Cancel,
@@ -545,8 +547,35 @@ fn wait_for_native(
             )
         };
         match result {
-            Err(WireError::PeerError(code)) if code == "deadline_exceeded" => continue,
-            other => state = other.context("observe native workload generation")?,
+            Err(WireError::PeerError(code)) if code == "deadline_exceeded" => {
+                reconnected = false;
+                continue;
+            }
+            Err(error)
+                if item.container.buildkit_worker
+                    && !cancelling
+                    && !reconnected
+                    && interrupted_worker_observation(&error) =>
+            {
+                // Wait reads the admitted generation. Reopen a fresh
+                // authenticated channel before reading it again, since the
+                // old socket may still contain a partial or late reply.
+                peer.disconnect();
+                *peer = owner
+                    .scoped_peer()
+                    .map_err(|error| anyhow::anyhow!(error.1))
+                    .context("reconnect native BuildKit worker observation")?;
+                ensure!(
+                    handle["boot_id"] == peer.boot,
+                    "native worker observation generation changed"
+                );
+                reconnected = true;
+                continue;
+            }
+            other => {
+                state = other.context("observe native workload generation")?;
+                reconnected = false;
+            }
         }
         ensure!(
             state["handle"] == handle,
@@ -651,6 +680,34 @@ fn wait_for_native(
         witness: state,
         delivery_error,
     })
+}
+
+fn interrupted_worker_observation(error: &WireError) -> bool {
+    matches!(error, WireError::Io(error) if matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+    ))
+}
+
+#[cfg(test)]
+#[test]
+fn worker_observation_recovers_transport_loss_without_accepting_invalid_replies() {
+    assert!(interrupted_worker_observation(
+        &io::Error::from(io::ErrorKind::TimedOut).into()
+    ));
+    assert!(interrupted_worker_observation(
+        &io::Error::from(io::ErrorKind::UnexpectedEof).into()
+    ));
+    assert!(!interrupted_worker_observation(&WireError::Unauthorized));
+    assert!(!interrupted_worker_observation(
+        &WireError::UnexpectedMessage
+    ));
+    assert!(!interrupted_worker_observation(&WireError::PeerError(
+        "stale_generation".into()
+    )));
 }
 
 #[derive(Debug)]
