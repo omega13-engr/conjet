@@ -287,12 +287,42 @@ fn start(
     Ok((command.spawn()?, result_reader, master))
 }
 
+fn child_pidfd(pid: libc::pid_t) -> Option<OwnedFd> {
+    // Both callers own the unreaped child, so its PID cannot be reused.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        return None;
+    }
+    Some(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+fn wait_for_exit(pidfd: Option<&OwnedFd>, deadline: Instant) {
+    if let Some(pidfd) = pidfd {
+        match crate::socket::wait(pidfd.as_raw_fd(), libc::POLLIN, None, Some(deadline)) {
+            Ok(()) => return,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => return,
+            Err(_) => {}
+        }
+    }
+    // Keep checking waitpid if the kernel could not provide process readiness.
+    thread::sleep(
+        deadline
+            .saturating_duration_since(Instant::now())
+            .min(EXIT_POLL_INTERVAL),
+    );
+}
+
 fn wait(
     child: &mut Child,
     deadline: Instant,
     cancelled: impl Fn() -> bool,
 ) -> io::Result<ExitStatus> {
-    let process_group = -(child.id() as libc::pid_t);
+    let pid = child.id() as libc::pid_t;
+    let process_group = -pid;
+    let pidfd = child_pidfd(pid);
+    let kill_deadline = deadline + Duration::from_millis(500);
     let mut forced = None;
     let status = loop {
         match child.try_wait() {
@@ -305,7 +335,7 @@ fn wait(
                 return Err(error);
             }
         }
-        if cancelled() || Instant::now() >= deadline + Duration::from_millis(500) {
+        if cancelled() || Instant::now() >= kill_deadline {
             child.kill()?;
             forced = Some(if Instant::now() >= deadline {
                 io::ErrorKind::TimedOut
@@ -314,7 +344,10 @@ fn wait(
             });
             break child.wait()?;
         }
-        thread::sleep(Duration::from_millis(5));
+        wait_for_exit(
+            pidfd.as_ref(),
+            kill_deadline.min(Instant::now() + EXIT_POLL_INTERVAL),
+        );
     };
     if forced.is_some() || status.signal().is_some() {
         // Container removal can kill the exec wrapper and its child
@@ -624,6 +657,7 @@ pub fn run_helper(
     unsafe {
         libc::close(lifeline[0]);
     }
+    let pidfd = child_pidfd(child);
     let mut timed_out = false;
     let status = loop {
         let mut status = 0;
@@ -648,7 +682,7 @@ pub fn run_helper(
             }
             break crate::kernel_fixture::reap(child)?;
         }
-        thread::sleep(Duration::from_millis(5));
+        wait_for_exit(pidfd.as_ref(), deadline);
     };
     unsafe {
         libc::close(lifeline[1]);

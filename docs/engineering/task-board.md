@@ -3587,6 +3587,50 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-172
+
+Title: Reduce latency of native Docker exec process completion
+
+Description: Trace the original CLI and API exec output and exit-code
+canaries through the guest supervisor and namespace helper.
+
+Is blocked by task: SPEED-171 passed the native exec streaming checks.
+
+Acceptance Criteria:
+
+- Attribute the cost of observing the wrapper and its command exit.
+- Preserve exact stdout, stderr and terminal status. Exercise timeout,
+  client disconnect, TTY and workload cancellation with owned cleanup.
+- Compare the original exec latency with matched boots and sample budgets.
+
+Problem and Evidence: The prior full control comparison had an API exec
+paired median ratio of 17.875. Both guest completion loops currently wait
+up to 5 ms after a nonblocking child status check.
+
+Approach: Trace the waits independently with the original control canary.
+Use readiness for the owned process if the trace supports a causal change.
+
+Evidence: On the original canary, all six traced commands hit the
+helper's 5 ms sleep and the supervisor slept two to four times per
+command. Two alternating boots per variant with 100 measured requests
+and ten warmups per case and boot passed with no output or exit-code
+mismatches. Pooled API exec median fell from 24.232 to 1.637 ms.
+CLI median fell from 57.622 to 18.774 ms. API inspect was 0.460 and
+0.169 ms respectively. These diagnostic medians do not establish Kiri
+parity. ExternalSSD retains `SPEED-172/cj-perf.LBoyR4-exec-wait-profile/`
+and `SPEED-172/cj-perf.LBoyR4-exec-readiness-ab/`.
+
+Source: `guest/launch-service/src/exec_fixture.rs`.
+
+Review: Both loops wake on an owned child's pidfd and still reap via
+their original wait calls. The outer loop keeps the cancellation and
+kill deadline checks. Polling remains available if pidfd readiness is
+unavailable. Rust workspace tests, strict ARM64 Clippy and the isolated
+live exec checks passed, including timeout, client disconnect, TTY,
+signal and active removal cleanup.
+
+Next Action: Profile the original 8 MiB Docker copy-out path.
+
 ### SPEED-171
 
 Title: Attribute and reduce cached Node Docker archive export latency
