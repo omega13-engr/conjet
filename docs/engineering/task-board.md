@@ -747,42 +747,6 @@ Next Action: Set matching version metadata and release notes for the reviewed pa
 
 ## INPROGRESS
 
-### SPEED-181
-
-Title: Adopt Docker 29.10.1 and isolate the frozen comparison clients
-
-Description: Update the Docker CLI pin and place comparison executables
-under the task-owned ExternalSSD root before launching either engine.
-
-Is blocked by task: The first optimized cohort lost the pinned Docker
-29.10.0 executable during Alpine bridge CLI pair 3.
-
-Acceptance Criteria:
-
-- Freeze Docker 29.10.1, Buildx 0.39.1 and Compose 5.8.0 by executable
-  checksum. Preserve the existing workload, resource and timing rules.
-- Keep the interrupted cohort and its raw successful and failed pairs.
-  Qualify the new client pin and run a fresh full comparison cohort.
-
-Problem and Evidence: Homebrew replaced the old executable after 17
-passing lifecycle pairs and one passing pilot pair. Later attempts
-recorded a missing executable or a changed SHA-256 pin. The managed
-runtimes and backing leases closed.
-
-Approach: Use regular read-only executable copies under an explicitly
-configured private ExternalSSD directory and verify each manifest hash.
-
-Evidence: `SPEED-065/cj-perf.LBoyR4-full-0e28023a99db/interruption/`.
-
-Source: `benchmarks/docker-comparison.py`,
-`benchmarks/scenarios/docker-comparison-v1.json` and
-`build-support/run-conjet-speedup.py`.
-
-Review: The updated Docker pin changes the comparison manifest digest.
-The prior cohort retains its original revision and inputs.
-
-Next Action: Verify the new pin and refresh exact-artifact qualification.
-
 ### SPEED-065
 
 Title: Qualify native speed and memory against official Kiri
@@ -853,6 +817,19 @@ and 180 executable-image canaries. Both prior failures were absent.
 The new timing scope is Buildx. The other suites retain their original
 artifacts, and full parity remains unqualified.
 [Build-only rerun](docker-benchmark-results.md#speed-065-build-only-rerun)
+
+The exact `c8cc705` optimized candidate passed 71/71 with Docker
+29.10.1 and ran the full 91-pair comparison against official Kiri
+0.2.2. Eighty-one pairs passed. All 60 lifecycle pairs passed, and ten
+of twelve lifecycle rows met parity. Build pairs 2 and 4 passed.
+Docker Hub setup timed out during Rust Buildx pair 3, Compose pairs
+1–4, and Conjet's stress OOM setup in pair 3. Kiri failed OOM
+attribution in all five stress pairs. Conjet kept Core dynamic memory
+enabled for every run. Production preservation and private cleanup
+passed. The new report contains paired intervals, per-engine p50/p95/p99
+tables, resources, and the retained partial attempts. A full comparative
+pass remains open.
+[Docker 29.10.1 comparison](docker-benchmark-results.md#speed-065-docker-29101-comparison)
 
 ### SPEED-089
 
@@ -3622,6 +3599,48 @@ Next Action: Preserve the source and diagnostics. The retained Docker
 path has no dependency on this experiment.
 
 ## DONE
+
+### SPEED-181
+
+Title: Adopt Docker 29.10.1 and isolate the frozen comparison clients
+
+Description: Update the Docker CLI pin and place comparison executables
+under the task-owned ExternalSSD root before launching either engine.
+
+Is blocked by task: The first optimized cohort lost the pinned Docker
+29.10.0 executable during Alpine bridge CLI pair 3.
+
+Acceptance Criteria:
+
+- Freeze Docker 29.10.1, Buildx 0.39.1 and Compose 5.8.0 by executable
+  checksum. Preserve the existing workload, resource and timing rules.
+- Keep the interrupted cohort and its raw successful and failed pairs.
+  Qualify the new client pin and run a fresh full comparison cohort.
+
+Problem and Evidence: Homebrew replaced the old executable after 17
+passing lifecycle pairs and one passing pilot pair. Later attempts
+recorded a missing executable or a changed SHA-256 pin. The managed
+runtimes and backing leases closed.
+
+Approach: Use regular read-only executable copies under an explicitly
+configured private ExternalSSD directory and verify each manifest hash.
+
+Evidence: Commit `c8cc705` pinned Docker 29.10.1 and the private
+copies of Buildx and Compose. The new cohort passed the interrupted
+Alpine bridge CLI pair and all 60 lifecycle pairs. The exact optimized
+set passed 71/71 before the comparison, and all 91 scheduled pair
+attempts are recorded. The old run remains in
+`SPEED-065/cj-perf.LBoyR4-full-0e28023a99db/interruption/`.
+[Current comparison](docker-benchmark-results.md#speed-065-docker-29101-comparison)
+
+Source: `benchmarks/docker-comparison.py`,
+`benchmarks/scenarios/docker-comparison-v1.json` and
+`build-support/run-conjet-speedup.py`.
+
+Review: The updated Docker pin changes the comparison manifest digest.
+The prior cohort retains its original revision and inputs.
+
+Next Action: Carry the remaining comparative qualification into SPEED-065.
 
 ### SPEED-180
 

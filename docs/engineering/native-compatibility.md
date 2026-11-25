@@ -501,3 +501,39 @@ checks with verified data and recovery to 448 MiB. Rust workspace tests,
 formatting, ARM64 guest Clippy and hosted macOS checks passed. Strict
 host Clippy reproduced the baseline diagnostics.
 [Hosted macOS CI](https://github.com/omega13-engr/conjet/actions/runs/45530432842)
+
+## Docker 29.10.1 optimized candidate
+
+Revision `c8cc7059668778a2c54d199d74c2f250ac0b0da4` passed all **71 frozen
+cases** on six checksum-verified optimized executables. Docker 29.10.1,
+Buildx 0.39.1, and Compose 5.8.0 ran from private read-only copies on
+ExternalSSD. Both benchmark engines subsequently used those same
+client hashes. The workload, resource, and timing budgets are the
+original frozen values.
+
+Core grew from 448 MiB to 2,048 MiB under workload demand and under
+independent guest pressure. The active-data checksum passed, and the
+VM returned to 448 MiB with verified memory ownership and teardown.
+Production fingerprints and detached ext4 checks passed.
+
+The first gate attempt passed 68 cases. The Docker build API, direct
+BuildKit, and image-default credentials checks encountered Docker Hub
+timeouts pulling the pinned BuildKit image. The build routes passed on
+replay. A later credential attempt timed out on the pinned Rust image.
+The final complete credential run passed all seven pins with the same
+artifacts. The 71-case ledger, six retained executables, three retained
+client executables, checksums, failed attempts, and launch receipts are
+in `SPEED-098/cj-perf.LBoyR4-release-c8cc70596687/` on ExternalSSD.
+
+The Rust workspace passed 223 tests with three default-ignored tests.
+Swift ran 440 tests with two skips and zero failures. Go, Rust
+formatting, strict ARM64 guest Clippy, and 19 benchmark harness tests
+passed. Rust 1.94.1 strict macOS Clippy reproduced the existing
+diagnostics. An initial build attempt had picked up Homebrew Rust 1.100.0
+and is retained separately. Hosted CI passed an unchanged rerun after
+the Darwin backing-discard test reported nonreusable backing in the
+first attempt. Structured runtime witnesses cover the headless surfaces.
+[Hosted macOS CI](https://github.com/omega13-engr/conjet/actions/runs/45576472547/attempts/2)
+
+The full Kiri comparison used this artifact set after qualification.
+[Docker 29.10.1 comparison results](docker-benchmark-results.md#speed-065-docker-29101-comparison)

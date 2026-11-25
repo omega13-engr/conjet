@@ -9,6 +9,247 @@ boundary. SPEED-008 remains unresolved.
 [Protocol and workload manifest](docker-benchmark-plan.md)
 [Native OCI research scope](docker-native-adapter.md)
 
+## SPEED-065 Docker 29.10.1 comparison
+
+The same optimized `c8cc7059668778a2c54d199d74c2f250ac0b0da4` artifact
+set and harness ran all 91 scheduled pairs on the M1 Pro against
+official Kiri 0.2.2. Conjet passed the 71-case compatibility gate
+before the comparison. The comparison used two vCPUs and a 2,048 MiB
+VM configuration. Core dynamic memory remained enabled before and
+after timing in all 91 Conjet boots. The six executable SHA-256 hashes
+and both engine identities match the raw protocol.
+[Exact compatibility and dynamic-memory evidence](native-compatibility.md#docker-29101-optimized-candidate)
+
+| Frozen input | SHA-256 |
+| --- | --- |
+| Optimized Jetstream | `f1fddf0f5c0e944022db9834aa95731c7fa457da2eb612fb5b8ba2fb77233cb4` |
+| Official Kiri 0.2.2 | `c5cd8edefc69d3e4de4cf38a8149d07d6c4c4f1d522167c890541c17f2630884` |
+| Docker 29.10.1 | `cb59cf76741a247388e6a84f8defa5054c12dcd5e05d84a3ed8638dac2f34077` |
+| Buildx 0.39.1 | `32208f721e053f3cf56741e16c585019f9281e4a1cda9bbbeaee35a32fb0d28f` |
+| Compose 5.8.0 | `429abdc8a6c39bb9cdf218203cae37414a38525c70dd7b0bd8c57ead5b552184` |
+| Comparison manifest | `2c0875bcd984e256ba25717455ed50360bc7902ed1aa4f7e42794e5279048f68` |
+
+**81 of 91 pairs passed. Full parity and overall superiority remain
+unqualified.** All 60 lifecycle pairs passed with 240,000 measured
+operations and 1,200 warmups across the two engines, excluding the
+pilot. Conjet cleared the 5% advantage threshold at p50 and p99 in
+all six API rows and at p50 in all three bridge CLI rows. Ten of the
+twelve lifecycle rows met parity. The no-network Alpine output and
+common-static CLI p99 upper bounds reached 1.059 and 1.065.
+
+Build pairs 1, 2, 4, and 5 passed for all three languages and all four
+cache conditions. In pair 3, the Rust builder timed out pulling the
+pinned BuildKit image before its first timed operation. The same
+session completed Go and Node. Docker Hub timeouts also blocked the
+Node or Redis prepull in Compose pairs 1–4 and the Node prepull for
+Conjet's stress OOM check in pair 3. The unchanged failed sessions
+remain in the results.
+
+Both engines completed 2,000 measured stress launches each across
+concurrency 1/2/4/8. Conjet passed all four OOM checks that reached the
+workload, with exit 137 and OOM attribution. Kiri timed out after
+20 seconds waiting for exit and reported `OOMKilled=false` in all five
+boots. Its Docker and guest limits both showed 64 MiB with zero swap.
+The records establish the failed canary and leave the underlying Kiri
+cause open.
+
+The tables report medians of per-boot nearest-rank p50, p95 and p99
+in milliseconds. Descriptive values include the recorded operations
+in partial and unpaired boots. Sample failure counts cover measured
+rows and warmups. Setup and verification failures appear separately.
+Throughput is the median of complete measured windows. The p99 of
+fewer than 100 observations per boot describes a session tail. The
+paired ratios use Conjet divided by Kiri and bootstrap the paired log
+ratios with 10,000 draws and seed 615026. Five eligible pairs are
+required. A timing advantage or disadvantage requires the entire
+interval to clear 5%. Parity requires both upper bounds at or below
+1.05. Controlled registry pulls have paired estimates. The other
+image operations retain their descriptive measurements.
+
+Raw evidence is in `SPEED-065/cj-perf.LBoyR4-full-c8cc70596687/` under
+the ExternalSSD evidence root. It includes timestamps, resource
+snapshots, all per-boot samples, the aggregation scripts and the
+verification of all 182 sessions. The interrupted Docker 29.10.0
+cohort remains in `SPEED-065/cj-perf.LBoyR4-full-0e28023a99db/interruption/`.
+Every table here uses the Docker 29.10.1 cohort.
+
+### Coverage
+
+| Suite | Passed pairs | Failed pairs |
+| --- | ---: | ---: |
+| pilot | 1 | 0 |
+| lifecycle | 60 | 0 |
+| images | 5 | 0 |
+| builds | 4 | 1 |
+| compose | 1 | 4 |
+| control | 5 | 0 |
+| storage_network | 5 | 0 |
+| stress | 0 | 5 |
+
+### Lifecycle
+
+| Case | Conjet p50/p95/p99 ms | Kiri p50/p95/p99 ms | Samples/failures Conjet, Kiri | Throughput/s Conjet, Kiri | Valid pairs | p50 ratio [95% CI] | p99 ratio [95% CI] | p50, p99, parity |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| alpine-stream-exit/bridge/api | 30.087/47.049/55.908 | 34.815/54.229/61.406 | 10000/0, 10000/0 | 30.42, 28.50 | 5 | 0.863 [0.859–0.869] | 0.909 [0.891–0.924] | faster, faster, met |
+| alpine-stream-exit/bridge/cli | 47.313/67.641/75.092 | 51.637/68.109/73.533 | 10000/0, 10000/0 | 19.58, 20.01 | 5 | 0.916 [0.913–0.918] | 1.017 [1.005–1.030] | faster, inconclusive, met |
+| alpine-stream-exit/none/api | 3.277/4.134/4.977 | 3.561/4.318/5.689 | 10000/0, 10000/0 | 265.03, 269.99 | 5 | 0.916 [0.913–0.920] | 0.870 [0.784–0.946] | faster, faster, met |
+| alpine-stream-exit/none/cli | 21.998/23.143/24.208 | 21.082/21.963/23.098 | 10000/0, 10000/0 | 43.72, 47.25 | 5 | 1.044 [1.040–1.048] | 1.041 [1.017–1.059] | inconclusive, inconclusive, missed |
+| alpine-true/bridge/api | 29.889/47.248/55.457 | 34.896/53.051/60.869 | 10000/0, 10000/0 | 30.57, 28.47 | 5 | 0.859 [0.853–0.865] | 0.909 [0.899–0.916] | faster, faster, met |
+| alpine-true/bridge/cli | 47.407/67.751/74.846 | 51.668/68.251/72.916 | 10000/0, 10000/0 | 19.53, 20.17 | 5 | 0.918 [0.914–0.922] | 1.020 [0.986–1.046] | faster, inconclusive, met |
+| alpine-true/none/api | 2.941/3.741/4.651 | 3.546/4.255/5.276 | 10000/0, 10000/0 | 290.86, 272.55 | 5 | 0.842 [0.823–0.861] | 0.843 [0.736–0.929] | faster, faster, met |
+| alpine-true/none/cli | 21.738/22.834/23.947 | 21.034/21.916/23.045 | 10000/0, 10000/0 | 44.25, 47.38 | 5 | 1.035 [1.033–1.039] | 1.042 [1.036–1.048] | inconclusive, inconclusive, met |
+| common-static/bridge/api | 30.046/47.108/55.735 | 34.134/52.753/61.069 | 10000/0, 10000/0 | 30.59, 28.65 | 5 | 0.876 [0.866–0.887] | 0.909 [0.896–0.923] | faster, faster, met |
+| common-static/bridge/cli | 47.464/67.607/74.804 | 51.139/67.994/72.177 | 10000/0, 10000/0 | 19.49, 20.34 | 5 | 0.931 [0.924–0.940] | 1.029 [1.015–1.043] | faster, inconclusive, met |
+| common-static/none/api | 2.978/3.772/4.668 | 3.436/4.172/5.160 | 10000/0, 10000/0 | 288.74, 280.85 | 5 | 0.865 [0.861–0.869] | 0.895 [0.853–0.941] | faster, faster, met |
+| common-static/none/cli | 21.919/23.047/24.271 | 21.126/22.118/23.050 | 10000/0, 10000/0 | 43.85, 47.17 | 5 | 1.035 [1.027–1.041] | 1.045 [1.031–1.065] | inconclusive, inconclusive, missed |
+
+### Images
+
+| Case | Conjet p50/p95/p99 ms | Kiri p50/p95/p99 ms | Samples/failures Conjet, Kiri | Throughput/s Conjet, Kiri | Valid pairs | p50 ratio [95% CI] | p99 ratio [95% CI] | p50, p99, parity |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| alpine.cached-public-pull | 17.803/18.086/18.086 | 31.334/38.025/38.025 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| alpine.ready-to-run | 21.801/22.421/22.421 | 21.569/21.951/21.951 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| alpine.remove-tag | 17.692/18.085/18.085 | 31.174/32.576/32.576 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| alpine.save | 48.457/48.931/48.931 | 33.828/37.300/37.300 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| alpine.warm-load | 25.452/26.660/26.660 | 56.500/57.256/57.256 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| node.cached-public-pull | 17.674/18.324/18.324 | 31.393/32.022/32.022 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| node.ready-to-run | 43.603/99.096/99.096 | 41.502/43.439/43.439 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| node.remove-tag | 17.743/18.113/18.113 | 31.803/32.385/32.385 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| node.save | 238.277/243.566/243.566 | 110.476/114.879/114.879 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| node.warm-load | 145.029/150.593/150.593 | 206.518/209.299/209.299 | 25/0, 25/0 | —, — | 0 | — | — | unsupported, unsupported, unsupported |
+| registry.multilayer.cached | 18.808/19.052/19.052 | 31.776/31.957/31.957 | 25/0, 25/0 | —, — | 5 | 0.591 [0.582–0.601] | 0.587 [0.536–0.633] | faster, faster, met |
+| registry.multilayer.first-pull | 225.645/232.978/232.978 | 67.744/75.526/75.526 | 25/0, 25/0 | —, — | 5 | 3.300 [3.109–3.458] | 3.131 [2.973–3.279] | slower, slower, missed |
+| registry.small.cached | 18.251/18.497/18.497 | 31.985/47.833/47.833 | 25/0, 25/0 | —, — | 5 | 0.540 [0.498–0.585] | 0.393 [0.385–0.405] | faster, faster, met |
+| registry.small.first-pull | 128.691/168.841/168.841 | 49.656/65.494/65.494 | 25/0, 25/0 | —, — | 5 | 2.511 [2.357–2.665] | 2.300 [1.993–2.566] | slower, slower, missed |
+
+### Buildx
+
+| Case | Conjet p50/p95/p99 ms | Kiri p50/p95/p99 ms | Samples/failures Conjet, Kiri | Throughput/s Conjet, Kiri | Valid pairs | p50 ratio [95% CI] | p99 ratio [95% CI] | p50, p99, parity |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| go.dependency.build-export | 4276.913/4422.330/4422.330 | 4021.053/4176.511/4176.511 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| go.dependency.load | 170.190/173.509/173.509 | 91.902/98.936/98.936 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| go.empty.build-export | 4311.835/4340.489/4340.489 | 4539.403/4648.393/4648.393 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| go.empty.load | 151.638/158.102/158.102 | 90.243/102.833/102.833 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| go.source.build-export | 4308.145/4407.971/4407.971 | 4064.734/4417.206/4417.206 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| go.source.load | 158.430/169.021/169.021 | 88.455/95.788/95.788 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| go.unchanged.build-export | 225.309/234.547/234.547 | 196.207/202.863/202.863 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| go.unchanged.load | 28.808/32.650/32.650 | 90.299/92.479/92.479 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| node.dependency.build-export | 1184.720/1261.991/1261.991 | 6016.257/6115.491/6115.491 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| node.dependency.load | 1188.162/1194.600/1194.600 | 264.207/272.354/272.354 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| node.empty.build-export | 1163.662/1188.345/1188.345 | 6022.931/6128.681/6128.681 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| node.empty.load | 1251.650/1259.323/1259.323 | 253.394/258.655/258.655 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| node.source.build-export | 812.290/836.795/836.795 | 557.828/599.586/599.586 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| node.source.load | 1172.721/1180.380/1180.380 | 238.370/262.379/262.379 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| node.unchanged.build-export | 700.106/721.210/721.210 | 467.139/556.065/556.065 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| node.unchanged.load | 140.837/144.479/144.479 | 222.479/238.969/238.969 | 15/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| rust.dependency.build-export | 516.292/575.724/575.724 | 508.322/547.954/547.954 | 12/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| rust.dependency.load | 144.928/147.012/147.012 | 87.714/88.711/88.711 | 12/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| rust.empty.build-export | 674.337/1199.371/1199.371 | 690.535/927.332/927.332 | 12/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| rust.empty.load | 150.740/153.193/153.193 | 91.371/163.290/163.290 | 12/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| rust.source.build-export | 495.353/552.610/552.610 | 493.666/597.176/597.176 | 12/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| rust.source.load | 145.305/159.669/159.669 | 85.689/145.470/145.470 | 12/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| rust.unchanged.build-export | 223.737/236.448/236.448 | 194.387/200.672/200.672 | 12/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+| rust.unchanged.load | 26.175/26.674/26.674 | 87.116/135.837/135.837 | 12/0, 15/0 | —, — | 4 | — | — | unsupported, unsupported, unsupported |
+
+### Compose
+
+| Case | Conjet p50/p95/p99 ms | Kiri p50/p95/p99 ms | Samples/failures Conjet, Kiri | Throughput/s Conjet, Kiri | Valid pairs | p50 ratio [95% CI] | p99 ratio [95% CI] | p50, p99, parity |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| compose.down | 2399.595/2414.487/2414.487 | 2126.353/2160.194/2160.194 | 5/0, 25/0 | —, — | 1 | — | — | unsupported, unsupported, unsupported |
+| compose.no-change | 570.309/585.549/585.549 | 568.890/570.818/570.818 | 5/0, 25/0 | —, — | 1 | — | — | unsupported, unsupported, unsupported |
+| compose.recreate | 10697.188/10710.377/10710.377 | 11620.158/11630.759/11630.759 | 5/0, 25/0 | —, — | 1 | — | — | unsupported, unsupported, unsupported |
+| compose.restart | 202.811/246.618/246.618 | 131.899/175.630/175.630 | 5/0, 25/0 | —, — | 1 | — | — | unsupported, unsupported, unsupported |
+| compose.restart-ready | 2.816/3.189/3.189 | 2.168/2.565/2.565 | 10/0, 50/0 | —, — | 1 | — | — | unsupported, unsupported, unsupported |
+| compose.scale | 582.074/583.500/583.500 | 1578.679/1582.857/1582.857 | 5/0, 25/0 | —, — | 1 | — | — | unsupported, unsupported, unsupported |
+| compose.up | 1092.600/1107.051/1107.051 | 3094.126/3105.748/3105.748 | 5/0, 25/0 | —, — | 1 | — | — | unsupported, unsupported, unsupported |
+
+### Control
+
+| Case | Conjet p50/p95/p99 ms | Kiri p50/p95/p99 ms | Samples/failures Conjet, Kiri | Throughput/s Conjet, Kiri | Valid pairs | p50 ratio [95% CI] | p99 ratio [95% CI] | p50, p99, parity |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| attach.stdin-streams | 20.429/33.834/34.895 | 19.731/20.694/21.398 | 500/0, 500/0 | —, — | 5 | 1.034 [1.029–1.040] | 1.625 [1.542–1.682] | inconclusive, slower, missed |
+| cp.in.4096 | 19.924/21.090/21.955 | 18.717/19.786/20.588 | 500/0, 500/0 | —, — | 5 | 1.071 [1.060–1.081] | 1.075 [1.028–1.136] | slower, inconclusive, missed |
+| cp.in.8388608 | 81.575/88.816/90.046 | 49.887/51.840/52.794 | 500/0, 500/0 | —, — | 5 | 1.677 [1.631–1.731] | 1.712 [1.666–1.746] | slower, slower, missed |
+| cp.out.4096 | 19.369/20.244/21.108 | 18.406/19.404/19.923 | 500/0, 500/0 | —, — | 5 | 1.056 [1.046–1.066] | 1.047 [0.987–1.095] | inconclusive, inconclusive, missed |
+| cp.out.8388608 | 59.064/61.507/62.425 | 47.902/50.166/51.028 | 500/0, 500/0 | —, — | 5 | 1.233 [1.225–1.241] | 1.210 [1.198–1.223] | slower, slower, missed |
+| events.lifecycle | 16.656/17.497/17.922 | 16.883/17.639/17.808 | 500/0, 500/0 | —, — | 5 | 0.986 [0.982–0.989] | 0.975 [0.923–1.010] | inconclusive, inconclusive, met |
+| exec.api | 18.226/23.700/26.965 | 1.938/2.316/2.429 | 500/0, 500/0 | —, — | 5 | 9.209 [8.867–9.513] | 11.805 [10.767–13.168] | slower, slower, missed |
+| exec.streams | 35.596/44.288/49.220 | 19.655/20.514/21.233 | 500/0, 500/0 | —, — | 5 | 1.805 [1.791–1.816] | 2.271 [2.114–2.440] | slower, slower, missed |
+| inspect.api | 0.190/0.260/0.298 | 0.177/0.228/0.242 | 500/0, 500/0 | —, — | 5 | 1.082 [1.050–1.108] | 1.177 [1.108–1.241] | slower, slower, missed |
+| inspect.one | 17.929/18.609/19.109 | 17.603/18.328/19.218 | 500/0, 500/0 | —, — | 5 | 1.018 [1.013–1.023] | 1.009 [0.983–1.039] | inconclusive, inconclusive, met |
+| list.one | 17.498/18.300/18.670 | 17.449/18.240/18.641 | 500/0, 500/0 | —, — | 5 | 1.005 [1.001–1.009] | 0.994 [0.937–1.053] | inconclusive, inconclusive, missed |
+| logs.streams | 17.818/18.531/18.718 | 17.217/18.265/19.291 | 500/0, 500/0 | —, — | 5 | 1.035 [1.032–1.039] | 0.962 [0.912–1.013] | inconclusive, inconclusive, met |
+
+### Storage and networking
+
+| Case | Conjet p50/p95/p99 ms | Kiri p50/p95/p99 ms | Samples/failures Conjet, Kiri | Throughput/s Conjet, Kiri | Valid pairs | p50 ratio [95% CI] | p99 ratio [95% CI] | p50, p99, parity |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| service.guest.dns | 2.719/3.035/3.035 | 2.713/3.070/3.070 | 25/0, 25/0 | —, — | 5 | 1.028 [0.957–1.152] | 1.071 [0.938–1.223] | inconclusive, inconclusive, missed |
+| service.guest.redis_ping | 0.987/1.063/1.063 | 0.962/1.098/1.098 | 25/0, 25/0 | —, — | 5 | 0.994 [0.912–1.081] | 1.009 [0.959–1.074] | inconclusive, inconclusive, missed |
+| service.guest.tcp_connect | 1.597/1.713/1.713 | 1.565/1.810/1.810 | 25/0, 25/0 | —, — | 5 | 0.994 [0.960–1.035] | 0.966 [0.921–1.013] | inconclusive, inconclusive, met |
+| service.transaction | 4.772/7.883/15.645 | 4.576/8.016/14.964 | 24703/0, 24941/0 | 82.32, 83.15 | 5 | 1.040 [1.028–1.054] | 1.032 [0.947–1.111] | inconclusive, inconclusive, missed |
+| storage.bind | 1218.837/1496.101/1496.101 | 206.909/217.290/217.290 | 25/0, 25/0 | —, — | 5 | 6.071 [5.752–6.497] | 6.660 [6.157–7.204] | slower, slower, missed |
+| storage.bind.guest.random_read | 116.091/146.694/146.694 | 33.824/34.374/34.374 | 25/0, 25/0 | —, — | 5 | 3.557 [3.372–3.921] | 3.946 [3.334–4.364] | slower, slower, missed |
+| storage.bind.guest.random_write_fsync | 39.455/43.481/43.481 | 21.875/24.792/24.792 | 25/0, 25/0 | —, — | 5 | 1.842 [1.786–1.906] | 1.750 [1.569–1.935] | slower, slower, missed |
+| storage.bind.guest.read_sha256 | 415.239/512.006/512.006 | 22.635/24.315/24.315 | 25/0, 25/0 | —, — | 5 | 19.107 [17.880–20.630] | 19.394 [16.422–22.082] | slower, slower, missed |
+| storage.bind.guest.small_file_metadata | 134.346/158.447/158.447 | 38.697/46.235/46.235 | 25/0, 25/0 | —, — | 5 | 3.602 [3.464–3.792] | 3.475 [3.026–3.990] | slower, slower, missed |
+| storage.bind.guest.write_fsync | 67.133/77.008/77.008 | 22.704/23.375/23.375 | 25/0, 25/0 | —, — | 5 | 3.031 [2.891–3.190] | 3.308 [3.184–3.488] | slower, slower, missed |
+| storage.volume | 119.350/128.054/128.054 | 122.682/135.998/135.998 | 25/0, 25/0 | —, — | 5 | 0.965 [0.949–0.985] | 0.960 [0.926–1.002] | inconclusive, inconclusive, met |
+| storage.volume.guest.random_read | 6.089/6.908/6.908 | 5.430/5.939/5.939 | 25/0, 25/0 | —, — | 5 | 1.115 [1.077–1.152] | 0.891 [0.538–1.221] | slower, inconclusive, missed |
+| storage.volume.guest.random_write_fsync | 1.584/1.762/1.762 | 14.530/14.881/14.881 | 25/0, 25/0 | —, — | 5 | 0.111 [0.105–0.117] | 0.125 [0.112–0.144] | faster, faster, met |
+| storage.volume.guest.read_sha256 | 20.001/21.069/21.069 | 16.936/18.443/18.443 | 25/0, 25/0 | —, — | 5 | 1.169 [1.158–1.181] | 1.060 [0.911–1.193] | slower, inconclusive, missed |
+| storage.volume.guest.small_file_metadata | 1.977/2.146/2.146 | 2.025/2.139/2.139 | 25/0, 25/0 | —, — | 5 | 0.997 [0.956–1.046] | 1.019 [0.941–1.105] | inconclusive, inconclusive, missed |
+| storage.volume.guest.write_fsync | 21.802/28.744/28.744 | 22.994/23.474/23.474 | 25/0, 25/0 | —, — | 5 | 0.977 [0.854–1.117] | 1.205 [1.166–1.235] | inconclusive, slower, missed |
+| storage.writable-layer | 102.941/112.534/112.534 | 126.978/131.044/131.044 | 25/0, 25/0 | —, — | 5 | 0.810 [0.790–0.831] | 0.840 [0.801–0.869] | faster, faster, met |
+| storage.writable-layer.guest.random_read | 6.222/6.584/6.584 | 5.941/6.381/6.381 | 25/0, 25/0 | —, — | 5 | 1.028 [0.976–1.077] | 1.040 [0.974–1.104] | inconclusive, inconclusive, missed |
+| storage.writable-layer.guest.random_write_fsync | 0.612/0.696/0.696 | 14.748/15.256/15.256 | 25/0, 25/0 | —, — | 5 | 0.042 [0.041–0.044] | 0.046 [0.044–0.048] | faster, faster, met |
+| storage.writable-layer.guest.read_sha256 | 20.405/21.078/21.078 | 17.056/18.496/18.496 | 25/0, 25/0 | —, — | 5 | 1.166 [1.118–1.211] | 1.064 [0.892–1.211] | slower, inconclusive, missed |
+| storage.writable-layer.guest.small_file_metadata | 1.774/1.853/1.853 | 2.320/2.581/2.581 | 25/0, 25/0 | —, — | 5 | 0.765 [0.719–0.815] | 0.746 [0.678–0.829] | faster, faster, met |
+| storage.writable-layer.guest.write_fsync | 2.927/3.565/3.565 | 22.788/27.647/27.647 | 25/0, 25/0 | —, — | 5 | 0.122 [0.107–0.140] | 0.131 [0.108–0.163] | faster, faster, met |
+
+### Stress
+
+| Case | Conjet p50/p95/p99 ms | Kiri p50/p95/p99 ms | Samples/failures Conjet, Kiri | Throughput/s Conjet, Kiri | Valid pairs | p50 ratio [95% CI] | p99 ratio [95% CI] | p50, p99, parity |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |
+| stress.launch.concurrency-1 | 21.773/22.601/24.224 | 21.146/22.108/23.372 | 500/0, 500/0 | 45.47, 46.82 | 4 | — | — | unsupported, unsupported, unsupported |
+| stress.launch.concurrency-2 | 24.299/26.089/26.942 | 23.634/25.013/25.700 | 500/0, 500/0 | 79.37, 81.65 | 4 | — | — | unsupported, unsupported, unsupported |
+| stress.launch.concurrency-4 | 29.104/32.283/32.916 | 28.659/32.747/33.504 | 500/0, 500/0 | 125.40, 123.11 | 4 | — | — | unsupported, unsupported, unsupported |
+| stress.launch.concurrency-8 | 43.796/51.582/53.187 | 43.130/53.209/55.292 | 500/0, 500/0 | 151.11, 146.14 | 4 | — | — | unsupported, unsupported, unsupported |
+
+### Host resources
+
+The table includes all boots with before-and-after host process observations, including attempts that ended during setup or verification. CPU is the elapsed process CPU time, and RSS is the final sample for the recorded engine-specific process set. Disk values describe observed backing-file allocations. Process roles, backing paths, and footprint samples accompany every session.
+
+| Suite | Engine | Complete snapshots | CPU seconds | Final RSS MiB | Allocated disk change MiB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| builds | conjet | 5 | 207.25 | 598.11 | 39.54 |
+| builds | kiri | 5 | 153.15 | 3196.17 | 0.00 |
+| compose | conjet | 5 | 7.10 | 391.81 | 0.00 |
+| compose | kiri | 5 | 14.31 | 505.41 | 0.00 |
+| control | conjet | 5 | 16.35 | 184.05 | 0.00 |
+| control | kiri | 5 | 12.97 | 466.52 | 0.00 |
+| images | conjet | 5 | 13.41 | 411.25 | 13.52 |
+| images | kiri | 5 | 2.30 | 473.75 | 0.00 |
+| lifecycle | conjet | 60 | 13.48 | 178.38 | 0.00 |
+| lifecycle | kiri | 60 | 12.58 | 437.80 | 0.00 |
+| storage_network | conjet | 5 | 53.02 | 497.33 | 0.48 |
+| storage_network | kiri | 5 | 32.70 | 1109.80 | 0.00 |
+| stress | conjet | 5 | 11.77 | 483.81 | 0.00 |
+| stress | kiri | 5 | 31.12 | 672.05 | 0.00 |
+
+### Failures and limits
+
+- Conjet Buildx pair 3 timed out pulling BuildKit for Rust. Go and Node completed.
+- Conjet Compose pairs 1–4 timed out pulling Node or Redis. Pair 5 passed.
+- Conjet stress pair 3 timed out pulling Node after the measured launch series.
+- Kiri failed OOM attribution in stress pairs 1–5. Its launch series passed.
+- The isolated native guest cleanup and backing leases closed in all
+  Conjet boots. Kiri stopped its private daemon and released its host
+  socket and backing. The two native ext4 disks passed detached checks.
+  Production fingerprints matched in all 182 sessions.
+- Per-workload Kiri guest teardown, second-host replication, energy,
+  and the original sub-1 ms research gate remain open.
+
 ## SPEED-065 optimized native comparison
 
 The `66a8a90` optimized native candidate passed the [71-case gate](native-compatibility.md#qualified-optimized-candidate)
