@@ -14,7 +14,9 @@ use conjet_launch_service::socket::{read_key, Stream};
 use conjet_launch_service::spec::{
     LaunchRequest, LaunchSpec, NATIVE_LIMITS, WORKLOAD_GID, WORKLOAD_UID,
 };
-use conjet_launch_service::wire::{Frame, Kind, WireError};
+use conjet_launch_service::wire::{
+    Frame, Kind, RequestId, WireError, COPY_DOWNLOAD_CAPABILITY, COPY_LIMIT,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -73,7 +75,31 @@ pub(super) struct Connection {
     pub(super) oci: bool,
     pub(super) mapped_ids: bool,
     pub(super) pending_watch: bool,
+    pub(super) copy_download: bool,
     stream: Stream,
+}
+
+fn read_copy_download(
+    mut stream: impl Read,
+    id: RequestId,
+    size: u64,
+    output: &mut impl Write,
+) -> anyhow::Result<()> {
+    let start: Value = Frame::read(&mut stream)?.expect(Kind::CopyDownload, id)?;
+    ensure!(
+        start["size"].as_u64() == Some(size),
+        "invalid archive download size"
+    );
+    ensure!(
+        io::copy(&mut (&mut stream).take(size), output)? == size,
+        "incomplete archive download"
+    );
+    let end: Value = Frame::read(stream)?.expect(Kind::CopyDownload, id)?;
+    ensure!(
+        end["copied"].as_u64() == Some(size),
+        "invalid archive download acknowledgement"
+    );
+    Ok(())
 }
 
 impl Connection {
@@ -160,6 +186,10 @@ impl Connection {
             pending_watch: hello.capabilities.iter().any(|value| {
                 value == conjet_launch_service::core_admission::PENDING_WATCH_CAPABILITY
             }),
+            copy_download: hello
+                .capabilities
+                .iter()
+                .any(|value| value == COPY_DOWNLOAD_CAPABILITY),
             stream,
         })
     }
@@ -179,6 +209,23 @@ impl Connection {
 
     pub(super) fn disconnect(&self) {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+
+    pub(super) fn copy_download(
+        &mut self,
+        request: &Value,
+        size: u64,
+        output: &mut impl Write,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            self.copy_download && size <= COPY_LIMIT,
+            "unsupported copy download"
+        );
+        self.stream
+            .deadline(Some(Instant::now() + Duration::from_secs(30)));
+        let id = random()?;
+        Frame::write(&mut self.stream, Kind::CopyDownload, id, request)?;
+        read_copy_download(&mut self.stream, id, size, output)
     }
 
     pub(super) fn inspect(&mut self) -> anyhow::Result<Value> {
@@ -340,6 +387,52 @@ fn transient_open(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod connection_tests {
     use super::*;
+
+    #[test]
+    fn archive_download_requires_exact_bytes_and_correlated_completion() {
+        let id = [7; 16];
+        let payload = b"archive data";
+        let size = payload.len() as u64;
+        let mut response = Vec::new();
+        Frame::write(&mut response, Kind::CopyDownload, id, &json!({"size":size})).unwrap();
+        let header_len = response.len();
+        response.extend_from_slice(payload);
+        for partial in [&response[..header_len + 1], response.as_slice()] {
+            assert!(read_copy_download(partial, id, size, &mut Vec::new()).is_err());
+        }
+        let mut wrong_id = response.clone();
+        Frame::write(
+            &mut wrong_id,
+            Kind::CopyDownload,
+            [8; 16],
+            &json!({"copied":size}),
+        )
+        .unwrap();
+        assert!(read_copy_download(wrong_id.as_slice(), id, size, &mut Vec::new()).is_err());
+        let mut changed = response.clone();
+        conjet_launch_service::wire::write_error(
+            &mut changed,
+            id,
+            "archive_rejected",
+            "native archive file changed",
+        )
+        .unwrap();
+        let error = read_copy_download(changed.as_slice(), id, size, &mut Vec::new()).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<WireError>(),
+            Some(WireError::PeerError(code)) if code == "archive_rejected"
+        ));
+        Frame::write(
+            &mut response,
+            Kind::CopyDownload,
+            id,
+            &json!({"copied":size}),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        read_copy_download(response.as_slice(), id, size, &mut output).unwrap();
+        assert_eq!(output, payload);
+    }
 
     #[test]
     fn retries_transport_closure_but_not_rejected_authentication() {

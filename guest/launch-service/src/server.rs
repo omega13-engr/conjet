@@ -67,6 +67,7 @@ impl Server {
                     crate::spec::MAPPED_IDS_CAPABILITY,
                     "memory",
                     crate::core_admission::PENDING_WATCH_CAPABILITY,
+                    crate::wire::COPY_DOWNLOAD_CAPABILITY,
                 ];
             }
             if fresh.is_oci() {
@@ -76,6 +77,7 @@ impl Server {
                     "native_oci_arm64_v1",
                     crate::spec::MAPPED_IDS_CAPABILITY,
                     "memory",
+                    crate::wire::COPY_DOWNLOAD_CAPABILITY,
                 ];
             }
             if fresh.is_native() {
@@ -316,6 +318,14 @@ impl Server {
                     "no pending BuildKit registry connection",
                 )?;
                 continue;
+            }
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            if let Some(fresh) = &self.fresh
+                && scope == Scope::Host
+                && fresh.is_oci()
+                && frame.kind == Kind::CopyDownload
+            {
+                return fresh.serve_copy_download(&frame, &boot_id, &mut stream);
             }
             #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
             if let Some(fresh) = &self.fresh

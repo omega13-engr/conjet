@@ -23,6 +23,7 @@ pub struct CgroupUsage {
     pub tasks: u64,
 }
 pub const COPY_LIMIT: u64 = 16 * 1024 * 1024;
+pub const COPY_DOWNLOAD_CAPABILITY: &str = "native_copy_download_v1";
 const HEADER_SIZE: usize = 28;
 const MAGIC: [u8; 4] = *b"CJLS";
 
@@ -65,6 +66,7 @@ pub enum Kind {
     Account = 32,
     ExecStream = 33,
     BuildRegistry = 34,
+    CopyDownload = 35,
 }
 
 impl TryFrom<u8> for Kind {
@@ -107,6 +109,7 @@ impl TryFrom<u8> for Kind {
             32 => Ok(Account),
             33 => Ok(ExecStream),
             34 => Ok(BuildRegistry),
+            35 => Ok(CopyDownload),
             _ => Err(WireError::BadHeader),
         }
     }

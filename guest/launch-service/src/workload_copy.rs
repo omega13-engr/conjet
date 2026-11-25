@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::fs::{File, Metadata};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::time::{Duration, Instant};
@@ -59,6 +59,54 @@ impl From<&Metadata> for Identity {
             changed: (info.ctime(), info.ctime_nsec()),
             modified: (info.mtime(), info.mtime_nsec()),
         }
+    }
+}
+
+pub(crate) struct DownloadRequest {
+    pub(crate) path: String,
+    pub(crate) identity: Identity,
+}
+
+impl DownloadRequest {
+    pub(crate) fn open(&self, root: &File) -> io::Result<File> {
+        let file = open_path(root, &self.path, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        self.verify(&file)?;
+        Ok(file)
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.identity.bytes
+    }
+
+    pub(crate) fn verify(&self, file: &File) -> io::Result<()> {
+        let info = file.metadata()?;
+        if !info.is_file() || self.identity != Identity::from(&info) || self.size() > COPY_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "workload archive file changed or exceeds its bound",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn transfer(
+        &self,
+        file: &mut File,
+        mut send: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut left = self.size();
+        let mut chunk = [0; 64 * 1024];
+        while left != 0 {
+            let count = left.min(chunk.len() as u64) as usize;
+            file.read_exact(&mut chunk[..count])?;
+            send(&chunk[..count])?;
+            left -= count as u64;
+        }
+        self.verify(file)
+    }
+
+    pub(crate) fn verify_path(&self, root: &File) -> io::Result<()> {
+        self.verify(&open_path(root, &self.path, libc::O_PATH)?)
     }
 }
 
@@ -425,30 +473,18 @@ impl Store {
                 identity,
                 offset,
             } => {
-                let file = open_path(root, &path, libc::O_RDONLY | libc::O_NONBLOCK)?;
-                let info = file.metadata()?;
-                if !info.is_file()
-                    || identity != Identity::from(&info)
-                    || identity.bytes > COPY_LIMIT
-                    || offset >= identity.bytes
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "workload archive file changed or exceeds its bound",
-                    ));
+                let request = DownloadRequest { path, identity };
+                let file = request.open(root)?;
+                if offset >= request.size() {
+                    return Err(rejected());
                 }
-                let count = (identity.bytes - offset).min(CHUNK as u64) as usize;
+                let count = (request.size() - offset).min(CHUNK as u64) as usize;
                 let mut chunk = [0; CHUNK];
                 file.read_exact_at(&mut chunk[..count], offset)?;
-                if identity != Identity::from(&file.metadata()?) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "workload archive file changed during read",
-                    ));
-                }
+                request.verify(&file)?;
                 let next = offset + count as u64;
                 Ok(json!({
-                    "offset":offset,"next_offset":next,"eof":next==identity.bytes,
+                    "offset":offset,"next_offset":next,"eof":next==request.size(),
                     "data":base64::engine::general_purpose::STANDARD.encode(&chunk[..count]),
                 }))
             }

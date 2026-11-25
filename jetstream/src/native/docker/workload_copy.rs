@@ -198,6 +198,37 @@ fn file_archive(
         !info.name.contains('/') && !matches!(info.name.as_str(), "" | "." | ".."),
         "invalid workload archive member name"
     );
+    let mut tar = tar::Builder::new(tempfile::tempfile_in(scratch)?);
+    let mut header = tar::Header::new_ustar();
+    header.set_size(size);
+    header.set_mode(info.mode);
+    header.set_mtime(u64::try_from(info.modified()?.0)?);
+    header.set_cksum();
+    if peer.copy_download && size > CHUNK as u64 {
+        let mut entry = tar.append_writer(&mut header, &info.name)?;
+        peer.copy_download(
+            &json!({"handle":handle,"path":path,"identity":info.identity,"budget_ms":30000}),
+            size,
+            &mut entry,
+        )?;
+        entry.finish()?;
+    } else {
+        let data = read_archive_chunks(peer, handle, scratch, info, path, size)?;
+        tar.append_data(&mut header, &info.name, data)?;
+    }
+    let mut archive = tar.into_inner()?;
+    archive.rewind()?;
+    Ok(archive)
+}
+
+fn read_archive_chunks(
+    peer: &mut client::Connection,
+    handle: &Value,
+    scratch: &std::path::Path,
+    info: &Info,
+    path: &str,
+    size: u64,
+) -> anyhow::Result<File> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut data = tempfile::tempfile_in(scratch)?;
     let mut offset = 0;
@@ -229,16 +260,7 @@ fn file_archive(
         offset = next;
     }
     data.rewind()?;
-    let mut tar = tar::Builder::new(tempfile::tempfile_in(scratch)?);
-    let mut header = tar::Header::new_ustar();
-    header.set_size(size);
-    header.set_mode(info.mode);
-    header.set_mtime(u64::try_from(info.modified()?.0)?);
-    header.set_cksum();
-    tar.append_data(&mut header, &info.name, data)?;
-    let mut archive = tar.into_inner()?;
-    archive.rewind()?;
-    Ok(archive)
+    Ok(data)
 }
 
 impl Owner {

@@ -3587,6 +3587,62 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-173
+
+Title: Remove per-chunk RPC delay from bounded Docker archive downloads
+
+Description: Optimize the original Docker copy-out path for regular files
+up to the current archive size limit.
+
+Is blocked by task: SPEED-172 passed the original exec canaries.
+
+Acceptance Criteria:
+
+- Preserve guest generation, workload and file identity, byte bounds and
+  tar metadata. Withhold the HTTP archive if the guest transfer fails,
+  the source changes or the connection closes before acknowledgement.
+- Verify copied contents with the original 4 KiB and 8 MiB SHA-256
+  round trips. Cover rejection, disconnect and cleanup.
+
+Problem and Evidence: Three original 8 MiB copies each used 1,024
+round trips in each direction. Guest RPCs accounted for 1,134 to
+2,381 ms of the copy-out stage. The second host tar spool took
+32 to 41 ms. Upload RPCs accounted for 170 to 180 ms.
+
+Approach: Stream a descriptor-pinned file over the authenticated
+connection into a private tar. Verify the retained source and require
+the final correlated acknowledgement before publishing the HTTP body.
+
+Evidence: Two alternating pairs kept the original control startup
+canaries, 100 measured copies and ten warmups per case and boot. All
+4 KiB and 8 MiB round trips passed their SHA-256 check. The pooled 8 MiB
+download median fell from 2,214.733 to 69.903 ms. The paired diagnostics
+used one host and swapped only guest support for the download stream.
+The original abbreviated screen caught a `not_running` upload response
+in its first warmup after detached start. The exact failed attempt is
+retained for a separate startup regression. ExternalSSD retains
+`SPEED-173/cj-perf.LBoyR4-copy-profile/`,
+`SPEED-173/cj-perf.LBoyR4-copy-download-ab/`, and
+`SPEED-173/cj-perf.LBoyR4-copy-download-matched-ab/`.
+
+Source: `guest/launch-service/src/workload_copy.rs`,
+`guest/launch-service/src/fresh_fixture.rs`,
+`guest/launch-service/src/server.rs`, `guest/launch-service/src/wire.rs`,
+`jetstream/src/native/client.rs`, and
+`jetstream/src/native/docker/workload_copy.rs`.
+
+Review: The guest retains an authenticated workload pidfd, verifies both
+the open file and the current path, and releases the transfer on peer
+closure. The host keeps the tar private until the final correlated reply.
+Rust workspace and strict ARM64 Clippy passed. The live guest passed the
+16 MiB SHA-256 round trip, stale request and conflicting-credit rejection,
+both in-place and replacement mutation rejection, and disconnect recovery.
+The workload file-size cap remained effective. Evidence is in
+`SPEED-173/cj-perf.LBoyR4-copy-download/`.
+
+Next Action: Reproduce and close the immediate archive startup race, then
+profile the streamed upload candidate against the original two sizes.
+
 ### SPEED-172
 
 Title: Reduce latency of native Docker exec process completion
