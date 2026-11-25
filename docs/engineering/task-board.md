@@ -3587,6 +3587,54 @@ path has no dependency on this experiment.
 
 ## DONE
 
+### SPEED-171
+
+Title: Attribute and reduce cached Node Docker archive export latency
+
+Description: Trace the pinned BuildKit worker's tarball transfer from
+guest process output through the native exec relay to Buildx and the
+original ExternalSSD archive destination.
+
+Is blocked by task: SPEED-170 passed its scoped archive checks.
+
+Acceptance Criteria:
+
+- Measure the completed transfer and distinguish worker output readiness,
+  guest relay, host relay and writer costs. Preserve original format,
+  backpressure, cancellation, error streams and terminal status.
+- Qualify any change against the original exported-image and cache
+  witnesses. Keep timing diagnostics separate from qualification binaries.
+
+Problem and Evidence: Cached Node builds bypass COPY and RUN. The retained
+comparison recorded median rounded tarball delivery of 800 ms on Conjet
+and 300 ms on Kiri. The optimized archive-load stages address a separate
+client boundary.
+
+Approach: Collect numeric stream counts and durations on the exact
+BuildKit client path in a trace boot. Optimize the demonstrated cause.
+
+Evidence: The traced cached export transferred about 61 MB in 7,600
+guest stdout frames. It spent 590 ms sending the frames, including
+socket waits. The host spent 156 ms forwarding stdout to Buildx.
+These spans overlap. Two alternating pairs with the original four Node
+cache cases and identical pinned BuildKit seeds passed all 48 image
+checks. The unchanged-cache build and export median moved from 950.326
+to 775.421 ms. The median rounded tarball transfer moved from 750 to
+600 ms. The other three build and export medians also fell. The frozen
+full comparison supplies the Kiri result. ExternalSSD evidence is in
+`SPEED-171/cj-perf.LBoyR4-node-export-profile/eof/` and
+`SPEED-171/cj-perf.LBoyR4-node-frame-ab/`.
+
+Source: `guest/launch-service/src/wire.rs`.
+
+Review: Each validated frame now submits its existing header and payload
+in one bounded write. The regression verifies the exact framing and
+terminal code. Workspace tests, guest lint, and the native live-output
+checks passed using the original stream and cleanup expectations.
+
+Next Action: Measure the two process-exit waits on the original exec API
+and CLI paths.
+
 ### SPEED-170
 
 Title: Attribute archive load and remove redundant blob I/O

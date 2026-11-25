@@ -119,9 +119,14 @@ pub fn write_exec_stream(mut output: impl Write, stream: u8, data: &[u8]) -> io:
             "invalid exec stream chunk",
         ));
     }
-    let [a, b, c, d] = (data.len() as u32).to_be_bytes();
-    output.write_all(&[stream, 0, 0, 0, a, b, c, d])?;
-    output.write_all(data)
+    // Exec traffic crosses a packetized transport. Submit each validated
+    // header and payload together so the receiver need not wake for both.
+    let mut frame = [0; 8 + EXEC_STREAM_CHUNK];
+    frame[0] = stream;
+    frame[4..8].copy_from_slice(&(data.len() as u32).to_be_bytes());
+    let length = 8 + data.len();
+    frame[8..length].copy_from_slice(data);
+    output.write_all(&frame[..length])
 }
 
 pub fn read_exec_stream(
@@ -335,6 +340,45 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct Ping {
         budget_ms: u16,
+    }
+
+    #[test]
+    fn exec_output_submits_a_complete_bounded_frame() {
+        #[derive(Default)]
+        struct Output {
+            writes: usize,
+            bytes: Vec<u8>,
+        }
+
+        impl Write for Output {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                self.bytes.extend_from_slice(data);
+                Ok(data.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let source = [0x91; EXEC_STREAM_CHUNK];
+        let mut output = Output::default();
+        write_exec_stream(&mut output, 2, &source).unwrap();
+        assert_eq!(output.writes, 1);
+        assert_eq!(output.bytes.len(), 8 + source.len());
+        let mut data = [0; EXEC_STREAM_CHUNK];
+        assert_eq!(
+            read_exec_stream(output.bytes.as_slice(), &mut data).unwrap(),
+            (2, source.len())
+        );
+        assert_eq!(data, source);
+        assert!(write_exec_stream(&mut output, 4, &source).is_err());
+        write_exec_stream(&mut output, 4, &[23]).unwrap();
+        assert_eq!(
+            &output.bytes[8 + source.len()..],
+            &[4, 0, 0, 0, 0, 0, 0, 1, 23]
+        );
     }
 
     #[test]
