@@ -14,9 +14,13 @@ jobs:
       - name: Install the static guest compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools linux-libc-dev
       - name: Build memory helpers and verify the kernel pin
-        run: bash build-support/build-native-core-assets.sh native-core-assets
+        run: |
+          set -euo pipefail
+          uapi="$(mktemp -d "${RUNNER_TEMP}/conjet-uapi.XXXXXX")"
+          ln -s /usr/include/linux /usr/include/asm-generic "/usr/include/$(gcc -print-multiarch)/asm" "$uapi/"
+          CONJET_NATIVE_UAPI_DIR="$uapi" bash build-support/build-native-core-assets.sh native-core-assets
       - uses: actions/upload-artifact@v4
         with:
           name: conjet-native-core-assets

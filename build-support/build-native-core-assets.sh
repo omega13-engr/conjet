@@ -16,8 +16,12 @@ fi
 stage="$(mktemp -d "$(dirname -- "$output")/.conjet-native-core.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
 
+compiler=("${CONJET_NATIVE_CC:-musl-gcc}")
+if [ -n "${CONJET_NATIVE_UAPI_DIR:-}" ]; then
+  compiler+=(-idirafter "$CONJET_NATIVE_UAPI_DIR")
+fi
 for helper in conjet-memd conjet-reclaimd; do
-  "${CONJET_NATIVE_CC:-musl-gcc}" -static -O2 -Wall -Wextra -pthread \
+  "${compiler[@]}" -static -O2 -Wall -Wextra -pthread \
     "$root/guest/image/conjet-core/src/$helper.c" -o "$stage/$helper"
   case "$(file -b "$stage/$helper")" in
     "ELF 64-bit LSB "*"ARM aarch64"*"statically linked"*) ;;
