@@ -10,6 +10,7 @@ final class ManagedNativeDocker {
     private let root: URL
     private let state: URL
     private let enableHostMounts: Bool
+    private let qualification: Qualification?
     private var boot: ConjetCoreRustVMMRun?
     private var endpoint: ConjetCoreRustVMMRun?
     private var session: URL?
@@ -24,6 +25,7 @@ final class ManagedNativeDocker {
         self.root = paths.runDirectory.resolvingSymlinksInPath()
         self.state = root.appendingPathComponent("native-data", isDirectory: true)
         self.enableHostMounts = enableHostMounts
+        self.qualification = try Qualification.read(paths: paths, state: state)
         guard paths.dockerSocket.deletingLastPathComponent().resolvingSymlinksInPath().path == root.path,
               root.appendingPathComponent("cn-XXXXXX/memory-control.sock").path.utf8CString.count <= 104 else {
             throw ConjetError.unavailable("The profile path is too long for native Docker sockets")
@@ -92,7 +94,8 @@ final class ManagedNativeDocker {
             "--guest-reclaimd", assets.appendingPathComponent("conjet-reclaimd").path,
             "--core-dynamic-memory", "--volume-disk", disk.path,
             "--build-snapshot-disk", "--disk-image-store"
-        ] + (enableHostMounts ? ["--bind-filesystem"] : []), stdout: readyLog, stderrName: "native-boot.stderr.log")
+        ] + (qualification == .pressure ? ["--core-pressure-fixture"] : [])
+          + (enableHostMounts ? ["--bind-filesystem"] : []), stdout: readyLog, stderrName: "native-boot.stderr.log")
         self.boot = boot
         do {
             try boot.start()
@@ -110,8 +113,10 @@ final class ManagedNativeDocker {
                     let endpoint = try process([
                         "docker-serve", "--native-session", session.path, "--socket", paths.dockerSocket.path,
                         "--image", image, "--receipt", receipt.path, "--image-store", images.path,
-                        "--boot-layout", layout.path, "--pinned-public-registry", "--pinned-build-registry"
-                    ] + buildClient + (enableHostMounts ? ["--bind-root", binds.path] : []),
+                        "--pinned-public-registry", "--pinned-build-registry"
+                    ] + (qualification?.coldImageStore == true ? [] : ["--boot-layout", layout.path])
+                      + (qualification?.registryArguments ?? []) + buildClient
+                      + (enableHostMounts ? ["--bind-root", binds.path] : []),
                     stdout: paths.logsDirectory.appendingPathComponent("native-docker.jsonl"),
                     stderrName: "native-docker.stderr.log")
                     self.endpoint = endpoint
@@ -277,5 +282,55 @@ final class ManagedNativeDocker {
         let pid: Int32
         let owner: String
         let session: String
+    }
+
+    private enum Qualification: Equatable {
+        case coldPublicBuild
+        case registry(UInt16)
+        case pressure
+
+        var coldImageStore: Bool { self != .pressure }
+
+        var registryArguments: [String] {
+            guard case .registry(let port) = self else { return [] }
+            return ["--registry", "127.0.0.1:\(port)"]
+        }
+
+        static func read(paths: ConjetPaths, state: URL) throws -> Self? {
+            let environment = ProcessInfo.processInfo.environment
+            guard let mode = environment["CONJET_NATIVE_QUALIFICATION"] else { return nil }
+            let scratch = URL(fileURLWithPath: "/Volumes/ExternalSSD/dev_workspace/tmp").resolvingSymlinksInPath()
+            let workspace = paths.home.deletingLastPathComponent()
+            let docker = URL(fileURLWithPath: environment["DOCKER_CONFIG"] ?? "")
+            func isPrivateScratch(_ path: URL) -> Bool {
+                var info = stat()
+                return path.path.hasPrefix(scratch.path + "/")
+                    && path.resolvingSymlinksInPath().path == path.path
+                    && lstat(path.path, &info) == 0 && info.st_mode & S_IFMT == S_IFDIR
+                    && info.st_uid == geteuid() && info.st_mode & 0o077 == 0
+            }
+            var stateInfo = stat()
+            guard environment["CONJET_HOME"] == paths.home.path,
+                  environment["CONJET_DISABLE_MENU_BAR_APP"] == "1",
+                  environment["CONJET_DISABLE_BACKGROUND_SERVICE_REGISTRATION"] == "1",
+                  environment["DOCKER_CONFIG"] == docker.path,
+                  docker.path.hasPrefix(workspace.path + "/"),
+                  isPrivateScratch(workspace),
+                  isPrivateScratch(paths.home),
+                  isPrivateScratch(docker),
+                  lstat(state.path, &stateInfo) == -1 && errno == ENOENT else {
+                throw ConjetError.invalidArgument("Native qualification requires a fresh private ExternalSSD profile and Docker configuration")
+            }
+            switch mode {
+            case "cold-public-build": return .coldPublicBuild
+            case "pressure": return .pressure
+            default:
+                if let value = mode.split(separator: ":", maxSplits: 1).last,
+                   mode.hasPrefix("registry:"), let port = UInt16(value), port >= 1024 {
+                    return .registry(port)
+                }
+                throw ConjetError.invalidArgument("Unknown native qualification input")
+            }
+        }
     }
 }

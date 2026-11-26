@@ -87,11 +87,7 @@ pub(super) struct Options {
     #[arg(long, requires = "core_dynamic_memory")]
     core_pressure_fixture: bool,
     /// Exclusively leased ext4 disk for the isolated native Core guest.
-    #[arg(
-        long,
-        requires = "core_dynamic_memory",
-        conflicts_with = "core_pressure_fixture"
-    )]
+    #[arg(long, requires = "core_dynamic_memory")]
     volume_disk: Option<PathBuf>,
     /// Mount the leased disk as a private BuildKit workspace for diagnostics.
     #[arg(long, requires = "volume_disk")]
@@ -319,6 +315,14 @@ pub(super) fn serve(
     docker_root: Option<&Path>,
     parent: Option<libc::pid_t>,
 ) -> anyhow::Result<()> {
+    ensure!(
+        !options.core_pressure_fixture
+            || options.volume_disk.is_none()
+            || (parent.is_some()
+                && docker_root
+                    .is_some_and(|root| { root.starts_with(super::docker::COMPARISON_SCRATCH) })),
+        "the Core pressure fixture can share a volume disk only in a managed qualification profile"
+    );
     let kernel_expected = unhex::<64>(&options.kernel_sha512).context("invalid kernel SHA-512")?;
     let expected = unhex::<32>(&options.sha256).context("invalid executable SHA-256")?;
     let (workload, oci, image_digest) = if let Some(path) = options.oci_package {

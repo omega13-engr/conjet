@@ -190,6 +190,14 @@ pub(super) fn serve(
     root: &Path,
     parent: Option<libc::pid_t>,
 ) -> anyhow::Result<()> {
+    if let Some(registry) = options.registry.filter(|_| parent.is_some()) {
+        ensure!(
+            root.starts_with(COMPARISON_SCRATCH)
+                && registry.ip() == std::net::Ipv4Addr::LOCALHOST
+                && registry.port() >= 1024,
+            "managed fixture registries require an ExternalSSD qualification profile and a private loopback authority"
+        );
+    }
     private_directory(&options.native_session, root)?;
     private_directory(
         options

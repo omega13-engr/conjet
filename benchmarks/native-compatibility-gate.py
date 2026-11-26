@@ -659,7 +659,7 @@ def direct_buildkit(report, data):
                for row, exit_status in ((runs[0], {'code': 0}), (terminal, {'signal': 9})))
 
 
-def evaluate(root, revision, release):
+def evaluate(root, revision, release, *, packaged=False):
     manifest = PREFLIGHT['contract']()
     required = {case['id']: {
         'task': group['task'], 'status': 'FAIL', 'reason': 'missing qualified witness',
@@ -668,7 +668,7 @@ def evaluate(root, revision, release):
     } for group in manifest['groups'] for case in group['cases']}
     if sum(len(group['cases']) for group in manifest['groups']) != len(required):
         raise ValueError('duplicate case in the frozen manifest')
-    launch_artifacts = {name: digest for name, digest in release.items() if name != 'conjetd'}
+    launch_artifacts = {name: digest for name, digest in release.items() if packaged or name != 'conjetd'}
     scenarios = json.loads((HERE / 'scenarios/docker-comparison-v1.json').read_text())
     lanes = {}
 
@@ -688,6 +688,21 @@ def evaluate(root, revision, release):
                         and launcher.get('cleanup_errors') == []
                         and launcher.get('shutdown', {}).get('guest_cleanup') == 'complete'
                         and launcher.get('shutdown', {}).get('reclaim_failures') == 0)
+            if packaged and verified:
+                started = read(folder, 'start.stdout')
+                status = started.get('status', {})
+                config = status.get('config', {})
+                pids = [launcher.get(name) for name in ('daemon_pid', 'vmm_pid', 'adapter_pid')]
+                verified = (launcher.get('scope') == 'packaged-ordinary-runtime'
+                            and started.get('ok') is True
+                            and status.get('pid') == pids[0]
+                            and all(type(pid) is int and pid > 0 for pid in pids)
+                            and len(set(pids)) == len(pids)
+                            and config.get('runtime') == 'native-docker'
+                            and (config.get('vmCPUs'), config.get('memoryMiB'), config.get('diskGiB'))
+                                == (2, 2048, 16)
+                            and '--volume-disk' in launcher['vm_command']
+                            and launcher.get('volume_lease_released') is True)
             lanes[name] = (folder, verified)
         return lanes[name]
 
@@ -920,6 +935,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--revision', required=True)
+    parser.add_argument('--packaged', action='store_true',
+                        help='require the packaged daemon identity, normal native default and mounted volume')
     args = parser.parse_args()
     root = args.evidence.resolve(strict=True)
     if not root.is_relative_to(SCRATCH):
@@ -934,7 +951,7 @@ def main():
     if (release.keys() != {'conjet', 'conjetd', 'jetstream', 'conjet-launchd', 'conjet-memd', 'conjet-reclaimd'}
             or re.fullmatch(r'[0-9a-f]{40}', args.revision) is None):
         parser.error('expected the exact release executable inventory')
-    summary = evaluate(root, args.revision, release)
+    summary = evaluate(root, args.revision, release, packaged=args.packaged)
     destination = root / 'compatibility-summary.json'
     destination.write_text(json.dumps(summary, indent=2) + '\n')
     print(f"{summary['passed_cases']} PASS / {summary['failed_cases']} FAIL. {destination}")

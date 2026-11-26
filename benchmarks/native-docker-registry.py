@@ -105,7 +105,7 @@ class Registry:
         return f'{self.authority}/{REPOSITORY}@{self.identities[name]["manifest_digest"]}'
 
 
-def collect(endpoint, peer, docker, env, evidence, registry, store):
+def collect(endpoint, peer, docker, env, evidence, registry, store, *, disk_packages=False):
     connection = TOOLS['UnixHTTP'](endpoint, peer)
     small, multi = (registry.image(name) for name in ('small', 'multi'))
     cases = {}
@@ -126,7 +126,7 @@ def collect(endpoint, peer, docker, env, evidence, registry, store):
 
     def pkg(name):
         manifest = registry.identities[name]['manifest_digest']
-        return store / 'images' / manifest[7:] / 'package.json'
+        return store / 'images' / manifest[7:] / ('package.cjoci' if disk_packages else 'package.json')
 
     try:
         if TOOLS['api'](connection, 'GET', '/version', (200,))['Platform']['Name'] != 'Conjet Native OCI':
