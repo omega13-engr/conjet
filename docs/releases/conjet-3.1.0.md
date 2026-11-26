@@ -12,11 +12,11 @@ foreground Jetstream session.
 
 The proposed version is 3.1.0. Independent review, Developer ID signing,
 notarization and stapling are production release gates.
-The [packaged evaluation](../engineering/packaged-native-release-evaluation.md)
-records 58/71 frozen cases. Production promotion remains held.
+The [installed ad-hoc evaluation](../engineering/installed-native-compatibility.md)
+records 71/71 frozen cases with Docker 29.10.1, Buildx 0.39.1, and Compose 5.8.0.
 
-The local verification envelope is a single Apple M1 Pro, with no guest
-network and one active workload or prepared slot per session. In three
+The standalone executable experiment was tested on a single Apple M1 Pro
+with no guest network and one active workload or prepared slot per session. In three
 local sessions, fresh API p99 was 7.258–7.737 ms and prepared claim
 through verified cleanup p99 was 2.080–3.291 ms. Preparation and
 refill are measured separately. This release makes no superiority claim.

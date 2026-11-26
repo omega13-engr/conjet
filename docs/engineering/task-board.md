@@ -2697,15 +2697,17 @@ Acceptance Criteria:
 - Retain the screenshots and raw attempts, verify isolation, and keep
   Developer ID signing, notarization and independent review in the release gate.
 
-Evidence: Ad-hoc source `5e6c44a` passed the hosted source workflow, all 12
-lifecycle groups, and the desktop, helper, installation, Core growth and
-rollback tests. The frozen gate passed 58/71. The remaining cases and artifact
-checksums are in the [packaged evaluation](packaged-native-release-evaluation.md).
+Evidence: The installed ad-hoc package at `748c2a7` passed 71/71 with
+Docker 29.10.1. All 24,000 measured lifecycle operations and 120 warmups
+passed. The [installed candidate report](installed-native-compatibility.md)
+records the package hashes, repeat tests, failed attempts, and release gates.
+The [earlier packaged evaluation](packaged-native-release-evaluation.md)
+retains its 58/71 result.
 
-Review: Implementation self-review complete. The frozen gate and independent
-review remain open for [PR #33](https://github.com/omega13-engr/conjet/pull/33).
+Review: Implementation self-review complete. Independent review remains
+open for [PR #33](https://github.com/omega13-engr/conjet/pull/33).
 
-Next Action: Qualify the outstanding frozen witnesses before production promotion.
+Next Action: Complete independent review and the production signing and notarization gates.
 
 ### SPEED-063
 

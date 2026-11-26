@@ -75,8 +75,9 @@ The native Docker candidate passed 71 compatibility cases on
 incomplete pairs include public registry setup timeouts and Kiri OOM
 verification failures. Benchmark scope and engine limits apply to any
 release notes. [Qualification and results](engineering/docker-benchmark-results.md#speed-065-docker-29101-comparison)
-The separate [packaged 3.1.0 evaluation](engineering/packaged-native-release-evaluation.md)
-recorded 58/71 frozen cases and retains the remaining release gates.
+The [installed 3.1.0 ad-hoc candidate](engineering/installed-native-compatibility.md)
+passed all 71 frozen cases through the packaged Native Docker path.
+Independent review and the production signing and notarization gates remain open.
 
 Fresh packaged Apple Silicon profiles select `native-docker` through the
 ordinary start path. Native profiles use two vCPUs, a 2 GiB memory ceiling,

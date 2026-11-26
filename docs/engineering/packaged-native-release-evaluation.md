@@ -1,7 +1,9 @@
 # Packaged Native Docker evaluation
 
 Proposed release version **3.1.0**. The **ad-hoc Apple silicon candidate** is
-available for local evaluation. Production promotion remains held.
+was tested for local evaluation. Its results apply to the package below.
+The newer [installed candidate report](installed-native-compatibility.md)
+records the follow-up on source `748c2a7`.
 
 ## Exact package
 
