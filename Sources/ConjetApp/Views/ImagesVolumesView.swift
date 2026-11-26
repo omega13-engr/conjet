@@ -109,7 +109,8 @@ private struct PullImagePanel: View {
             Text("Pull")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            TextField("Image", text: $app.pullImage)
+            TextField(app.isNativeDockerProfile ? "Pinned image reference (name@sha256:digest)" : "Image",
+                      text: $app.pullImage)
                 .textFieldStyle(.roundedBorder)
             HStack {
                 Spacer()

@@ -5,6 +5,7 @@ pub mod host_net;
 pub mod net;
 pub mod pl011;
 pub mod psci;
+pub mod readiness;
 pub mod rng;
 pub mod virtio;
 pub mod virtqueue;

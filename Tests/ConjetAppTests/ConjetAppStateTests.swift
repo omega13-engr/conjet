@@ -389,8 +389,9 @@ final class ConjetAppStateTests: XCTestCase {
         )
         let app = ConjetAppState(service: service)
 
-        app.applyPulseFrameForTesting(.heartbeat(state: ConjetPulseState(highWatermark: 7, replayAvailableFrom: 1)))
-        try await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertNil(app.applyPulseFrameForTesting(.heartbeat(
+            state: ConjetPulseState(highWatermark: 7, replayAvailableFrom: 1)
+        )))
 
         XCTAssertTrue(app.pulseConnected)
         XCTAssertEqual(app.pulseHighWatermark, 7)
@@ -442,12 +443,13 @@ final class ConjetAppStateTests: XCTestCase {
             message: "running"
         )
 
-        app.applyPulseFrameForTesting(ConjetPulseFrame(
+        let frame = ConjetPulseFrame(
             kind: .events,
             state: ConjetPulseState(highWatermark: 4, replayAvailableFrom: 1),
             events: [event]
-        ))
-        try await Task.sleep(nanoseconds: 200_000_000)
+        )
+        let refresh = try XCTUnwrap(app.applyPulseFrameForTesting(frame))
+        await refresh.value
 
         XCTAssertTrue(app.pulseConnected)
         XCTAssertEqual(app.pulseHighWatermark, 4)
@@ -600,7 +602,7 @@ final class ConjetAppStateTests: XCTestCase {
         app.selectedSection = .containers
         app.setInteractiveSurfaceVisible(true)
 
-        app.applyPulseFrameForTesting(ConjetPulseFrame(
+        let frame = ConjetPulseFrame(
             kind: .events,
             state: ConjetPulseState(highWatermark: 11, replayAvailableFrom: 1),
             events: [
@@ -611,8 +613,9 @@ final class ConjetAppStateTests: XCTestCase {
                     message: "image.pull"
                 )
             ]
-        ))
-        try await Task.sleep(nanoseconds: 220_000_000)
+        )
+        let refresh = try XCTUnwrap(app.applyPulseFrameForTesting(frame))
+        await refresh.value
 
         XCTAssertEqual(app.snapshot.images.map(\.reference), ["redis:7.4-alpine"])
         let invocations = await executor.invocations
@@ -627,7 +630,8 @@ final class ConjetAppStateTests: XCTestCase {
         FileManager.default.createFile(atPath: paths.dockerSocket.path, contents: Data())
         defer { try? FileManager.default.removeItem(at: paths.rootHome) }
 
-        let executor = SlowContainerRefreshExecutor()
+        let containerRefreshStarted = expectation(description: "First container refresh reached the executor")
+        let executor = GatedContainerRefreshExecutor(started: containerRefreshStarted)
         let service = ConjetManagementService(
             environment: ["CONJET_HOME": paths.rootHome.path],
             conjetTool: Self.tool,
@@ -643,8 +647,9 @@ final class ConjetAppStateTests: XCTestCase {
         let refreshTask = Task { @MainActor in
             await app.refresh()
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
-        app.applyPulseFrameForTesting(ConjetPulseFrame(
+        let started = await XCTWaiter.fulfillment(of: [containerRefreshStarted], timeout: 5)
+        XCTAssertEqual(started, .completed)
+        let frame = ConjetPulseFrame(
             kind: .events,
             state: ConjetPulseState(highWatermark: 13, replayAvailableFrom: 1),
             events: [
@@ -655,8 +660,19 @@ final class ConjetAppStateTests: XCTestCase {
                     message: "image.pull"
                 )
             ]
-        ))
+        )
+        let deferredRefresh = app.applyPulseFrameForTesting(frame)
+        XCTAssertNotNil(deferredRefresh)
+        let pulseQueued = expectation(description: "Deferred pulse refresh queued behind the first refresh")
+        let pulseWait = Task { @MainActor in
+            await deferredRefresh?.value
+            pulseQueued.fulfill()
+        }
+        let queued = await XCTWaiter.fulfillment(of: [pulseQueued], timeout: 5)
+        XCTAssertEqual(queued, .completed)
+        await executor.releaseInitialContainerRefresh()
         await refreshTask.value
+        await pulseWait.value
 
         XCTAssertEqual(app.snapshot.images.map(\.reference), ["redis:7.4-alpine"])
         let invocations = await executor.invocations
@@ -686,7 +702,7 @@ final class ConjetAppStateTests: XCTestCase {
         app.selectedSection = .volumes
 
         await app.refresh()
-        app.applyPulseFrameForTesting(ConjetPulseFrame(
+        let frame = ConjetPulseFrame(
             kind: .events,
             state: ConjetPulseState(highWatermark: 12, replayAvailableFrom: 1),
             events: [
@@ -697,8 +713,9 @@ final class ConjetAppStateTests: XCTestCase {
                     message: "volume.create"
                 )
             ]
-        ))
-        try await Task.sleep(nanoseconds: 220_000_000)
+        )
+        let refresh = try XCTUnwrap(app.applyPulseFrameForTesting(frame))
+        await refresh.value
 
         let invocations = await executor.invocations
         let usageProbeCount = invocations.filter {
@@ -730,12 +747,13 @@ final class ConjetAppStateTests: XCTestCase {
         app.selectedSection = .profiles
         app.setInteractiveSurfaceVisible(true)
 
-        app.applyPulseFrameForTesting(ConjetPulseFrame(
+        let frame = ConjetPulseFrame(
             kind: .events,
             state: ConjetPulseState(highWatermark: 21, replayAvailableFrom: 14),
             overflowed: true
-        ))
-        try await Task.sleep(nanoseconds: 220_000_000)
+        )
+        let refresh = try XCTUnwrap(app.applyPulseFrameForTesting(frame))
+        await refresh.value
 
         let invocations = await executor.invocations
         XCTAssertTrue(invocations.contains { $0.arguments.contains("ps") })
@@ -1102,6 +1120,28 @@ final class ConjetAppStateTests: XCTestCase {
         draft.networkLANAllowedPorts = "8080, nope"
 
         XCTAssertThrowsError(try draft.makeConfig())
+    }
+
+    func testProfileConfigDraftUsesNativeRuntimeLimits() throws {
+        var existing = ConjetConfig.default
+        existing.vmCPUs = 4
+        existing.memoryMiB = 4096
+        existing.diskGiB = 40
+        existing.diskImagePath = "/fixture/appliance.raw"
+        existing.enableRemovableHostMounts = true
+        var draft = ProfileConfigDraft(profileName: "default", config: existing)
+        draft.runtime = ConjetContainerRuntimeKind.nativeDocker.rawValue
+        let native = try draft.makeConfig()
+
+        XCTAssertEqual(native.containerRuntime, .nativeDocker)
+        XCTAssertEqual(native.vmCPUs, 2)
+        XCTAssertEqual(native.memoryMiB, 2048)
+        XCTAssertEqual(native.diskGiB, 16)
+        XCTAssertNil(native.diskImagePath)
+        XCTAssertFalse(native.enableRemovableHostMounts)
+
+        draft.runtime = ConjetContainerRuntimeKind.docker.rawValue
+        XCTAssertEqual(try draft.makeConfig(), existing)
     }
 
     func testProfileConfigDraftPreservesNetworkEgressWhenSavingOtherSettings() throws {
@@ -1999,15 +2039,35 @@ private actor RecordingCommandExecutor: CommandExecuting {
     }
 }
 
-private actor SlowContainerRefreshExecutor: CommandExecuting {
+private actor GatedContainerRefreshExecutor: CommandExecuting {
     private var recordedInvocations: [CommandInvocation] = []
+    private let started: XCTestExpectation
+    private var hasStarted = false
+    private var released = false
+    private var suspension: CheckedContinuation<Void, Never>?
+
+    init(started: XCTestExpectation) {
+        self.started = started
+    }
+
+    func releaseInitialContainerRefresh() {
+        released = true
+        suspension?.resume()
+        suspension = nil
+    }
 
     var invocations: [CommandInvocation] { recordedInvocations }
 
     func run(_ invocation: CommandInvocation) async -> ProcessResult {
         recordedInvocations.append(invocation)
         if invocation.arguments.contains("ps") {
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            if !hasStarted {
+                hasStarted = true
+                started.fulfill()
+                if !released {
+                    await withCheckedContinuation { suspension = $0 }
+                }
+            }
             return Self.result(invocation, stdout: """
             {"ID":"api","Names":"api","Image":"alpine:3.20","Command":"\\"sleep 60\\"","CreatedAt":"2026-06-15 10:00:00 +0800 PST","RunningFor":"2 minutes","Ports":"","State":"running","Status":"Up 2 minutes","Size":"0B","Labels":""}
             """)

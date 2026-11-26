@@ -34,6 +34,7 @@ use crate::hvf::ffi::{
     HV_REG_PC, HV_REG_X0, HV_REG_X1, HV_REG_X2, HV_REG_X3, HV_SYS_REG_MPIDR_EL1,
 };
 use crate::hvf::gic::{Gic, GicLayout, GicMmio};
+use crate::hvf::native_memory::NativeMemoryAdmission;
 use crate::hvf::reclaim::{release_owned, ReleaseError, ReleaseOperations};
 use crate::vmm::boot::{load_boot_artifacts, BootArtifacts, BootPlan};
 use crate::vmm::config::JetstreamConfig;
@@ -96,6 +97,8 @@ pub struct HvfBootReport {
     pub docker_ready: bool,
     pub docker_probe: Option<DockerProbeReport>,
     pub balloon: BalloonMetrics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_records: Option<Vec<crate::devices::readiness::Record>>,
     pub stages: Vec<HvfBootStage>,
 }
 
@@ -118,6 +121,13 @@ pub struct HvfBootOptions {
     pub hold_after_ready_forever: bool,
     pub balloon_target_mib: Option<u64>,
     pub memory_control_socket: Option<PathBuf>,
+    pub trace_guest_readiness: bool,
+    pub enable_native_launch: bool,
+    pub native_airgap: bool,
+    pub enable_native_memory_bridge: bool,
+    pub native_memory_admission: Option<Arc<NativeMemoryAdmission>>,
+    pub leased_data_disk: Option<Arc<std::fs::File>>,
+    pub external_stop: Option<Arc<AtomicBool>>,
 }
 
 impl Default for HvfBootOptions {
@@ -133,6 +143,13 @@ impl Default for HvfBootOptions {
             hold_after_ready_forever: false,
             balloon_target_mib: None,
             memory_control_socket: None,
+            trace_guest_readiness: false,
+            enable_native_launch: false,
+            native_airgap: false,
+            enable_native_memory_bridge: false,
+            native_memory_admission: None,
+            leased_data_disk: None,
+            external_stop: None,
         }
     }
 }
@@ -2293,9 +2310,26 @@ impl HvfBootRunner {
     }
 
     pub fn run(self) -> HvfBootReport {
+        let trace_started = self.options.trace_guest_readiness.then(Instant::now);
         let mut stages = Vec::new();
         let mut exit_count = 0u64;
         let mut console_output = String::new();
+        let mut core_memory_policy = CoreMemoryPolicy::from_environment(self.config.memory_mib);
+        if self.options.native_memory_admission.is_some()
+            && (!self.options.enable_native_launch
+                || !self.options.native_airgap
+                || !self.options.enable_native_memory_bridge
+                || !core_memory_policy.enabled)
+        {
+            return self.finish(
+                false,
+                "native admission requires the isolated Core memory bridge and an enabled governor",
+                None,
+                exit_count,
+                console_output,
+                stages,
+            );
+        }
 
         let memory = match GuestMemory::anonymous(self.plan.ram_size_bytes as usize) {
             Ok(memory) => {
@@ -2378,6 +2412,8 @@ impl HvfBootRunner {
         };
         let vm = Arc::new(vm);
 
+        // Hypervisor.framework routes interrupts through the GIC for this VM.
+        // hv_vcpu_set_pending_interrupt is unsupported after hv_gic_create.
         let gic_layout = GicLayout::new(self.plan.vcpu_count);
         let gic = match Gic::create(gic_layout) {
             Ok(gic) => {
@@ -2519,6 +2555,8 @@ impl HvfBootRunner {
             &self.virtio_devices,
             &mut vm_state,
             Some(memory_reclaimer),
+            trace_started,
+            &self.options,
         ) {
             Ok(detail) => stage(&mut stages, "virtio-runtime", true, detail),
             Err(error) => {
@@ -2575,7 +2613,17 @@ impl HvfBootRunner {
             .balloon_target_mib
             .unwrap_or(self.config.memory_mib)
             .min(self.config.memory_mib);
-        let core_memory_policy = CoreMemoryPolicy::from_environment(self.config.memory_mib);
+        if self.options.enable_native_launch && self.options.native_memory_admission.is_none() {
+            // Docker-only workload telemetry cannot classify a native
+            // workload's lifetime. Guest-owned page reporting still runs.
+            core_memory_policy.enabled = false;
+            stage(
+                &mut stages,
+                "native-memory-policy",
+                true,
+                "Docker-only idle policy bypassed for the native launch session".to_string(),
+            );
+        }
         let mut core_memory_controller = CoreMemoryController::new(
             core_memory_policy,
             self.config.memory_mib,
@@ -2682,6 +2730,33 @@ impl HvfBootRunner {
                 }
             }
         }
+        {
+            let state = shared.vm_state.lock().expect("VM state mutex poisoned");
+            for bridge in [
+                &state.devices.native_launch_bridge,
+                &state.devices.docker_bridge,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let ids = vcpu_ids.clone();
+                bridge.set_ingress_wake(move || {
+                    let ids = ids.lock().expect("vCPU id mutex poisoned");
+                    let _ = exit_vcpus(&ids);
+                });
+            }
+        }
+        let controller_wake = self
+            .options
+            .native_memory_admission
+            .as_deref()
+            .and_then(|gate| {
+                let ids = vcpu_ids.clone();
+                gate.register_controller_wake(move || {
+                    let ids = ids.lock().expect("vCPU id mutex poisoned");
+                    let _ = exit_vcpus(&ids);
+                })
+            });
         let memory_control = if let Some(socket_path) = self.options.memory_control_socket.clone() {
             match spawn_memory_control_socket(
                 socket_path.clone(),
@@ -2757,6 +2832,7 @@ impl HvfBootRunner {
             let tick_vcpu_ids = vcpu_ids.clone();
             let tick_shared = shared.clone();
             let interval = Duration::from_millis(self.options.host_tick_ms);
+            let external_stop = self.options.external_stop.clone();
             stage(
                 &mut stages,
                 "host-tick",
@@ -2769,6 +2845,15 @@ impl HvfBootRunner {
                     .spawn(move || {
                         while !tick_shared.stop_requested.load(Ordering::SeqCst) {
                             std::thread::sleep(interval);
+                            if external_stop
+                                .as_ref()
+                                .is_some_and(|stop| stop.load(Ordering::Acquire))
+                            {
+                                request_shared_stop(
+                                    &tick_shared,
+                                    "native session stopped".to_string(),
+                                );
+                            }
                             let ids = tick_vcpu_ids
                                 .lock()
                                 .expect("vCPU id mutex poisoned")
@@ -2809,6 +2894,8 @@ impl HvfBootRunner {
         let mut last_docker_completed_workload_streams = 0u64;
         let mut last_active_docker_workload_streams = 0u64;
         let mut last_docker_transport_bytes = 0u64;
+        let mut last_native_active = None;
+        let mut native_workload_seen = false;
         let memory_reclaim_socket_path =
             memory_socket_path(&self.config.boot_source.docker_socket_path);
         while exit_count < self.options.max_exits {
@@ -2892,28 +2979,54 @@ impl HvfBootRunner {
                 break;
             };
             let current_vcpu = &vcpus[cpu_index].as_ref().unwrap().vcpu;
-            match poll_host_vsock_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices) {
-                Ok(true) => {
-                    if let Err(error) = current_vcpu.set_pending_interrupt(0, true) {
-                        stage(
-                            &mut stages,
-                            "hv_vcpu_set_pending_interrupt",
-                            false,
-                            describe_hvf_error(&error),
-                        );
-                        stop_reason = Some("vsock interrupt injection failed".to_string());
-                        break;
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    stage(&mut stages, "virtio-vsock-host-poll", false, error);
-                    stop_reason = Some("virtio-vsock host packet delivery failed".to_string());
-                    break;
-                }
+            if let Err(error) =
+                poll_host_vsock_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices)
+            {
+                stage(&mut stages, "virtio-vsock-host-poll", false, error);
+                stop_reason = Some("virtio-vsock host packet delivery failed".to_string());
+                break;
             }
             let docker_phase_metrics = docker_phase_metrics(&shared);
             let now = Instant::now();
+            let native_memory = self.options.native_memory_admission.as_ref();
+            let native_observation = native_memory.and_then(|gate| gate.observe(now));
+            if native_memory.is_some() {
+                if native_observation.is_some() {
+                    core_memory_controller.note_runtime_ready(now, &shared);
+                }
+                // Missing or expired observations keep the VM in the active
+                // policy. Only an authenticated empty ledger can arm shrink.
+                let active = native_observation.is_none_or(|(_, owned, _)| owned > 0);
+                native_workload_seen |= native_observation.is_some_and(|(_, owned, _)| owned > 0);
+                if last_native_active != Some(active) {
+                    last_native_active = Some(active);
+                    if active {
+                        if let Some(transition) =
+                            core_memory_controller.note_workload_started(now, &shared)
+                        {
+                            let _ = apply_core_memory_target_transition(
+                                &mut core_memory_controller,
+                                transition,
+                                now,
+                                &shared,
+                                &gic,
+                                &vcpu_ids,
+                                &self.virtio_devices,
+                                self.config.memory_mib,
+                            );
+                        }
+                    } else {
+                        core_memory_controller.note_workload_finished(now, false, &shared);
+                        if std::mem::take(&mut native_workload_seen) {
+                            schedule_guest_memory_reclaim(
+                                memory_reclaim_socket_path.clone(),
+                                "native.workloadFinished",
+                                shared.clone(),
+                            );
+                        }
+                    }
+                }
+            }
             let docker_transport_bytes = docker_transport_bytes(&docker_phase_metrics);
             let transport_activity = docker_transport_bytes > last_docker_transport_bytes;
             let workload_started =
@@ -3025,25 +3138,22 @@ impl HvfBootRunner {
                         .record_idle_backing_compaction_error(now, error, &shared),
                 }
             }
-            match poll_host_net_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices) {
-                Ok(true) => {
-                    if let Err(error) = current_vcpu.set_pending_interrupt(0, true) {
-                        stage(
-                            &mut stages,
-                            "hv_vcpu_set_pending_interrupt",
-                            false,
-                            describe_hvf_error(&error),
-                        );
-                        stop_reason = Some("net interrupt injection failed".to_string());
-                        break;
-                    }
+            if let (Some(gate), Some((seen, _, true))) = (native_memory, native_observation) {
+                if core_memory_controller.policy.enabled
+                    && core_memory_controller.requested_target_mib == self.config.memory_mib
+                    && core_balloon_target_converged(&shared)
+                {
+                    gate.allow(seen);
+                } else {
+                    gate.note_capacity_hold(seen);
                 }
-                Ok(false) => {}
-                Err(error) => {
-                    stage(&mut stages, "virtio-net-host-poll", false, error);
-                    stop_reason = Some("virtio-net host packet delivery failed".to_string());
-                    break;
-                }
+            }
+            if let Err(error) =
+                poll_host_net_packets(&shared, self.plan.ram_base, &gic, &self.virtio_devices)
+            {
+                stage(&mut stages, "virtio-net-host-poll", false, error);
+                stop_reason = Some("virtio-net host packet delivery failed".to_string());
+                break;
             }
             if let Err(error) = current_vcpu.run() {
                 let mut continue_after_probe_wake = false;
@@ -3140,16 +3250,6 @@ impl HvfBootRunner {
                         error.to_string(),
                     );
                     stop_reason = Some("virtual timer GIC injection failed".to_string());
-                    break;
-                }
-                if let Err(error) = current_vcpu.set_pending_interrupt(0, true) {
-                    stage(
-                        &mut stages,
-                        "hv_vcpu_set_pending_interrupt",
-                        false,
-                        describe_hvf_error(&error),
-                    );
-                    stop_reason = Some("virtual timer interrupt injection failed".to_string());
                     break;
                 }
                 continue;
@@ -3306,6 +3406,7 @@ impl HvfBootRunner {
             }
         }
 
+        drop(controller_wake);
         shared.stop_requested.store(true, Ordering::SeqCst);
         let ids = vcpu_ids.lock().expect("vCPU id mutex poisoned").clone();
         let _ = exit_vcpus(&ids);
@@ -3382,13 +3483,19 @@ impl HvfBootRunner {
         } else {
             !console_output.is_empty()
         };
-        let balloon_metrics = shared
-            .vm_state
-            .lock()
-            .expect("VM state mutex poisoned")
+        let mut vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
+        let balloon_metrics = vm_state.devices.balloon_metrics();
+        let readiness_records = vm_state
             .devices
-            .balloon_metrics();
-        self.finish_with_docker_probe(
+            .vsock
+            .values_mut()
+            .find_map(VsockQueueHandler::take_readiness_records);
+        let native_launch_bridge = vm_state.devices.native_launch_bridge.take();
+        drop(vm_state);
+        // Other boot threads can still retain shared VM state. Close the
+        // private launch listener before publishing completion.
+        drop(native_launch_bridge);
+        let mut report = self.finish_with_docker_probe(
             ok,
             message,
             Some(artifacts),
@@ -3397,7 +3504,9 @@ impl HvfBootRunner {
             docker_probe,
             balloon_metrics,
             stages,
-        )
+        );
+        report.readiness_records = readiness_records;
+        report
     }
 
     fn finish(
@@ -3443,6 +3552,7 @@ impl HvfBootRunner {
             docker_ready,
             docker_probe,
             balloon,
+            readiness_records: None,
             stages,
         }
     }
@@ -3592,19 +3702,6 @@ fn spawn_secondary_vcpu(
                         request_shared_stop(
                             &shared,
                             format!("secondary cpu {cpu_index} virtual timer GIC injection failed"),
-                        );
-                        break;
-                    }
-                    if let Err(error) = vcpu.set_pending_interrupt(0, true) {
-                        shared_stage(
-                            &shared,
-                            "hv_vcpu_set_pending_interrupt",
-                            false,
-                            format!("cpu {cpu_index}: {}", describe_hvf_error(&error)),
-                        );
-                        request_shared_stop(
-                            &shared,
-                            format!("secondary cpu {cpu_index} virtual timer injection failed"),
                         );
                         break;
                     }
@@ -3817,10 +3914,7 @@ fn handle_data_abort(
             maybe_deassert_virtio_irq(vm_state, gic, physical_address, value)?;
             execute_virtio_notification(vm_state, guest_base, physical_address)
                 .map_err(|error| format!("virtio queue execution failed: {error}"))?;
-            if maybe_assert_virtio_irq(vm_state, gic, physical_address)? {
-                vcpu.set_pending_interrupt(0, true)
-                    .map_err(|error| describe_hvf_error(&error))?;
-            }
+            maybe_assert_virtio_irq(vm_state, gic, physical_address)?;
         }
     } else {
         let value =
@@ -3849,6 +3943,8 @@ fn configure_virtio_runtime(
     devices: &[VirtioMmioDevicePlan],
     vm_state: &mut VmState,
     memory_reclaimer: Option<Arc<dyn GuestMemoryReclaimer>>,
+    trace_started: Option<Instant>,
+    options: &HvfBootOptions,
 ) -> Result<String, String> {
     let mut block_paths = vec![config.boot_source.root_disk_path.clone()];
     if let Some(path) = config.boot_source.data_disk_path.clone() {
@@ -3867,8 +3963,15 @@ fn configure_virtio_runtime(
                 let path = block_paths.get(next_block).ok_or_else(|| {
                     "missing block backing path for virtio-blk device".to_string()
                 })?;
-                let raw = RawBlockDevice::open(path, format!("conjet-blk{next_block}"), false)
-                    .map_err(|error| error.to_string())?;
+                let identifier = format!("conjet-blk{next_block}");
+                let raw = match (next_block, options.leased_data_disk.as_ref()) {
+                    (1, Some(disk)) if config.boot_source.data_disk_path.is_some() => {
+                        let file = disk.try_clone().map_err(|error| error.to_string())?;
+                        RawBlockDevice::from_file(file, path.clone(), identifier, false)
+                    }
+                    _ => RawBlockDevice::open(path, identifier, false),
+                }
+                .map_err(|error| error.to_string())?;
                 vm_state
                     .devices
                     .block
@@ -3893,35 +3996,56 @@ fn configure_virtio_runtime(
                 net_count += 1;
             }
             VirtioDeviceKind::Vsock => {
-                let docker_bridge = if let Some(existing) = vm_state.devices.docker_bridge.as_ref()
-                {
-                    existing.state.clone()
-                } else {
-                    let bridge = HostUnixVsockBridge::bind(&config.boot_source.docker_socket_path)
-                        .map_err(|error| error.to_string())?;
-                    let state = bridge.state.clone();
-                    vm_state.devices.docker_bridge = Some(bridge);
-                    state
-                };
-                let memory_socket_path = memory_socket_path(&config.boot_source.docker_socket_path);
-                let memory_bridge = if let Some(existing) = vm_state.devices.memory_bridge.as_ref()
-                {
-                    existing.state.clone()
-                } else {
-                    let bridge = HostUnixVsockBridge::bind_with_guest_port(
-                        &memory_socket_path,
-                        MEMORY_BRIDGE_PORT,
-                        50_000,
+                let mut bridges = Vec::new();
+                if !options.native_airgap {
+                    let docker_bridge =
+                        if let Some(existing) = vm_state.devices.docker_bridge.as_ref() {
+                            existing.state.clone()
+                        } else {
+                            let bridge =
+                                HostUnixVsockBridge::bind(&config.boot_source.docker_socket_path)
+                                    .map_err(|error| error.to_string())?;
+                            let state = bridge.state.clone();
+                            vm_state.devices.docker_bridge = Some(bridge);
+                            state
+                        };
+                    bridges.push(docker_bridge);
+                }
+                if !options.native_airgap || options.enable_native_memory_bridge {
+                    let memory_socket_path =
+                        memory_socket_path(&config.boot_source.docker_socket_path);
+                    let memory_bridge =
+                        if let Some(existing) = vm_state.devices.memory_bridge.as_ref() {
+                            existing.state.clone()
+                        } else {
+                            let bridge = HostUnixVsockBridge::bind_with_guest_port(
+                                &memory_socket_path,
+                                MEMORY_BRIDGE_PORT,
+                                50_000,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            let state = bridge.state.clone();
+                            vm_state.devices.memory_bridge = Some(bridge);
+                            state
+                        };
+                    bridges.push(memory_bridge);
+                }
+                if options.enable_native_launch {
+                    let native_bridge = HostUnixVsockBridge::bind_native_launch(
+                        config
+                            .boot_source
+                            .docker_socket_path
+                            .with_file_name("native-launch.sock"),
                     )
                     .map_err(|error| error.to_string())?;
-                    let state = bridge.state.clone();
-                    vm_state.devices.memory_bridge = Some(bridge);
-                    state
-                };
-                vm_state.devices.vsock.insert(
-                    device.mmio_base,
-                    VsockQueueHandler::with_bridges(vec![docker_bridge, memory_bridge]),
-                );
+                    bridges.push(native_bridge.state.clone());
+                    vm_state.devices.native_launch_bridge = Some(native_bridge);
+                }
+                let mut handler = VsockQueueHandler::with_bridges(bridges);
+                if let Some(started) = trace_started {
+                    handler.enable_readiness_trace(started);
+                }
+                vm_state.devices.vsock.insert(device.mmio_base, handler);
                 vsock_count += 1;
             }
             VirtioDeviceKind::Balloon => {
@@ -4858,10 +4982,9 @@ fn poll_host_vsock_packets(
     guest_base: u64,
     gic: &Gic,
     devices: &[VirtioMmioDevicePlan],
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let mut vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
     let memory = &vm_state.memory as *const GuestMemory;
-    let mut interrupt_asserted = false;
 
     for device in devices
         .iter()
@@ -4871,7 +4994,7 @@ fn poll_host_vsock_packets(
         let Some(mut handler) = vm_state.devices.vsock.remove(&base) else {
             continue;
         };
-        let result = {
+        {
             let Some(transport) = vm_state.mmio_bus.virtio_mut_at(base) else {
                 vm_state.devices.vsock.insert(base, handler);
                 continue;
@@ -4896,16 +5019,12 @@ fn poll_host_vsock_packets(
             if !used.is_empty() || transport.interrupt_status != 0 {
                 gic.set_spi(transport.plan.irq, true)
                     .map_err(|error| error.to_string())?;
-                true
-            } else {
-                false
             }
-        };
+        }
         vm_state.devices.vsock.insert(base, handler);
-        interrupt_asserted |= result;
     }
 
-    Ok(interrupt_asserted)
+    Ok(())
 }
 
 fn poll_host_net_packets(
@@ -4913,10 +5032,9 @@ fn poll_host_net_packets(
     guest_base: u64,
     gic: &Gic,
     devices: &[VirtioMmioDevicePlan],
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let mut vm_state = shared.vm_state.lock().expect("VM state mutex poisoned");
     let memory = &vm_state.memory as *const GuestMemory;
-    let mut interrupt_asserted = false;
 
     for device in devices
         .iter()
@@ -4926,7 +5044,7 @@ fn poll_host_net_packets(
         let Some(mut handler) = vm_state.devices.net.remove(&base) else {
             continue;
         };
-        let result = {
+        {
             let Some(transport) = vm_state.mmio_bus.virtio_mut_at(base) else {
                 vm_state.devices.net.insert(base, handler);
                 continue;
@@ -4966,32 +5084,28 @@ fn poll_host_net_packets(
             if !used.is_empty() || transport.interrupt_status != 0 {
                 gic.set_spi(transport.plan.irq, true)
                     .map_err(|error| error.to_string())?;
-                true
-            } else {
-                false
             }
-        };
+        }
         vm_state.devices.net.insert(base, handler);
-        interrupt_asserted |= result;
     }
 
-    Ok(interrupt_asserted)
+    Ok(())
 }
 
 fn maybe_assert_virtio_irq(
     vm_state: &mut VmState,
     gic: &Gic,
     physical_address: u64,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let Some(transport) = vm_state.mmio_bus.virtio_mut_at(physical_address) else {
-        return Ok(false);
+        return Ok(());
     };
     if transport.interrupt_status == 0 {
-        return Ok(false);
+        return Ok(());
     }
     gic.set_spi(transport.plan.irq, true)
         .map_err(|error| error.to_string())?;
-    Ok(true)
+    Ok(())
 }
 
 fn maybe_deassert_virtio_irq(

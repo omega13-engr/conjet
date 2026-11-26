@@ -1,0 +1,60 @@
+services:
+  writer:
+    image: docker.io/library/alpine@sha256:e233f2058b0628266762f745a2c17e623b418e0090f47d223909d1f9a7d4367e
+    platform: linux/arm64
+    user: "65532:65532"
+    mem_limit: 16m
+    pids_limit: 4
+    cpus: 0.5
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        [ -s /data/witness ] || printf compose-proof >/data/witness;
+        printf 'writer-ready\n';
+        exec /bin/busybox nc -l -p 8080 -e /bin/sh -ec
+        'while IFS= read -r line; do :; done;
+        printf "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n";
+        exec /bin/busybox cat /data/witness'
+    healthcheck:
+      test: [CMD, /bin/busybox, test, -s, /data/witness]
+      interval: 250ms
+      timeout: 2s
+      retries: 4
+    networks: [private]
+    volumes:
+      - type: volume
+        source: data
+        target: /data
+    ports:
+      - target: 8080
+        published: "0"
+        host_ip: 127.0.0.1
+        protocol: tcp
+
+  reader:
+    image: docker.io/library/alpine@sha256:e233f2058b0628266762f745a2c17e623b418e0090f47d223909d1f9a7d4367e
+    platform: linux/arm64
+    user: "65532:65532"
+    mem_limit: 16m
+    pids_limit: 4
+    cpus: 0.5
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    command: [/bin/sh, -c, "printf 'reader-ready\\n'; exec /bin/busybox sleep 40"]
+    depends_on:
+      writer:
+        condition: service_healthy
+    networks: [private]
+
+networks:
+  private:
+    external: true
+    name: cj-compose-private
+
+volumes:
+  data:
+    external: true
+    name: cj-compose-data

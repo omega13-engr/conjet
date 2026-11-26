@@ -3,6 +3,31 @@ import ConjetCore
 import XCTest
 
 final class VirtualMachineControllerTests: XCTestCase {
+    func testNativeCrashCleanupRemovesOnlyOwnedPrivateSessionDirectory() throws {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? manager.removeItem(at: root) }
+        let run = root.appendingPathComponent("run")
+        let privateAttributes: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+        try manager.createDirectory(at: run, withIntermediateDirectories: true, attributes: privateAttributes)
+        let session = run.appendingPathComponent("cn-lost")
+        try manager.createDirectory(at: session, withIntermediateDirectories: false, attributes: privateAttributes)
+        try Data("session metadata".utf8).write(to: session.appendingPathComponent("identity.json"))
+        let symlink = run.appendingPathComponent("cn-link")
+        try manager.createSymbolicLink(at: symlink, withDestinationURL: session)
+        let publicSession = run.appendingPathComponent("cn-public")
+        try manager.createDirectory(at: publicSession, withIntermediateDirectories: false,
+                                    attributes: [.posixPermissions: 0o755])
+
+        XCTAssertFalse(ManagedNativeDocker.reapLostSession(session, in: root))
+        XCTAssertFalse(ManagedNativeDocker.reapLostSession(symlink, in: run))
+        XCTAssertFalse(ManagedNativeDocker.reapLostSession(publicSession, in: run))
+        XCTAssertTrue(ManagedNativeDocker.reapLostSession(session, in: run))
+        XCTAssertFalse(manager.fileExists(atPath: session.path))
+        XCTAssertEqual(try manager.destinationOfSymbolicLink(atPath: symlink.path), session.path)
+        XCTAssertTrue(manager.fileExists(atPath: publicSession.path))
+    }
+
     func testNetworkEnvironmentPreservesOverridesAndRejectsUnknownBackend() throws {
         let config = ConjetConfig(networkEgressMode: .host)
         XCTAssertEqual(try VirtualMachineController.networkEnvironment(config: config, environment: [:])["CONJET_NETWORK_EGRESS"], "host")

@@ -50,12 +50,15 @@ public enum ConjetVMProfile: String, Codable, CaseIterable, Sendable {
 
 public enum ConjetContainerRuntimeKind: String, Codable, CaseIterable, Sendable {
     case docker
+    case nativeDocker = "native-docker"
     case ociDirect = "oci-direct"
 
     public static func parse(_ value: String) -> ConjetContainerRuntimeKind? {
         switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "docker":
             return .docker
+        case "native-docker":
+            return .nativeDocker
         case "oci", "oci-direct", "direct-oci", "pulse":
             return .ociDirect
         default:
@@ -64,7 +67,7 @@ public enum ConjetContainerRuntimeKind: String, Codable, CaseIterable, Sendable 
     }
 
     public static var allowedValuesDescription: String {
-        "docker or oci-direct"
+        "docker, native-docker, or oci-direct"
     }
 
     public var requiresPublishedConjetCoreImage: Bool {
@@ -764,13 +767,58 @@ public struct ConjetConfig: Codable, Equatable, Sendable {
             }
             return try parseTOML(text)
         }
-        let config = ConjetConfig.default
+        let config = freshProfileConfig(paths: paths, packagedNativeDocker: bundledNativeDockerAvailable())
         do {
             try config.renderTOML().write(to: paths.config, atomically: true, encoding: .utf8)
         } catch {
             throw configurationAccessError(path: paths.config, operation: "write Conjet config", underlying: error)
         }
         return config
+    }
+
+    static func freshProfileConfig(paths: ConjetPaths, packagedNativeDocker: Bool) -> ConjetConfig {
+        let manager = FileManager.default
+        guard packagedNativeDocker,
+              let bootEntries = try? manager.contentsOfDirectory(atPath: paths.vmDirectory.path),
+              bootEntries.allSatisfy({ $0 == paths.bootstrapShare.lastPathComponent }),
+              let shareEntries = try? manager.contentsOfDirectory(atPath: paths.bootstrapShare.path),
+              shareEntries.isEmpty else { return .default }
+        return nativeDockerDefault
+    }
+
+    public static var nativeDockerDefault: ConjetConfig {
+        var config = ConjetConfig.default
+        config.runtime = ConjetContainerRuntimeKind.nativeDocker.rawValue
+        config.vmCPUs = 2
+        config.memoryMiB = 2048
+        config.diskGiB = 16
+        config.ssh.enabled = false
+        return config
+    }
+
+    private static func bundledNativeDockerAvailable() -> Bool {
+        #if arch(arm64)
+        let tools = [
+            Bundle.main.resourceURL?.appendingPathComponent("ConjetTools", isDirectory: true),
+            Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent()
+        ]
+        return tools.compactMap { $0 }.contains(where: toolsSelectNativeDocker)
+        #else
+        return false
+        #endif
+    }
+
+    static func toolsSelectNativeDocker(_ directory: URL) -> Bool {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: directory.appendingPathComponent("native-docker-default").path) {
+            return true
+        }
+        // Preserve the native selection for packages built before the marker was introduced.
+        var isDirectory = ObjCBool(false)
+        return manager.fileExists(
+            atPath: directory.appendingPathComponent("ConjetCoreVMM/NativeCore").path,
+            isDirectory: &isDirectory
+        ) && isDirectory.boolValue
     }
 
     public func save(paths: ConjetPaths = .default()) throws {

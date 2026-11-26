@@ -7,12 +7,17 @@ on:
       - dev
     paths:
       - .github/workflows/ci.yml
+      - .github/workflows/native-core-assets.yml
       - Package.swift
       - Package.resolved
       - VERSION
       - Sources/**
       - Tests/**
       - build-support/**
+      - Cargo.toml
+      - Cargo.lock
+      - guest/launch-service/**
+      - guest/image/conjet-core/src/**
       - jetstream/**
       - network-helper/**
       - benchmarks/**
@@ -21,12 +26,17 @@ on:
   pull_request:
     paths:
       - .github/workflows/ci.yml
+      - .github/workflows/native-core-assets.yml
       - Package.swift
       - Package.resolved
       - VERSION
       - Sources/**
       - Tests/**
       - build-support/**
+      - Cargo.toml
+      - Cargo.lock
+      - guest/launch-service/**
+      - guest/image/conjet-core/src/**
       - jetstream/**
       - network-helper/**
       - benchmarks/**
@@ -45,9 +55,13 @@ env:
   SWIFT_VERSION: "6.1.0"
 
 jobs:
+  native-core-assets:
+    uses: ./.github/workflows/native-core-assets.yml
+
   swift:
     name: Swift build and test
     runs-on: macos-15
+    needs: native-core-assets
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -75,10 +89,25 @@ jobs:
       - name: Test host networking
         run: |
           go test -C network-helper ./...
-          cargo test --manifest-path jetstream/Cargo.toml
+          cargo test --locked --workspace
 
       - name: Test Conjet
+        timeout-minutes: 15
         run: swift test
+
+      - name: Build native Linux guest supervisor
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+            cargo build --locked --release --target aarch64-unknown-linux-musl \
+            -p conjet-launch-service --bin conjet-launchd
+
+      - name: Download native Core assets
+        uses: actions/download-artifact@v4
+        with:
+          name: conjet-native-core-assets
+          path: native-core-assets
 
       - name: Stage Conjet app bundle
         run: |
@@ -87,6 +116,8 @@ jobs:
             --configuration release \
             --version "$(cat VERSION)" \
             --dist-dir dist \
+            --native-guest target/aarch64-unknown-linux-musl/release/conjet-launchd \
+            --native-core-assets native-core-assets \
             --signing-identity - \
             --entitlements build-support/conjet-release.entitlements
 
@@ -121,6 +152,29 @@ jobs:
           test -x "${mount_dir}/bin/conjetd"
           test -x "${mount_dir}/bin/ConjetCoreVMM/Conjet Core"
           test -x "${mount_dir}/bin/ConjetCoreVMM/conjet-network"
+          guest="Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-launchd-linux-arm64"
+          cmp "${mount_dir}/Conjet.app/${guest}" "${mount_dir}/bin/ConjetCoreVMM/conjet-launchd-linux-arm64"
+          helper="${mount_dir}/Conjet.app/Contents/Library/LoginItems/Conjet Menu Bar.app"
+          cmp "${mount_dir}/Conjet.app/${guest}" "${helper}/${guest}"
+          marker="Contents/Resources/ConjetTools/native-docker-default"
+          test "$(cat "${mount_dir}/bin/native-docker-default")" = native-docker
+          cmp "${mount_dir}/bin/native-docker-default" "${mount_dir}/Conjet.app/${marker}"
+          cmp "${mount_dir}/bin/native-docker-default" "${helper}/${marker}"
+          native="Contents/Resources/ConjetTools/ConjetCoreVMM/NativeCore"
+          for asset in Image conjet-memd conjet-reclaimd kernel.sha512 boot-image volume.tar.gz; do
+            cmp "native-core-assets/${asset}" "${mount_dir}/Conjet.app/${native}/${asset}"
+            cmp "${mount_dir}/Conjet.app/${native}/${asset}" "${mount_dir}/bin/ConjetCoreVMM/NativeCore/${asset}"
+            cmp "${mount_dir}/Conjet.app/${native}/${asset}" "${helper}/${native}/${asset}"
+          done
+          diff -r native-core-assets/BootOCI "${mount_dir}/bin/ConjetCoreVMM/NativeCore/BootOCI"
+          diff -r native-core-assets/BootOCI "${mount_dir}/Conjet.app/${native}/BootOCI"
+          diff -r native-core-assets/BootOCI "${helper}/${native}/BootOCI"
+          pins="${mount_dir}/Conjet.app/${native}/docker-client-pins.json"
+          cmp benchmarks/scenarios/docker-comparison-v1.json "$pins"
+          cmp "$pins" "${mount_dir}/bin/ConjetCoreVMM/NativeCore/docker-client-pins.json"
+          cmp "$pins" "${helper}/${native}/docker-client-pins.json"
+          (cd "${mount_dir}/bin/ConjetCoreVMM/NativeCore" && shasum -a 512 -c kernel.sha512)
+          "${mount_dir}/bin/conjet" native --help
           test -x "${mount_dir}/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-network"
           "${mount_dir}/bin/ConjetCoreVMM/conjet-network" --version
           /usr/bin/codesign --verify --deep --strict "${mount_dir}/Conjet.app"

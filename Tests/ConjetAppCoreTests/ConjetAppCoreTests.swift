@@ -376,6 +376,7 @@ final class ConjetAppCoreTests: XCTestCase {
     func testLoadSnapshotUsesDirectStatusAndProfileDiscoveryWithoutConjetCommands() async throws {
         let paths = try Self.makeTemporaryConjetPaths()
         try paths.ensureBaseDirectories()
+        try ConjetConfig.nativeDockerDefault.save(paths: paths)
         let profilesDirectory = paths.rootHome.appendingPathComponent("profiles", isDirectory: true)
         try FileManager.default.createDirectory(
             at: profilesDirectory.appendingPathComponent("dev", isDirectory: true),
@@ -399,6 +400,7 @@ final class ConjetAppCoreTests: XCTestCase {
         XCTAssertEqual(snapshot.profiles, ["default", "dev"])
         XCTAssertEqual(snapshot.profileContexts.map(\.name), ["default", "dev"])
         XCTAssertEqual(snapshot.profileContexts.first(where: { $0.isCurrent })?.name, "default")
+        XCTAssertEqual(snapshot.profileContexts.first(where: { $0.isCurrent })?.containerRuntime, .nativeDocker)
         XCTAssertEqual(snapshot.profileContexts.first(where: { $0.name == "dev" })?.dockerSocketPath, devPaths.dockerSocket.path)
         XCTAssertEqual(snapshot.daemonResponse?.ok, false)
 

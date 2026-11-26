@@ -262,16 +262,9 @@ impl GuestMemory {
         // that backing first: Darwin clears compressor slots and makes resident
         // pages clean and reusable without faulting them in or zeroing them.
         #[cfg(target_os = "macos")]
-        if let Err(error) = self.advise_reusable_at(guest_base, guest_address, size) {
+        if let Err(error) = self.discard_backing(guest_base, guest_address, size, address) {
             self.cancel_backing_discard(guest_base, guest_address, size);
             return Err(error);
-        }
-        #[cfg(target_os = "macos")]
-        if let Err(error) =
-            super::macos_memory::ensure_backing_reusable(address, size, self.host_page_size())
-        {
-            self.cancel_backing_discard(guest_base, guest_address, size);
-            return Err(GuestMemoryError::BackingDiscard(error.to_string()));
         }
 
         let result = match replace(address) {
@@ -292,6 +285,33 @@ impl GuestMemory {
             std::process::abort();
         }
         Ok(result)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn discard_backing(
+        &self,
+        guest_base: u64,
+        guest_address: u64,
+        size: usize,
+        address: *mut libc::c_void,
+    ) -> Result<(), GuestMemoryError> {
+        use super::macos_memory::{ensure_backing_reusable, BackingDiscardError};
+
+        const ATTEMPTS: usize = 3;
+        // Darwin can skip a page while the compressor is working on it.
+        // Retry only an observed retained page. A permanent condition, such
+        // as wiring, still fails verification before the mapping is replaced.
+        for attempt in 1..=ATTEMPTS {
+            self.advise_reusable_at(guest_base, guest_address, size)?;
+            match ensure_backing_reusable(address, size, self.host_page_size()) {
+                Ok(()) => return Ok(()),
+                Err(BackingDiscardError::Retained { .. }) if attempt < ATTEMPTS => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => return Err(GuestMemoryError::BackingDiscard(error.to_string())),
+            }
+        }
+        unreachable!("the final backing verification returns its outcome")
     }
 
     #[cfg(target_os = "macos")]
@@ -467,31 +487,41 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn failed_replacement_cancels_reusability_before_returning() {
-        use crate::vmm::macos_memory::{nonreusable_backing_pages, reusable_backing_pages};
+        use crate::vmm::macos_memory::{ensure_backing_reusable, reusable_backing_pages};
 
         let page = page_size();
-        let memory = GuestMemory::anonymous(page * 4).unwrap();
-        for offset in (0..memory.len()).step_by(page) {
+        let size = page * 4;
+        let memory = GuestMemory::anonymous(size + 2 * page).unwrap();
+        // VM_REGION_TOP_INFO reports the VM object's counts. Guard the test
+        // range so Darwin cannot coalesce it with a neighboring mapping.
+        for offset in [0, page + size] {
+            let guard = memory.host_address_at(0, offset as u64, page).unwrap();
+            assert_eq!(unsafe { libc::mprotect(guard, page, libc::PROT_NONE) }, 0);
+        }
+        let address = memory.host_address_at(0, page as u64, size).unwrap();
+        for offset in (page..page + size).step_by(page) {
             memory.write(offset, &[0x7f]);
         }
         let error = memory
-            .replace_backing_at(0, 0, memory.len(), |_| {
-                assert_eq!(nonreusable_backing_pages(memory.as_ptr()), 0);
+            .replace_backing_at(0, page as u64, size, |_| {
+                // VM_REGION_TOP_INFO counts the entire backing object, which
+                // may include pages outside the range being replaced.
+                ensure_backing_reusable(address, size, page).unwrap();
                 Err(GuestMemoryError::MapFailed(
                     std::io::Error::from_raw_os_error(libc::ENOMEM),
                 ))
             })
             .unwrap_err();
-        assert!(matches!(error, GuestMemoryError::MapFailed(_)));
+        assert!(
+            matches!(error, GuestMemoryError::MapFailed(_)),
+            "replacement fault was not reached: {error:?}"
+        );
         // A restored HVF mapping must never expose still-reusable live pages.
         // Some pages may already have been evicted while reusable, so inspect
         // their disposition instead of assuming they all remain resident.
-        assert_eq!(
-            reusable_backing_pages(memory.as_ptr(), memory.len(), page),
-            0
-        );
-        memory.write(0, &[0x5a]);
-        assert_eq!(memory.read_at(0, 0, 1).unwrap(), [0x5a]);
+        assert_eq!(reusable_backing_pages(address, size, page), 0);
+        memory.write(page, &[0x5a]);
+        assert_eq!(memory.read_at(0, page as u64, 1).unwrap(), [0x5a]);
     }
 
     #[cfg(target_os = "macos")]

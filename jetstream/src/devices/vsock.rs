@@ -1,15 +1,22 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::Shutdown;
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "macos")]
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::devices::readiness;
 use crate::devices::virtio::{VirtioMmioDevice, VirtioQueueState};
 use crate::devices::virtqueue::{
     read_descriptors, write_descriptors, DescriptorChain, QueueError, SplitQueueExecutor,
@@ -21,6 +28,10 @@ pub const HOST_CID: u64 = 2;
 pub const DEFAULT_GUEST_CID: u64 = 3;
 pub const DOCKER_BRIDGE_PORT: u32 = 2375;
 pub const MEMORY_BRIDGE_PORT: u32 = 2376;
+const NATIVE_LAUNCH_PORT: u32 = 2380;
+const MAX_NATIVE_BRIDGE_STREAMS: usize = 10;
+#[cfg(target_os = "macos")]
+const NATIVE_BRIDGE_SEND_BUFFER: libc::c_int = 128 * 1024;
 const STREAM_TYPE: u16 = 1;
 const OP_REQUEST: u16 = 1;
 const OP_RESPONSE: u16 = 2;
@@ -28,10 +39,12 @@ const OP_RESET: u16 = 3;
 const OP_SHUTDOWN: u16 = 4;
 const OP_RW: u16 = 5;
 const OP_CREDIT_UPDATE: u16 = 6;
+const OP_CREDIT_REQUEST: u16 = 7;
 const HEADER_LEN: usize = 44;
 const DEFAULT_BUF_ALLOC: u32 = 4 * 1024 * 1024;
 const DEFAULT_GUEST_BUF_ALLOC: u64 = 256 * 1024;
 const MAX_HOST_PAYLOAD: usize = 32 * 1024;
+const MAX_QUEUED_TRACE_REPLIES: usize = 64;
 const TRANSMIT_DRAIN_BATCH_LIMIT: usize = 64;
 const SHUTDOWN_SEND: u32 = 2;
 const MAX_HTTP_RESPONSE_HEADER_BYTES: usize = 64 * 1024;
@@ -42,6 +55,59 @@ const CONJET_BINARY_FRAME_HEADER_LEN: usize = 20;
 const CONJET_BINARY_FRAME_TCP_DATA: u8 = 15;
 const MAX_CONJET_BINARY_FRAME_PAYLOAD: usize = 1024 * 1024;
 const MAX_DOCKER_WORKLOAD_REQUEST_PREFIX_BYTES: usize = 16 * 1024;
+
+fn docker_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var_os("CONJET_DOCKER_TRANSPORT_TRACE").is_some_and(|v| v == "1"))
+}
+
+fn docker_trace_tag(payload: &[u8]) -> Option<[u8; 32]> {
+    let header_end = payload
+        .get(..payload.len().min(8192))?
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")?;
+    let header = payload.get(..header_end)?;
+    let mut lines = header.split(|b| *b == b'\n');
+    let request = lines.next()?;
+    if ![b"POST ".as_slice(), b"GET ", b"DELETE "]
+        .iter()
+        .any(|method| request.starts_with(method))
+    {
+        return None;
+    }
+    lines.find_map(|line| {
+        let tag: [u8; 32] = line
+            .strip_suffix(b"\r")
+            .unwrap_or(line)
+            .strip_prefix(b"X-Conjet-Benchmark-Trace: ")?
+            .try_into()
+            .ok()?;
+        tag.iter()
+            .all(|&b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            .then_some(tag)
+    })
+}
+
+fn docker_trace(tag: &[u8; 32], phase: &str, at: Instant) {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    static EVENTS: AtomicUsize = AtomicUsize::new(0);
+    // Clamp to the diagnostic budget without writing request paths or bytes.
+    if EVENTS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            (n < 2048).then_some(n + 1)
+        })
+        .is_ok()
+    {
+        let epoch = *EPOCH.get_or_init(|| at);
+        eprintln!(
+            "conjet-docker-trace {} {} {}",
+            std::str::from_utf8(tag).expect("validated hex"),
+            phase,
+            at.saturating_duration_since(epoch).as_nanos()
+        );
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum VsockError {
@@ -184,6 +250,63 @@ pub struct VsockQueueHandler {
     transmit_executor: SplitQueueExecutor,
     pending_host_packets: VecDeque<VsockPacket>,
     bridges: Vec<Arc<Mutex<HostUnixVsockBridgeState>>>,
+    readiness: Option<ReadinessConnection>,
+}
+
+#[derive(Debug)]
+struct ReadinessConnection {
+    trace: readiness::Trace,
+    peer: Option<u32>,
+    forwarded: u32,
+}
+
+impl ReadinessConnection {
+    fn handle(&mut self, packet: &VsockPacket) -> Option<VsockPacket> {
+        let peer = packet.src_port;
+        match packet.op {
+            OP_REQUEST if self.peer.is_none() => {
+                self.peer = Some(peer);
+                self.forwarded = 0;
+                self.trace.reset_stream();
+                Some(VsockPacket::control(
+                    readiness::PORT,
+                    peer,
+                    OP_RESPONSE,
+                    0,
+                    0,
+                ))
+            }
+            OP_RW if self.peer == Some(peer) => {
+                self.forwarded = self.forwarded.wrapping_add(packet.payload.len() as u32);
+                if self.trace.receive(&packet.payload) {
+                    Some(VsockPacket::credit_update(
+                        readiness::PORT,
+                        peer,
+                        self.forwarded,
+                    ))
+                } else {
+                    self.peer = None;
+                    Some(VsockPacket::reset(readiness::PORT, peer, self.forwarded))
+                }
+            }
+            OP_SHUTDOWN if self.peer == Some(peer) => {
+                self.peer = None;
+                Some(VsockPacket::reset(readiness::PORT, peer, self.forwarded))
+            }
+            OP_RESET if self.peer == Some(peer) => {
+                self.peer = None;
+                None
+            }
+            OP_CREDIT_UPDATE if self.peer == Some(peer) => None,
+            OP_CREDIT_REQUEST if self.peer == Some(peer) => Some(VsockPacket::credit_update(
+                readiness::PORT,
+                peer,
+                self.forwarded,
+            )),
+            OP_RESET => None,
+            _ => Some(VsockPacket::reset(readiness::PORT, peer, 0)),
+        }
+    }
 }
 
 impl VsockQueueHandler {
@@ -200,6 +323,20 @@ impl VsockQueueHandler {
             bridges,
             ..Self::default()
         }
+    }
+
+    pub fn enable_readiness_trace(&mut self, started: Instant) {
+        self.readiness = Some(ReadinessConnection {
+            trace: readiness::Trace::new(started),
+            peer: None,
+            forwarded: 0,
+        });
+    }
+
+    pub fn take_readiness_records(&mut self) -> Option<Vec<readiness::Record>> {
+        self.readiness
+            .as_mut()
+            .map(|lane| lane.trace.take_records())
     }
 
     pub fn enqueue_host_packet(&mut self, packet: VsockPacket) {
@@ -245,7 +382,16 @@ impl VsockQueueHandler {
                 memory,
                 guest_base,
                 Some(TRANSMIT_DRAIN_BATCH_LIMIT),
-                |chain| receive_guest_packet(chain, memory, guest_base, &self.bridges),
+                |chain| {
+                    receive_guest_packet(
+                        chain,
+                        memory,
+                        guest_base,
+                        &self.bridges,
+                        self.readiness.as_mut(),
+                        &mut self.pending_host_packets,
+                    )
+                },
             )?;
             let batch_len = batch.len();
             used.extend(batch);
@@ -290,6 +436,7 @@ impl VsockQueueHandler {
             return Ok(Vec::new());
         }
         let mut prepared = Vec::new();
+        let mut trace_deliveries = Vec::new();
         for chain in chains {
             let Some(packet) = self.pending_host_packets.pop_front() else {
                 break;
@@ -301,6 +448,14 @@ impl VsockQueueHandler {
             if capacity < HEADER_LEN {
                 self.pending_host_packets.push_front(packet);
                 break;
+            }
+            if packet.dst_port == DOCKER_BRIDGE_PORT && packet.op == OP_RW && docker_trace_enabled()
+            {
+                if let Some(tag) = docker_trace_tag(
+                    &packet.payload[..packet.payload.len().min(capacity - HEADER_LEN)],
+                ) {
+                    trace_deliveries.push(tag);
+                }
             }
             let encoded = packet.encode();
             if encoded.len() > capacity {
@@ -343,6 +498,9 @@ impl VsockQueueHandler {
         }
         self.receive_executor
             .publish_used(queue, transport, memory, guest_base, &used)?;
+        for tag in trace_deliveries {
+            docker_trace(&tag, "guest_rx_published", Instant::now());
+        }
         if !used.is_empty() && transport.interrupt_status == 0 {
             transport.mark_queue_used();
         }
@@ -355,17 +513,34 @@ fn receive_guest_packet(
     memory: &GuestMemory,
     guest_base: u64,
     bridges: &[Arc<Mutex<HostUnixVsockBridgeState>>],
+    readiness: Option<&mut ReadinessConnection>,
+    replies: &mut VecDeque<VsockPacket>,
 ) -> Result<UsedElement, QueueError> {
     let descriptors: Vec<_> = chain.readable_descriptors().copied().collect();
     let bytes = read_descriptors(memory, guest_base, descriptors)?;
     if let Ok(packet) = VsockPacket::decode(&bytes) {
-        for bridge in bridges {
-            if bridge
-                .lock()
-                .expect("vsock bridge mutex poisoned")
-                .handle_guest_packet(packet.clone())
+        match readiness {
+            Some(lane)
+                if packet.src_cid == DEFAULT_GUEST_CID
+                    && packet.dst_cid == HOST_CID
+                    && packet.dst_port == readiness::PORT =>
             {
-                break;
+                if replies.len() < MAX_QUEUED_TRACE_REPLIES {
+                    if let Some(response) = lane.handle(&packet) {
+                        replies.push_back(response);
+                    }
+                }
+            }
+            _ => {
+                for bridge in bridges {
+                    if bridge
+                        .lock()
+                        .expect("vsock bridge mutex poisoned")
+                        .handle_guest_packet(packet.clone())
+                    {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -379,6 +554,40 @@ fn receive_guest_packet(
 pub struct HostUnixVsockBridge {
     pub state: Arc<Mutex<HostUnixVsockBridgeState>>,
     socket_path: PathBuf,
+    native_listener: Option<NativeListener>,
+}
+
+#[derive(Debug)]
+struct NativeListener {
+    stop: UnixStream,
+    thread: thread::JoinHandle<()>,
+    identity: (u64, u64),
+    #[cfg(target_os = "macos")]
+    wake: Arc<NativeWake>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct NativeWake(Mutex<Option<Arc<WakeVcpus>>>);
+
+#[cfg(target_os = "macos")]
+type WakeVcpus = dyn Fn() + Send + Sync;
+
+#[cfg(target_os = "macos")]
+impl std::fmt::Debug for NativeWake {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("NativeWake").finish_non_exhaustive()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl NativeWake {
+    fn signal(&self) {
+        let action = self.0.lock().expect("native wake mutex poisoned").clone();
+        if let Some(action) = action {
+            action();
+        }
+    }
 }
 
 impl HostUnixVsockBridge {
@@ -392,6 +601,12 @@ impl HostUnixVsockBridge {
         first_host_port: u32,
     ) -> Result<Self, VsockError> {
         let socket_path = socket_path.as_ref().to_path_buf();
+        #[cfg(target_os = "macos")]
+        if guest_port == DOCKER_BRIDGE_PORT
+            && std::env::var_os("CONJET_DOCKER_EVENT_WAKE").is_some_and(|value| value == "1")
+        {
+            return Self::bind_event_listener(socket_path, guest_port, first_host_port);
+        }
         if socket_path.exists() {
             std::fs::remove_file(&socket_path)?;
         }
@@ -414,11 +629,288 @@ impl HostUnixVsockBridge {
             .name("jetstream-docker-vsock-bridge".to_string())
             .spawn(move || accept_loop(listener, worker_state))
             .map_err(VsockError::Io)?;
-        Ok(Self { state, socket_path })
+        Ok(Self {
+            state,
+            socket_path,
+            native_listener: None,
+        })
+    }
+
+    pub fn bind_native_launch(socket_path: PathBuf) -> Result<Self, VsockError> {
+        Self::bind_event_listener(socket_path, NATIVE_LAUNCH_PORT, 55_000)
+    }
+
+    fn bind_event_listener(
+        socket_path: PathBuf,
+        guest_port: u32,
+        first_host_port: u32,
+    ) -> Result<Self, VsockError> {
+        let parent = socket_path
+            .parent()
+            .ok_or(std::io::ErrorKind::InvalidInput)
+            .map_err(std::io::Error::from)?;
+        let directory = std::fs::symlink_metadata(parent)?;
+        if !directory.is_dir() || directory.mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "event-driven vsock requires a private socket directory",
+            )
+            .into());
+        }
+        let (wake, stop) = UnixStream::pair()?;
+        let listener = UnixListener::bind(&socket_path)?;
+        let setup = (|| -> std::io::Result<_> {
+            let metadata = std::fs::symlink_metadata(&socket_path)?;
+            listener.set_nonblocking(true)?;
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+            let state = Arc::new(Mutex::new(HostUnixVsockBridgeState::new(
+                guest_port,
+                first_host_port,
+                guest_port == DOCKER_BRIDGE_PORT,
+            )));
+            let worker_state = Arc::clone(&state);
+            #[cfg(target_os = "macos")]
+            let (queue, notifications) = {
+                let queue = NativeEvents::open()?;
+                queue.watch(listener.as_raw_fd(), false)?;
+                queue.watch(wake.as_raw_fd(), false)?;
+                (queue, Arc::new(NativeWake::default()))
+            };
+            #[cfg(target_os = "macos")]
+            let worker_notifications = Arc::clone(&notifications);
+            let thread = thread::Builder::new()
+                .name(if guest_port == DOCKER_BRIDGE_PORT {
+                    "jetstream-docker-vsock".into()
+                } else {
+                    "jetstream-launch-vsock".into()
+                })
+                .spawn(move || {
+                    #[cfg(target_os = "macos")]
+                    serve_native_events(listener, wake, worker_state, queue, worker_notifications);
+                    #[cfg(not(target_os = "macos"))]
+                    accept_native_launch(listener, wake, worker_state);
+                })?;
+            Ok((
+                state,
+                NativeListener {
+                    stop,
+                    thread,
+                    identity: (metadata.dev(), metadata.ino()),
+                    #[cfg(target_os = "macos")]
+                    wake: notifications,
+                },
+            ))
+        })();
+        match setup {
+            Ok((state, native_listener)) => Ok(Self {
+                state,
+                socket_path,
+                native_listener: Some(native_listener),
+            }),
+            Err(error) => {
+                let _ = std::fs::remove_file(&socket_path);
+                Err(error.into())
+            }
+        }
     }
 
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_ingress_wake(&self, action: impl Fn() + Send + Sync + 'static) {
+        if let Some(listener) = &self.native_listener {
+            *listener.wake.0.lock().expect("native wake mutex poisoned") = Some(Arc::new(action));
+        }
+    }
+}
+
+impl Drop for HostUnixVsockBridge {
+    fn drop(&mut self) {
+        if let Some(listener) = self.native_listener.take() {
+            drop(listener.stop);
+            let _ = listener.thread.join();
+            if let Ok(metadata) = std::fs::symlink_metadata(&self.socket_path) {
+                if metadata.file_type().is_socket()
+                    && (metadata.dev(), metadata.ino()) == listener.identity
+                {
+                    let _ = std::fs::remove_file(&self.socket_path);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn accept_native_launch(
+    listener: UnixListener,
+    wake: UnixStream,
+    state: Arc<Mutex<HostUnixVsockBridgeState>>,
+) {
+    let mut descriptors = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    loop {
+        // Both descriptor owners stay alive throughout poll.
+        let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, -1) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+        if descriptors[1].revents != 0 {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let mut state = state.lock().expect("vsock bridge mutex poisoned");
+                if state.streams.len() < MAX_NATIVE_BRIDGE_STREAMS {
+                    state.accept_stream(stream);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct NativeEvents(OwnedFd);
+
+#[cfg(target_os = "macos")]
+impl NativeEvents {
+    fn open() -> std::io::Result<Self> {
+        let fd = unsafe { libc::kqueue() };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let queue = Self(unsafe { OwnedFd::from_raw_fd(fd) });
+        if unsafe { libc::fcntl(queue.0.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(queue)
+    }
+
+    fn watch(&self, descriptor: RawFd, edge: bool) -> std::io::Result<()> {
+        let mut flags = libc::EV_ADD;
+        if edge {
+            flags |= libc::EV_CLEAR;
+        }
+        let change = libc::kevent {
+            ident: descriptor as libc::uintptr_t,
+            filter: libc::EVFILT_READ,
+            flags,
+            fflags: 0,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // kqueue removes a stream's registration when the owning FD closes.
+        let result = unsafe {
+            libc::kevent(
+                self.0.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn wait(&self, events: &mut [libc::kevent]) -> std::io::Result<usize> {
+        let count = unsafe {
+            libc::kevent(
+                self.0.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                events.as_mut_ptr(),
+                events.len() as libc::c_int,
+                std::ptr::null(),
+            )
+        };
+        if count < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(count as usize)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn serve_native_events(
+    listener: UnixListener,
+    stop: UnixStream,
+    state: Arc<Mutex<HostUnixVsockBridgeState>>,
+    queue: NativeEvents,
+    notifications: Arc<NativeWake>,
+) {
+    // kevent is a C record and the kernel fills only the reported elements.
+    let mut events: [libc::kevent; MAX_NATIVE_BRIDGE_STREAMS + 2] = unsafe { std::mem::zeroed() };
+    loop {
+        let events = match queue.wait(&mut events) {
+            Ok(count) => &events[..count],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                eprintln!("native launch socket notification failed: {error}");
+                return;
+            }
+        };
+        if events
+            .iter()
+            .any(|event| event.ident as RawFd == stop.as_raw_fd())
+        {
+            return;
+        }
+        let mut wake_vm = false;
+        for event in events {
+            if event.ident as RawFd != listener.as_raw_fd() {
+                // Readiness wakes the vCPU. The existing virtio queue owner
+                // still reads the bytes and applies its own credit limits.
+                wake_vm = true;
+                continue;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let mut state = state.lock().expect("vsock bridge mutex poisoned");
+                    if state.guest_port != NATIVE_LAUNCH_PORT
+                        || state.streams.len() < MAX_NATIVE_BRIDGE_STREAMS
+                    {
+                        match queue.watch(stream.as_raw_fd(), true) {
+                            Ok(()) => {
+                                state.accept_stream(stream);
+                                wake_vm = true;
+                            }
+                            Err(error) => {
+                                eprintln!("native launch stream could not be watched: {error}")
+                            }
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    eprintln!("native launch socket accept failed: {error}");
+                    return;
+                }
+            }
+        }
+        if wake_vm {
+            notifications.signal();
+        }
     }
 }
 
@@ -506,7 +998,35 @@ impl HostUnixVsockBridgeState {
         let port = self.next_port;
         self.next_port = self.next_port.saturating_add(1);
         let _ = stream.set_nonblocking(true);
-        let stream = HostUnixVsockStream::new(stream);
+        let mut stream = HostUnixVsockStream::new(stream);
+        if self.guest_port == NATIVE_LAUNCH_PORT {
+            // A synchronous guest request can fill Darwin's default 8 KiB
+            // buffer before the host consumer reads. Give the bounded native
+            // socket space for two full guest packets.
+            #[cfg(target_os = "macos")]
+            {
+                let result = unsafe {
+                    libc::setsockopt(
+                        stream.socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        (&NATIVE_BRIDGE_SEND_BUFFER as *const libc::c_int).cast(),
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    )
+                };
+                if result != 0 {
+                    eprintln!(
+                        "native bridge retained its default send buffer: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+            // The launch protocol is explicitly raw. HTTP body and close
+            // inference belongs to the Docker-facing transport.
+            stream.host_protocol_known = true;
+            stream.binary_frame_stream = true;
+            stream.response_framing = HostResponseFraming::CloseDelimited;
+        }
         self.pending_guest_packets
             .push_back(VsockPacket::connection_request(port, self.guest_port));
         self.streams.insert(port, stream);
@@ -599,6 +1119,18 @@ impl HostUnixVsockBridgeState {
                     let Some((buf, request_complete)) = host_payload.into_forwarded() else {
                         continue;
                     };
+                    if self.guest_port == DOCKER_BRIDGE_PORT && docker_trace_enabled() {
+                        if let Some(tag) = docker_trace_tag(&buf) {
+                            let now = Instant::now();
+                            docker_trace(
+                                &tag,
+                                "socket_accepted",
+                                stream.accepted_at.unwrap_or(now),
+                            );
+                            docker_trace(&tag, "request_queued", now);
+                            stream.trace_tag = Some(tag);
+                        }
+                    }
                     stream.bytes_sent_to_guest =
                         stream.bytes_sent_to_guest.wrapping_add(buf.len() as u64);
                     let fwd_cnt = stream.forward_count();
@@ -668,6 +1200,12 @@ impl HostUnixVsockBridgeState {
             }
             OP_RW => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
+                    let trace_tag = stream
+                        .trace_tag
+                        .filter(|_| stream.bytes_received_from_guest == 0);
+                    if let Some(tag) = &trace_tag {
+                        docker_trace(tag, "guest_response_rx", Instant::now());
+                    }
                     stream.update_guest_credit(&packet);
                     let workload_was_detected = stream.is_docker_workload();
                     if !stream.binary_frame_stream {
@@ -701,6 +1239,9 @@ impl HostUnixVsockBridgeState {
                         ));
                         return true;
                     }
+                    if let Some(tag) = &trace_tag {
+                        docker_trace(tag, "client_flush_attempt", Instant::now());
+                    }
                     self.poll_host_stream(host_port);
                     true
                 } else {
@@ -710,6 +1251,11 @@ impl HostUnixVsockBridgeState {
             OP_SHUTDOWN => {
                 if let Some(stream) = self.streams.get_mut(&host_port) {
                     stream.update_guest_credit(&packet);
+                    if !stream.guest_shutdown_pending && !stream.guest_shutdown {
+                        if let Some(tag) = &stream.trace_tag {
+                            docker_trace(tag, "guest_shutdown_rx", Instant::now());
+                        }
+                    }
                     // Do not half-close the host socket until every response
                     // byte already accepted from the guest has been written.
                     // Closing here can truncate a Content-Length response and
@@ -783,6 +1329,10 @@ impl HostUnixVsockBridgeState {
 #[derive(Debug)]
 struct HostUnixVsockStream {
     socket: UnixStream,
+    accepted_at: Option<Instant>,
+    trace_tag: Option<[u8; 32]>,
+    trace_write_blocked: bool,
+    trace_write_complete: bool,
     bytes_received_from_guest: u64,
     bytes_forwarded_to_host: u64,
     last_advertised_guest_forward_count: u32,
@@ -817,6 +1367,10 @@ impl HostUnixVsockStream {
     fn new(socket: UnixStream) -> Self {
         Self {
             socket,
+            accepted_at: docker_trace_enabled().then(Instant::now),
+            trace_tag: None,
+            trace_write_blocked: false,
+            trace_write_complete: false,
             bytes_received_from_guest: 0,
             bytes_forwarded_to_host: 0,
             last_advertised_guest_forward_count: 0,
@@ -1126,13 +1680,29 @@ impl HostUnixVsockStream {
                     ));
                 }
                 Ok(count) => {
+                    if let Some(tag) = self.trace_tag.filter(|_| self.trace_write_blocked) {
+                        docker_trace(&tag, "client_write_resumed", Instant::now());
+                        self.trace_write_blocked = false;
+                    }
                     self.host_output.drain(..count);
                     self.bytes_forwarded_to_host =
                         self.bytes_forwarded_to_host.wrapping_add(count as u64);
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Some(tag) = self.trace_tag.filter(|_| !self.trace_write_blocked) {
+                        docker_trace(&tag, "client_write_blocked", Instant::now());
+                        self.trace_write_blocked = true;
+                    }
+                    break;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
+            }
+        }
+        if self.host_output.is_empty() && self.response_framing.is_complete() {
+            if let Some(tag) = self.trace_tag.filter(|_| !self.trace_write_complete) {
+                docker_trace(&tag, "client_write_complete", Instant::now());
+                self.trace_write_complete = true;
             }
         }
         self.finish_guest_shutdown_if_drained();
@@ -1149,6 +1719,9 @@ impl HostUnixVsockStream {
             && !self.guest_shutdown
         {
             let _ = self.socket.shutdown(Shutdown::Write);
+            if let Some(tag) = &self.trace_tag {
+                docker_trace(tag, "client_shutdown", Instant::now());
+            }
             self.guest_shutdown = true;
             self.guest_shutdown_pending = false;
         }
@@ -1855,6 +2428,104 @@ mod tests {
     }
 
     #[test]
+    fn native_bridge_forwards_guest_eof_after_the_transport_drains() {
+        let (mut client, socket) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut bridge = HostUnixVsockBridgeState::new(NATIVE_LAUNCH_PORT, 55_000, false);
+        bridge.accept_stream(socket);
+        bridge.handle_guest_packet(VsockPacket {
+            src_cid: DEFAULT_GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: NATIVE_LAUNCH_PORT,
+            dst_port: 55_000,
+            op: OP_SHUTDOWN,
+            flags: SHUTDOWN_SEND,
+            buf_alloc: DEFAULT_BUF_ALLOC,
+            fwd_cnt: 0,
+            payload: vec![],
+        });
+        bridge.finish_pending_guest_shutdowns_after_transport_drain();
+        assert_eq!(client.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn native_bridge_forwards_split_binary_data_without_http_inference() {
+        let (mut client, socket) = UnixStream::pair().unwrap();
+        let mut bridge = HostUnixVsockBridgeState::new(NATIVE_LAUNCH_PORT, 55_000, false);
+        bridge.accept_stream(socket);
+        assert_eq!(
+            bridge.pending_guest_packets.pop_front().unwrap().op,
+            OP_REQUEST
+        );
+        client.write_all(b"CJ").unwrap();
+        bridge.poll_host_streams();
+        let first = bridge.pending_guest_packets.pop_front().unwrap();
+        assert_eq!(first.op, OP_RW);
+        assert_eq!(first.payload, b"CJ");
+        client.write_all(b"LS").unwrap();
+        bridge.poll_host_streams();
+        let second = bridge.pending_guest_packets.pop_front().unwrap();
+        assert_eq!(second.op, OP_RW);
+        assert_eq!(second.payload, b"LS");
+    }
+
+    #[test]
+    fn native_listener_refuses_existing_paths_and_unlinks_only_its_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = dir.path().join("launch.sock");
+        std::fs::write(&endpoint, b"existing").unwrap();
+        assert!(HostUnixVsockBridge::bind_native_launch(endpoint.clone()).is_err());
+        assert_eq!(std::fs::read(&endpoint).unwrap(), b"existing");
+        std::fs::remove_file(&endpoint).unwrap();
+        let bridge = HostUnixVsockBridge::bind_native_launch(endpoint.clone()).unwrap();
+        assert!(endpoint.exists());
+        drop(bridge);
+        assert!(!endpoint.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_listener_notifies_on_ingress_without_consuming_or_polling_bytes() {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = dir.path().join("launch.sock");
+        let bridge = HostUnixVsockBridge::bind_native_launch(endpoint.clone()).unwrap();
+        let (wake, observed) = std::sync::mpsc::channel();
+        bridge.set_ingress_wake(move || {
+            let _ = wake.send(());
+        });
+        let mut client = UnixStream::connect(endpoint).unwrap();
+        let deadline = Duration::from_secs(2);
+        let quiet = Duration::from_millis(40);
+        observed.recv_timeout(deadline).unwrap();
+        assert_eq!(observed.recv_timeout(quiet), Err(RecvTimeoutError::Timeout));
+
+        client.write_all(b"native data").unwrap();
+        observed.recv_timeout(deadline).unwrap();
+        // Unread bytes remain in the transport but do not spin the watcher.
+        assert_eq!(observed.recv_timeout(quiet), Err(RecvTimeoutError::Timeout));
+        {
+            let mut state = bridge.state.lock().unwrap();
+            state.poll_host_streams();
+            assert_eq!(
+                state.pending_guest_packets.pop_front().unwrap().op,
+                OP_REQUEST
+            );
+            let data = state.pending_guest_packets.pop_front().unwrap();
+            assert_eq!(data.op, OP_RW);
+            assert_eq!(data.payload, b"native data");
+        }
+        client.write_all(b"next").unwrap();
+        observed.recv_timeout(deadline).unwrap();
+    }
+
+    #[test]
     fn bridge_rejects_forged_guest_packet_identity() {
         let (_client, server) = UnixStream::pair().unwrap();
         let mut bridge = HostUnixVsockBridgeState::new(DOCKER_BRIDGE_PORT, 49_152, true);
@@ -2017,6 +2688,38 @@ mod tests {
         let credit = bridge.pending_guest_packets.pop_front().unwrap();
         assert_eq!(credit.op, OP_CREDIT_UPDATE);
         assert_eq!(credit.fwd_cnt, count as u32);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_bridge_queues_a_full_fuse_write_before_the_client_reads() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut bridge = HostUnixVsockBridgeState::new(NATIVE_LAUNCH_PORT, 55_000, false);
+        bridge.accept_stream(server);
+        let request = vec![0x63; 64 * 1024 + 80];
+        for part in request.chunks(64 * 1024) {
+            assert!(bridge.handle_guest_packet(VsockPacket {
+                src_cid: DEFAULT_GUEST_CID,
+                dst_cid: HOST_CID,
+                src_port: NATIVE_LAUNCH_PORT,
+                dst_port: 55_000,
+                op: OP_RW,
+                flags: 0,
+                buf_alloc: DEFAULT_BUF_ALLOC,
+                fwd_cnt: 0,
+                payload: part.to_vec(),
+            }));
+        }
+        assert_eq!(
+            bridge.streams[&55_000].forward_count(),
+            request.len() as u32
+        );
+        let mut output = vec![0; request.len()];
+        client.read_exact(&mut output).unwrap();
+        assert_eq!(output, request);
     }
 
     #[test]
@@ -2728,4 +3431,63 @@ mod tests {
         assert_eq!(bridge.docker_phase_response_events(), 1);
         assert_eq!(bridge.docker_response_bytes(), payload.len() as u64);
     }
+}
+#[test]
+fn diagnostic_tag_requires_a_bounded_http_header_and_valid_hex() {
+    let tag = b"0123456789abcdef0123456789abcdef";
+    let request = [
+        b"POST /start HTTP/1.1\r\nX-Conjet-Benchmark-Trace: ".as_slice(),
+        tag,
+        b"\r\n\r\n",
+    ]
+    .concat();
+    assert_eq!(docker_trace_tag(&request), Some(*tag));
+    for method in ["GET", "DELETE"] {
+        let request = format!(
+            "{method} / HTTP/1.1\r\nX-Conjet-Benchmark-Trace: {}\r\n\r\n",
+            std::str::from_utf8(tag).unwrap()
+        );
+        assert_eq!(docker_trace_tag(request.as_bytes()), Some(*tag));
+    }
+    let in_body = [
+        b"POST /start HTTP/1.1\r\n\r\nX-Conjet-Benchmark-Trace: ".as_slice(),
+        tag,
+        b"\r\n\r\n",
+    ]
+    .concat();
+    assert_eq!(docker_trace_tag(&in_body), None);
+    assert_eq!(docker_trace_tag(&request[..request.len() - 1]), None);
+    let mut invalid = request;
+    let digit = invalid.len() - 5;
+    invalid[digit] = b'g';
+    assert_eq!(docker_trace_tag(&invalid), None);
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn docker_event_listener_wakes_for_ingress_and_removes_its_socket_on_drop() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = root.path().join("docker.sock");
+    let bridge =
+        HostUnixVsockBridge::bind_event_listener(socket.clone(), DOCKER_BRIDGE_PORT, 40_000)
+            .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    bridge.set_ingress_wake(move || {
+        let _ = tx.send(());
+    });
+    let mut client = UnixStream::connect(&socket).unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    let request = b"POST /v1.44/containers/owned/start HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
+    client.write_all(request).unwrap();
+    rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    {
+        let mut state = bridge.state.lock().unwrap();
+        state.poll_host_streams();
+        assert!(state.pending_guest_packets.iter().any(|packet| {
+            packet.dst_port == DOCKER_BRIDGE_PORT && packet.op == OP_RW && packet.payload == request
+        }));
+    }
+    drop(bridge);
+    assert!(!socket.exists());
 }

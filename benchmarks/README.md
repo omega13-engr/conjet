@@ -67,6 +67,41 @@ swift run --package-path benchmarks conjet-bench run \
   --output-dir benchmarks/reports/rerun-failed-gates
 ```
 
+## Fresh lifecycle baseline
+
+The [pinned scenario](scenarios/fresh-lifecycle-v1.json) runs separate API
+and CLI samples for both network modes. Pass `--benchmark-output` to the
+[isolated runtime launchers](../docs/engineering/speedup-environment.md).
+Use `--benchmark-samples` to choose the measured count per lane and network.
+Each launcher validates its engine and owns cleanup for the duration of
+the benchmark. Reports preserve all observations and distinguish API
+removal from the guest cleanup boundary.
+
+For a matched static ARM64 fixture, build `fixtures/fresh-arm64-exit.S`
+as a Linux ELF with an AArch64 assembler and static linker, then pass it
+to `create-fresh-fixture.py` with a new ExternalSSD output directory.
+The script writes the image archive, the OCI manifest, the executable,
+and a scenario containing their digests and runtime limits. Pass the
+scenario and archive via `--benchmark-scenario` and `--benchmark-archive`
+to either launcher. Each launcher imports the image after validating
+the private Docker endpoint. Use `native-fresh-lifecycle.py` with the
+same fixture directory and branch-built native guest and host tools to
+measure the separate native API and experimental native CLI.
+
+The native runner accepts `--prepared` for the isolated one-slot no-network
+experiment. Its raw rows separate preparation, claim acknowledgement,
+exec observation, and verified cleanup. Cancellation and expiry probes
+include miss timing. Each sample prepares a new slot, so preparation
+also records the refill cost under sequential churn.
+
+Run `--memory-pressure` to audit active and prepared cgroup ownership,
+authenticated eviction, and refill. This mode records empty and
+ready VMM footprints and checks a live allocation canary through
+the pressure transition. The separate `--balloon-pressure` mode
+uses a disposable 512 MiB guest and a 72 MiB balloon target to
+verify the automatic admission guard from guest memory telemetry.
+Use a new ExternalSSD output directory for each boot.
+
 ## Energy Gate
 
 Run the energy gate with required power measurement:
@@ -127,3 +162,112 @@ reported with their actual topology metadata.
 - Strict bind claims require strict-bind workloads.
 - SmartMount/native-overlay claims require smart-bind workloads.
 - Kubernetes is intentionally out of scope for this benchmark generation.
+
+## Experimental product path
+
+`native-product.py` boots the packaged `conjet native --experimental`
+surface and separately measures its persistent authenticated API and
+CLI. It also exercises the native guest with the ARM64 canary, including
+its memory, isolation, output, cleanup and one-use checks. Keep inputs
+and output under ExternalSSD. Use the published kernel and its sidecar,
+the package's CLI/VMM pair, and the same pinned workload for repeat runs.
+
+The timer for API execution starts at launch or claim submission and
+ends at verified guest cleanup. CLI timing includes process startup and
+captured-output collection. Preparation through ready is recorded
+separately. Serial prepared throughput includes every refill. Raw
+outputs are written even when a check fails. See the
+[qualification report](../docs/engineering/speed-qualification.md)
+for the documented M1 Pro runs and the
+[experimental feature](../docs/engineering/speed-release-scope.md)
+for the supported configuration.
+
+## Paired Docker comparison
+
+Use the release artifacts from the environment runbook for the matched
+native Docker/Kiri lane. The orchestrator holds the comparison lock,
+alternates order over five independent pairs and verifies launcher cleanup.
+Keep builds and other suites outside the measured sessions. Smaller sample
+counts are pilots.
+
+```sh
+python3 benchmarks/native-docker-comparison.py --all-pairs \
+  --swift-bin "$speed_build/swift/release" --core "$speed_build/cargo/release/jetstream" \
+  --native-kernel "$kernel" \
+  --native-guest "$speed_build/cargo/aarch64-unknown-linux-musl/release/conjet-launchd" \
+  --native-package "$native_package" --native-receipt "$oci_receipt" \
+  --native-memd "$native_memd" --native-reclaimd "$native_reclaimd" \
+  --output "$evidence/native-kiri-release"
+```
+
+Both lanes use pinned ARM64 Alpine, UID/GID 65532, 16 MiB, four PIDs,
+half of one CPU, no networking, dropped capabilities and no-new-privileges.
+The probes check credentials, stdout/stderr, and nonzero exit. The timed
+workload is the image's `/bin/true`. Ten warmups per transport are retained
+separately. API time spans create, start, wait and removal acknowledgement.
+CLI time spans the Docker process and `run --rm` completion. The native
+lane checks the unique guest workload and verified cleanup after recording
+each sample. Kiri guest cleanup is unobservable in this suite. Report
+percentiles, failures and throughput per independent session before
+computing paired uncertainty.
+
+The native launcher requires both static Core memory helpers. It audits the
+initramfs, boots the Core governor and records its policy and ownership
+metrics immediately before and after measurement. The pressure fixture is
+available only in the separate `dynamic-pressure` diagnostic.
+
+The [frozen protocol](../docs/engineering/docker-benchmark-plan.md) controls
+the Docker comparison. Use the build outputs and verified Core assets from
+the [isolated environment runbook](../docs/engineering/speedup-environment.md).
+Run each command in the foreground. Outputs must be new directories under
+ExternalSSD.
+
+```sh
+python3 benchmarks/docker-comparison.py --mode lifecycle \
+  --group alpine-true/none/api --pair 2 --timeout 3600 \
+  --output "$evidence/alpine-true-none-api-pair-2" \
+  --swift-bin "$speed_build/swift/debug" \
+  --core "$speed_build/cargo/debug/jetstream" \
+  --network-helper "$speed_build/conjet-network" \
+  --core-assets "$core_assets"
+```
+
+Use `--mode preflight` before a new environment, `pilot` for annotated pilot
+timings, and `probes` for capability checks. A selected lifecycle group runs
+its full per-session budget. Repeat at every pair index for a qualifying
+series. Use `--all-pairs` in place of `--pair` to run a mode or lifecycle
+group through all five pairs with one foreground lock. If a session fails,
+keep its evidence and resume each remaining pair into a new output directory.
+The launchers record the running VM's reported memory and the container view
+of `/proc/meminfo` before timing. The other modes are `images`, `builds`, `compose`, `control`,
+`storage_network` and `stress`. They run their own frozen per-session counts
+and retain failed operations. A successful launcher exit confirms capture and
+cleanup. Check each scenario's errors and coverage before using its timings.
+
+The image suite separates public image pulls, known-warm load/save,
+and private registry pulls. A host HTTP client seeds the owned loopback
+registry directly. The first-pull result records which config and layer
+bytes were served, and describes the transfer as unknown when the witness
+is incomplete. [Registry HTTP API](https://distribution.github.io/distribution/spec/api/)
+
+The build suite uses a uniquely named
+pinned BuildKit worker with its own guest volume and separates preloading,
+build/export, load and output validation. To keep guest registry egress out
+of that experiment, stage the same pinned build bases once outside any
+timing session, then pass `--build-bases "$speed_build/oci-bases"` with
+`--mode builds` for both halves. Buildx reads the bases as local OCI named
+contexts. [Buildx named contexts](https://docs.docker.com/reference/cli/docker/buildx/build/#build-context)
+
+```sh
+python3 benchmarks/fetch-comparison-build-bases.py --output "$speed_build/oci-bases"
+```
+
+Compose uses Node and Redis with
+functional readiness and a persistent transaction counter. No benchmark
+rewrites the installed Docker context or prunes a shared store.
+
+`docker-comparison-summary.py` emits per-session percentiles and failure
+counts from retained reports. Use the paired estimator only with five
+complete, independent, semantically matched pairs. `--paired-lifecycle`
+applies to the lifecycle rows. `--paired-images` applies to controlled
+registry rows and requires complete transfer witnesses for first pulls.

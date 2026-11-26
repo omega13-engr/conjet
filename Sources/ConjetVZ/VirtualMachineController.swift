@@ -11,13 +11,19 @@ public final class VirtualMachineController {
     private var events: [VMRuntimeEvent] = []
     private let maxEventCount = 16
     private var hvfRun: ConjetCoreRustVMMRun?
+    private var nativeRun: ManagedNativeDocker?
     private var activeNetworkEgressMode: ConjetNetworkEgressMode?
 
     private var publishedPortForwarder: DockerPublishedPortForwarder?
 
     public init() {}
 
-    public func status(store: VMImageStore, backend: ConjetVMBackend = .hvfExperimental) -> VMRuntimeStatus {
+    public func status(store: VMImageStore, backend: ConjetVMBackend = .hvfExperimental, nativeDocker: Bool = false) -> VMRuntimeStatus {
+        if nativeDocker {
+            operationLock.lock()
+            defer { operationLock.unlock() }
+            return nativeStatus(store: store)
+        }
         if let hvfRun {
             if hvfRun.isRunning {
                 if progressSnapshot().phase == "control-ready" {
@@ -43,6 +49,20 @@ public final class VirtualMachineController {
             store.status(state: snapshot.state, message: snapshot.message ?? "\(backend.displayName) VM is \(snapshot.state.rawValue)"),
             backend: backend
         )
+    }
+
+    private func nativeStatus(store: VMImageStore) -> VMRuntimeStatus {
+        let snapshot = progressSnapshot()
+        let running = nativeRun?.isRunning == true
+        let state: VMRunState = running ? .running : snapshot.state == .running ? .stopped : snapshot.state
+        return statusWithProgress(VMRuntimeStatus(
+            state: state, backend: .hvfExperimental, configured: true,
+            manifestPath: store.paths.config.path,
+            dataDiskPath: store.paths.runDirectory.appendingPathComponent("native-data/volume.raw").path,
+            serialLogPath: store.paths.logsDirectory.appendingPathComponent("native-boot.jsonl").path,
+            dockerSocketPath: store.paths.dockerSocket.path,
+            message: nativeRun?.diagnostic ?? snapshot.message ?? "Native Docker is \(state.rawValue)"
+        ))
     }
 
     public func networkStatus(config: ConjetConfig) -> ConjetNetworkStatus {
@@ -91,9 +111,59 @@ public final class VirtualMachineController {
         return try startJetstreamHVF(manifest: manifest, config: config, store: store, waitMode: waitMode)
     }
 
+    public func startNativeDocker(config: ConjetConfig, store: VMImageStore) throws -> VMRuntimeStatus {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+        if nativeRun?.isRunning == true { return nativeStatus(store: store) }
+        if let nativeRun, !nativeRun.stop() {
+            throw ConjetError.unavailable("The previous native Docker session did not fully drain")
+        }
+        let native = ConjetConfig.nativeDockerDefault
+        guard ["aarch64", "arm64"].contains(config.architecture), config.effectiveVMCPUs == native.vmCPUs,
+              config.effectiveMemoryMiB == native.memoryMiB, config.diskGiB == native.diskGiB,
+              config.diskImagePath == nil, config.kernelImagePath == nil else {
+            throw ConjetError.invalidArgument("Native Docker requires ARM64, 2 vCPUs, 2048 MiB, a 16 GiB disk, and packaged boot assets")
+        }
+        guard !config.enableRemovableHostMounts else {
+            throw ConjetError.invalidArgument("Native Docker host mounts use the profile's private bind directory")
+        }
+        setProgress(state: .starting, phase: "native-boot", message: "Starting native Docker", resetEvents: true)
+        let run = try ManagedNativeDocker(paths: store.paths, enableHostMounts: config.enableHostMounts)
+        nativeRun = run
+        do {
+            try run.start()
+            try waitForDockerAPIReady(socketPath: store.paths.dockerSocket.path, timeoutSeconds: 30) {
+                guard run.isRunning else {
+                    throw ConjetError.unavailable(run.diagnostic ?? "Native Docker exited before readiness")
+                }
+            }
+            guard let memory = run.memoryControlSocketPath,
+                  try ConjetCoreRustMemoryControlClient(socketPath: memory, timeoutSeconds: 3).metrics().ok else {
+                throw ConjetError.unavailable("Native Docker Core memory controller did not respond")
+            }
+            setProgress(state: .running, phase: "docker-ready", message: "Native Docker API ready")
+            return nativeStatus(store: store)
+        } catch {
+            if run.stop() { nativeRun = nil }
+            setProgress(state: .error, phase: "native-boot", message: String(describing: error))
+            throw error
+        }
+    }
+
     public func stop(store: VMImageStore, backend: ConjetVMBackend = .hvfExperimental) throws -> VMRuntimeStatus {
         operationLock.lock()
         defer { operationLock.unlock() }
+
+        if let nativeRun {
+            setProgress(state: .stopping, phase: "native-stop", message: "Stopping native Docker", resetEvents: true)
+            guard nativeRun.stop() else {
+                setProgress(state: .error, phase: "native-stop", message: "Native Docker did not confirm guest cleanup")
+                throw ConjetError.unavailable("Native Docker did not confirm guest cleanup")
+            }
+            self.nativeRun = nil
+            setProgress(state: .stopped, phase: "stopped", message: "Native Docker stopped")
+            return nativeStatus(store: store)
+        }
 
         if let hvfRun {
             setProgress(state: .stopping, phase: "rust-vmm-stop", message: "stopping Conjet Core Rust virtual machine", resetEvents: true)

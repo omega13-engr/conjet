@@ -115,6 +115,7 @@ base_cflags=(
   -Werror
   -fno-plt
   -fstack-protector-strong
+  -U_FORTIFY_SOURCE
   -D_FORTIFY_SOURCE=3
 )
 base_ldflags=(-static)

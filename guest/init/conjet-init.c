@@ -7,18 +7,21 @@
 
 #define _GNU_SOURCE
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/reboot.h>
-#include <linux/vm_sockets.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/ptrace.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
+#include <linux/vm_sockets.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -41,6 +44,11 @@
 #define CONJET_READINESS_VERSION 1U
 #define CONJET_EVENT_CONTROL_READY 1U
 #define CONJET_EVENT_PROCESS_STARTED 2U
+#define CONJET_EVENT_CHILD_CREATED 3U
+#define CONJET_EVENT_EXEC_CONFIRMED 4U
+#define CONJET_EVENT_APPLICATION_READY 5U
+#define CONJET_EVENT_EXEC_FAILED 6U
+#define CONJET_EVENT_PROCESS_EXITED 7U
 #define CONJET_STATUS_OK 0U
 #define CONJET_STATUS_FAILED 1U
 
@@ -48,6 +56,8 @@ static volatile sig_atomic_t shutdown_requested = 0;
 static volatile sig_atomic_t child_signal_seen = 0;
 static int console_fd = -1;
 static int readiness_fd = -1;
+static int application_ready_fd = -1;
+static int trace_exec = 0;
 static pid_t managed_child = -1;
 static uint64_t boot_id_hash = 0;
 
@@ -291,13 +301,13 @@ static char *cmdline_value(const char *key) {
     size_t key_len = strlen(key);
     char *cursor = buffer;
     while (*cursor != '\0') {
-        while (*cursor == ' ') {
+        while (isspace((unsigned char)*cursor)) {
             cursor++;
         }
         if (strncmp(cursor, key, key_len) == 0) {
             char *value = cursor + key_len;
             char *end = value;
-            while (*end != '\0' && *end != ' ') {
+            while (*end != '\0' && !isspace((unsigned char)*end)) {
                 end++;
             }
             size_t value_len = (size_t)(end - value);
@@ -312,7 +322,7 @@ static char *cmdline_value(const char *key) {
             percent_decode(copy);
             return copy;
         }
-        while (*cursor != '\0' && *cursor != ' ') {
+        while (*cursor != '\0' && !isspace((unsigned char)*cursor)) {
             cursor++;
         }
     }
@@ -335,8 +345,9 @@ static char **configured_argv(int *argc_out) {
     if (argc_text != NULL) {
         char *end = NULL;
         long argc_long = strtol(argc_text, &end, 10);
+        int valid = end != argc_text && *end == '\0' && argc_long > 0 && argc_long <= 32;
         free(argc_text);
-        if (end == NULL || *end != '\0' || argc_long <= 0 || argc_long > 32) {
+        if (!valid) {
             return NULL;
         }
         int argc = (int)argc_long;
@@ -373,6 +384,122 @@ static char **configured_argv(int *argc_out) {
     return argv;
 }
 
+static int cmdline_enabled(const char *key) {
+    char *value = cmdline_value(key);
+    int enabled = value != NULL && strcmp(value, "1") == 0;
+    free(value);
+    return enabled;
+}
+
+static pid_t wait_managed_child(int *status) {
+    pid_t result;
+    do {
+        result = waitpid(managed_child, status, 0);
+    } while (result < 0 && errno == EINTR);
+    return result;
+}
+
+static void observe_application_ready(void) {
+    if (application_ready_fd < 0) {
+        return;
+    }
+    uint8_t marker = 0;
+    ssize_t count = read(application_ready_fd, &marker, sizeof(marker));
+    if (count < 0 && (errno == EAGAIN || errno == EINTR)) {
+        return;
+    }
+    (void)close(application_ready_fd);
+    application_ready_fd = -1;
+    if (count == 1 && marker == 1U) {
+        (void)send_readiness(CONJET_EVENT_APPLICATION_READY, CONJET_STATUS_OK, 0);
+    }
+}
+
+static void report_exit(int status) {
+    observe_application_ready();
+    managed_child = -1;
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
+        (void)dprintf(console_fd, "conjet-init: child exited status=%d\n", code);
+        if (trace_exec) {
+            (void)send_readiness(CONJET_EVENT_PROCESS_EXITED, CONJET_STATUS_OK, (uint32_t)code);
+        }
+    } else if (WIFSIGNALED(status)) {
+        int signal_number = WTERMSIG(status);
+        (void)dprintf(console_fd, "conjet-init: child signaled signal=%d\n", signal_number);
+        if (trace_exec) {
+            (void)send_readiness(CONJET_EVENT_PROCESS_EXITED, CONJET_STATUS_FAILED,
+                                 (uint32_t)signal_number);
+        }
+    }
+}
+
+static void fail_traced_child(int error_code) {
+    (void)send_readiness(CONJET_EVENT_EXEC_FAILED, CONJET_STATUS_FAILED, (uint32_t)error_code);
+    if (managed_child > 0) {
+        (void)kill(managed_child, SIGKILL);
+        int status = 0;
+        if (wait_managed_child(&status) == managed_child) {
+            report_exit(status);
+        }
+    }
+}
+
+static int confirm_traced_exec(int error_fd) {
+    int status = 0;
+    if (wait_managed_child(&status) != managed_child) {
+        fail_traced_child(errno);
+        return -1;
+    }
+    if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP) {
+        if (ptrace(PTRACE_SETOPTIONS, managed_child, NULL,
+                   (void *)(uintptr_t)(PTRACE_O_TRACEEXEC | PTRACE_O_EXITKILL)) != 0) {
+            fail_traced_child(errno);
+            return -1;
+        }
+        int deliver = 0;
+        while (WIFSTOPPED(status)) {
+            if (ptrace(PTRACE_CONT, managed_child, NULL, (void *)(uintptr_t)deliver) != 0 ||
+                wait_managed_child(&status) != managed_child) {
+                fail_traced_child(errno);
+                return -1;
+            }
+            if (WIFSTOPPED(status) && (unsigned int)status >> 16 == PTRACE_EVENT_EXEC) {
+                (void)send_readiness(CONJET_EVENT_EXEC_CONFIRMED, CONJET_STATUS_OK, 0);
+                if (ptrace(PTRACE_DETACH, managed_child, NULL, NULL) != 0) {
+                    log_errno("PTRACE_DETACH");
+                    (void)kill(managed_child, SIGKILL);
+                    if (wait_managed_child(&status) == managed_child) {
+                        report_exit(status);
+                    }
+                    return -1;
+                }
+                return 0;
+            }
+            deliver = WIFSTOPPED(status) ? WSTOPSIG(status) : 0;
+        }
+    }
+
+    if (WIFSTOPPED(status)) {
+        fail_traced_child(EIO);
+        return -1;
+    }
+    int code = 0;
+    if (read(error_fd, &code, sizeof(code)) != (ssize_t)sizeof(code)) {
+        code = WIFSIGNALED(status) ? EINTR : EIO;
+    }
+    (void)send_readiness(CONJET_EVENT_EXEC_FAILED, CONJET_STATUS_FAILED, (uint32_t)code);
+    report_exit(status);
+    return -1;
+}
+
+static void exec_failure(int error_fd, int code) {
+    if (error_fd >= 0) {
+        (void)write_all(error_fd, (const uint8_t *)&code, sizeof(code));
+    }
+    _exit(127);
+}
+
 static int start_configured_process(void) {
     int argc = 0;
     char **argv = configured_argv(&argc);
@@ -380,24 +507,67 @@ static int start_configured_process(void) {
         return 0;
     }
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        uint32_t code = (uint32_t)errno;
-        log_errno("fork");
-        (void)send_readiness(CONJET_EVENT_PROCESS_STARTED, CONJET_STATUS_FAILED, code);
+    int exec_error[2] = {-1, -1};
+    int ready[2] = {-1, -1};
+    if (trace_exec &&
+        (pipe2(exec_error, O_CLOEXEC) != 0 || pipe2(ready, O_CLOEXEC | O_NONBLOCK) != 0)) {
+        int code = errno;
+        if (exec_error[0] >= 0) {
+            (void)close(exec_error[0]);
+            (void)close(exec_error[1]);
+        }
+        (void)send_readiness(CONJET_EVENT_EXEC_FAILED, CONJET_STATUS_FAILED, (uint32_t)code);
         free_argv(argv, argc);
         return -1;
     }
+
+    pid_t pid = fork();
     if (pid == 0) {
-        char *envp[] = { "PATH=/bin:/usr/bin:/sbin:/usr/sbin", NULL };
+        char ready_env[64];
+        char *envp[] = { "PATH=/bin:/usr/bin:/sbin:/usr/sbin", NULL, NULL };
+        if (trace_exec) {
+            (void)close(exec_error[0]);
+            (void)close(ready[0]);
+            if (fcntl(ready[1], F_SETFD, 0) != 0 ||
+                ptrace(PTRACE_TRACEME, 0, NULL, NULL) != 0) {
+                exec_failure(exec_error[1], errno);
+            }
+            (void)snprintf(ready_env, sizeof(ready_env), "CONJET_READY_FD=%d", ready[1]);
+            envp[1] = ready_env;
+            if (raise(SIGSTOP) != 0) {
+                exec_failure(exec_error[1], errno);
+            }
+        }
         execve(argv[0], argv, envp);
-        _exit(127);
+        exec_failure(exec_error[1], errno);
+    }
+
+    int code = errno;
+    free_argv(argv, argc);
+    if (trace_exec) {
+        (void)close(exec_error[1]);
+        (void)close(ready[1]);
+    }
+    if (pid < 0) {
+        if (trace_exec) {
+            (void)close(exec_error[0]);
+            (void)close(ready[0]);
+        }
+        (void)send_readiness(trace_exec ? CONJET_EVENT_EXEC_FAILED : CONJET_EVENT_PROCESS_STARTED,
+                             CONJET_STATUS_FAILED, (uint32_t)code);
+        return -1;
     }
 
     managed_child = pid;
-    (void)send_readiness(CONJET_EVENT_PROCESS_STARTED, CONJET_STATUS_OK, 0);
-    free_argv(argv, argc);
-    return 0;
+    if (!trace_exec) {
+        (void)send_readiness(CONJET_EVENT_PROCESS_STARTED, CONJET_STATUS_OK, 0);
+        return 0;
+    }
+    application_ready_fd = ready[0];
+    (void)send_readiness(CONJET_EVENT_CHILD_CREATED, CONJET_STATUS_OK, 0);
+    int result = confirm_traced_exec(exec_error[0]);
+    (void)close(exec_error[0]);
+    return result;
 }
 
 static void reap_children(void) {
@@ -406,12 +576,7 @@ static void reap_children(void) {
         pid_t pid = waitpid(-1, &status, WNOHANG);
         if (pid > 0) {
             if (pid == managed_child) {
-                managed_child = -1;
-                if (WIFEXITED(status)) {
-                    (void)dprintf(console_fd, "conjet-init: child exited status=%d\n", WEXITSTATUS(status));
-                } else if (WIFSIGNALED(status)) {
-                    (void)dprintf(console_fd, "conjet-init: child signaled signal=%d\n", WTERMSIG(status));
-                }
+                report_exit(status);
             }
             continue;
         }
@@ -440,30 +605,77 @@ static void shutdown_child(void) {
     }
 }
 
-int main(void) {
+// This entry runs only after the fixture execs /init with an explicit argument.
+static int run_readiness_fixture(int argc, char **argv) {
+    if (argc > 2 && strcmp(argv[2], "early-exit") == 0) {
+        return 23;
+    }
+    const char *value = getenv("CONJET_READY_FD");
+    if (value == NULL) {
+        return 0;
+    }
+    char *end = NULL;
+    long fd = strtol(value, &end, 10);
+    if (end == value || *end != '\0' || fd < 3 || fd > INT32_MAX) {
+        return 1;
+    }
+    const uint8_t ready = 1;
+    int result = write_all((int)fd, &ready, sizeof(ready));
+    (void)close((int)fd);
+    return result == 0 ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--readiness-fixture") == 0) {
+        return run_readiness_fixture(argc, argv);
+    }
     install_signals();
     setup_mounts();
     boot_id_hash = load_boot_id_hash();
+    trace_exec = cmdline_enabled("conjet.trace_exec=");
+    int qa_exit = cmdline_enabled("conjet.qa_exit=");
 
     log_line("control plane starting");
     if (send_readiness(CONJET_EVENT_CONTROL_READY, CONJET_STATUS_OK, 0) == 0) {
         log_line("CONTROL_READY sent");
     }
 
-    if (start_configured_process() == 0 && managed_child > 0) {
-        log_line("PROCESS_STARTED sent");
-    }
+    (void)start_configured_process();
 
+    sigset_t blocked;
+    sigset_t wait_mask;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGCHLD);
+    sigaddset(&blocked, SIGTERM);
+    sigaddset(&blocked, SIGINT);
+    int signals_blocked = sigprocmask(SIG_BLOCK, &blocked, &wait_mask) == 0;
+    if (!signals_blocked) {
+        log_errno("sigprocmask");
+        shutdown_requested = 1;
+    }
     while (!shutdown_requested) {
-        pause();
+        observe_application_ready();
         if (child_signal_seen) {
             child_signal_seen = 0;
             reap_children();
         }
+        if (qa_exit && managed_child < 0) {
+            break;
+        }
+        struct pollfd readiness = { .fd = application_ready_fd, .events = POLLIN };
+        if (ppoll(&readiness, 1, NULL, &wait_mask) < 0 && errno != EINTR) {
+            log_errno("ppoll");
+            break;
+        }
     }
-
+    if (signals_blocked) {
+        (void)sigprocmask(SIG_SETMASK, &wait_mask, NULL);
+    }
     log_line("shutdown requested");
     shutdown_child();
+    if (application_ready_fd >= 0) {
+        (void)close(application_ready_fd);
+    }
     if (readiness_fd >= 0) {
         (void)close(readiness_fd);
     }

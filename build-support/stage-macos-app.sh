@@ -14,6 +14,9 @@ Options:
   --disable-sandbox                Pass --disable-sandbox to swift build
   --scratch-path DIR               Swift build artifacts directory
   --rust-target-dir DIR            Rust and network helper build directory
+  --native-guest PATH              Include the built static ARM64 guest supervisor
+  --native-core-assets DIR         Include the verified native kernel and Core memory helpers
+  --swift-build-system NAME        Override the SwiftPM build system
 USAGE
 }
 
@@ -26,6 +29,9 @@ ENTITLEMENTS="$ROOT_DIR/build-support/conjet-release.entitlements"
 DISABLE_SANDBOX=0
 SWIFT_SCRATCH_PATH=""
 RUST_TARGET_DIR="$ROOT_DIR/target"
+NATIVE_GUEST=""
+NATIVE_CORE_ASSETS=""
+SWIFT_BUILD_SYSTEM=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -59,6 +65,18 @@ while [ "$#" -gt 0 ]; do
       ;;
     --rust-target-dir)
       RUST_TARGET_DIR="${2:?missing value for --rust-target-dir}"
+      shift 2
+      ;;
+    --native-guest)
+      NATIVE_GUEST="${2:?missing value for --native-guest}"
+      shift 2
+      ;;
+    --native-core-assets)
+      NATIVE_CORE_ASSETS="${2:?missing value for --native-core-assets}"
+      shift 2
+      ;;
+    --swift-build-system)
+      SWIFT_BUILD_SYSTEM="${2:?missing value for --swift-build-system}"
       shift 2
       ;;
     -h|--help)
@@ -120,9 +138,36 @@ if [ ! -f "$ENTITLEMENTS" ]; then
   exit 1
 fi
 
+static_arm64_guest() {
+  case "$(file -b "$1")" in
+    "ELF 64-bit LSB "*"ARM aarch64"*"statically linked"*) ;;
+    *) echo "expected a static AArch64 Linux guest executable at $1" >&2; exit 1 ;;
+  esac
+}
+
+if [ -n "$NATIVE_GUEST" ]; then
+  static_arm64_guest "$NATIVE_GUEST"
+fi
+if [ -n "$NATIVE_CORE_ASSETS" ]; then
+  if [ -z "$NATIVE_GUEST" ]; then
+    echo "--native-core-assets requires --native-guest" >&2
+    exit 2
+  fi
+  NATIVE_CORE_ASSETS="$(CDPATH='' cd -- "$NATIVE_CORE_ASSETS" && pwd)"
+  (cd "$NATIVE_CORE_ASSETS" && shasum -a 512 -c "$ROOT_DIR/build-support/native-core-kernel.sha512")
+  static_arm64_guest "$NATIVE_CORE_ASSETS/conjet-memd"
+  static_arm64_guest "$NATIVE_CORE_ASSETS/conjet-reclaimd"
+  test -s "$NATIVE_CORE_ASSETS/boot-image"
+  test -s "$NATIVE_CORE_ASSETS/BootOCI/index.json"
+  test "$(/usr/bin/tar -tzf "$NATIVE_CORE_ASSETS/volume.tar.gz")" = volume.raw
+fi
+
 cd "$ROOT_DIR"
 
 swift_build_args=("-c" "$CONFIGURATION")
+if [ -n "$SWIFT_BUILD_SYSTEM" ]; then
+  swift_build_args+=(--build-system "$SWIFT_BUILD_SYSTEM")
+fi
 if [ -n "$SWIFT_SCRATCH_PATH" ]; then
   swift_build_args+=(--scratch-path "$SWIFT_SCRATCH_PATH")
 fi
@@ -163,6 +208,23 @@ if [ -x "$RUST_TARGET_DIR/release/jetstream" ]; then
   /usr/bin/ditto "$RUST_TARGET_DIR/release/jetstream" "$HELPER_VMM_TOOLS/$VMM_BINARY_NAME"
   /usr/bin/ditto "$RUST_TARGET_DIR/release/$NETWORK_BINARY_NAME" "$APP_VMM_TOOLS/$NETWORK_BINARY_NAME"
   /usr/bin/ditto "$RUST_TARGET_DIR/release/$NETWORK_BINARY_NAME" "$HELPER_VMM_TOOLS/$NETWORK_BINARY_NAME"
+  if [ -n "$NATIVE_GUEST" ]; then
+    for tools in "$APP_VMM_TOOLS" "$HELPER_VMM_TOOLS"; do
+      install -m 0644 "$NATIVE_GUEST" "$tools/conjet-launchd-linux-arm64"
+      if [ -n "$NATIVE_CORE_ASSETS" ]; then
+        mkdir "$tools/NativeCore"
+        install -m 0644 "$NATIVE_CORE_ASSETS/"{Image,conjet-memd,conjet-reclaimd} "$tools/NativeCore/"
+        install -m 0644 "$NATIVE_CORE_ASSETS/"{boot-image,volume.tar.gz} "$tools/NativeCore/"
+        install -m 0644 "$ROOT_DIR/benchmarks/scenarios/docker-comparison-v1.json" "$tools/NativeCore/docker-client-pins.json"
+        /usr/bin/ditto "$NATIVE_CORE_ASSETS/BootOCI" "$tools/NativeCore/BootOCI"
+        install -m 0644 "$ROOT_DIR/build-support/native-core-kernel.sha512" "$tools/NativeCore/kernel.sha512"
+      fi
+    done
+    if [ -n "$NATIVE_CORE_ASSETS" ]; then
+      printf 'native-docker\n' > "$APP_TOOLS/native-docker-default"
+      printf 'native-docker\n' > "$HELPER_TOOLS/native-docker-default"
+    fi
+  fi
 fi
 
 /usr/bin/ditto "$ROOT_DIR/Sources/ConjetApp/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"

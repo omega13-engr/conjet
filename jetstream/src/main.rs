@@ -1,5 +1,8 @@
 use std::path::PathBuf;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod native;
+
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use jetstream::hvf::boot::HvfBootOptions;
@@ -17,6 +20,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run the opt-in static Linux workload experiment.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    Native(native::Arguments),
     /// Validate the host can create and run a tiny HVF VM.
     Smoke {
         /// Emit machine-readable JSON.
@@ -73,6 +79,15 @@ enum Command {
         /// Host Unix socket for live virtio-balloon target updates and metrics.
         #[arg(long)]
         memory_control_socket: Option<PathBuf>,
+        /// Collect bounded guest process observations over the readiness VSOCK port.
+        #[arg(long)]
+        trace_guest_readiness: bool,
+        /// Expose the isolated native launch transport on native-launch.sock.
+        #[arg(long)]
+        enable_native_launch: bool,
+        /// Omit the guest Ethernet device for guest-local network diagnostics.
+        #[arg(long)]
+        airgap: bool,
         /// Emit pretty JSON boot report.
         #[arg(long)]
         json: bool,
@@ -85,6 +100,8 @@ enum Command {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        Command::Native(args) => native::run(args),
         Command::Smoke { json } => {
             let report = HvfSmokeRunner::default().run();
             if json {
@@ -127,6 +144,9 @@ fn main() -> anyhow::Result<()> {
             hold_after_ready_forever,
             balloon_target_mib,
             memory_control_socket,
+            trace_guest_readiness,
+            enable_native_launch,
+            airgap,
             json,
             dry_run,
         } => {
@@ -155,6 +175,10 @@ fn main() -> anyhow::Result<()> {
                 hold_after_ready_forever,
                 balloon_target_mib,
                 memory_control_socket,
+                trace_guest_readiness,
+                enable_native_launch,
+                native_airgap: airgap,
+                ..HvfBootOptions::default()
             });
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);

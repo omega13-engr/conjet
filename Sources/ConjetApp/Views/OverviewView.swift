@@ -64,8 +64,10 @@ struct OverviewView: View {
                             CommandBarButton(title: "Restart", systemImage: "arrow.triangle.2.circlepath") {
                                 Task { await app.restartRuntime() }
                             }
-                            CommandBarButton(title: "Update Core", systemImage: "arrow.down.circle") {
-                                Task { await app.updateRuntime() }
+                            if !app.isNativeDockerProfile {
+                                CommandBarButton(title: "Update Core", systemImage: "arrow.down.circle") {
+                                    Task { await app.updateRuntime() }
+                                }
                             }
                         }
                     }

@@ -20,7 +20,7 @@ public enum StartupTimelineEventID: String, Codable, CaseIterable, Hashable, Sen
         case .t3: return "first guest instruction"
         case .t4: return "PID 1 control channel ready"
         case .t5: return "OCI bundle mounted/configured"
-        case .t6: return "target process first instruction"
+        case .t6: return "process launch observation"
         case .t7: return "first useful response/exit"
         case .td: return "Docker API ready"
         }

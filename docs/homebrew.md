@@ -46,7 +46,10 @@ When `.github/workflows/release-conjet.yml` runs, it:
 The pushed `conjet-vX.Y.Z` tag is the source of truth for the release version.
 The DMG `bin/` directory must include `ConjetCoreVMM/Conjet Core` beside
 `conjetd`; Homebrew cask launches the daemon through `bin/conjetd`, and the
-daemon resolves the Jetstream VMM from that sibling directory.
+daemon resolves the Jetstream VMM from that sibling directory. Binary
+packages also carry the static Linux supervisor beside the VMM. Native
+Core assets include the verified Linux kernel and static memory helpers.
+[Runtime scope](engineering/speed-release-scope.md)
 
 ## Developer Builds
 

@@ -43,7 +43,6 @@ mod imp {
         fn hv_vcpu_get_reg(vcpu: HvVcpu, reg: u32, value: *mut u64) -> i32;
         fn hv_vcpu_set_sys_reg(vcpu: HvVcpu, reg: u16, value: u64) -> i32;
         fn hv_vcpu_get_sys_reg(vcpu: HvVcpu, reg: u16, value: *mut u64) -> i32;
-        fn hv_vcpu_set_pending_interrupt(vcpu: HvVcpu, interrupt_type: u32, pending: bool) -> i32;
         fn hv_vcpu_set_vtimer_mask(vcpu: HvVcpu, masked: bool) -> i32;
         fn hv_vcpu_run(vcpu: HvVcpu) -> i32;
         fn hv_vcpus_exit(vcpus: *mut HvVcpu, vcpu_count: u32) -> i32;
@@ -146,12 +145,6 @@ mod imp {
 
         pub fn id(&self) -> HvVcpu {
             self.id
-        }
-
-        pub fn set_pending_interrupt(&self, interrupt_type: u32, pending: bool) -> HvfResult<()> {
-            check("hv_vcpu_set_pending_interrupt", unsafe {
-                hv_vcpu_set_pending_interrupt(self.id, interrupt_type, pending)
-            })
         }
 
         pub fn set_vtimer_mask(&self, masked: bool) -> HvfResult<()> {
@@ -269,9 +262,6 @@ mod imp {
         }
         pub fn id(&self) -> u64 {
             0
-        }
-        pub fn set_pending_interrupt(&self, _interrupt_type: u32, _pending: bool) -> HvfResult<()> {
-            Err(unsupported("hv_vcpu_set_pending_interrupt"))
         }
         pub fn set_vtimer_mask(&self, _masked: bool) -> HvfResult<()> {
             Err(unsupported("hv_vcpu_set_vtimer_mask"))

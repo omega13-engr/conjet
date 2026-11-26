@@ -23,9 +23,13 @@ env:
   SWIFT_VERSION: "6.1.0"
 
 jobs:
+  native-core-assets:
+    uses: ./.github/workflows/native-core-assets.yml
+
   build:
     name: Build, sign, notarize DMG
     runs-on: macos-15
+    needs: native-core-assets
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
@@ -88,7 +92,7 @@ jobs:
       - name: Test Jetstream and host networking
         timeout-minutes: 10
         run: |
-          cargo test --locked --manifest-path jetstream/Cargo.toml
+          cargo test --locked --workspace
           go -C network-helper test -race ./...
 
       - name: Import Developer ID certificate
@@ -99,9 +103,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${MACOS_CERTIFICATE_P12}" ]; then
-            echo "::warning::MACOS_CERTIFICATE_P12 is not configured; release will use ad-hoc signing and skip notarization."
-            echo "identity=-" >> "${GITHUB_OUTPUT}"
-            exit 0
+            echo "::error::MACOS_CERTIFICATE_P12 is required for production signing."
+            exit 1
           fi
           if [ -z "${MACOS_CERTIFICATE_PASSWORD}" ]; then
             echo "MACOS_CERTIFICATE_PASSWORD is required when MACOS_CERTIFICATE_P12 is set" >&2
@@ -118,8 +121,13 @@ jobs:
           security unlock-keychain -p "${keychain_password}" "${keychain_path}"
           security import "${certificate_path}" -P "${MACOS_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${keychain_path}"
           security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain_path}"
-          mapfile -t existing_keychains < <(security list-keychains -d user | sed 's/[ "]//g')
-          security list-keychains -d user -s "${keychain_path}" "${existing_keychains[@]}"
+          keychain_paths=("${keychain_path}")
+          while IFS= read -r keychain; do
+            if [ -n "${keychain}" ] && [ "${keychain}" != "${keychain_path}" ]; then
+              keychain_paths+=("${keychain}")
+            fi
+          done <<< "$(security list-keychains -d user | sed -E 's/^[[:space:]]*"([^"]*)"$/\1/')"
+          security list-keychains -d user -s "${keychain_paths[@]}"
 
           identity="$(security find-identity -v -p codesigning "${keychain_path}" | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
           if [ -z "${identity}" ]; then
@@ -139,14 +147,28 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${SIGNING_IDENTITY}" = "-" ] || [ -z "${SIGNING_IDENTITY}" ]; then
-            echo "::warning::Publishing an ad-hoc signed, non-notarized DMG because Developer ID signing secrets are not configured."
-            exit 0
+            echo "::error::Production releases require Developer ID signing."
+            exit 1
           fi
           if [ -z "${APPLE_ID}" ] || [ -z "${APPLE_TEAM_ID}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD}" ]; then
-            echo "::warning::Publishing a Developer ID signed but non-notarized DMG because Apple notarization secrets are not configured."
-            exit 0
+            echo "::error::Apple notarization credentials are required for production release."
+            exit 1
           fi
           echo "Developer ID signing and notarization credentials are configured."
+
+      - name: Build native Linux guest supervisor
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+            cargo build --locked --release --target aarch64-unknown-linux-musl \
+            -p conjet-launch-service --bin conjet-launchd
+
+      - name: Download native Core assets
+        uses: actions/download-artifact@v4
+        with:
+          name: conjet-native-core-assets
+          path: native-core-assets
 
       - name: Stage signed Conjet app bundle
         env:
@@ -157,6 +179,8 @@ jobs:
             --configuration release \
             --version "${{ steps.meta.outputs.version }}" \
             --dist-dir dist \
+            --native-guest target/aarch64-unknown-linux-musl/release/conjet-launchd \
+            --native-core-assets native-core-assets \
             --signing-identity "${SIGNING_IDENTITY}" \
             --entitlements build-support/conjet-release.entitlements
 
@@ -168,6 +192,9 @@ jobs:
           /usr/bin/codesign -dvvv --entitlements :- "dist/Conjet.app/Contents/Resources/ConjetTools/conjetd"
           /usr/bin/codesign -dvvv --entitlements :- "dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core"
           test -x "dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/Conjet Core"
+          test "$(cat dist/Conjet.app/Contents/Resources/ConjetTools/native-docker-default)" = native-docker
+          cmp target/aarch64-unknown-linux-musl/release/conjet-launchd \
+            dist/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-launchd-linux-arm64
 
       - name: Create release DMG
         id: package
@@ -181,25 +208,21 @@ jobs:
             --dist-dir dist \
             --arch "${arch}"
           test -x "dist/dmg-staging/${artifact_base}/bin/ConjetCoreVMM/Conjet Core"
+          cmp "dist/dmg-staging/${artifact_base}/bin/native-docker-default" \
+            "dist/Conjet.app/Contents/Resources/ConjetTools/native-docker-default"
           echo "artifact_base=${artifact_base}" >> "${GITHUB_OUTPUT}"
 
       - name: Finalize DMG notarization and checksum
         env:
-          SIGNING_IDENTITY: ${{ steps.certificate.outputs.identity }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
           dmg="dist/${{ steps.package.outputs.artifact_base }}.dmg"
-          if [ "${SIGNING_IDENTITY}" = "-" ] || [ -z "${SIGNING_IDENTITY}" ]; then
-            echo "::warning::Skipping notarization for ad-hoc signed DMG."
-          elif [ -z "${APPLE_ID}" ] || [ -z "${APPLE_TEAM_ID}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD}" ]; then
-            echo "::warning::Skipping notarization because Apple notarization secrets are not configured."
-          else
-            build-support/notarize-macos-dmg.sh "${dmg}"
-          fi
+          build-support/notarize-macos-dmg.sh "${dmg}"
           shasum -a 256 "${dmg}" > "${dmg}.sha256"
+          shasum -a 256 -c "${dmg}.sha256"
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
@@ -301,7 +324,7 @@ jobs:
           fi
 
           echo "::warning::Direct Homebrew update push to ${default_branch} was rejected; opening a pull request instead."
-          git push --force-with-lease origin "HEAD:${update_branch}"
+          git push origin "HEAD:${update_branch}"
           pr_url="$(gh pr view "${update_branch}" --repo "${GITHUB_REPOSITORY}" --json url --jq .url 2>/dev/null || true)"
           if [ -z "${pr_url}" ]; then
             pr_url="$(gh pr create \

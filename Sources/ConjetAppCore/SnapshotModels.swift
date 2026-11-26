@@ -124,6 +124,7 @@ public struct ConjetProfileContext: Identifiable, Equatable, Sendable {
     public var stateDirectoryPath: String
     public var vmManifestPath: String
     public var serialLogPath: String
+    public var containerRuntime: ConjetContainerRuntimeKind?
 
     public var id: String { name }
 
@@ -140,7 +141,8 @@ public struct ConjetProfileContext: Identifiable, Equatable, Sendable {
         daemonLogPath: String = "",
         stateDirectoryPath: String = "",
         vmManifestPath: String = "",
-        serialLogPath: String = ""
+        serialLogPath: String = "",
+        containerRuntime: ConjetContainerRuntimeKind? = nil
     ) {
         self.name = name
         self.isCurrent = isCurrent
@@ -155,9 +157,11 @@ public struct ConjetProfileContext: Identifiable, Equatable, Sendable {
         self.stateDirectoryPath = stateDirectoryPath
         self.vmManifestPath = vmManifestPath
         self.serialLogPath = serialLogPath
+        self.containerRuntime = containerRuntime
     }
 
     public init(paths: ConjetPaths, isCurrent: Bool) {
+        let config = try? ConjetConfig.parseTOML(String(contentsOf: paths.config, encoding: .utf8))
         self.init(
             name: paths.profileName,
             isCurrent: isCurrent,
@@ -171,7 +175,8 @@ public struct ConjetProfileContext: Identifiable, Equatable, Sendable {
             daemonLogPath: paths.daemonLog.path,
             stateDirectoryPath: paths.stateDirectory.path,
             vmManifestPath: paths.vmManifest.path,
-            serialLogPath: paths.serialLog.path
+            serialLogPath: paths.serialLog.path,
+            containerRuntime: config?.containerRuntime
         )
     }
 

@@ -37,6 +37,7 @@ pub struct DeviceRuntimeState {
     pub vsock: BTreeMap<u64, VsockQueueHandler>,
     pub docker_bridge: Option<HostUnixVsockBridge>,
     pub memory_bridge: Option<HostUnixVsockBridge>,
+    pub native_launch_bridge: Option<HostUnixVsockBridge>,
 }
 
 impl DeviceRuntimeState {

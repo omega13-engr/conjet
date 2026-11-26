@@ -1,5 +1,5 @@
 [workspace]
-members = ["jetstream"]
+members = ["jetstream", "guest/launch-service"]
 resolver = "2"
 
 [profile.release]

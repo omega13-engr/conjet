@@ -17,6 +17,7 @@ startup-trace runner:
 swift run --package-path benchmarks conjet-bench startup-trace \
   --conjet .build/debug/conjet \
   --conjet-home "$qa_root/conjet-home" \
+  --trace-guest-readiness \
   --samples 10 \
   --output-dir "$qa_root/startup-trace"
 ```
@@ -24,7 +25,7 @@ swift run --package-path benchmarks conjet-bench startup-trace \
 Each sample invokes:
 
 ```sh
-conjet vm backend boot-attempt --timeline-jsonl "$trace"
+conjet vm backend boot-attempt --timeline-jsonl "$trace" --trace-guest-readiness
 ```
 
 The trace is newline-delimited JSON with one `StartupTimelineEvent` per line.
@@ -37,12 +38,17 @@ ordered before a result can support a performance claim:
 - `T3`: first guest instruction attempted.
 - `T4`: PID 1 control channel or equivalent guest readiness reached.
 - `T5`: OCI bundle/rootfs mounted and configured.
-- `T6`: target process first instruction or process-start record observed.
+- `T6`: process launch observation. The legacy Pulse process-start record marks child creation.
 - `T7`: first useful response or launch exit result.
 - `TD`: Docker API readiness for the resident Docker lane.
 
-Reports must keep the per-sample JSONL files, `all-results.json`, and
-`startup-trace.md`. At minimum, startup reports must state:
+The bounded Rust boot command records T0, T1, and T7 on the host clock. T7 on
+this command is VMM subprocess completion, which includes returning the boot
+report or failure. Guest readiness records remain separate in the VMM report.
+Supply `--early-console-only` for a bounded fixture that powers off directly.
+
+Reports must keep the per-sample JSONL files, full VMM response output,
+`all-results.json`, and `startup-trace.md`. At minimum, startup reports must state:
 
 - sample count and failures;
 - T0-to-T7 p50 and p95;
@@ -65,6 +71,44 @@ Cache-state labels are mandatory:
 Never use a startup microbenchmark to claim full Docker-appliance cold-start
 speed. Docker cold boot, resident Docker operations, and Pulse/direct-OCI
 launches must be reported as separate lanes.
+
+## Guest readiness records
+
+The optional `--trace-guest-readiness` boot flag enables Jetstream's bounded
+guest-to-host readiness stream on VSOCK port 1029. The Rust boot report
+includes `readiness_records`, and the outer `conjet vm backend boot-attempt`
+report preserves those records. An empty array means the host saw no valid
+records. Existing boots omit the field.
+
+The transport accepts the existing v1 readiness envelope and retains at
+most 16 events per boot. The legacy event ID 2 is reported as
+`legacy_process_started`. Pulse uses it for fork completion and the Docker
+appliance uses it as a boot marker. IDs 3 through 7 are reserved for
+`child_created`, `exec_confirmed`, `application_ready`, `exec_failed`,
+and `process_exited`, respectively. The report keeps status and an event
+code along with the boot ID hash.
+
+The Pulse guest emits IDs 3 through 7 with `conjet.trace_exec=1`. This
+diagnostic mode observes the kernel's ptrace exec event and releases the
+child immediately after that observation. Use trusted fixtures for this mode.
+It changes execution timing and may affect credential transitions. The
+`exec_failed` code carries errno. The `process_exited` code carries the exit
+status when status is zero and the signal number when status is one.
+
+The static `conjet-init` binary doubles as the application fixture when
+execed as `/init --readiness-fixture`. It writes a one-byte readiness marker
+through `CONJET_READY_FD` after exec. The `early-exit` argument exits with
+status 23 before writing that marker. The missing-executable fixture uses
+`/missing`, and the permissions fixture uses `/etc/conjet-release`.
+Use `conjet.qa_exit=1` to power off after the fixture is reaped. The
+launcher retains the legacy fork marker when exec tracing is disabled.
+
+`host_offset_ns` is the elapsed time from the start of the Rust VMM boot
+runner to complete frame receipt. Durations between host observations use
+the same host monotonic clock. `guest_monotonic_ns` is the raw guest clock
+reading, for guest intervals only. The host offset includes transport and
+decoding, and excludes the outer CLI and VMM process startup. Qualification
+requires a separate paired measurement of tracing overhead.
 
 ## Parallel Wrapper
 
@@ -100,6 +144,37 @@ swift run --package-path benchmarks conjet-bench run \
   --suites warm-gate,no-cache-gate,cold-base-prepulled-gate \
   --output-dir benchmarks/reports/rerun-failed-gates
 ```
+
+## Fresh Docker lifecycle
+
+The pinned scenario uses ARM64 Alpine `/bin/true`, a resident two-vCPU VM
+with a 2,048 MiB ceiling, a pre-pulled image, and engine-default container
+limits. Run the `none` and `bridge` networks separately. Resolve and record the
+actual image configuration ID, guest kernel, server identity, host hardware,
+and binary hashes for each engine. Use the verified private launchers and
+alternate engine order across sessions.
+
+The resident API lane times create, start, wait, and remove with one client.
+The CLI lane times a new Docker process through return from `run --rm`.
+Keep raw stage timings, warmups, failed samples, and observed host load.
+End the session after its first fixture failure, preserve the partial group,
+and treat the session as failed. API removal acknowledgement is recorded independently of observable cleanup.
+When guest cleanup telemetry is unavailable, record it as unknown. An
+initial baseline may use this boundary to describe API behaviour only.
+
+For final comparisons, use at least 10,000 measured operations per scenario
+per engine across at least five independent paired sessions on each of two
+supported hardware configurations. Predeclare a minimum 5% improvement at
+p50 and p99 for each required fresh lane. For each hardware, scenario,
+and percentile, compute candidate-to-competitor ratios from the paired
+session percentiles. Report the median ratio and a paired-session bootstrap
+95% interval from 10,000 resamples. The upper interval bound must be at
+or below 0.95. Report nearest-rank percentiles, use failure-free sessions
+for the superiority gate, and retain all failures in raw evidence and
+operation counts. The cleanup-complete boundary must pass independently.
+Report throughput without excluding the elapsed time of failed operations.
+Small smoke runs and single-host baselines are descriptive. They cannot pass
+the qualification gate.
 
 ## Topology Labels
 

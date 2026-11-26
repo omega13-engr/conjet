@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "contract_revision": "7e075c0bc64ee9e587e18ccf2f02fe641822218d",
+  "platform": "linux/arm64",
+  "host_model": "MacBookPro18,3",
+  "host_ram_bytes": 17179869184,
+  "docker_api": "1.44",
+  "virtual_machine": {
+    "cpus": 2,
+    "memory_ceiling_mib": 2048
+  },
+  "participants": {
+    "kiri": {
+      "version": "0.2.2",
+      "executable_sha256": "c5cd8edefc69d3e4de4cf38a8149d07d6c4c4f1d522167c890541c17f2630884"
+    },
+    "conjet": {
+      "baseline_revision": "7e075c0bc64ee9e587e18ccf2f02fe641822218d",
+      "core": "1.3.1",
+      "kernel": "6.12.86"
+    }
+  },
+  "clients": {
+    "docker": {
+      "version": "29.10.1",
+      "sha256": "cb59cf76741a247388e6a84f8defa5054c12dcd5e05d84a3ed8638dac2f34077"
+    },
+    "buildx": {
+      "version": "0.39.1",
+      "sha256": "32208f721e053f3cf56741e16c585019f9281e4a1cda9bbbeaee35a32fb0d28f"
+    },
+    "compose": {
+      "version": "5.8.0",
+      "sha256": "429abdc8a6c39bb9cdf218203cae37414a38525c70dd7b0bd8c57ead5b552184"
+    }
+  },
+  "images": {
+    "alpine": {
+      "tag": "3.22",
+      "ref": "docker.io/library/alpine@sha256:e233f2058b0628266762f745a2c17e623b418e0090f47d223909d1f9a7d4367e",
+      "config_digest": "sha256:062964a69725bb96611dae2ac911a5a1ab3f8d32fe6f096f267d77f09e55a99c"
+    },
+    "golang": {
+      "tag": "1.25-alpine",
+      "ref": "docker.io/library/golang@sha256:ac555adf0aa5588ce5c707a2534b7d2d6f9f3938faa3560ab12eedeb6a18541f"
+    },
+    "rust": {
+      "tag": "1.94-alpine",
+      "ref": "docker.io/library/rust@sha256:c1e4313a36ea7f5b21b04675272e50f90fb5f129eae98e5fff3bc3c87f9f4623"
+    },
+    "node": {
+      "tag": "22-alpine",
+      "ref": "docker.io/library/node@sha256:286344ef340c151df65af44a8c8cf2996c1783073d49b88fabcf90a56ea82023",
+      "config_digest": "sha256:fd6e7c5e242aaf648004a761573a2b930792eb46b1be852862b595dfdaa11b36"
+    },
+    "redis": {
+      "tag": "7.4-alpine",
+      "ref": "docker.io/library/redis@sha256:52d1ea8a654b10f06af3ecda4e9dbcd035c7868b5c49ee7975de917f81de13db"
+    },
+    "registry": {
+      "tag": "2.8.3",
+      "ref": "docker.io/library/registry@sha256:fa647fc1e5d5df7d8d923fb6332aab8e78783f8fca1a1394efb4011f68f5a793"
+    },
+    "buildkit": {
+      "tag": "v0.23.2",
+      "ref": "docker.io/moby/buildkit@sha256:771795ae105f698c5a354aecb1a1be2cf1f1c17c97b348c8b19f7cded83fb97c"
+    }
+  },
+  "common_static_fixture": {
+    "archive_sha256": "7c634cde03b42a156ac14729ceaa54d3a0f3d5aa590b644f4bfa435048578473",
+    "config_digest": "sha256:8b2d95474a9220b9986dd2004dec7bd4b02e2955ea0e1e1fdda58f416d95361c",
+    "executable_sha256": "3d6e591aed52e461f1383970a9cb1aa4bcad82349b42b641f8dffb23a5730ca0",
+    "path": "/bin/probe"
+  },
+  "lifecycle_limits": {
+    "memory_bytes": 16777216,
+    "pids": 4,
+    "cpu_millicores": 500
+  },
+  "service_limits": {
+    "memory_bytes": 134217728,
+    "pids": 64,
+    "cpu_millicores": 500
+  },
+  "concurrency": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "session_order": [
+    [
+      "conjet",
+      "kiri"
+    ],
+    [
+      "kiri",
+      "conjet"
+    ],
+    [
+      "conjet",
+      "kiri"
+    ],
+    [
+      "kiri",
+      "conjet"
+    ],
+    [
+      "conjet",
+      "kiri"
+    ]
+  ],
+  "suites": {
+    "pilot": {
+      "sessions": 1,
+      "samples": 20,
+      "warmups": 10,
+      "timeout_seconds": 180
+    },
+    "lifecycle": {
+      "sessions": 5,
+      "samples_per_session": 2000,
+      "warmups": 10,
+      "timeout_seconds": 30,
+      "networks": [
+        "none",
+        "bridge"
+      ],
+      "workloads": [
+        "alpine-true",
+        "alpine-stream-exit",
+        "common-static"
+      ]
+    },
+    "images": {
+      "sessions": 5,
+      "samples_per_session": 5,
+      "warmups": 1,
+      "timeout_seconds": 180
+    },
+    "builds": {
+      "sessions": 5,
+      "samples_per_session": 3,
+      "warmups": 0,
+      "timeout_seconds": 600,
+      "workloads": [
+        "rust",
+        "go",
+        "node"
+      ]
+    },
+    "compose": {
+      "sessions": 5,
+      "samples_per_session": 5,
+      "warmups": 1,
+      "timeout_seconds": 120
+    },
+    "control": {
+      "sessions": 5,
+      "samples_per_session": 100,
+      "warmups": 10,
+      "timeout_seconds": 30
+    },
+    "storage_network": {
+      "sessions": 5,
+      "samples_per_session": 5,
+      "warmups": 1,
+      "timeout_seconds": 180,
+      "steady_state_seconds": 60
+    },
+    "stress": {
+      "sessions": 5,
+      "samples_per_session": 100,
+      "warmups": 10,
+      "timeout_seconds": 60
+    }
+  },
+  "statistics": {
+    "percentiles": [
+      50,
+      95,
+      99
+    ],
+    "estimator": "nearest-rank",
+    "confidence": 0.95,
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 615026,
+    "resampling_unit": "paired session",
+    "minimum_effect_percent": 5
+  }
+}

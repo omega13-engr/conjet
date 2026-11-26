@@ -1,7 +1,42 @@
-import ConjetCore
+@testable import ConjetCore
 import XCTest
 
 final class ConfigTests: XCTestCase {
+    func testPackagedNativeDefaultDoesNotDependOnBootAssetAvailability() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        XCTAssertFalse(ConjetConfig.toolsSelectNativeDocker(root))
+
+        let assets = root.appendingPathComponent("ConjetCoreVMM/NativeCore")
+        try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
+        XCTAssertTrue(ConjetConfig.toolsSelectNativeDocker(root))
+
+        try FileManager.default.removeItem(at: assets)
+        try Data().write(to: root.appendingPathComponent("native-docker-default"))
+        XCTAssertTrue(ConjetConfig.toolsSelectNativeDocker(root))
+    }
+
+    func testPackagedNativeDockerDefaultsOnlyForFreshProfiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ConjetPaths(home: root)
+        try paths.ensureBaseDirectories()
+
+        let fresh = ConjetConfig.freshProfileConfig(paths: paths, packagedNativeDocker: true)
+        XCTAssertEqual(fresh.containerRuntime, .nativeDocker)
+        XCTAssertEqual(fresh.effectiveVMCPUs, 2)
+        XCTAssertEqual(fresh.effectiveMemoryMiB, 2048)
+        XCTAssertEqual(fresh.diskGiB, 16)
+        XCTAssertFalse(fresh.ssh.enabled)
+        XCTAssertEqual(ConjetConfig.freshProfileConfig(paths: paths, packagedNativeDocker: false), .default)
+
+        try Data().write(to: paths.vmManifest)
+        XCTAssertEqual(ConjetConfig.freshProfileConfig(paths: paths, packagedNativeDocker: true), .default)
+        XCTAssertEqual(try ConjetConfig.parseTOML("[vm]\nmemory_mib = 4096\n").containerRuntime, .docker)
+        XCTAssertEqual(try ConjetConfig.parseTOML(fresh.renderTOML()), fresh)
+    }
+
     func testNetworkEgressRoundTripsAndRejectsInvalidModes() throws {
         XCTAssertEqual(try ConjetConfig.parseTOML("").networkEgressMode, .host)
         for mode in ConjetNetworkEgressMode.allCases {

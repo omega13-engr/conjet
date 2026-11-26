@@ -129,6 +129,7 @@ struct ProfileConfigDraft: Equatable {
     }
 
     mutating func clampMemory(to bounds: ConjetProfileMemoryBounds) {
+        guard ConjetContainerRuntimeKind.parse(runtime) != .nativeDocker else { return }
         memoryMiB = bounds.clampedMiB(memoryMiB)
     }
 
@@ -137,17 +138,18 @@ struct ProfileConfigDraft: Equatable {
         guard let runtime = ConjetContainerRuntimeKind.parse(trimmed(runtime)) else {
             throw ConjetError.invalidArgument("runtime must be \(ConjetContainerRuntimeKind.allowedValuesDescription)")
         }
+        let native = runtime == .nativeDocker ? ConjetConfig.nativeDockerDefault : nil
         let config = ConjetConfig(
-            vmCPUs: vmCPUs,
-            memoryMiB: effectiveMemoryMiB,
-            architecture: trimmed(architecture),
-            diskGiB: diskGiB,
-            diskImagePath: optional(trimmed(diskImagePath)),
+            vmCPUs: native?.vmCPUs ?? vmCPUs,
+            memoryMiB: native?.memoryMiB ?? effectiveMemoryMiB,
+            architecture: native?.architecture ?? trimmed(architecture),
+            diskGiB: native?.diskGiB ?? diskGiB,
+            diskImagePath: native == nil ? optional(trimmed(diskImagePath)) : nil,
             runtime: runtime.rawValue,
             vmBackend: vmBackend,
             quietStopMinutes: quietStopMinutes,
             enableHostMounts: enableHostMounts,
-            enableRemovableHostMounts: enableRemovableHostMounts,
+            enableRemovableHostMounts: native == nil && enableRemovableHostMounts,
             socketPath: optional(trimmed(socketPath)),
             conjetCoreRepository: trimmed(conjetCoreRepository),
             networkBindPolicy: networkBindPolicy,
@@ -229,7 +231,7 @@ final class ConjetAppState: ObservableObject {
     @Published var dockerEditorSource: String
     @Published var dockerEditorImageTag = "conjet-editor:latest"
     @Published var dockerEditorRunArguments = ""
-    @Published var pullImage = "ubuntu:24.04"
+    @Published var pullImage = ""
     @Published var containerTerminalDebugEnabled = false
     @Published private(set) var containerTerminalError: String?
     @Published var composeDirectory = ""
@@ -319,6 +321,10 @@ final class ConjetAppState: ObservableObject {
         snapshot.profileContexts.first { $0.isCurrent }
     }
 
+    var isNativeDockerProfile: Bool {
+        (snapshot.daemonResponse?.status?.config.containerRuntime ?? currentProfileContext?.containerRuntime) == .nativeDocker
+    }
+
     var currentVMState: VMRunState? {
         Self.resolvedVMState(command: commandVMState, snapshot: snapshotVMState)
     }
@@ -339,8 +345,10 @@ final class ConjetAppState: ObservableObject {
         await refresh(trigger: .automatic)
     }
 
-    func applyPulseFrameForTesting(_ frame: ConjetPulseFrame) {
+    @discardableResult
+    func applyPulseFrameForTesting(_ frame: ConjetPulseFrame) -> Task<Void, Never>? {
         handlePulseFrame(frame)
+        return deferredRefreshTask
     }
 
     private func refresh(trigger initialTrigger: DashboardRefreshTrigger) async {
@@ -710,7 +718,7 @@ final class ConjetAppState: ObservableObject {
     }
 
     func runDockerEditor() async {
-        guard activeCommandLabel == nil else { return }
+        guard activeCommandLabel == nil, !isNativeDockerProfile else { return }
         let source = dockerEditorSource.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !source.isEmpty else { return }
         let runArguments: [String]

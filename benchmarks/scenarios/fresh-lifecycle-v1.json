@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "platform": "linux/arm64",
+  "image": "alpine@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f",
+  "command": ["/bin/true"],
+  "virtual_machine": {"cpus": 2, "memory_ceiling_mib": 2048},
+  "container_limits": "engine defaults",
+  "cache_state": "resident_vm_prepulled_image",
+  "networks": ["none", "bridge"],
+  "lanes": ["api", "cli"],
+  "warmups_per_lane": 10,
+  "api_version": "1.44"
+}

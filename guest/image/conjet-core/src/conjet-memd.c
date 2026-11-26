@@ -785,13 +785,33 @@ static bool path_contains_container_marker(const char *path) {
            strstr(path, "moby") != NULL;
 }
 
+static bool path_is_native_workload(const char *path) {
+    static const char prefix[] = "/sys/fs/cgroup/conjet-native-";
+    static const char scope[] = "/workloads/active/";
+    const size_t id_length = 32;
+    if (strncmp(path, prefix, sizeof(prefix) - 1) != 0) {
+        return false;
+    }
+    const char *id = path + sizeof(prefix) - 1;
+    if (strspn(id, "0123456789abcdef") != id_length ||
+        strncmp(id + id_length, scope, sizeof(scope) - 1) != 0) {
+        return false;
+    }
+    const char *leaf = id + id_length + sizeof(scope) - 1;
+    return strlen(leaf) == id_length && memcmp(id, leaf, id_length) == 0;
+}
+
+static bool read_cgroup_populated(const char *cgroup);
+
 static bool path_is_build_cgroup(const char *path) {
     return strstr(path, "/conjet-build.slice") != NULL ||
            strstr(path, "/conjet-build.slice/") != NULL ||
            strstr(path, ".slice/conjet-build.slice") != NULL;
 }
 
-static void scan_cgroups(const char *dir, int depth, struct memory_metrics *metrics) {
+static void scan_cgroups(
+    const char *dir, int depth, bool native_workloads, struct memory_metrics *metrics
+) {
     if (depth > MAX_CGROUP_DEPTH) {
         return;
     }
@@ -806,9 +826,10 @@ static void scan_cgroups(const char *dir, int depth, struct memory_metrics *metr
 
     char memory_current[4096];
     snprintf(memory_current, sizeof(memory_current), "%s/memory.current", dir);
-    if (path_contains_container_marker(dir)) {
+    bool native = native_workloads && path_is_native_workload(dir);
+    if (native || (!native_workloads && path_contains_container_marker(dir))) {
         uint64_t current = read_uint_file(memory_current);
-        if (current > 0) {
+        if (native ? (current > 0 || read_cgroup_populated(dir)) : current > 0) {
             char memory_peak[4096];
             char memory_stat[4096];
             char memory_events[4096];
@@ -843,7 +864,7 @@ static void scan_cgroups(const char *dir, int depth, struct memory_metrics *metr
         snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name);
         struct stat st;
         if (stat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
-            scan_cgroups(child, depth + 1, metrics);
+            scan_cgroups(child, depth + 1, native_workloads, metrics);
         }
     }
     closedir(d);
@@ -1939,7 +1960,8 @@ static struct memory_metrics collect_metrics(void) {
     read_swaps(&metrics);
     read_zram(&metrics);
     read_configured_cgroup_metrics(&metrics);
-    scan_cgroups("/sys/fs/cgroup", 0, &metrics);
+    const char *native = getenv("CONJET_NATIVE_WORKLOAD_CGROUPS");
+    scan_cgroups("/sys/fs/cgroup", 0, native != NULL && strcmp(native, "1") == 0, &metrics);
     return metrics;
 }
 

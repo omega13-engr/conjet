@@ -397,9 +397,14 @@ public enum InitramfsBuilder {
         version=1
         frame_kind=readiness
         vsock_port=1029
-        record_bytes=24
+        record_bytes=32
         event_control_ready=1
         event_process_started=2
+        event_child_created=3
+        event_exec_confirmed=4
+        event_application_ready=5
+        event_exec_failed=6
+        event_process_exited=7
         legacy_serial_marker=CONJET_INIT_READY
         """
     }
