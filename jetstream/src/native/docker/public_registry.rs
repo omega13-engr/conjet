@@ -17,6 +17,10 @@ pub(super) const FIXTURES: &str =
 pub(super) struct Pins(BTreeMap<String, String>);
 
 impl Pins {
+    pub(super) fn enabled(&self) -> bool {
+        !self.0.is_empty()
+    }
+
     pub(super) fn frozen() -> anyhow::Result<Self> {
         let fixture: Value = serde_json::from_str(FIXTURES)?;
         let entries = fixture["images"]

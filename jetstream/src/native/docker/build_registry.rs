@@ -106,16 +106,17 @@ fn request(line: &str) -> anyhow::Result<(bool, Object<'_>)> {
     let (repository, kind) = path
         .rsplit_once('/')
         .context("missing registry repository")?;
+    ensure!(
+        super::build_mirror::repository(repository),
+        "invalid registry repository"
+    );
     let manifest = match kind {
         "manifests" => true,
         "blobs" => false,
         _ => anyhow::bail!("unsupported registry object"),
     };
     ensure!(
-        super::request::digest(digest)
-            || (manifest
-                && repository == "library/alpine"
-                && super::public_registry::valid_tag(digest)),
+        super::request::digest(digest) || (manifest && super::public_registry::valid_tag(digest)),
         "expected a registry digest or a supported image tag"
     );
     Ok((
@@ -145,7 +146,15 @@ fn serve(owner: &Owner, stream: &mut Stream, trace: bool) -> anyhow::Result<()> 
             }
         }
     }
-    let (head, object) = request(&line)?;
+    let (head, object) = match request(&line) {
+        Ok(request) => request,
+        Err(error) => {
+            stream.write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )?;
+            return Err(error);
+        }
+    };
     let Object::Content {
         repository,
         digest,
@@ -213,9 +222,10 @@ mod tests {
                 }
             )
         );
+        assert!(request("HEAD /v2/docker/dockerfile/manifests/1?ns=docker.io HTTP/1.1").is_ok());
         for line in [
             format!("PUT {path} HTTP/1.1"),
-            "GET /v2/library/node/manifests/latest HTTP/1.1".into(),
+            "GET /v2/library/node/blobs/latest HTTP/1.1".into(),
             format!("GET /v2/library/node/blobs/{digest}?ns=example.com HTTP/1.1"),
             format!("GET http://example.com/v2/library/node/blobs/{digest} HTTP/1.1"),
         ] {

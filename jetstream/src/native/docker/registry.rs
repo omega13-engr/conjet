@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -32,6 +32,7 @@ pub(super) struct Store {
     owned_registry: Option<SocketAddr>,
     public: public_registry::Pins,
     resolved_public: BTreeMap<String, String>,
+    build_mirror: Option<super::build_mirror::Cache>,
     encoding: PackageEncoding,
     installed: BTreeMap<String, String>,
     _lock: File,
@@ -171,6 +172,7 @@ impl Store {
             },
             installed,
             resolved_public: BTreeMap::new(),
+            build_mirror: None,
             _lock: lock,
         };
         store.recover()?;
@@ -411,79 +413,16 @@ impl Store {
         digest: &str,
         manifest_request: bool,
     ) -> anyhow::Result<(File, &'static str, String, bool)> {
-        let (image, digest, cached) = if manifest_request && !request::digest(digest) {
-            let (image, cached) = self.prepare_tagged(repository, digest)?;
-            let manifest = image.manifest.clone();
-            (image, manifest, cached)
-        } else {
-            ensure!(
-                request::digest(digest),
-                "registry object requires a SHA-256 digest"
-            );
-            // A digest is served only if it belongs to a staged manifest for this repository.
-            let frozen = self.public.manifest_for(repository).map(str::to_owned);
-            let dynamic = self
-                .resolved_public
-                .iter()
-                .filter(|(_, repo)| repo.as_str() == repository)
-                .map(|(manifest, _)| manifest)
-                .find(|manifest| {
-                    if manifest_request {
-                        manifest.as_str() == digest
-                    } else {
-                        self.receipt(manifest)
-                            .and_then(|receipt| Self::references(&receipt))
-                            .is_ok_and(|objects| objects.contains(digest))
-                    }
-                })
-                .cloned();
-            let manifest = dynamic
-                .or(frozen)
-                .context("registry repository is outside the supported sources")?;
-            ensure!(
-                !manifest_request || manifest == digest,
-                "registry manifest is not staged"
-            );
-            let cached = self.path(&manifest)?.try_exists()?;
-            let image = self.prepare(&format!("docker.io/{repository}@{manifest}"))?;
-            (image, digest.to_owned(), cached)
-        };
-        ensure!(
-            Self::references(&image.receipt)?.contains(&digest),
-            "registry blob is outside the verified manifest"
-        );
-        let suffix = suffix(&digest)?;
-        let path = self.root.join("blobs/sha256").join(suffix);
-        let bound = if manifest_request {
-            METADATA as u64
-        } else {
-            oci_stage::DISK_COMPRESSED_BUDGET
-        };
-        let mut file = oci_stage::open_bounded(&self.root, &path, bound)?;
-        let size = file.metadata()?.len();
-        ensure!(
-            oci_stage::digest_file(&mut file, size)? == suffix,
-            "registry object digest differs"
-        );
-        let content_type = if manifest_request {
-            let mut bytes = Vec::new();
-            (&mut file).take(size + 1).read_to_end(&mut bytes)?;
-            ensure!(bytes.len() as u64 == size, "registry manifest size changed");
-            file.rewind()?;
-            let value: Value = serde_json::from_slice(&bytes)?;
-            match value["mediaType"].as_str() {
-                Some("application/vnd.oci.image.manifest.v1+json") => {
-                    "application/vnd.oci.image.manifest.v1+json"
-                }
-                Some("application/vnd.docker.distribution.manifest.v2+json") => {
-                    "application/vnd.docker.distribution.manifest.v2+json"
-                }
-                _ => anyhow::bail!("unsupported pinned registry manifest type"),
-            }
-        } else {
-            "application/octet-stream"
-        };
-        Ok((file, content_type, digest, cached))
+        ensure!(self.public.enabled(), "public build mirror is disabled");
+        if self.build_mirror.is_none() {
+            self.build_mirror = Some(super::build_mirror::Cache::new(
+                self.root.join("build-mirror"),
+            )?);
+        }
+        self.build_mirror
+            .as_mut()
+            .unwrap()
+            .read(repository, digest, manifest_request)
     }
 
     pub(super) fn archive_layer_limit(&self) -> u64 {
@@ -1108,6 +1047,7 @@ mod tests {
             owned_registry: None,
             public: public_registry::Pins::default(),
             resolved_public: BTreeMap::new(),
+            build_mirror: None,
             encoding: PackageEncoding::DiskV2,
             installed: BTreeMap::new(),
             _lock: tempfile::tempfile().unwrap(),

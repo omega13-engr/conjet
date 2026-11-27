@@ -180,11 +180,14 @@ def qualify(args, root, report):
             if bootstrap.returncode:
                 raise RuntimeError('project builder bootstrap failed')
             project = args.compose_project
-            docker('project-compose-build', 'compose', '--env-file', '/dev/null',
+            result = docker('project-compose-build', 'compose', '--env-file', '/dev/null',
                    '--project-directory', project, '--file', project / 'docker-compose.yml',
                    '--project-name', 'conjet-project-qa', '--ansi', 'never', '--progress', 'plain',
-                   'build', '--builder', 'fresh', timeout=1800,
+                   'build', '--builder', 'fresh', timeout=1800, checked=False,
                    updates={'COMPOSE_BAKE': 'true', 'POSTGRES_PASSWORD': 'isolated-build-placeholder'})
+            if result.returncode:
+                docker('project-worker-log', 'logs', 'buildx_buildkit_fresh0', checked=False)
+                raise RuntimeError('project Compose build failed; see build and worker logs')
             docker('remove-project-builder', 'buildx', 'rm', 'fresh')
             report['passed'] = True
             return

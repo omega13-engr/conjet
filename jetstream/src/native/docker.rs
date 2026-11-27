@@ -3,6 +3,7 @@ mod archive;
 mod bind;
 mod bind_fuse;
 mod build_api;
+mod build_mirror;
 mod build_registry;
 mod buildkit;
 mod discovery;

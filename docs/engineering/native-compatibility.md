@@ -56,9 +56,14 @@ build. Evidence: `ExternalSSD/dev_workspace/tmp/conjet-memory-fix-evidence/`.
 The ordinary Docker-container driver can pull
 `moby/buildkit:buildx-stable-1` and build from a tagged Alpine image.
 The native registry supports anonymous Docker Hub tags for Alpine and
-BuildKit. The worker mirror serves tagged Alpine and the existing pinned
-build inputs. It selects Linux ARM64 from OCI indexes, loads the selected
-manifest by digest, and verifies the config, layers and OCI diff IDs
+BuildKit. The build worker mirror separately serves bounded, digest-verified
+anonymous Docker Hub manifests, indexes and manifest-authorized blobs. This
+removes its benchmark-image allowlist but does not broaden container image
+admission or privileged worker admission. External Dockerfile frontends still
+require guest execution features; ARTEX reaches an unsupported OCI preset
+after its frontend image downloads. Runnable-image staging selects Linux ARM64
+from OCI indexes, loads the selected manifest by digest, and verifies the config,
+layers and OCI diff IDs
 before admitting the image. Loopback grants and the existing pinned
 repositories retain their scoped digest policy.
 [OCI Distribution Specification](https://specs.opencontainers.org/distribution-spec/),
@@ -620,3 +625,31 @@ first attempt. Structured runtime witnesses cover the headless surfaces.
 
 The full Kiri comparison used this artifact set after qualification.
 [Docker 29.10.1 comparison results](docker-benchmark-results.md#speed-065-docker-29101-comparison)
+
+## Expanded build compatibility increment — 2026-11-27
+
+The dedicated content mirror passed 36 focused Rust tests. The Rust workspace
+passed 233 tests with three existing opt-in tests ignored. Formatting and the
+five compatibility-inventory tests passed. The expanded runner executed all
+88 contracts and failed all of them as UNIMPLEMENTED; this is missing test
+implementation, not 88 observed runtime defects or successful qualification.
+
+The optimized host and guest were rebuilt with Rust 1.94.1. Unchanged Swift,
+kernel and memory helpers came from the verified memory-fix app. The final
+ad-hoc DMG passed verification; its extracted app matched all 47 staged file
+hashes and passed strict deep code-signature verification after restoring
+executable modes. This does not qualify a Finder/Homebrew installation.
+
+Against that exact app, both the complete memory canary and stock Docker smoke
+suite passed. The unchanged ARTEX Compose build downloaded and extracted its
+external frontend but failed with `unsupported live BuildKit OCI preset`.
+The captured policy and concrete remaining execution tasks are in the
+[expanded task board](docker-compatibility-task-board.md). No release or full
+Docker compatibility is qualified. All three runtime receipts report successful
+owned-runtime cleanup and unchanged production fingerprints. No GUI changed;
+headless process/API witnesses cover these checks instead of screenshots.
+
+Evidence is retained under
+`/Volumes/ExternalSSD/dev_workspace/tmp/conjet-compat-evidence/`, including
+`dmg-memory.json`, `dmg-smoke.json`, `dmg-artex.json`, `package-files.json`,
+`rust-tests.log`, and `rejected-frontend-policy.json`.
