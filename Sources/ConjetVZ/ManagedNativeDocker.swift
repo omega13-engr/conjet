@@ -76,7 +76,7 @@ final class ManagedNativeDocker {
         }
         let images = state.appendingPathComponent("images", isDirectory: true)
         try makePrivateDirectory(images)
-        let buildClient = try configureBuildClient()
+        let buildClient = configureBuildClient()
         let binds = state.appendingPathComponent("binds", isDirectory: true)
         if enableHostMounts { try makePrivateDirectory(binds) }
         let kernel = assets.appendingPathComponent("Image")
@@ -172,28 +172,36 @@ final class ManagedNativeDocker {
 
     var diagnostic: String? { endpoint?.resultSnapshot()?.message ?? boot?.resultSnapshot()?.message }
 
-    private func configureBuildClient() throws -> [String] {
-        let pins = try JSONDecoder().decode(ClientPins.self, from: Data(contentsOf: assets.appendingPathComponent("docker-client-pins.json")))
-        guard let dockerPath = try? DockerCLIResolver.docker(),
-              let dockerPin = pins.clients["docker"]?.sha256,
-              let buildxPin = pins.clients["buildx"]?.sha256 else { return [] }
-        let docker = URL(fileURLWithPath: dockerPath).resolvingSymlinksInPath()
-        let buildxCandidates = [
-            URL(fileURLWithPath: "/opt/homebrew/lib/docker/cli-plugins/docker-buildx"),
-            URL(fileURLWithPath: "/usr/local/lib/docker/cli-plugins/docker-buildx"),
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".docker/cli-plugins/docker-buildx")
-        ].map { $0.resolvingSymlinksInPath() }
-        guard (try? digest(docker)) == dockerPin,
-              let buildx = buildxCandidates.first(where: { (try? digest($0)) == buildxPin }) else { return [] }
+    private func configureBuildClient() -> [String] {
+        do {
+            let dockerPath = try DockerCLIResolver.docker()
+            let docker = URL(fileURLWithPath: dockerPath).resolvingSymlinksInPath()
+            let dockerConfig = ProcessInfo.processInfo.environment["DOCKER_CONFIG"]
+            let configuredPlugin = dockerConfig.flatMap { path in
+                path.hasPrefix("/") ? URL(fileURLWithPath: path).appendingPathComponent("cli-plugins/docker-buildx") : nil
+            }
+            let candidates = ([configuredPlugin].compactMap { $0 } + [
+                URL(fileURLWithPath: "/opt/homebrew/lib/docker/cli-plugins/docker-buildx"),
+                URL(fileURLWithPath: "/usr/local/lib/docker/cli-plugins/docker-buildx"),
+                URL(fileURLWithPath: "/Applications/Docker.app/Contents/Resources/cli-plugins/docker-buildx"),
+                FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".docker/cli-plugins/docker-buildx")
+            ]).map { $0.resolvingSymlinksInPath() }
+            guard let buildx = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
+                throw ConjetError.unavailable("Docker Buildx executable was not found in the standard plugin directories")
+            }
 
-        let config = state.appendingPathComponent("build-client", isDirectory: true)
-        let plugins = config.appendingPathComponent("cli-plugins", isDirectory: true)
-        try makePrivateDirectory(config)
-        try makePrivateDirectory(plugins)
-        let dockerCopy = config.appendingPathComponent("docker")
-        try copyClient(docker, to: dockerCopy, sha256: dockerPin)
-        try copyClient(buildx, to: plugins.appendingPathComponent("docker-buildx"), sha256: buildxPin)
-        return ["--build-client-docker", dockerCopy.path, "--build-client-config", config.path]
+            let config = state.appendingPathComponent("build-client", isDirectory: true)
+            let plugins = config.appendingPathComponent("cli-plugins", isDirectory: true)
+            try makePrivateDirectory(config)
+            try makePrivateDirectory(plugins)
+            let dockerCopy = config.appendingPathComponent("docker")
+            try copyClient(docker, to: dockerCopy, sha256: digest(docker))
+            try copyClient(buildx, to: plugins.appendingPathComponent("docker-buildx"), sha256: digest(buildx))
+            return ["--build-client-docker", dockerCopy.path, "--build-client-config", config.path]
+        } catch {
+            NSLog("Native Docker build API unavailable: %@", String(describing: error))
+            return []
+        }
     }
 
     private func digest(_ url: URL) throws -> String {
@@ -204,6 +212,8 @@ final class ManagedNativeDocker {
         var info = stat()
         let limit = 128 * 1024 * 1024
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_uid == 0 || info.st_uid == geteuid(),
+              info.st_mode & 0o022 == 0, info.st_mode & 0o111 != 0,
               info.st_size > 0, info.st_size <= limit else {
             throw ConjetError.filesystem("Invalid native Docker client \(url.path)")
         }
@@ -271,11 +281,6 @@ final class ManagedNativeDocker {
     private struct BootReceipt: Decodable {
         let manifest_digest: String
         let package_sha256: String
-    }
-
-    private struct ClientPins: Decodable {
-        struct Pin: Decodable { let sha256: String }
-        let clients: [String: Pin]
     }
 
     private struct BootReady: Decodable {

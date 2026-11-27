@@ -241,6 +241,18 @@ fn archive(
             continue;
         }
         let path = text_path(&raw, kind == Kind::Directory)?;
+        let mode = if disk_image == conjet_launch_service::spec::BUILDKIT_DEFAULT_CONFIG
+            && path == "usr/bin/wall"
+            && kind == Kind::File
+            && mode == 0o2755
+            && uid == 0
+            && gid == 5
+        {
+            // The worker does not use Alpine's setgid terminal broadcast helper.
+            mode & !0o2000
+        } else {
+            mode
+        };
         ensure!(
             oci::allowed_mode(kind, &path, mode, uid, gid, disk_image)
                 && uid <= 65535

@@ -18,6 +18,13 @@ pub const REGISTRY_CONFIG: &str =
     "sha256:33eeff39e0aaabe61ca826fd7502396183462451be0783133e1a8fa944fc7350";
 pub const BUILDKIT_CONFIG: &str =
     "sha256:8ff6bca64af355cd0434480a0fd583a7c571211750a5eb806b992017148bab55";
+pub const BUILDKIT_DEFAULT_CONFIG: &str =
+    "sha256:8e11cae448ccc48942e94449d6d440319bbe781cd134cde792c16ffdf7dc4e17";
+
+pub fn approved_buildkit_config(image: &str) -> bool {
+    matches!(image, BUILDKIT_CONFIG | BUILDKIT_DEFAULT_CONFIG)
+}
+
 pub const BUILDKIT_PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 pub const BUILDKIT_SNAPSHOTTER_ARG: usize = 5;
 pub const BUILDKIT_NATIVE_ARGS: &[&str] = &[
@@ -36,7 +43,7 @@ pub const BUILDKIT_REGISTRY_CONFIG: &str = "--config=/run/conjet/buildkit-regist
 pub const BUILDKIT_REGISTRY_PORT: u16 = 5001;
 
 pub fn buildkit_control_exec(image: &str, argv: &[String]) -> bool {
-    image == BUILDKIT_CONFIG
+    approved_buildkit_config(image)
         && match argv {
             [program, operation] => {
                 (program == "buildctl" && operation == "dial-stdio")
@@ -381,7 +388,7 @@ impl LaunchSpec {
     }
 
     pub fn can_start_buildkit(&self) -> bool {
-        self.image_digest == BUILDKIT_CONFIG
+        approved_buildkit_config(&self.image_digest)
             && self.uid == 0
             && self.gid == 0
             && self.cwd == "/"

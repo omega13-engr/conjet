@@ -1,4 +1,4 @@
-//! Intake profile for the pinned BuildKit 0.23.2 Linux ARM64 OCI worker.
+//! Intake profiles for verified Linux ARM64 BuildKit workers.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -16,6 +16,16 @@ pub(crate) const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 // Dynamic process fields and validated worker-owned paths are excluded.
 const POLICY: &str = "65a0504290aa0fed601cf5f19b860b77d1ba682595b92c69b8909bfc4cfd4224";
 const LIVE_POLICY: &str = "90e0f262862d2b34e3cf86f74011abeec843b7f2ed2552d77ef2ac4d16913dd6";
+const DEFAULT_LIVE_POLICY: &str =
+    "47faf84bdade57af612fcc50749e81b4517080601894497e8080a64a4c9a3050";
+
+fn live_policy(worker_image: &str) -> Result<&'static str, &'static str> {
+    match worker_image {
+        crate::spec::BUILDKIT_CONFIG => Ok(LIVE_POLICY),
+        crate::spec::BUILDKIT_DEFAULT_CONFIG => Ok(DEFAULT_LIVE_POLICY),
+        _ => Err("unknown live BuildKit worker image"),
+    }
+}
 
 #[derive(Serialize)]
 pub(crate) struct BundleWitness {
@@ -97,6 +107,7 @@ pub(crate) fn parse_live(
     bytes: &[u8],
     snapshot: Snapshot,
     image_digest: &str,
+    worker_image: &str,
     snapshotter: Snapshotter,
 ) -> Result<(LaunchSpec, String), &'static str> {
     if bytes.len() as u64 > MAX_CONFIG_BYTES || !snapshot.live_worker || !valid_id(&snapshot.id) {
@@ -151,7 +162,7 @@ pub(crate) fn parse_live(
             .ok_or("missing live BuildKit bind flags")?;
         options.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
     }
-    if policy_sha256(&mut bundle)? != LIVE_POLICY {
+    if policy_sha256(&mut bundle)? != live_policy(worker_image)? {
         return Err("unsupported live BuildKit OCI preset");
     }
     Ok((spec, hosts))
@@ -233,6 +244,7 @@ mod tests {
         let error = |bundle: &Value| match parse_live(
             &serde_json::to_vec(bundle).unwrap(),
             snapshot.clone(),
+            crate::spec::BUILDKIT_CONFIG,
             crate::spec::BUILDKIT_CONFIG,
             Snapshotter::Native,
         ) {

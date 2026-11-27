@@ -176,10 +176,6 @@ jobs:
           diff -r native-core-assets/BootOCI "${mount_dir}/bin/ConjetCoreVMM/NativeCore/BootOCI"
           diff -r native-core-assets/BootOCI "${mount_dir}/Conjet.app/${native}/BootOCI"
           diff -r native-core-assets/BootOCI "${helper}/${native}/BootOCI"
-          pins="${mount_dir}/Conjet.app/${native}/docker-client-pins.json"
-          cmp benchmarks/scenarios/docker-comparison-v1.json "$pins"
-          cmp "$pins" "${mount_dir}/bin/ConjetCoreVMM/NativeCore/docker-client-pins.json"
-          cmp "$pins" "${helper}/${native}/docker-client-pins.json"
           (cd "${mount_dir}/bin/ConjetCoreVMM/NativeCore" && shasum -a 512 -c kernel.sha512)
           "${mount_dir}/bin/conjet" native --help
           test -x "${mount_dir}/Conjet.app/Contents/Resources/ConjetTools/ConjetCoreVMM/conjet-network"

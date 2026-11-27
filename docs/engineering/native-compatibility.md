@@ -8,6 +8,46 @@ release artifact set. An unsupported, skipped, flaky, missing or failed case
 blocks the full paired SPEED-065 benchmark. The earlier matched lifecycle
 measurements belong to their earlier source and artifact set.
 
+## Fresh Buildx on a packaged Native Docker profile
+
+The ordinary Docker-container driver can pull
+`moby/buildkit:buildx-stable-1` and build from a tagged Alpine image.
+The native registry supports anonymous Docker Hub tags for Alpine and
+BuildKit. The worker mirror serves tagged Alpine and the existing pinned
+build inputs. It selects Linux ARM64 from OCI indexes, loads the selected
+manifest by digest, and verifies the config, layers and OCI diff IDs
+before admitting the image. Loopback grants and the existing pinned
+repositories retain their scoped digest policy.
+[OCI Distribution Specification](https://specs.opencontainers.org/distribution-spec/),
+[Docker Registry API](https://docs.docker.com/reference/api/registry/latest/).
+
+The default tag resolved to BuildKit v0.35.1 during qualification.
+Special worker admission requires the approved platform manifest and
+config digest, the bounded worker configuration and its private cache
+volume. Live build requests additionally match the exact OCI preset of
+the verified worker generation. The older pinned worker remains usable
+by digest. An update that moves the default tag to an unqualified worker
+fails with the new digest in the diagnostic. The guest never grants the
+unused setgid mode on the v0.35.1 `wall` binary.
+
+The packaged direct `/build` route copies the local Docker CLI and
+Buildx into the profile's private client directory. It checks source file
+ownership, permissions, size and copy integrity. A fresh run exercised
+Docker 29.10.1, Buildx v0.39.1 and Compose 5.8.0. The private route
+succeeded with a re-signed Buildx v0.39.1 whose bytes differ from the
+benchmark hash. If client discovery or validation fails, the runtime logs
+the specific reason and returns an installation diagnostic on `/build`.
+
+The 3.1.0 baseline bootstrap failed at `POST /images/create` with
+HTTP 400 and `expected an immutable SHA-256 digest`. The release-staged
+candidate bootstrapped the same default driver, exported a scratch
+control, solved and ran the tagged Alpine Compose fixture, and printed
+`conjet-buildx-ok`. The isolated run also exercised a cached build,
+a changed COPY input, failed RUN, cancellation, worker reconstruction
+after restart, direct Docker build, and rejection of an unrelated
+privileged create. See the [fresh Buildx harness](../../benchmarks/README.md#fresh-packaged-buildx)
+for the commands and evidence format.
+
 ## SPEED-090 local image tags
 
 The native adapter now tags, inspects, launches and untags staged images

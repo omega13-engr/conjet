@@ -70,7 +70,7 @@ pub fn allowed_mode(
     disk_image: &str,
 ) -> bool {
     mode & !mode_mask(kind) == 0
-        || (disk_image == crate::spec::BUILDKIT_CONFIG
+        || (crate::spec::approved_buildkit_config(disk_image)
             && kind == Kind::File
             && path == "usr/bin/fusermount3"
             && mode == 0o4755
@@ -212,7 +212,7 @@ impl Root {
                     "OCI hard link must refer to a regular file"
                 );
                 ensure!(
-                    disk_image != crate::spec::BUILDKIT_CONFIG
+                    !crate::spec::approved_buildkit_config(disk_image)
                         || record.target != "usr/bin/fusermount3",
                     "pinned BuildKit helper cannot be aliased by a hard link"
                 );

@@ -1,0 +1,5 @@
+services:
+  smoke:
+    build:
+      context: .
+    image: conjet-buildx-smoke:local
