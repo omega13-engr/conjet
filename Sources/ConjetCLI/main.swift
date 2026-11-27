@@ -2125,8 +2125,20 @@ struct ConjetCLI {
 
         let paths = ConjetPaths.default()
         let config = try ConjetConfig.loadOrCreate(paths: paths)
-        guard config.containerRuntime != .nativeDocker else {
-            throw ConjetError.invalidArgument("Native Docker uses bundled Core assets. Update the installed app or Homebrew package.")
+        if config.containerRuntime == .nativeDocker {
+            guard updateArgs.isEmpty, !force, !restartRequested else {
+                throw ConjetError.invalidArgument("Native Docker cannot update Core assets separately or restart through 'conjet update'. Update the installed package; use 'conjet restart' to restart the runtime.")
+            }
+            let message = "Native Docker uses Core assets bundled with Conjet; no separate VM image update is performed."
+            let guidance = "For Homebrew cask installations: brew update && brew upgrade --cask conjet. For formula installations: brew update && brew upgrade conjet. For DMG installations, install the newer Conjet app."
+            if json {
+                print(try ConjetJSON.string(ConjetBundledCoreUpdateResult(message: message, guidance: guidance)))
+            } else {
+                print(message)
+                print(guidance)
+                print("If Homebrew reports the latest version is installed, no package update is available from your current tap metadata.")
+            }
+            return
         }
         try autoInstallSSHConfig(json: json)
         let currentSocketPath = try socketPath(paths: paths)
@@ -7112,3 +7124,11 @@ extension Array where Element == String {
 }
 
 ConjetCLI.main()
+
+private struct ConjetBundledCoreUpdateResult: Encodable {
+    let ok = true
+    let updated = false
+    let updateCheckPerformed = false
+    let message: String
+    let guidance: String
+}

@@ -80,6 +80,13 @@ jobs:
       - name: Show Swift version
         run: swift --version
 
+      - name: Test Native Docker update guidance
+        run: |
+          swift build --product conjet
+          CONJET_TEST_CLI="$(swift build --show-bin-path)/conjet" \
+            CONJET_TEST_SCRATCH="$RUNNER_TEMP" PYTHONDONTWRITEBYTECODE=1 \
+            python3 build-support/test-native-update.py
+
       - name: Check whitespace
         run: git diff --check
 

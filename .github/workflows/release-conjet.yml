@@ -21,6 +21,8 @@ concurrency:
 
 env:
   SWIFT_VERSION: "6.1.0"
+  # Explicitly authorized one-time ad-hoc release; later tags remain notarized.
+  CONJET_ADHOC_RELEASE: ${{ github.ref == 'refs/tags/conjet-v3.1.1' }}
 
 jobs:
   native-core-assets:
@@ -96,6 +98,7 @@ jobs:
           go -C network-helper test -race ./...
 
       - name: Import Developer ID certificate
+        if: env.CONJET_ADHOC_RELEASE != 'true'
         id: certificate
         env:
           MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
@@ -140,12 +143,16 @@ jobs:
 
       - name: Report signing mode
         env:
-          SIGNING_IDENTITY: ${{ steps.certificate.outputs.identity }}
+          SIGNING_IDENTITY: ${{ steps.certificate.outputs.identity || '-' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
+          if [ "${CONJET_ADHOC_RELEASE}" = "true" ]; then
+            echo "::warning::Conjet 3.1.1 is explicitly authorized as ad-hoc signed and NOT notarized."
+            exit 0
+          fi
           if [ "${SIGNING_IDENTITY}" = "-" ] || [ -z "${SIGNING_IDENTITY}" ]; then
             echo "::error::Production releases require Developer ID signing."
             exit 1
@@ -172,7 +179,7 @@ jobs:
 
       - name: Stage signed Conjet app bundle
         env:
-          SIGNING_IDENTITY: ${{ steps.certificate.outputs.identity }}
+          SIGNING_IDENTITY: ${{ steps.certificate.outputs.identity || '-' }}
         run: |
           set -euo pipefail
           build-support/stage-macos-app.sh \
@@ -220,7 +227,11 @@ jobs:
         run: |
           set -euo pipefail
           dmg="dist/${{ steps.package.outputs.artifact_base }}.dmg"
-          build-support/notarize-macos-dmg.sh "${dmg}"
+          if [ "${CONJET_ADHOC_RELEASE}" != "true" ]; then
+            build-support/notarize-macos-dmg.sh "${dmg}"
+          else
+            echo "::warning::Ad-hoc release: notarization and stapling are intentionally omitted."
+          fi
           shasum -a 256 "${dmg}" > "${dmg}.sha256"
           shasum -a 256 -c "${dmg}.sha256"
 
