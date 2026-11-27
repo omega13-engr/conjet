@@ -165,7 +165,7 @@ impl Token {
             "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repository}:pull"
         );
         let mut body = Vec::new();
-        get(&url, None, 65_536, deadline, &mut body)?;
+        get(&url, None, 65_536, deadline, &mut body).context("request Docker Hub pull token")?;
         let entry: Value = serde_json::from_slice(&body)?;
         let token = entry["token"]
             .as_str()
@@ -216,6 +216,7 @@ impl Token {
             deadline,
             target,
         )
+        .with_context(|| format!("fetch Docker Hub {repository}/{kind}/{digest}"))
     }
 }
 
@@ -253,15 +254,18 @@ fn attempt(
     deadline: Instant,
     target: &mut impl Write,
 ) -> anyhow::Result<(u64, ExitStatus)> {
-    let remaining = super::registry::remaining(deadline)?;
-    let time = if bound > super::super::oci_stage::LAYER_BUDGET {
-        deadline
-            .saturating_duration_since(Instant::now())
-            .min(std::time::Duration::from_secs(90))
+    super::registry::remaining(deadline)?;
+    // A Docker Hub edge or its blob CDN can take more than the loopback I/O
+    // timeout to respond. Keep both the attempt and the entire pull bounded.
+    let attempt_limit = if bound > super::super::oci_stage::LAYER_BUDGET {
+        Duration::from_secs(90)
     } else {
-        remaining
-    }
-    .as_secs_f64();
+        Duration::from_secs(20)
+    };
+    let time = deadline
+        .saturating_duration_since(Instant::now())
+        .min(attempt_limit)
+        .as_secs_f64();
     let mut command = Command::new("/usr/bin/curl");
     command.env_clear().args([
         "--disable", "--fail", "--silent", "--location", "--max-redirs", "4",
