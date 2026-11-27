@@ -1655,12 +1655,28 @@ impl Owner {
             return Ok(json!({"status":"Image is already staged","id":reference}));
         }
         let mut store = self.image_store(&ledger)?;
-        store
-            .validate_reference(reference)
-            .map_err(|error| Rejected::bad(error.to_string()))?;
-        let image = store
-            .prepare(reference)
-            .map_err(|error| Rejected::internal(format!("{error:#}")))?;
+        let tagged = if reference.contains('@') {
+            store
+                .validate_reference(reference)
+                .map_err(|error| Rejected::bad(error.to_string()))?;
+            None
+        } else {
+            Some(
+                public_registry::tagged(reference)
+                    .map_err(|error| Rejected::bad(error.to_string()))?,
+            )
+        };
+        let mut tags = ledger.tags.clone();
+        if let Some((repository, tag)) = &tagged {
+            tags.insert(&format!("docker.io/{repository}"), tag, String::new())?;
+        }
+        let image = match &tagged {
+            Some((repository, tag)) => store
+                .prepare_tagged(repository, tag)
+                .map(|(image, _)| image),
+            None => store.prepare(reference),
+        }
+        .map_err(|error| Rejected::internal(format!("{error:#}")))?;
         if owned {
             // Keep the verified host image addressable if guest
             // installation fails and the caller needs to remove it.
@@ -1672,7 +1688,27 @@ impl Owner {
                 .ensure_guest(&mut peer, &image)
                 .map_err(|error| Rejected::internal(format!("{error:#}")))?;
         } else {
-            self.with_guest(|peer| store.ensure_guest(peer, &image))?;
+            // This pull owns an idle guest. Host-staged images keep their identity
+            // and can reinstall their guest roots on demand after an eviction.
+            self.with_guest(|peer| {
+                let install = store.ensure_guest(peer, &image);
+                if install.as_ref().is_err_and(|error| {
+                    matches!(error.downcast_ref::<WireError>(),
+                        Some(WireError::PeerError(code)) if code == "capacity")
+                }) {
+                    store.evict_idle_guest_roots(peer, &BTreeSet::new())?;
+                    return store.ensure_guest(peer, &image);
+                }
+                install
+            })?;
+        }
+        if let Some((repository, tag)) = tagged {
+            tags.insert(
+                &format!("docker.io/{repository}"),
+                tag,
+                image.metadata.reference.clone(),
+            )?;
+            ledger.tags = tags;
         }
         Ok(json!({"status":"Image is staged","id":reference}))
     }
@@ -1970,7 +2006,15 @@ impl Owner {
         } else {
             None
         };
-        let buildkit_worker = buildkit::requested(&name, &config, mount.as_ref())?;
+        let worker_config = buildkit::requested(
+            &name,
+            &config,
+            ledger
+                .tags
+                .resolve(config["Image"].as_str().unwrap_or_default()),
+            mount.as_ref(),
+        )?;
+        let buildkit_worker = worker_config.is_some();
         let volume = mount
             .as_ref()
             .filter(|_| !buildkit_worker)
@@ -2033,11 +2077,8 @@ impl Owner {
         } else {
             self.process(&ledger, &config)?
         };
-        let volume = if buildkit_worker {
-            if spec["image_digest"] != conjet_launch_service::spec::BUILDKIT_CONFIG
-                || spec["uid"] != 0
-                || spec["gid"] != 0
-            {
+        let volume = if let Some(expected) = worker_config {
+            if spec["image_digest"] != expected || spec["uid"] != 0 || spec["gid"] != 0 {
                 return Err(Rejected::bad(
                     "BuildKit worker image has a different verified identity",
                 ));

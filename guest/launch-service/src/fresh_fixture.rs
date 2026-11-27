@@ -3212,7 +3212,7 @@ impl FreshFixture {
         owner: &str,
         id: &str,
     ) -> Result<(LaunchSpec, WorkerBuild), Failure> {
-        let (pidfd, volume, snapshotter) = {
+        let (pidfd, volume, worker_image, snapshotter) = {
             let ledger = self.ledger.lock().expect("fresh ledger");
             let record = ledger
                 .record(owner)
@@ -3239,6 +3239,7 @@ impl FreshFixture {
                     .try_clone()
                     .map_err(|_| ("busy", "could not retain BuildKit process lease"))?,
                 volume,
+                worker.image_digest.clone(),
                 snapshotter,
             )
         };
@@ -3278,6 +3279,7 @@ impl FreshFixture {
             &bundle.config,
             snapshot,
             &self.image_digest,
+            &worker_image,
             snapshotter,
         )
         .map_err(|reason| ("unsupported_option", reason))?;

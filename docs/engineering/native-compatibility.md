@@ -8,6 +8,89 @@ release artifact set. An unsupported, skipped, flaky, missing or failed case
 blocks the full paired SPEED-065 benchmark. The earlier matched lifecycle
 measurements belong to their earlier source and artifact set.
 
+## Guest telemetry thread-stack regression
+
+The fresh-profile memory test exposed a guest telemetry stack overflow when
+an active container deepened the cgroup tree. `scan_cgroups` reserved several
+4 KiB path arrays per recursive call, in addition to the HTTP handler's
+16 KiB response buffer. A 128 KiB pthread regression reproduced a fatal
+signal with both the original debug and optimized scanner. Reusing one path
+buffer per recursion level allows the bounded tree walk to complete without
+changing memory policy, telemetry fields or cgroup ownership checks.
+
+The regression walks the maximum supported tree depth on a 128 KiB thread
+stack and asserts the deepest container's memory count. The native Core asset
+workflow runs it before building the static guest helpers. The isolated memory
+harness also reads telemetry before shrink, making a later disconnection
+distinguishable from a service that never responded at boot.
+
+The corrected helper passed the complete active-memory canary from a newly
+built optimized 3.1.1 ad-hoc DMG: 2,048 → 448 → 2,048 → 448 MiB, verified
+active data, stale-grant rejection and clean guest teardown. The same package
+passed the stock Buildx/Compose smoke suite, cache and changed-input rebuilds,
+failed RUN/cancellation, restart recovery, Docker BuildKit build and the private
+legacy `/build` route. The original debug and optimized bounded-stack tests
+terminated with SIGBUS; both patched variants passed. The memory/reclaim C
+regressions, workflow lint and diff checks passed.
+
+The DMG verified successfully. macOS denied mounting it, so qualification used
+an app extracted from that exact DMG by 7-Zip. All 47 app files matched the
+staged source hashes; executable modes lost by extraction were restored from
+the staged app, and strict deep signature verification passed. This is not a
+Finder/Homebrew installation qualification. An initial extraction-mode failure
+and the denied mount are retained. Headless HTTP/process witnesses cover the
+changed surface; no GUI behavior changed or screenshot qualification is claimed.
+
+ARTEX's unchanged Compose project was also built against a separate fresh
+profile, without reading its `.env` or starting services. Worker bootstrap
+passed, but the build failed resolving `docker.io/docker/dockerfile:1` through
+the native registry mirror (`HEAD .../v2/docker/dockerfile/manifests/1?ns=docker.io`:
+EOF). Its `# syntax=docker/dockerfile:1` frontend and subsequent pinned Node,
+Go, Debian and Python bases remain outside this patch's qualification. Do not
+claim ARTEX compatibility from the Alpine sample. Production fingerprints and
+owned-runtime cleanup passed for both the successful sample and failed project
+build. Evidence: `ExternalSSD/dev_workspace/tmp/conjet-memory-fix-evidence/`.
+
+## Fresh Buildx on a packaged Native Docker profile
+
+The ordinary Docker-container driver can pull
+`moby/buildkit:buildx-stable-1` and build from a tagged Alpine image.
+The native registry supports anonymous Docker Hub tags for Alpine and
+BuildKit. The worker mirror serves tagged Alpine and the existing pinned
+build inputs. It selects Linux ARM64 from OCI indexes, loads the selected
+manifest by digest, and verifies the config, layers and OCI diff IDs
+before admitting the image. Loopback grants and the existing pinned
+repositories retain their scoped digest policy.
+[OCI Distribution Specification](https://specs.opencontainers.org/distribution-spec/),
+[Docker Registry API](https://docs.docker.com/reference/api/registry/latest/).
+
+The default tag resolved to BuildKit v0.35.1 during qualification.
+Special worker admission requires the approved platform manifest and
+config digest, the bounded worker configuration and its private cache
+volume. Live build requests additionally match the exact OCI preset of
+the verified worker generation. The older pinned worker remains usable
+by digest. An update that moves the default tag to an unqualified worker
+fails with the new digest in the diagnostic. The guest never grants the
+unused setgid mode on the v0.35.1 `wall` binary.
+
+The packaged direct `/build` route copies the local Docker CLI and
+Buildx into the profile's private client directory. It checks source file
+ownership, permissions, size and copy integrity. A fresh run exercised
+Docker 29.10.1, Buildx v0.39.1 and Compose 5.8.0. The private route
+succeeded with a re-signed Buildx v0.39.1 whose bytes differ from the
+benchmark hash. If client discovery or validation fails, the runtime logs
+the specific reason and returns an installation diagnostic on `/build`.
+
+The 3.1.0 baseline bootstrap failed at `POST /images/create` with
+HTTP 400 and `expected an immutable SHA-256 digest`. The release-staged
+candidate bootstrapped the same default driver, exported a scratch
+control, solved and ran the tagged Alpine Compose fixture, and printed
+`conjet-buildx-ok`. The isolated run also exercised a cached build,
+a changed COPY input, failed RUN, cancellation, worker reconstruction
+after restart, direct Docker build, and rejection of an unrelated
+privileged create. See the [fresh Buildx harness](../../benchmarks/README.md#fresh-packaged-buildx)
+for the commands and evidence format.
+
 ## SPEED-090 local image tags
 
 The native adapter now tags, inspects, launches and untags staged images

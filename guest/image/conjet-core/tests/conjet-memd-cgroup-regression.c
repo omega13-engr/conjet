@@ -988,7 +988,52 @@ static void test_native_workload_requires_owned_active_leaf(void) {
     require_int("short path excluded", path_is_native_workload("/"), 0);
 }
 
+// musl uses a small default pthread stack. Exercise the deepest allowed tree
+// with the response buffer still live, as in the HTTP metrics handler.
+static void *scan_on_small_stack(void *root) {
+    volatile char response[METRICS_JSON_CAPACITY];
+    memset((void *)response, 1, sizeof(response));
+    struct memory_metrics metrics = {0};
+    scan_cgroups(root, 0, false, &metrics);
+    require_int("deep leaf counted", metrics.active_workloads, 1);
+    require_u64("deep leaf memory", metrics.container_memory_current, 42);
+    require_int("response stack survives scan", response[sizeof(response) - 1], 1);
+    return NULL;
+}
+
+static void test_cgroup_scan_fits_musl_thread_stack(void) {
+    const char *tmp = getenv("TMPDIR");
+    char root[4096];
+    snprintf(root, sizeof(root), "%s/memd-stack.XXXXXX", tmp ? tmp : "/tmp");
+    if (!mkdtemp(root)) { perror("mkdtemp"); exit(1); }
+    char path[4096];
+    snprintf(path, sizeof(path), "%s", root);
+    for (int depth = 0; depth < MAX_CGROUP_DEPTH; depth++) {
+        strcat(path, depth == MAX_CGROUP_DEPTH - 1 ? "/docker-test" : "/child");
+        if (mkdir(path, 0700)) { perror("mkdir"); exit(1); }
+    }
+    char current[8192];
+    snprintf(current, sizeof(current), "%s/memory.current", path);
+    FILE *file = fopen(current, "w");
+    if (!file) { perror("fopen"); exit(1); }
+    fputs("42\n", file);
+    fclose(file);
+    pthread_attr_t attr;
+    require_int("thread attributes", pthread_attr_init(&attr), 0);
+    require_int("musl-sized stack", pthread_attr_setstacksize(&attr, 128 * 1024), 0);
+    pthread_t thread;
+    require_int("scan thread", pthread_create(&thread, &attr, scan_on_small_stack, root), 0);
+    require_int("join scan", pthread_join(thread, NULL), 0);
+    pthread_attr_destroy(&attr);
+    require_int("remove memory fixture", unlink(current), 0);
+    for (int depth = MAX_CGROUP_DEPTH; depth >= 0; depth--) {
+        require_int("remove scan directory", rmdir(path), 0);
+        if (depth) *strrchr(path, '/') = '\0';
+    }
+}
+
 int main(void) {
+    test_cgroup_scan_fits_musl_thread_stack();
     test_vsock_peer_requires_host_cid();
     test_native_workload_requires_owned_active_leaf();
     test_build_snapshot_aggregates_prefixed_sibling_memory_without_false_activity();

@@ -54,12 +54,11 @@ impl Tags {
     }
 
     fn familiar(reference: &str) -> &str {
-        reference
+        let name = reference
             .strip_prefix("docker.io/")
             .or_else(|| reference.strip_prefix("index.docker.io/"))
-            .map_or(reference, |name| {
-                name.strip_prefix("library/").unwrap_or(name)
-            })
+            .unwrap_or(reference);
+        name.strip_prefix("library/").unwrap_or(name)
     }
 
     pub(super) fn key(reference: &str) -> std::borrow::Cow<'_, str> {

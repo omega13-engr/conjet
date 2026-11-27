@@ -103,7 +103,6 @@ fn request(line: &str) -> anyhow::Result<(bool, Object<'_>)> {
         return Ok((head, Object::Ping));
     }
     let (path, digest) = path.rsplit_once('/').context("missing registry digest")?;
-    ensure!(super::request::digest(digest), "expected a registry digest");
     let (repository, kind) = path
         .rsplit_once('/')
         .context("missing registry repository")?;
@@ -112,6 +111,13 @@ fn request(line: &str) -> anyhow::Result<(bool, Object<'_>)> {
         "blobs" => false,
         _ => anyhow::bail!("unsupported registry object"),
     };
+    ensure!(
+        super::request::digest(digest)
+            || (manifest
+                && repository == "library/alpine"
+                && super::public_registry::valid_tag(digest)),
+        "expected a registry digest or a supported image tag"
+    );
     Ok((
         head,
         Object::Content {
@@ -157,7 +163,7 @@ fn serve(owner: &Owner, stream: &mut Stream, trace: bool) -> anyhow::Result<()> 
         .unwrap()
         .worker_registry_file(repository, digest, manifest);
     match result {
-        Ok((mut file, content_type, cached)) => {
+        Ok((mut file, content_type, digest, cached)) => {
             let size = file.metadata()?.len();
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nDocker-Content-Digest: {digest}\r\nConnection: close\r\n\r\n",
                 size)?;

@@ -215,7 +215,6 @@ if [ -x "$RUST_TARGET_DIR/release/jetstream" ]; then
         mkdir "$tools/NativeCore"
         install -m 0644 "$NATIVE_CORE_ASSETS/"{Image,conjet-memd,conjet-reclaimd} "$tools/NativeCore/"
         install -m 0644 "$NATIVE_CORE_ASSETS/"{boot-image,volume.tar.gz} "$tools/NativeCore/"
-        install -m 0644 "$ROOT_DIR/benchmarks/scenarios/docker-comparison-v1.json" "$tools/NativeCore/docker-client-pins.json"
         /usr/bin/ditto "$NATIVE_CORE_ASSETS/BootOCI" "$tools/NativeCore/BootOCI"
         install -m 0644 "$ROOT_DIR/build-support/native-core-kernel.sha512" "$tools/NativeCore/kernel.sha512"
       fi

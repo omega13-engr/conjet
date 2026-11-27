@@ -484,7 +484,7 @@ impl Sandbox {
                 gid: oci.map_or(WORKLOAD_GID, |spec| spec.gid),
                 redis_bootstrap: oci.is_some_and(|spec| spec.redis_bootstrap),
                 buildkit_image: oci
-                    .is_some_and(|spec| spec.image_digest == crate::spec::BUILDKIT_CONFIG),
+                    .is_some_and(|spec| crate::spec::approved_buildkit_config(&spec.image_digest)),
                 buildkit_registry: oci.is_some_and(LaunchSpec::buildkit_registry),
                 policy,
             })

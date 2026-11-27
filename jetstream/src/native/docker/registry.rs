@@ -31,6 +31,7 @@ pub(super) struct Store {
     registry: Option<SocketAddr>,
     owned_registry: Option<SocketAddr>,
     public: public_registry::Pins,
+    resolved_public: BTreeMap<String, String>,
     encoding: PackageEncoding,
     installed: BTreeMap<String, String>,
     _lock: File,
@@ -169,6 +170,7 @@ impl Store {
                 PackageEncoding::Json
             },
             installed,
+            resolved_public: BTreeMap::new(),
             _lock: lock,
         };
         store.recover()?;
@@ -180,7 +182,13 @@ impl Store {
             .rsplit_once('@')
             .context("native pull requires a pinned registry digest")?;
         suffix(manifest)?;
-        if let Some(repository) = self.public.repository(name, manifest) {
+        let hub = public_registry::hub_repository(name);
+        if let Some(repository) = self.public.repository(name, manifest).or_else(|| {
+            self.resolved_public
+                .get(manifest)
+                .filter(|repo| repo.as_str() == hub)
+                .map(String::as_str)
+        }) {
             return Ok(Reference {
                 repository,
                 manifest,
@@ -337,6 +345,10 @@ impl Store {
             Some(manifest) => manifest,
             None => self.reference(reference)?.manifest,
         };
+        self.get_manifest(reference, manifest)
+    }
+
+    fn get_manifest(&self, reference: &str, manifest: &str) -> anyhow::Result<Option<Image>> {
         let path = self.path(manifest)?;
         if !path.try_exists()? {
             return Ok(None);
@@ -373,6 +385,11 @@ impl Store {
                 })
                 .cloned()
                 .or_else(|| self.public.reference_for(&manifest))
+                .or_else(|| {
+                    self.resolved_public
+                        .get(&manifest)
+                        .map(|repo| format!("docker.io/{repo}@{manifest}"))
+                })
                 .unwrap_or_else(|| format!("{}@{manifest}", archive::LOCAL));
             let receipt = self.receipt(&manifest)?;
             images.push(Image {
@@ -393,29 +410,49 @@ impl Store {
         repository: &str,
         digest: &str,
         manifest_request: bool,
-    ) -> anyhow::Result<(File, &'static str, bool)> {
-        let manifest = self
-            .public
-            .manifest_for(repository)
-            .context("registry repository is outside the frozen pins")?
-            .to_owned();
-        ensure!(
-            request::digest(digest),
-            "registry request requires a SHA-256 digest"
-        );
-        if manifest_request {
+    ) -> anyhow::Result<(File, &'static str, String, bool)> {
+        let (image, digest, cached) = if manifest_request && !request::digest(digest) {
+            let (image, cached) = self.prepare_tagged(repository, digest)?;
+            let manifest = image.manifest.clone();
+            (image, manifest, cached)
+        } else {
             ensure!(
-                manifest == digest,
-                "registry manifest differs from its frozen pin"
+                request::digest(digest),
+                "registry object requires a SHA-256 digest"
             );
-        }
-        let cached = self.path(&manifest)?.try_exists()?;
-        let image = self.prepare(&format!("docker.io/{repository}@{manifest}"))?;
+            // A digest is served only if it belongs to a staged manifest for this repository.
+            let frozen = self.public.manifest_for(repository).map(str::to_owned);
+            let dynamic = self
+                .resolved_public
+                .iter()
+                .filter(|(_, repo)| repo.as_str() == repository)
+                .map(|(manifest, _)| manifest)
+                .find(|manifest| {
+                    if manifest_request {
+                        manifest.as_str() == digest
+                    } else {
+                        self.receipt(manifest)
+                            .and_then(|receipt| Self::references(&receipt))
+                            .is_ok_and(|objects| objects.contains(digest))
+                    }
+                })
+                .cloned();
+            let manifest = dynamic
+                .or(frozen)
+                .context("registry repository is outside the supported sources")?;
+            ensure!(
+                !manifest_request || manifest == digest,
+                "registry manifest is not staged"
+            );
+            let cached = self.path(&manifest)?.try_exists()?;
+            let image = self.prepare(&format!("docker.io/{repository}@{manifest}"))?;
+            (image, digest.to_owned(), cached)
+        };
         ensure!(
-            Self::references(&image.receipt)?.contains(digest),
-            "registry blob is outside the frozen manifest"
+            Self::references(&image.receipt)?.contains(&digest),
+            "registry blob is outside the verified manifest"
         );
-        let suffix = suffix(digest)?;
+        let suffix = suffix(&digest)?;
         let path = self.root.join("blobs/sha256").join(suffix);
         let bound = if manifest_request {
             METADATA as u64
@@ -446,7 +483,7 @@ impl Store {
         } else {
             "application/octet-stream"
         };
-        Ok((file, content_type, cached))
+        Ok((file, content_type, digest, cached))
     }
 
     pub(super) fn archive_layer_limit(&self) -> u64 {
@@ -608,27 +645,96 @@ impl Store {
             return Ok(image);
         }
         let name = self.reference(reference)?;
+        self.prepare_reference(reference, &name, None, self.download()?)
+    }
+
+    pub(super) fn prepare_tagged(
+        &mut self,
+        repository: &str,
+        tag: &str,
+    ) -> anyhow::Result<(Image, bool)> {
+        ensure!(
+            self.public.manifest_for(repository).is_some()
+                && matches!(repository, "library/alpine" | "moby/buildkit")
+                && public_registry::valid_tag(tag),
+            "tagged pulls are disabled for this repository"
+        );
+        let mut download = self.download()?;
+        let token = public_registry::Token::acquire(repository, download.deadline)?;
+        let resolved = token.resolve(repository, tag, download.deadline)?;
+        if repository == "moby/buildkit" && tag == "buildx-stable-1" {
+            ensure!(
+                super::buildkit::approved_manifest(&resolved.digest),
+                "Docker Hub's default BuildKit worker has an unqualified manifest {}",
+                resolved.digest
+            );
+        }
+        download.token = Some(token);
+        let reference = format!("docker.io/{repository}@{}", resolved.digest);
+        let name = Reference {
+            repository,
+            manifest: &resolved.digest,
+            origin: Origin::Public,
+        };
+        let cached = self.path(name.manifest)?.try_exists()?;
+        let image = self.prepare_reference(&reference, &name, Some(resolved.size), download)?;
+        self.resolved_public
+            .insert(resolved.digest, repository.to_owned());
+        Ok((image, cached))
+    }
+
+    fn download(&self) -> anyhow::Result<Download> {
+        let seconds = if self.encoding == PackageEncoding::DiskV2 {
+            110
+        } else {
+            25
+        };
+        Ok(Download {
+            free: self.free_bytes()?,
+            created: Vec::new(),
+            deadline: Instant::now() + Duration::from_secs(seconds),
+            token: None,
+        })
+    }
+
+    fn prepare_reference(
+        &self,
+        reference: &str,
+        name: &Reference<'_>,
+        manifest_size: Option<usize>,
+        mut download: Download,
+    ) -> anyhow::Result<Image> {
+        if let Some(image) = self.get_manifest(reference, name.manifest)? {
+            return Ok(image);
+        }
         ensure!(
             self.root.join("images").read_dir()?.count() < MAX_IMAGES,
             "ExternalSSD OCI image capacity exceeded"
         );
         let disk = self.encoding == PackageEncoding::DiskV2;
-        let mut download = Download {
-            free: self.free_bytes()?,
-            created: Vec::new(),
-            deadline: Instant::now() + Duration::from_secs(if disk { 110 } else { 25 }),
-            token: None,
-        };
         let mut total_layer = if disk {
             oci_stage::DISK_COMPRESSED_BUDGET as usize
         } else {
             LAYERS
         };
         let results = (|| {
-            self.receive(&name, "manifests", name.manifest, METADATA, &mut download)?;
+            self.receive(
+                name,
+                "manifests",
+                name.manifest,
+                manifest_size.unwrap_or(METADATA),
+                &mut download,
+            )?;
+            if let Some(size) = manifest_size {
+                let path = self.root.join("blobs/sha256").join(suffix(name.manifest)?);
+                ensure!(
+                    fs::metadata(path)?.len() == size as u64,
+                    "registry manifest size differs"
+                );
+            }
             let manifest = oci_stage::read_manifest(&self.root, name.manifest)?;
             self.receive(
-                &name,
+                name,
                 "blobs",
                 &manifest.config.digest,
                 manifest.config.size.min(METADATA),
@@ -639,7 +745,7 @@ impl Store {
                     layer.size <= total_layer,
                     "OCI layer descriptors exceed network budget"
                 );
-                self.receive(&name, "blobs", &layer.digest, layer.size, &mut download)?;
+                self.receive(name, "blobs", &layer.digest, layer.size, &mut download)?;
                 total_layer -= layer.size;
             }
             ensure!(
@@ -652,7 +758,7 @@ impl Store {
                 &self.path(name.manifest)?,
                 self.encoding,
             )?;
-            self.get(reference)?
+            self.get_manifest(reference, name.manifest)?
                 .context("published OCI receipt is missing")
         })();
         if results.is_err() && !self.path(name.manifest)?.try_exists()? {
@@ -838,6 +944,7 @@ impl Store {
             fs::remove_file(self.root.join("blobs/sha256").join(suffix(digest)?))?;
         }
         fs::remove_dir_all(retired)?;
+        self.resolved_public.remove(&image.manifest);
         Ok(())
     }
 }
@@ -922,6 +1029,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn registry_errors_roll_back_downloaded_objects() {
+        use sha2::{Digest, Sha256};
+        use std::net::TcpListener;
+        use std::os::unix::fs::PermissionsExt;
+        use std::thread;
+
+        let untouched = |root: &Path| {
+            assert_eq!(root.join("blobs/sha256").read_dir().unwrap().count(), 0);
+            assert_eq!(root.join("images").read_dir().unwrap().count(), 0);
+        };
+
+        for (status, body, expected) in [
+            ("200 OK", "wrong", "registry blob digest mismatch"),
+            ("404 Not Found", "", "registry request failed"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let root_path = root.path().canonicalize().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let config = format!("sha256:{:x}", Sha256::digest(b"right"));
+            let layer = serde_json::json!({
+                "mediaType":"application/vnd.oci.image.layer.v1.tar+gzip",
+                "size":5,"digest":config
+            });
+            let manifest = serde_json::json!({
+                "schemaVersion":2,
+                "config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":5,"digest":config},
+                "layers":[layer]
+            }).to_string();
+            let digest = format!("sha256:{:x}", Sha256::digest(manifest.as_bytes()));
+            let serve = thread::spawn(move || {
+                for (status, body) in [("200 OK", manifest.as_str()), (status, body)] {
+                    let (mut client, _) = listener.accept().unwrap();
+                    let mut request = BufReader::new(&client);
+                    loop {
+                        let mut line = String::new();
+                        request.read_line(&mut line).unwrap();
+                        if line == "\r\n" {
+                            break;
+                        }
+                        assert!(!line.is_empty());
+                    }
+                    write!(
+                        client,
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            });
+            let store = Store::open(
+                root_path.clone(),
+                root_path.parent().unwrap(),
+                Some(address),
+                false,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+            let reference = format!("{address}/fixture@{digest}");
+            let parsed = store.reference(&reference).unwrap();
+            let result =
+                store.prepare_reference(&reference, &parsed, None, store.download().unwrap());
+            serve.join().unwrap();
+            assert_eq!(result.err().unwrap().to_string(), expected);
+            untouched(root.path());
+        }
+    }
+
+    #[test]
     fn extent_mutation_keeps_the_blob_and_image_private() {
         let root = tempfile::tempdir().unwrap();
         let store = Store {
@@ -930,6 +1107,7 @@ mod tests {
             registry: None,
             owned_registry: None,
             public: public_registry::Pins::default(),
+            resolved_public: BTreeMap::new(),
             encoding: PackageEncoding::DiskV2,
             installed: BTreeMap::new(),
             _lock: tempfile::tempfile().unwrap(),

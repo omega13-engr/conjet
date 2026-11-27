@@ -167,6 +167,7 @@ def check_growth(endpoint, owner_pid, session, vm_pid, output, client, env, pres
     try:
         with (output / 'native-core-memory.jsonl').open('x') as log:
             outcome['boot'] = sample('boot', log)
+            outcome['guest_at_boot'] = guest_metrics()
             wait('initial_reduced', log, reduced, 25)
             if pressure_fixture:
                 outcome['guest_before_pressure'] = guest_metrics()

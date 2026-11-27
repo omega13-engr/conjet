@@ -271,3 +271,43 @@ counts from retained reports. Use the paired estimator only with five
 complete, independent, semantically matched pairs. `--paired-lifecycle`
 applies to the lifecycle rows. `--paired-images` applies to controlled
 registry rows and requires complete transfer witnesses for first pulls.
+
+## Fresh packaged Buildx
+
+On an ARM64 macOS host with ExternalSSD and local Docker CLI, Buildx and
+Compose binaries, run the acceptance test against a release-staged app:
+
+```sh
+benchmarks/native-fresh-buildx.py \
+  --app "$staged_app" --evidence "$qa_root/fresh-buildx.json" \
+  --docker "$docker_cli" --buildx "$buildx_plugin" --compose "$compose_plugin"
+```
+
+Use a new evidence path below `/Volumes/ExternalSSD/dev_workspace/tmp`.
+The harness creates a private Docker context and a fresh Native Docker
+profile, then verifies socket ownership before sending requests. It
+starts the stock `docker-container` driver with the default image,
+exercises a scratch export and the tagged Alpine Compose build and run,
+and checks cache reuse, changed input, failure, cancellation, restart, and
+the separate native `/build` path. The expected smoke output is
+`conjet-buildx-ok`. A restart keeps the client's builder definition.
+Buildx bootstraps a new worker in the isolated runtime and the test rebuilds
+the locally tagged output before running it again.
+
+Pass `--expect-baseline` with a pre-fix package to assert the HTTP 400
+digest error. Pass `--memory-only` to run the existing Core growth and
+reclaim canary against the package. The CI workspace tests cover reference
+parsing, verified registry staging and worker admission with deterministic
+fixtures. The macOS qualification additionally needs the packaged VM,
+local clients and Docker Hub network access.
+
+### Existing Compose project build
+
+The fresh packaged Buildx harness also accepts `--compose-project /absolute/project`.
+It builds that project's `docker-compose.yml` with the isolated stock builder,
+without starting services. It uses `--env-file /dev/null` and an explicit disposable
+`POSTGRES_PASSWORD` placeholder for configuration interpolation, so it does not
+load the project's runtime secrets. This mode is suitable for the ARTEX build
+fixture; projects requiring other interpolation variables need explicit fixture
+configuration. It leaves project files unchanged and records build failures as
+failures. Run this separately from `--memory-only` and the standard smoke suite.

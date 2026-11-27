@@ -545,7 +545,7 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             if owner.build_client.is_none() {
                 return Err(Rejected(
                     501,
-                    "native Docker build client is not configured".into(),
+                    "Native Docker build requires local Docker CLI and Docker Buildx executables. Install both and restart this Conjet profile.".into(),
                 ));
             }
             let archive = request
@@ -808,7 +808,7 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                 || !request.body.is_empty()
             {
                 return Err(Rejected::bad(
-                    "only pinned Linux ARM64 registry pulls are supported",
+                    "only Linux ARM64 registry pulls are supported",
                 ));
             }
             let from = query
@@ -817,7 +817,13 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             let reference = query
                 .get("tag")
                 .filter(|value| !value.is_empty())
-                .map_or_else(|| from.to_owned(), |tag| format!("{from}@{tag}"));
+                .map_or_else(
+                    || from.to_owned(),
+                    |tag| {
+                        let separator = if tag.contains(':') { '@' } else { ':' };
+                        format!("{from}{separator}{tag}")
+                    },
+                );
             let mut reply = Reply::json(200, owner.pull_image(&reference)?);
             reply.data.push(b'\n');
             reply
