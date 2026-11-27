@@ -300,3 +300,14 @@ reclaim canary against the package. The CI workspace tests cover reference
 parsing, verified registry staging and worker admission with deterministic
 fixtures. The macOS qualification additionally needs the packaged VM,
 local clients and Docker Hub network access.
+
+### Existing Compose project build
+
+The fresh packaged Buildx harness also accepts `--compose-project /absolute/project`.
+It builds that project's `docker-compose.yml` with the isolated stock builder,
+without starting services. It uses `--env-file /dev/null` and an explicit disposable
+`POSTGRES_PASSWORD` placeholder for configuration interpolation, so it does not
+load the project's runtime secrets. This mode is suitable for the ARTEX build
+fixture; projects requiring other interpolation variables need explicit fixture
+configuration. It leaves project files unchanged and records build failures as
+failures. Run this separately from `--memory-only` and the standard smoke suite.

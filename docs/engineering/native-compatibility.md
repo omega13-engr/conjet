@@ -8,6 +8,49 @@ release artifact set. An unsupported, skipped, flaky, missing or failed case
 blocks the full paired SPEED-065 benchmark. The earlier matched lifecycle
 measurements belong to their earlier source and artifact set.
 
+## Guest telemetry thread-stack regression
+
+The fresh-profile memory test exposed a guest telemetry stack overflow when
+an active container deepened the cgroup tree. `scan_cgroups` reserved several
+4 KiB path arrays per recursive call, in addition to the HTTP handler's
+16 KiB response buffer. A 128 KiB pthread regression reproduced a fatal
+signal with both the original debug and optimized scanner. Reusing one path
+buffer per recursion level allows the bounded tree walk to complete without
+changing memory policy, telemetry fields or cgroup ownership checks.
+
+The regression walks the maximum supported tree depth on a 128 KiB thread
+stack and asserts the deepest container's memory count. The native Core asset
+workflow runs it before building the static guest helpers. The isolated memory
+harness also reads telemetry before shrink, making a later disconnection
+distinguishable from a service that never responded at boot.
+
+The corrected helper passed the complete active-memory canary from a newly
+built optimized 3.1.1 ad-hoc DMG: 2,048 → 448 → 2,048 → 448 MiB, verified
+active data, stale-grant rejection and clean guest teardown. The same package
+passed the stock Buildx/Compose smoke suite, cache and changed-input rebuilds,
+failed RUN/cancellation, restart recovery, Docker BuildKit build and the private
+legacy `/build` route. The original debug and optimized bounded-stack tests
+terminated with SIGBUS; both patched variants passed. The memory/reclaim C
+regressions, workflow lint and diff checks passed.
+
+The DMG verified successfully. macOS denied mounting it, so qualification used
+an app extracted from that exact DMG by 7-Zip. All 47 app files matched the
+staged source hashes; executable modes lost by extraction were restored from
+the staged app, and strict deep signature verification passed. This is not a
+Finder/Homebrew installation qualification. An initial extraction-mode failure
+and the denied mount are retained. Headless HTTP/process witnesses cover the
+changed surface; no GUI behavior changed or screenshot qualification is claimed.
+
+ARTEX's unchanged Compose project was also built against a separate fresh
+profile, without reading its `.env` or starting services. Worker bootstrap
+passed, but the build failed resolving `docker.io/docker/dockerfile:1` through
+the native registry mirror (`HEAD .../v2/docker/dockerfile/manifests/1?ns=docker.io`:
+EOF). Its `# syntax=docker/dockerfile:1` frontend and subsequent pinned Node,
+Go, Debian and Python bases remain outside this patch's qualification. Do not
+claim ARTEX compatibility from the Alpine sample. Production fingerprints and
+owned-runtime cleanup passed for both the successful sample and failed project
+build. Evidence: `ExternalSSD/dev_workspace/tmp/conjet-memory-fix-evidence/`.
+
 ## Fresh Buildx on a packaged Native Docker profile
 
 The ordinary Docker-container driver can pull

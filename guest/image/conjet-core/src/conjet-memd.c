@@ -824,32 +824,30 @@ static void scan_cgroups(
         return;
     }
 
-    char memory_current[4096];
-    snprintf(memory_current, sizeof(memory_current), "%s/memory.current", dir);
+    // One path buffer per recursion level keeps the bounded walk within
+    // musl's default thread stack, including the HTTP response buffer.
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/memory.current", dir);
     bool native = native_workloads && path_is_native_workload(dir);
     if (native || (!native_workloads && path_contains_container_marker(dir))) {
-        uint64_t current = read_uint_file(memory_current);
+        uint64_t current = read_uint_file(path);
         if (native ? (current > 0 || read_cgroup_populated(dir)) : current > 0) {
-            char memory_peak[4096];
-            char memory_stat[4096];
-            char memory_events[4096];
-            char memory_swap_current[4096];
             metrics->container_memory_current += current;
             metrics->active_workloads += 1;
-            snprintf(memory_peak, sizeof(memory_peak), "%s/memory.peak", dir);
-            uint64_t peak = read_uint_file(memory_peak);
+            snprintf(path, sizeof(path), "%s/memory.peak", dir);
+            uint64_t peak = read_uint_file(path);
             if (peak == 0) {
                 peak = current;
             }
             if (peak > metrics->container_memory_peak) {
                 metrics->container_memory_peak = peak;
             }
-            snprintf(memory_stat, sizeof(memory_stat), "%s/memory.stat", dir);
-            add_memory_stat(memory_stat, metrics);
-            snprintf(memory_events, sizeof(memory_events), "%s/memory.events", dir);
-            add_memory_events(memory_events, metrics);
-            snprintf(memory_swap_current, sizeof(memory_swap_current), "%s/memory.swap.current", dir);
-            metrics->container_swap_current += read_uint_file(memory_swap_current);
+            snprintf(path, sizeof(path), "%s/memory.stat", dir);
+            add_memory_stat(path, metrics);
+            snprintf(path, sizeof(path), "%s/memory.events", dir);
+            add_memory_events(path, metrics);
+            snprintf(path, sizeof(path), "%s/memory.swap.current", dir);
+            metrics->container_swap_current += read_uint_file(path);
             closedir(d);
             return;
         }
@@ -860,11 +858,10 @@ static void scan_cgroups(
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
-        char child[4096];
-        snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name);
+        snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
         struct stat st;
-        if (stat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
-            scan_cgroups(child, depth + 1, native_workloads, metrics);
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            scan_cgroups(path, depth + 1, native_workloads, metrics);
         }
     }
     closedir(d);

@@ -176,6 +176,18 @@ def qualify(args, root, report):
             raise RuntimeError('the private runtime did not start with an empty listed image store')
         docker('create', 'buildx', 'create', '--driver', 'docker-container', '--name', 'fresh', 'cjb')
         bootstrap = docker('bootstrap', 'buildx', 'inspect', 'fresh', '--bootstrap', checked=False)
+        if args.compose_project:
+            if bootstrap.returncode:
+                raise RuntimeError('project builder bootstrap failed')
+            project = args.compose_project
+            docker('project-compose-build', 'compose', '--env-file', '/dev/null',
+                   '--project-directory', project, '--file', project / 'docker-compose.yml',
+                   '--project-name', 'conjet-project-qa', '--ansi', 'never', '--progress', 'plain',
+                   'build', '--builder', 'fresh', timeout=1800,
+                   updates={'COMPOSE_BAKE': 'true', 'POSTGRES_PASSWORD': 'isolated-build-placeholder'})
+            docker('remove-project-builder', 'buildx', 'rm', 'fresh')
+            report['passed'] = True
+            return
         if bootstrap.returncode == 0 and not args.expect_baseline:
             docker('scratch-control', 'buildx', 'build', '--builder', 'fresh', '--load',
                    '--tag', 'conjet-buildx-scratch:local', FIXTURE / 'scratch')
@@ -255,6 +267,10 @@ def qualify(args, root, report):
         docker('restart-build', *compose, 'build', '--builder', 'fresh', **bake)
         if docker('restart-run', *compose, 'run', '--rm', '-T', 'smoke').stdout != 'conjet-buildx-ok\n':
             raise RuntimeError('Compose run failed after private runtime restart')
+        docker('docker-buildkit-build', 'build', '--builder', 'fresh', '--load',
+               '--tag', 'conjet-docker-buildkit:local', FIXTURE / 'smoke')
+        if docker('docker-buildkit-run', 'run', '--rm', 'conjet-docker-buildkit:local').stdout != 'conjet-buildx-ok\n':
+            raise RuntimeError('Docker BuildKit build returned unexpected output')
         docker('remove-builder', 'buildx', 'rm', 'fresh')
         if docker('workers-after-remove', 'ps', '-a', '-q').stdout:
             raise RuntimeError('builder cleanup left a container')
@@ -316,6 +332,7 @@ def main():
     for key in ('docker', 'buildx', 'compose'):
         parser.add_argument(f'--{key}', required=True, type=lambda path: Path(path).resolve(strict=True))
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--compose-project', type=lambda path: Path(path).resolve(strict=True))
     mode.add_argument('--expect-baseline', action='store_true')
     mode.add_argument('--memory-only', action='store_true')
     mode.add_argument('--expect-private-build-unavailable', action='store_true')
