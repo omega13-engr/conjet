@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::sync::Arc;
 
 use crate::security::checked;
 
@@ -63,14 +64,29 @@ pub(crate) fn pair() -> io::Result<(Master, File)> {
     if slave < 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok((Master(master), unsafe { File::from_raw_fd(slave) }))
+    Ok((Master(Arc::new(master)), unsafe {
+        File::from_raw_fd(slave)
+    }))
 }
 
-pub(crate) struct Master(File);
+#[derive(Clone)]
+pub(crate) struct Master(Arc<File>);
+
+impl Master {
+    pub(crate) fn resize(&self, height: u16, width: u16) -> io::Result<()> {
+        let size = libc::winsize {
+            ws_row: height,
+            ws_col: width,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        checked(unsafe { libc::ioctl(self.0.as_raw_fd(), libc::TIOCSWINSZ, &size) })
+    }
+}
 
 impl Read for Master {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        match self.0.read(output) {
+        match (&*self.0).read(output) {
             Err(error) if error.raw_os_error() == Some(libc::EIO) => Ok(0),
             result => result,
         }

@@ -116,7 +116,19 @@ struct Exec {
     #[serde(default)]
     tty: bool,
     #[serde(default)]
+    console_id: Option<String>,
+    #[serde(default)]
     stdin: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecResize {
+    handle: Handle,
+    budget_ms: u64,
+    console_id: String,
+    height: u16,
+    width: u16,
 }
 
 #[derive(Deserialize)]
@@ -579,6 +591,7 @@ struct Ledger {
     pressure_helper: Option<std::process::Child>,
     evictions: u64,
     exec_active: bool,
+    exec_terminal: Option<(Handle, String, crate::pty::Master)>,
     exec_streams: usize,
     exec_output: Option<PendingExecOutput>,
     archive_downloads: usize,
@@ -2910,6 +2923,13 @@ impl FreshFixture {
             Kind::Exec if self.oci => {
                 let request: Exec = parse(frame)?;
                 let expires = deadline(request.budget_ms)?;
+                if request
+                    .console_id
+                    .as_deref()
+                    .is_some_and(|id| !request.tty || crate::handshake::unhex::<32>(id).is_err())
+                {
+                    return Err(("invalid_spec", "invalid exec terminal identity"));
+                }
                 let stdin = request
                     .stdin
                     .map(|encoded| {
@@ -2929,9 +2949,23 @@ impl FreshFixture {
                 let (spec, target, id) = guard.exec_target(&request.handle, request.argv)?;
                 guard.exec_active = true;
                 drop(guard);
-                let result =
-                    crate::exec_fixture::execute(target, id, spec, request.tty, stdin, expires);
+                let publish = |master: &crate::pty::Master| {
+                    if let Some(console_id) = request.console_id {
+                        let mut guard = self.ledger.lock().expect("fresh ledger");
+                        guard.exec_terminal = Some((request.handle, console_id, master.clone()));
+                    }
+                };
+                let result = crate::exec_fixture::execute(
+                    target,
+                    id,
+                    spec,
+                    request.tty,
+                    stdin,
+                    expires,
+                    publish,
+                );
                 let mut guard = self.ledger.lock().expect("fresh ledger");
+                guard.exec_terminal = None;
                 guard.exec_active = false;
                 self.changed.notify_all();
                 match result {
@@ -2947,6 +2981,34 @@ impl FreshFixture {
                         ))
                     }
                 }
+            }
+            Kind::ExecResize if self.oci => {
+                let request: ExecResize = parse(frame)?;
+                let expiry = deadline(request.budget_ms)?;
+                check(&guard, &request.handle)?;
+                if request.height == 0 || request.width == 0 {
+                    return Err(("invalid_spec", "invalid terminal dimensions"));
+                }
+                if guard.closing || Instant::now() >= expiry {
+                    return Err(("busy", "native exec terminal is unavailable"));
+                }
+                let (_, _, master) = guard
+                    .exec_terminal
+                    .as_ref()
+                    .filter(|(handle, id, _)| {
+                        *handle == request.handle && *id == request.console_id
+                    })
+                    .ok_or(("not_running", "native exec terminal is not active"))?;
+                master
+                    .resize(request.height, request.width)
+                    .map_err(|_| ("control_failed", "native exec terminal resize failed"))?;
+                Ok((
+                    Kind::ExecResize,
+                    json!({
+                        "handle": request.handle, "console_id": request.console_id,
+                        "height": request.height, "width": request.width,
+                    }),
+                ))
             }
             Kind::ExecOutput if self.oci => {
                 let request: ExecOutput = parse(frame)?;

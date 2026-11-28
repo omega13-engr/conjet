@@ -1,12 +1,13 @@
 """Interactive conformance fixtures and pending contracts."""
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
 import time
 import unittest
 import uuid
 
-from support import alpine, container
+from support import API, alpine, container, exec_command
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -98,7 +99,83 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_tty_resize(self):
         'DC-016: TTY allocation and resize update guest dimensions; non-TTY stdout and stderr remain separate.'
-        self.fail('UNIMPLEMENTED DC-016; no runtime compatibility evidence')
+        session = self.compatibility
+        token = 'conjet-terminal-' + uuid.uuid4().hex[:16]
+        height, width = 37, 119
+        script = r'''
+            test -t 1 && test -t 2 || exit 40
+            exec 3<&1
+            printf 'tty-stdout\n'
+            printf 'tty-stderr\n' >&2
+            i=0
+            while [ "$i" -lt 120 ]; do
+                size=$(stty size <&3 2>/dev/null) || exit 41
+                if [ "$size" = "$1" ]; then
+                    printf 'dimensions:%s\n' "$size"
+                    exit 17
+                fi
+                i=$((i+1))
+                sleep 0.05
+            done
+            exit 42
+        '''
+
+        with alpine(self, session) as image, container(self, session, token, {
+                'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                'HostConfig': {'NetworkMode': 'none'},
+        }) as (path, _):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+            status, raw = session.request('POST', path + '/exec', {
+                'Cmd': ['/bin/sh', '-c', script, 'fixture', f'{height} {width}'],
+                'AttachStdout': True, 'AttachStderr': True, 'Tty': True,
+            })
+            self.assertEqual(status, 201, raw)
+            identifier = API + '/exec/' + json.loads(raw)['Id']
+            resize = identifier + f'/resize?h={height}&w={width}'
+
+            def launch():
+                peer = session.connection.peer(timeout=12)
+                try:
+                    peer.request('POST', identifier + '/start', json.dumps({'Tty': True, 'Detach': False}),
+                                 {'Content-Type': 'application/json'})
+                    with peer.getresponse() as response:
+                        return response.status, response.read(4097)
+                finally:
+                    peer.close()
+
+            with ThreadPoolExecutor(max_workers=1) as worker:
+                attached = worker.submit(launch)
+                deadline = time.monotonic() + 5
+                while True:
+                    status, raw = session.request('GET', identifier + '/json')
+                    self.assertEqual(status, 200, raw)
+                    if json.loads(raw)['Running']:
+                        status, raw = session.request('POST', resize)
+                        if status == 200:
+                            break
+                        self.assertIn(status, (404, 409), raw)
+                    self.assertLess(time.monotonic(), deadline, raw)
+                    self.assertFalse(attached.done(), attached.result() if attached.done() else None)
+                    time.sleep(0.04)
+                status, output = attached.result(timeout=10)
+            self.assertEqual(status, 200, output)
+            self.assertEqual(output, b'tty-stdout\r\ntty-stderr\r\n' +
+                             f'dimensions:{height} {width}\r\n'.encode())
+            status, raw = session.request('GET', identifier + '/json')
+            self.assertEqual(status, 200, raw)
+            terminal = json.loads(raw)
+            self.assertIs(terminal['ProcessConfig']['tty'], True)
+            self.assertIs(terminal['Running'], False)
+            self.assertEqual(terminal['ExitCode'], 17)
+
+            raw = exec_command(self, session, path, [
+                '/bin/sh', '-c', 'test ! -t 1 && test ! -t 2 || exit 43; '
+                'printf "split-stdout\n"; printf "split-stderr\n" >&2; exit 19',
+            ])
+            self.assertEqual(raw, (19, b'split-stdout\n', b'split-stderr\n'))
+        session.record({'tty_dimensions': [height, width], 'combined_tty_output': True,
+                        'split_non_tty_output': True, 'exec_exits': [17, 19]})
 
     def test_detach_keys(self):
         'DC-017: Detach sequence split across reads detaches without dropping ordinary input or stopping container.'

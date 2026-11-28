@@ -986,7 +986,7 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             let (id, operation) = path["/exec/".len()..]
                 .split_once('/')
                 .ok_or_else(|| Rejected::bad("invalid native exec route"))?;
-            if !super::request::name(id) || !query.is_empty() {
+            if !super::request::name(id) || (operation != "resize" && !query.is_empty()) {
                 return Err(Rejected::bad("invalid native exec identifier or query"));
             }
             let entry = owner.lookup_exec(id)?;
@@ -997,6 +997,20 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                     }
                     let handle = entry.reserve(&request.body)?;
                     return Ok(Action::Exec(entry, handle));
+                }
+                ("POST", "resize") => {
+                    if query.len() != 2 {
+                        return Err(Rejected::bad("exec resize requires h and w"));
+                    }
+                    let dimension = |key| {
+                        query
+                            .get(key)
+                            .and_then(|value| value.parse::<u16>().ok())
+                            .filter(|dim| *dim != 0)
+                            .ok_or_else(|| Rejected::bad("invalid exec terminal dimensions"))
+                    };
+                    entry.resize(owner, dimension("h")?, dimension("w")?)?;
+                    Reply::empty(200)
                 }
                 ("GET", "json") => Reply::json(200, entry.inspect()),
                 _ => return Err(Rejected(501, "unsupported native exec operation".into())),

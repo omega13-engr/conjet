@@ -195,6 +195,56 @@ impl Entry {
         Ok(handle)
     }
 
+    pub(super) fn resize(
+        &self,
+        owner: &Owner,
+        height: u16,
+        width: u16,
+    ) -> std::result::Result<(), Rejected> {
+        let handle = {
+            let state = self.state.lock().unwrap();
+            let container = self.container.state();
+            if !self.tty
+                || !matches!(*state, State::Submitted)
+                || container.generation != self.generation
+                || container.removed
+            {
+                return Err(Rejected(409, "native exec terminal is not active".into()));
+            }
+            container
+                .native_handle
+                .clone()
+                .ok_or_else(|| Rejected(409, "native exec terminal is preparing".into()))?
+        };
+        let mut peer = owner.scoped_peer()?;
+        let response = peer
+            .exchange(
+                Kind::ExecResize,
+                Kind::ExecResize,
+                &json!({"handle":handle,"budget_ms":500,"console_id":self.id,
+                    "height":height,"width":width}),
+                Duration::from_millis(750),
+            )
+            .map_err(|error| match error {
+                WireError::PeerError(code)
+                    if matches!(code.as_str(), "not_running" | "not_found" | "busy") =>
+                {
+                    Rejected(409, "native exec terminal is not active".into())
+                }
+                _ => Rejected::internal(format!("native exec terminal resize failed: {error}")),
+            })?;
+        if response["handle"] != handle
+            || response["console_id"] != self.id
+            || response["height"] != height
+            || response["width"] != width
+        {
+            return Err(Rejected::internal(
+                "native exec terminal resize lost its identity",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn fail(&self, error: String) -> Result {
         *self.state.lock().unwrap() = State::Finished(125);
         Result {
@@ -210,7 +260,13 @@ impl Entry {
             self.output
         };
         let result = execute(
-            owner, handle, &self.argv, enabled, self.tty, stdin, BUDGET_MS,
+            owner,
+            handle,
+            &self.argv,
+            enabled,
+            self.tty.then_some(self.id.as_str()),
+            stdin,
+            BUDGET_MS,
         );
         let (status, reply) = match result {
             Ok(result) => result,
@@ -302,7 +358,7 @@ pub(super) fn execute(
     handle: Value,
     argv: &[String],
     enabled: [bool; 2],
-    tty: bool,
+    console_id: Option<&str>,
     stdin: Option<&[u8]>,
     budget_ms: u64,
 ) -> std::result::Result<(i64, Result), String> {
@@ -334,8 +390,9 @@ pub(super) fn execute(
     }
     let connected = control.as_mut().expect("exec peer");
     let mut request = json!({"handle":handle,"budget_ms":budget_ms,"argv":argv});
-    if tty {
+    if let Some(id) = console_id {
         request["tty"] = json!(true);
+        request["console_id"] = json!(id);
     }
     if let Some(stdin) = stdin {
         request["stdin"] = json!(base64::engine::general_purpose::STANDARD.encode(stdin));

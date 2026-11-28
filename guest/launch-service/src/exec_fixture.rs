@@ -193,6 +193,7 @@ pub(crate) fn execute(
     tty: bool,
     stdin: Option<Vec<u8>>,
     deadline: Instant,
+    publish: impl FnOnce(&crate::pty::Master),
 ) -> io::Result<ExecResult> {
     let input = if let Some(bytes) = stdin {
         let (reader, mut writer) = crate::workload_input::pipe()?;
@@ -206,6 +207,7 @@ pub(crate) fn execute(
     let (mut child, result_reader, master) = start(pidfd, id, spec, tty, input, deadline)?;
     type Reader = Box<dyn Read + Send>;
     let (out, err): (Reader, Reader) = if let Some(master) = master {
+        publish(&master);
         (Box::new(master), Box::new(io::empty()))
     } else {
         (

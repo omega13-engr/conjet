@@ -397,6 +397,7 @@ impl Server {
                         | Kind::Image
                         | Kind::Exec
                         | Kind::ExecOutput
+                        | Kind::ExecResize
                         | Kind::Copy
                         | Kind::Input
                         | Kind::Account

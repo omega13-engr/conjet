@@ -150,7 +150,7 @@ pub(super) fn probe(owner: &Owner, item: &Item, generation: u64, handle: &Value)
         handle.clone(),
         &config.argv,
         [false, false],
-        false,
+        None,
         None,
         config.budget_ms,
     )

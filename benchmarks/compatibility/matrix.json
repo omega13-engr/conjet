@@ -224,6 +224,7 @@
       "acceptance": "TTY allocation and resize update guest dimensions; non-TTY stdout and stderr remain separate.",
       "test_file": "cases/test_interactive.py",
       "test_name": "test_tty_resize",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

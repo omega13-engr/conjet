@@ -90,6 +90,7 @@ pub enum Kind {
     CopyDownload = 35,
     CopyUpload = 36,
     WorkloadControl = 37,
+    ExecResize = 38,
 }
 
 impl TryFrom<u8> for Kind {
@@ -135,6 +136,7 @@ impl TryFrom<u8> for Kind {
             35 => Ok(CopyDownload),
             36 => Ok(CopyUpload),
             37 => Ok(WorkloadControl),
+            38 => Ok(ExecResize),
             _ => Err(WireError::BadHeader),
         }
     }
