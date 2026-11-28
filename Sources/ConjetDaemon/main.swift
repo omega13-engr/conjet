@@ -7,6 +7,16 @@ import Foundation
 @main
 struct ConjetDaemon {
     static func main() {
+        switch Array(CommandLine.arguments.dropFirst()) {
+        case ["--help"], ["-h"]:
+            print("Usage: conjetd [--serve | --help | --version]")
+            return
+        case ["--version"], ["-V"]:
+            print(ConjetBuildVersion.display())
+            return
+        default:
+            break
+        }
         do {
             try serve()
         } catch {

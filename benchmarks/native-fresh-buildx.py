@@ -42,7 +42,8 @@ def copy_guest_probe(core, destination):
 def production():
     home = Path.home()
     docker = home / '.docker'
-    files = [docker / 'config.json', *docker.glob('contexts/meta/*/meta.json'),
+    profiles = [home / name for name in ('.zprofile', '.zshrc', '.bash_profile', '.bashrc', '.profile')]
+    files = [*profiles, docker / 'config.json', *docker.glob('contexts/meta/*/meta.json'),
              *docker.glob('buildx/instances/*'), home / '.ssh/config',
              *home.glob('Library/LaunchAgents/*.plist'),
              home / 'Library/Application Support/Conjet/runtime-environment.json',

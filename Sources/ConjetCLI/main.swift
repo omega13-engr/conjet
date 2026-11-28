@@ -52,6 +52,14 @@ struct ConjetCLI {
             return
         }
 
+        if command == "version" || command == "--version" || command == "-V" {
+            guard args.isEmpty else {
+                throw ConjetError.invalidArgument("usage: conjet --version")
+            }
+            print(ConjetBuildVersion.display())
+            return
+        }
+
         if let profileName = commandProfile ?? globalProfile {
             try activateProfile(profileName)
         }
@@ -6324,6 +6332,7 @@ struct ConjetCLI {
             Conjet manages a lightweight macOS container runtime and synchronized Linux workspaces.
 
             Usage:
+              conjet --version
               conjet [--profile NAME] <command> [options]
 
             Runtime:
