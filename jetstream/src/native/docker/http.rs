@@ -581,7 +581,13 @@ enum Action {
     Archive(File),
     WorkloadArchive(String, Option<File>),
     Wait(Arc<Item>, String, u64),
-    Attach(Arc<Item>, [bool; 2], u64, bool),
+    Attach {
+        item: Arc<Item>,
+        streams: [bool; 2],
+        generation: u64,
+        stdin: bool,
+        cursors: [usize; 2],
+    },
     Logs(Arc<Item>, [bool; 2], u64, bool, Option<usize>),
     Exec(Arc<super::exec::Entry>, Value),
     Events(super::events::Subscription),
@@ -1133,9 +1139,6 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
         }
         ("POST", "attach") => {
             let stdin = !disabled(query.get("stdin"));
-            if !disabled(query.get("logs")) {
-                return Err(Rejected::bad("attachment replay is unsupported"));
-            }
             if stdin && (item.container.config["OpenStdin"] != true || !request.tcp_upgrade) {
                 return Err(Rejected::bad(
                     "attached stdin requires an open workload input and TCP upgrade",
@@ -1143,8 +1146,26 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             }
             let streams = ["stdout", "stderr"]
                 .map(|name| query.get(name).is_none() || !disabled(query.get(name)));
-            let generation = item.state().generation;
-            return Ok(Action::Attach(item, streams, generation, stdin));
+            let state = item.state();
+            let generation = state.generation;
+            // Snapshot the output positions before the upgrade and before this
+            // attachment can supply stdin.
+            let cursors = if disabled(query.get("logs")) {
+                state.terminal_for(generation).map_or_else(
+                    || state.live.each_ref().map(Vec::len),
+                    |terminal| [terminal.stdout.len(), terminal.stderr.len()],
+                )
+            } else {
+                [0; 2]
+            };
+            drop(state);
+            return Ok(Action::Attach {
+                item,
+                streams,
+                generation,
+                stdin,
+                cursors,
+            });
         }
         ("GET", "logs") => {
             if !disabled(query.get("timestamps"))
@@ -1299,10 +1320,11 @@ fn attach(
     item: &Item,
     enabled: [bool; 2],
     generation: u64,
+    cursors: [usize; 2],
     writer: &mut UnixStream,
 ) -> io::Result<()> {
     header(writer, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
-    send_output(item, enabled, generation, true, None, writer)
+    send_output(item, enabled, generation, true, None, cursors, writer)
 }
 
 fn tail_offsets(streams: [&[u8]; 2], enabled: [bool; 2], mut lines: usize) -> [usize; 2] {
@@ -1338,10 +1360,10 @@ fn send_output(
     generation: u64,
     follow: bool,
     mut tail: Option<usize>,
+    mut cursors: [usize; 2],
     writer: &mut UnixStream,
 ) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(35);
-    let mut cursors = [0; 2];
     loop {
         let mut state = item.state();
         let (frames, finished, failure) = loop {
@@ -1529,7 +1551,13 @@ pub(super) fn serve(
                 wait(&item, &condition, generation, &mut stream)?;
                 break;
             }
-            Ok(Action::Attach(item, streams, generation, stdin)) => {
+            Ok(Action::Attach {
+                item,
+                streams,
+                generation,
+                stdin,
+                cursors,
+            }) => {
                 if stdin {
                     let Ok(_input) = item.input_attachment.try_lock() else {
                         Reply::json(
@@ -1543,7 +1571,7 @@ pub(super) fn serve(
                         let input = tasks.spawn(|| {
                             super::workload_input::relay(owner, &item, generation, reader)
                         });
-                        let output = attach(&item, streams, generation, &mut stream);
+                        let output = attach(&item, streams, generation, cursors, &mut stream);
                         let _ = stream.shutdown(Shutdown::Read);
                         let sent = input
                             .join()
@@ -1555,13 +1583,21 @@ pub(super) fn serve(
                         Ok(())
                     })?;
                 } else {
-                    attach(&item, streams, generation, &mut stream)?;
+                    attach(&item, streams, generation, cursors, &mut stream)?;
                 }
                 break;
             }
             Ok(Action::Logs(item, streams, generation, follow, tail)) => {
                 header(&mut stream, 200, "Connection: close\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
-                send_output(&item, streams, generation, follow, tail, &mut stream)?;
+                send_output(
+                    &item,
+                    streams,
+                    generation,
+                    follow,
+                    tail,
+                    [0; 2],
+                    &mut stream,
+                )?;
                 break;
             }
             Ok(Action::Events(subscription)) => {

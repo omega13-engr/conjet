@@ -206,6 +206,7 @@
       "acceptance": "StdinOnce false survives attach disconnect and reconnect without premature EOF.",
       "test_file": "cases/test_interactive.py",
       "test_name": "test_attach_reconnect",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": [
         "https://github.com/libracoder/kiri/issues/128"
