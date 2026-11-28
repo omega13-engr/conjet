@@ -42,6 +42,7 @@ fn launch(
         spec: LaunchSpec {
             retained_layer: None,
             rootfs_read_only: false,
+            container_init: false,
             docker_resource_defaults: false,
             docker_default_capabilities: false,
             docker_net_admin: false,

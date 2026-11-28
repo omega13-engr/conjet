@@ -22,7 +22,9 @@ use crate::handshake::{hex, random};
 use crate::image_store::{self, ConnectionId};
 use crate::intent::{DIRECTORY, Intent};
 use crate::output::{Capture, drain};
-use crate::prepared::{CANCEL, ClaimError, RELEASE, SLOT_MEMORY_LIMIT, SLOT_TTL, Slot, TERMINATE};
+use crate::prepared::{
+    CANCEL, ClaimError, RELEASE, SLOT_MEMORY_LIMIT, SLOT_TTL, Slot, signal_command,
+};
 use crate::socket::Stream;
 use crate::spec::{BridgeScope, LaunchRequest, LaunchSpec, ValidatedLaunch};
 use crate::wire::{Frame, Kind, WireError, write_error};
@@ -460,7 +462,7 @@ struct Record {
     buildkit_registry: bool,
     core_admission_deadline: Option<Instant>,
     cancelled: bool,
-    terminate_requested: bool,
+    terminate_requested: Option<u8>,
     control: Option<UnixStream>,
     input: Option<fs::File>,
     stdout: Capture,
@@ -487,7 +489,7 @@ impl Record {
 
     fn pending_core_admission(&self, now: Instant) -> bool {
         self.phase == Phase::Accepted
-            && !self.terminate_requested
+            && self.terminate_requested.is_none()
             && self
                 .core_admission_deadline
                 .is_some_and(|deadline| now < deadline)
@@ -568,14 +570,14 @@ impl Record {
         }
     }
 
-    fn terminate(&mut self) -> io::Result<()> {
-        if self.cancelled || self.terminate_requested || self.phase.terminal() {
+    fn terminate(&mut self, signal: u8) -> io::Result<()> {
+        if self.cancelled || self.terminate_requested.is_some() || self.phase.terminal() {
             return Ok(());
         }
         if let Some(control) = &mut self.control {
-            control.write_all(&[TERMINATE])?;
+            control.write_all(&[signal_command(signal)])?;
         }
-        self.terminate_requested = true;
+        self.terminate_requested = Some(signal);
         Ok(())
     }
 }
@@ -618,7 +620,7 @@ impl Ledger {
             .ok_or(("not_found", "unknown native workload"))?;
         if record.phase == Phase::Running
             && !record.cancelled
-            && !record.terminate_requested
+            && record.terminate_requested.is_none()
             && let Some(target) = &record.exec_context
         {
             return Ok(target);
@@ -632,7 +634,7 @@ impl Ledger {
             record.buildkit_worker
                 && record.phase == Phase::Running
                 && !record.cancelled
-                && !record.terminate_requested
+                && record.terminate_requested.is_none()
                 && cgroup == format!("conjet-native-{id}/workloads/active/{id}/{id}")
         })
     }
@@ -849,7 +851,7 @@ impl Ledger {
             .filter(|record| record.handle.boot_id == boot && record.sequence == grant.sequence)
             .ok_or(("stale_generation", "Core admission identity changed"))?;
         if record.phase != Phase::Accepted
-            || record.terminate_requested
+            || record.terminate_requested.is_some()
             || record
                 .core_admission_deadline
                 .is_none_or(|deadline| now >= deadline)
@@ -1335,7 +1337,7 @@ impl FreshFixture {
                     worker.buildkit_worker
                         && worker.phase == Phase::Running
                         && !worker.cancelled
-                        && !worker.terminate_requested
+                        && worker.terminate_requested.is_none()
                         && worker.volume.as_ref().is_some_and(|volume| {
                             volume.name == live.volume.name && volume.inode == live.volume.inode
                         })
@@ -1496,7 +1498,7 @@ impl FreshFixture {
             buildkit_registry: spec.buildkit_registry(),
             core_admission_deadline: self.core_admission.then_some(deadline),
             cancelled: false,
-            terminate_requested: false,
+            terminate_requested: None,
             control: None,
             input: None,
             stdout: Capture::default(),
@@ -1573,7 +1575,7 @@ impl FreshFixture {
                     .core_admission_deadline
                     .is_some_and(|deadline| now >= deadline);
                 if record.cancelled
-                    || (self.core_admission && (expired || record.terminate_requested))
+                    || (self.core_admission && (expired || record.terminate_requested.is_some()))
                 {
                     record.exec = "failed";
                     if bridge {
@@ -1690,7 +1692,7 @@ impl FreshFixture {
         {
             let mut ledger = self.ledger.lock().expect("fresh ledger");
             if let Some(worker) = ledger.record_mut(owner) {
-                worker.terminate_requested = true;
+                worker.terminate_requested = Some(libc::SIGTERM as u8);
             }
             loop {
                 let mut pending = false;
@@ -1756,7 +1758,7 @@ impl FreshFixture {
             };
             if !record.build_runtime_owned
                 || record.cancelled
-                || record.terminate_requested
+                || record.terminate_requested.is_some()
                 || captured.bytes.len() + data.len() <= capacity
             {
                 captured.append_bounded(data, capacity);
@@ -1915,8 +1917,12 @@ impl FreshFixture {
             record.input = input_writer;
             if record.cancelled {
                 let _ = record.control.as_mut().unwrap().write_all(&[CANCEL]);
-            } else if record.terminate_requested {
-                let _ = record.control.as_mut().unwrap().write_all(&[TERMINATE]);
+            } else if let Some(signal) = record.terminate_requested {
+                let _ = record
+                    .control
+                    .as_mut()
+                    .unwrap()
+                    .write_all(&[signal_command(signal)]);
             }
         });
         let mut removed = false;
@@ -2389,7 +2395,7 @@ impl FreshFixture {
                         && ledger.record(&handle.workload_id).is_some_and(|record| {
                             record.handle == *handle
                                 && !record.cancelled
-                                && !record.terminate_requested
+                                && record.terminate_requested.is_none()
                                 && matches!(
                                     record.phase,
                                     Phase::Accepted
@@ -3185,9 +3191,11 @@ impl FreshFixture {
                         record.cancel();
                         self.changed.notify_all();
                     }
-                    (Kind::Cancel, Some(15)) if self.oci => {
+                    (Kind::Cancel, Some(signal))
+                        if self.oci && crate::spec::valid_workload_signal(signal) =>
+                    {
                         record
-                            .terminate()
+                            .terminate(signal)
                             .map_err(|_| ("control_failed", "native termination channel failed"))?;
                         if self.core_admission {
                             self.changed.notify_all();
@@ -3384,7 +3392,7 @@ impl FreshFixture {
                 .is_some_and(|record| {
                     record.buildkit_registry
                         && !record.cancelled
-                        && !record.terminate_requested
+                        && record.terminate_requested.is_none()
                         && !record.phase.terminal()
                 })
     }
@@ -3421,7 +3429,7 @@ impl FreshFixture {
                     record.phase == Phase::Running
                         && record.buildkit_worker
                         && !record.cancelled
-                        && !record.terminate_requested
+                        && record.terminate_requested.is_none()
                 })
                 .ok_or(("stale_generation", "BuildKit worker lease ended"))?;
             let (worker, pidfd) = record

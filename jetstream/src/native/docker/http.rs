@@ -1186,18 +1186,18 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             Reply::json(200, owner.stats(&item, !disabled(query.get("one-shot")))?)
         }
         ("POST", "stop" | "restart") => {
-            if query
-                .get("signal")
-                .is_some_and(|value| !matches!(value.as_str(), "SIGTERM" | "TERM" | "15"))
-            {
-                return Err(Rejected::bad("stop and restart support SIGTERM"));
-            }
             let grace = stop_grace(query)?;
+            let signal = super::request::stop_signal(
+                query
+                    .get("signal")
+                    .map(String::as_str)
+                    .or_else(|| item.container.config["StopSignal"].as_str()),
+            )?;
             if action == "restart" {
-                owner.restart(&item, grace)?;
+                owner.restart(&item, signal, grace)?;
                 Reply::empty(204)
             } else {
-                Reply::empty(if owner.stop(&item, super::TERM, grace)? {
+                Reply::empty(if owner.stop(&item, signal, grace)? {
                     204
                 } else {
                     304

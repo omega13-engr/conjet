@@ -19,6 +19,31 @@ pub(super) struct Image {
     pub(super) diff_ids: Option<Vec<String>>,
 }
 
+pub(super) fn stop_signal(value: Option<&str>) -> Result<u8, Rejected> {
+    // These are Linux signal numbers. The macOS host uses different values
+    // for several of the names, including SIGUSR1.
+    const NAMES: [&str; 32] = [
+        "", "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1", "SEGV",
+        "USR2", "PIPE", "ALRM", "TERM", "STKFLT", "CHLD", "CONT", "STOP", "TSTP", "TTIN", "TTOU",
+        "URG", "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "IO", "PWR", "SYS",
+    ];
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(super::TERM);
+    };
+    let value = value.to_ascii_uppercase();
+    let name = value.strip_prefix("SIG").unwrap_or(value.as_str());
+    name.parse::<u8>()
+        .ok()
+        .or_else(|| {
+            NAMES
+                .iter()
+                .position(|signal| *signal == name)
+                .map(|index| index as u8)
+        })
+        .filter(|signal| conjet_launch_service::spec::valid_workload_signal(*signal))
+        .ok_or_else(|| Rejected::bad("invalid Docker stop signal"))
+}
+
 pub(super) fn digest(value: &str) -> bool {
     value
         .strip_prefix("sha256:")
@@ -206,6 +231,7 @@ impl Image {
                 "OpenStdin",
                 "StdinOnce",
                 "Tty",
+                "StopSignal",
                 "Labels",
                 "Healthcheck",
                 "NetworkingConfig",
@@ -235,9 +261,17 @@ impl Image {
                 "SecurityOpt",
                 "ReadonlyRootfs",
                 "Tmpfs",
+                "Init",
             ],
             "HostConfig ",
         )?;
+        if !data["StopSignal"].is_null() && !data["StopSignal"].is_string() {
+            return Err(Rejected::bad("invalid Docker StopSignal"));
+        }
+        stop_signal(data["StopSignal"].as_str())?;
+        if !host["Init"].is_null() && !host["Init"].is_boolean() {
+            return Err(Rejected::bad("invalid Docker Init"));
+        }
         if !host["AutoRemove"].is_null() && !host["AutoRemove"].is_boolean() {
             return Err(Rejected::bad("invalid AutoRemove"));
         }
@@ -326,6 +360,7 @@ impl Image {
         let spec = LaunchSpec {
             retained_layer: None,
             rootfs_read_only: host["ReadonlyRootfs"] == true,
+            container_init: host["Init"] == true,
             image_digest: self.config_digest.clone(),
             argv,
             env: environment

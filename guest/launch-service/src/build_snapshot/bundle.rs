@@ -265,6 +265,7 @@ fn process_spec(
     let spec = LaunchSpec {
         retained_layer: None,
         rootfs_read_only: false,
+        container_init: false,
         docker_resource_defaults: live,
         docker_default_capabilities: false,
         docker_net_admin: false,

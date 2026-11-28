@@ -42,6 +42,8 @@ pub mod wire;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 mod workload_copy;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub mod workload_init;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 mod workload_input;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 mod workload_layers;

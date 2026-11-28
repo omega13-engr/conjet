@@ -146,6 +146,7 @@
       "acceptance": "PID 1 receives configured stop signal; init reaps zombies; timeout escalates and reports exit correctly.",
       "test_file": "cases/test_lifecycle.py",
       "test_name": "test_signal_init",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

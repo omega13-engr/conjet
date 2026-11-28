@@ -4,6 +4,25 @@ pub(crate) const SLOT_TTL: Duration = Duration::from_secs(5);
 pub(crate) const SLOT_MEMORY_LIMIT: u64 = 32 * 1024 * 1024;
 pub(crate) const CANCEL: u8 = 1;
 pub(crate) const TERMINATE: u8 = 3;
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub(crate) fn signal_command(signal: u8) -> u8 {
+    if signal == libc::SIGTERM as u8 {
+        TERMINATE
+    } else {
+        0x80 | signal
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub(crate) fn requested_signal(command: u8) -> Option<i32> {
+    if command == TERMINATE {
+        return Some(libc::SIGTERM);
+    }
+    let signal = command & 0x7f;
+    (command & 0x80 != 0 && crate::spec::valid_workload_signal(signal)).then_some(signal.into())
+}
+
 pub(crate) const RELEASE: u8 = 2;
 
 #[derive(PartialEq, Eq)]

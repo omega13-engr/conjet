@@ -668,6 +668,7 @@ impl Sandbox {
         snapshot_mount: Option<OwnedFd>,
         sysfs: Option<OwnedFd>,
         cgroup_path: Option<&Path>,
+        init_fd: Option<std::os::fd::RawFd>,
         before_filter: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
         fn step(name: &str, result: io::Result<()>) -> io::Result<()> {
@@ -872,12 +873,28 @@ impl Sandbox {
                 }),
             )?;
         }
-        // Only stdio may survive. The fixture's syscall code needs no inherited directory handle.
-        if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } != 0 {
-            return Err(io::Error::other(format!(
-                "close inherited descriptors: {}",
-                io::Error::last_os_error()
-            )));
+        // Preserve only the trusted close-on-exec executable FD until
+        // execveat. No extra descriptor may survive into application code.
+        let close_range = |first: u32, last: u32| -> io::Result<()> {
+            if first <= last {
+                step(
+                    "close inherited descriptors",
+                    security::checked(unsafe {
+                        libc::syscall(libc::SYS_close_range, first, last, 0u32) as i32
+                    }),
+                )?;
+            }
+            Ok(())
+        };
+        if let Some(fd) = init_fd {
+            let fd = u32::try_from(fd)
+                .ok()
+                .filter(|fd| *fd >= 3)
+                .ok_or_else(|| io::Error::other("invalid workload init executable FD"))?;
+            close_range(3, fd - 1)?;
+            close_range(fd + 1, u32::MAX)?;
+        } else {
+            close_range(3, u32::MAX)?;
         }
         let (open_files, file_size) = match self.policy {
             WorkloadPolicy::BuildKitWorker

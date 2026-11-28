@@ -105,6 +105,8 @@ pub struct LaunchSpec {
     pub retained_layer: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rootfs_read_only: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub container_init: bool,
     pub argv: Vec<String>,
     pub env: Vec<String>,
     pub cwd: String,
@@ -295,6 +297,10 @@ pub fn valid_retained_layer_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+pub fn valid_workload_signal(signal: u8) -> bool {
+    matches!(signal, 1..=31 | 34..=64)
 }
 
 pub fn mount_paths_overlap(a: &str, b: &str) -> bool {
@@ -690,6 +696,7 @@ impl LaunchSpec {
 
     pub fn set_exec_argv(&mut self, argv: Vec<String>) {
         self.redis_bootstrap = false;
+        self.container_init = false;
         self.buildkit_worker &= buildkit_control_exec(&self.image_digest, &argv);
         self.argv = argv;
     }
@@ -715,7 +722,9 @@ impl LaunchSpec {
         {
             return Err(SpecError::Volume);
         }
-        if spec.tty && (!search_path || spec.build_snapshot.is_some() || spec.buildkit_worker) {
+        if (spec.tty || spec.container_init)
+            && (!search_path || spec.build_snapshot.is_some() || spec.buildkit_worker)
+        {
             return Err(SpecError::Identity);
         }
         if spec.rootfs_read_only && (spec.build_snapshot.is_some() || spec.buildkit_worker) {
@@ -967,6 +976,7 @@ mod tests {
             spec: LaunchSpec {
                 retained_layer: None,
                 rootfs_read_only: false,
+                container_init: false,
                 image_digest: format!("sha256:{}", "a0".repeat(32)),
                 argv: vec!["/bin/probe".into()],
                 env: vec!["LANG=C".into()],

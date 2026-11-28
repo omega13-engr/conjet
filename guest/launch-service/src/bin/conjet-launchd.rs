@@ -80,6 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return conjet_launch_service::kernel_fixture::run_helper(args);
         }
         #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--run-workload-init" => {
+            std::process::exit(conjet_launch_service::workload_init::run(args)?);
+        }
+        #[cfg(target_arch = "aarch64")]
         Some(argument) if argument == "--run-oci-exec" => {
             return conjet_launch_service::exec_fixture::run_helper(args);
         }

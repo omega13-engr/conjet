@@ -3388,10 +3388,10 @@ impl Owner {
             }
         }
         let finished = |state: &Lifecycle| state.terminal.is_some() || state.error.is_some();
-        let termination = if signal == TERM && grace > 0 {
+        let termination = if signal != KILL && grace > 0 {
             let _ = item.container.cancel.compare_exchange(
                 0,
-                TERM,
+                signal,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             );
@@ -3412,13 +3412,13 @@ impl Owner {
         Ok(true)
     }
 
-    fn restart(self: &Arc<Self>, item: &Arc<Item>, grace: u64) -> Result<(), Rejected> {
+    fn restart(self: &Arc<Self>, item: &Arc<Item>, signal: u8, grace: u64) -> Result<(), Rejected> {
         let _control = item.control.lock().unwrap();
         if item.container.auto_remove {
             return Err(Rejected::bad("restart requires a retained container"));
         }
         self.mark_stopped(item)?;
-        self.stop_generation(item, TERM, grace)?;
+        self.stop_generation(item, signal, grace)?;
         self.submit(item, true)?;
         Self::wait_for_network_start(item)
     }

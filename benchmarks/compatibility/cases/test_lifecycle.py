@@ -3,13 +3,14 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 import hashlib
 import json
+import re
 from threading import Barrier
 import time
 import unittest
 from urllib.parse import quote, urlencode
 import uuid
 
-from support import API, alpine, container, exec_command
+from support import API, alpine, container, demultiplex, exec_command
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -191,7 +192,95 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_signal_init(self):
         'DC-010: PID 1 receives configured stop signal; init reaps zombies; timeout escalates and reports exit correctly.'
-        self.fail('UNIMPLEMENTED DC-010; no runtime compatibility evidence')
+        session = self.compatibility
+        prefix = 'conjet-stop-signal-' + uuid.uuid4().hex[:12]
+
+        def start(path):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+
+        def stdout(path):
+            status, raw = session.request('GET', path + '/logs?stdout=true&stderr=true')
+            self.assertEqual(status, 200, raw)
+            out, errors = demultiplex(self, raw)
+            self.assertEqual(errors, b'')
+            return out
+
+        def ready(path):
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                data = stdout(path)
+                match = re.search(rb'^ready:(\d+)$', data, re.MULTILINE)
+                if match:
+                    return int(match[1])
+                time.sleep(0.04)
+            self.fail('workload did not report readiness')
+
+        def stop(path, expected):
+            started = time.monotonic()
+            status, raw = session.request('POST', path + '/stop?t=1')
+            self.assertEqual(status, 204, raw)
+            elapsed = time.monotonic() - started
+            status, raw = session.request('POST', path + '/wait?condition=not-running')
+            self.assertEqual(status, 200, raw)
+            self.assertEqual(json.loads(raw)['StatusCode'], expected)
+            return elapsed
+
+        with alpine(self, session) as image:
+            def spec(command, **host):
+                return {'Image': image, 'Cmd': ['/bin/sh', '-c', command],
+                        'HostConfig': {'NetworkMode': 'none', **host}}
+
+            signal = spec("trap 'printf \"received-usr1\\n\"; exit 42' USR1; "
+                          'printf "ready:%s\n" "$$"; while :; do sleep 0.04; done')
+            signal['StopSignal'] = 'SIGUSR1'
+            with container(self, session, prefix + '-signal', signal) as (path, _):
+                start(path)
+                self.assertEqual(ready(path), 1)
+                stop(path, 42)
+                self.assertEqual(stdout(path), b'ready:1\nreceived-usr1\n')
+
+            init = spec(
+                r"""sh -c '(while test ! -e /tmp/reap-now; do sleep 0.04; done) & echo "$!" >/tmp/orphan-id'
+printf 'ready:%s\n' "$$"
+while :; do sleep 0.04; done""",
+                Init=True,
+            )
+            with container(self, session, prefix + '-init', init) as (path, _):
+                start(path)
+                self.assertGreater(ready(path), 1)
+                status, raw = session.request('GET', path + '/json')
+                self.assertEqual(status, 200, raw)
+                self.assertIs(json.loads(raw)['HostConfig']['Init'], True)
+                observe = ('read pid </tmp/orphan-id; awk \'$1 == "PPid:" { print $2 }\' '
+                           '"/proc/$pid/status"')
+                self.assertEqual(exec_command(self, session, path, ['/bin/sh', '-c', observe]),
+                                 (0, b'1\n', b''))
+                self.assertEqual(exec_command(self, session, path, ['/bin/touch', '/tmp/reap-now']),
+                                 (0, b'', b''))
+                deadline = time.monotonic() + 4
+                while time.monotonic() < deadline:
+                    code, out, errors = exec_command(self, session, path, [
+                        '/bin/sh', '-c', 'read pid </tmp/orphan-id; test ! -e "/proc/$pid/status"',
+                    ])
+                    self.assertEqual((out, errors), (b'', b''))
+                    if code == 0:
+                        break
+                    self.assertEqual(code, 1)
+                else:
+                    self.fail('PID 1 did not reap the adopted orphan')
+
+            ignored = spec("trap '' TERM; printf 'ready:%s\n' \"$$\"; "
+                           'while :; do sleep 0.04; done')
+            with container(self, session, prefix + '-escalation', ignored) as (path, _):
+                start(path)
+                self.assertEqual(ready(path), 1)
+                elapsed = stop(path, 137)
+                self.assertGreaterEqual(elapsed, 0.75)
+                self.assertLess(elapsed, 5)
+        session.record({'custom_stop_signal': 'SIGUSR1', 'signal_workload_pid': 1,
+                        'custom_signal_exit': 42, 'init_reaped_adopted_child': True,
+                        'stop_timeout_escalated': True, 'sigkill_exit': 137})
 
     def test_pause_update(self):
         'DC-011: Pause freezes progress; unpause resumes; resource update preserves unrelated configuration.'
