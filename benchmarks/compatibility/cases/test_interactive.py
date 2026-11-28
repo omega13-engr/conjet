@@ -8,6 +8,7 @@ import unittest
 from urllib.parse import urlencode
 import uuid
 
+import websocket_fixture
 from support import API, alpine, container, exec_command
 
 
@@ -258,4 +259,64 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_websocket_attach(self):
         'DC-018: WebSocket masking, ping, close, backpressure and disconnect have bounded memory and correct stream behavior.'
-        self.fail('UNIMPLEMENTED DC-018; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-websocket-' + uuid.uuid4().hex[:16]
+        config = {'OpenStdin': True, 'StdinOnce': False,
+                  'AttachStdout': True, 'AttachStderr': True,
+                  'HostConfig': {'NetworkMode': 'none'}}
+
+        def start(path):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+
+        def running(path):
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            self.assertIs(json.loads(raw)['State']['Running'], True)
+
+        with alpine(self, session) as image:
+            script = 'while IFS= read -r line; do printf "echo:%s\n" "$line"; done'
+            with container(self, session, name + '-echo', {
+                    **config, 'Image': image, 'Cmd': ['/bin/sh', '-c', script],
+            }) as (path, _):
+                start(path)
+                with websocket_fixture.open_attach(self, session, path) as (channel, wire):
+                    channel.sendall(websocket_fixture.frame(2, b'masked-message\n'))
+                    websocket_fixture.output(self, wire, b'echo:masked-message\n')
+                    channel.sendall(websocket_fixture.frame(9, b'owned-ping'))
+                    self.assertEqual(websocket_fixture.receive(self, wire), (10, b'owned-ping'))
+                    channel.sendall(websocket_fixture.frame(8, b'\x03\xe8'))
+                    self.assertEqual(websocket_fixture.receive(self, wire), (8, b'\x03\xe8'))
+                running(path)
+                with websocket_fixture.open_attach(self, session, path) as (channel, wire):
+                    channel.sendall(websocket_fixture.frame(2, b'after-close\n'))
+                    websocket_fixture.output(self, wire, b'echo:after-close\n')
+                running(path)
+
+            with container(self, session, name + '-pressure', {
+                    **config, 'Image': image, 'Cmd': ['/bin/sleep', '120'],
+            }) as (path, _):
+                start(path)
+                before = session.sample_engine_rss('before_backpressure')
+                with websocket_fixture.open_attach(self, session, path) as (channel, _):
+                    payload = b'z' * 16384
+                    channel.settimeout(0.25)
+                    completed = 0
+                    deadline = time.monotonic() + 5
+                    with self.assertRaises((TimeoutError, BrokenPipeError, ConnectionResetError)):
+                        while completed < 512 and time.monotonic() < deadline:
+                            channel.sendall(websocket_fixture.frame(2, payload))
+                            completed += 1
+                    self.assertGreater(completed, 0)
+                    self.assertLess(completed, 512)
+                    peak = session.sample_engine_rss('during_backpressure')
+                    self.assertLessEqual(peak - before, 32 * 1024 * 1024)
+                    status, raw = session.request('GET', API + '/_ping')
+                    self.assertEqual((status, raw), (200, b'OK'))
+                    running(path)
+                status, raw = session.request('POST', path + '/stop?t=1')
+                self.assertEqual(status, 204, raw)
+        session.record({'masked_input_echoed': True, 'ping_payload_echoed': True,
+                        'normal_close': True, 'stdin_reconnected': True,
+                        'producer_backpressured': True, 'owned_engine_rss_growth_under_bytes': 33554432,
+                        'control_api_responsive': True, 'stopped_after_disconnect': True})

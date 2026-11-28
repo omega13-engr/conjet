@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import subprocess
 import time
 import unittest
 
@@ -91,11 +92,13 @@ def load_tests():
 
 
 class CaseSession:
-    def __init__(self, connection, restart=None):
+    def __init__(self, connection, restart=None, engine_rss=None):
         self.connection = connection
         self._restart = restart
         self.restarts = 0
         self.observation = None
+        self.measurements = {}
+        self._engine_rss = engine_rss
 
     def restart_engine(self):
         if self._restart is None:
@@ -120,6 +123,29 @@ class CaseSession:
         if self.observation is not None or not observation:
             raise ValueError('a case must record one non-empty observation')
         self.observation = json.loads(json.dumps(observation, allow_nan=False))
+
+    def sample_engine_rss(self, label):
+        if label in self.measurements:
+            raise ValueError('engine RSS sample name is already recorded')
+        if self._engine_rss is None:
+            if self.connection.server_version.get('platform') != 'Conjet Native OCI':
+                raise RuntimeError('launcher did not provide a reference engine RSS probe')
+            peer = self.connection.peer(timeout=2)
+            try:
+                peer.connect()
+                rss_kib = subprocess.run(
+                    ['/bin/ps', '-p', str(peer.expected_pid), '-o', 'rss='],
+                    capture_output=True, text=True, check=True, timeout=5,
+                ).stdout.strip()
+            finally:
+                peer.close()
+            size = int(rss_kib) * 1024
+        else:
+            size = self._engine_rss()
+        if type(size) is not int or size <= 0:
+            raise RuntimeError('invalid engine RSS sample')
+        self.measurements[label] = size
+        return size
 
     def resources(self):
         inventory = {}
@@ -159,8 +185,8 @@ def ignore_engine_bridge_recreation(inventory):
     return {**inventory, 'networks': networks}
 
 
-def execute_case(test, connection, timeout, restart=None):
-    session = CaseSession(connection, restart)
+def execute_case(test, connection, timeout, restart=None, engine_rss=None):
+    session = CaseSession(connection, restart, engine_rss)
     row = {'passed': False, 'cleanup': False}
     started = time.monotonic()
 
@@ -205,6 +231,8 @@ def execute_case(test, connection, timeout, restart=None):
             row['cleanup_error'] = str(error)
         row['passed'] = row['passed'] and row['cleanup']
         row['elapsed_seconds'] = time.monotonic() - started
+        if session.measurements:
+            row['engine_rss_bytes'] = session.measurements
     return row
 
 
@@ -227,7 +255,8 @@ def same_engine_new_peer(before, after):
             and after['version'] == before['version'])
 
 
-def record_lane(profile, connection, executable, identity, timeout=60, restart_engine=None):
+def record_lane(profile, connection, executable, identity, timeout=60, restart_engine=None,
+                engine_rss=None):
     matrix = sha256(MATRIX)
     harness = runner_hashes()
     selected = selection(profile)
@@ -264,7 +293,7 @@ def record_lane(profile, connection, executable, identity, timeout=60, restart_e
             raise RuntimeError(f"fixture changed before running {case['id']}")
         prior_restarts = len(transitions)
         row = execute_case(tests[key], connection, case.get('timeout_seconds', timeout),
-                           restart if restart_engine else None)
+                           restart if restart_engine else None, engine_rss)
         count = len(transitions) - prior_restarts
         if count != case.get('required_restarts', 0):
             row['passed'] = False

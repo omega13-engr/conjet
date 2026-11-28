@@ -118,6 +118,14 @@ ssh:
                 raise RuntimeError('reference dockerd PID file does not identify the private engine')
             return int(pid)
 
+        def engine_rss():
+            pid = daemon_pid()
+            status = guest('sudo', '-n', 'cat', f'/proc/{pid}/status', timeout=10)
+            rss, = [line.split() for line in status.splitlines() if line.startswith('VmRSS:')]
+            if len(rss) != 3 or rss[2] != 'kB':
+                raise RuntimeError('invalid reference engine RSS sample')
+            return int(rss[1]) * 1024
+
         def stop_daemon():
             pid = daemon_pid()
             guest('sudo', '-n', 'kill', '-TERM', str(pid), timeout=15)
@@ -196,7 +204,7 @@ ssh:
                 raise RuntimeError('reference Docker socket is not root-owned')
             if args.profile:
                 report['compatibility'] = record_lane(args.profile, client, ssh, report['identity'],
-                                                      restart_engine=restart_engine)
+                                                      restart_engine=restart_engine, engine_rss=engine_rss)
             if args.direct_egress_ip:
                 config = root / 'docker-config'
                 config.mkdir(mode=0o700)

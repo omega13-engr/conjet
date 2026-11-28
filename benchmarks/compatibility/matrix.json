@@ -252,6 +252,7 @@
       "acceptance": "WebSocket masking, ping, close, backpressure and disconnect have bounded memory and correct stream behavior.",
       "test_file": "cases/test_interactive.py",
       "test_name": "test_websocket_attach",
+      "support_files": ["cases/support.py", "cases/websocket_fixture.py"],
       "status": "UNTESTED",
       "upstream_issues": [
         "https://github.com/libracoder/kiri/issues/128"

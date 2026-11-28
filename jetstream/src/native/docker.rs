@@ -21,6 +21,7 @@ mod registry;
 mod request;
 mod restart_policy;
 mod volume;
+mod websocket;
 mod workload_copy;
 mod workload_input;
 

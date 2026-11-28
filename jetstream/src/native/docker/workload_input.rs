@@ -1,5 +1,4 @@
-use std::io::{self, BufReader, Read};
-use std::os::unix::net::UnixStream;
+use std::io::{self, Read};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -52,7 +51,7 @@ pub(super) fn relay(
     owner: &Owner,
     item: &Item,
     generation: u64,
-    mut reader: BufReader<UnixStream>,
+    mut reader: impl Read,
     detach: Option<&[u8]>,
 ) -> io::Result<bool> {
     let deadline = Instant::now() + Duration::from_secs(35);
@@ -81,9 +80,6 @@ pub(super) fn relay(
     let mut guest = owner
         .scoped_peer()
         .map_err(|error| io::Error::other(error.1))?;
-    reader
-        .get_ref()
-        .set_read_timeout(Some(Duration::from_millis(250)))?;
     let active = || active_generation(&item.state());
     let mut bytes = [0; CHUNK];
     let mut pending = Vec::new();

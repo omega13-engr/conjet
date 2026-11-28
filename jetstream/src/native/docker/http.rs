@@ -29,6 +29,7 @@ struct Request {
     archive: Option<File>,
     close: bool,
     tcp_upgrade: bool,
+    websocket_accept: Option<String>,
 }
 
 type Result<T> = std::result::Result<T, Rejected>;
@@ -391,6 +392,15 @@ fn parse(
     let mut close = false;
     let mut connection_upgrade = false;
     let mut tcp_upgrade = false;
+    let mut websocket_upgrade = false;
+    let mut websocket_key = None;
+    let mut websocket_version = None;
+    let websocket_route = method == "GET"
+        && path
+            .strip_prefix("/v1.44")
+            .unwrap_or(path)
+            .strip_prefix("/containers/")
+            .is_some_and(|path| path.ends_with("/attach/ws"));
     loop {
         let header = line(reader, &mut left, deadline)?
             .ok_or_else(|| Rejected::bad("incomplete HTTP headers"))?;
@@ -438,8 +448,36 @@ fn parse(
         }
         if key.eq_ignore_ascii_case("upgrade") {
             tcp_upgrade |= value.eq_ignore_ascii_case("tcp");
+            websocket_upgrade |= value.eq_ignore_ascii_case("websocket");
+        }
+        if websocket_route {
+            if key.eq_ignore_ascii_case("sec-websocket-key")
+                && websocket_key.replace(value.to_owned()).is_some()
+            {
+                return Err(Rejected::bad("duplicate WebSocket key"));
+            }
+            if key.eq_ignore_ascii_case("sec-websocket-version")
+                && websocket_version.replace(value.to_owned()).is_some()
+            {
+                return Err(Rejected::bad("duplicate WebSocket version"));
+            }
         }
     }
+    let websocket_accept = if websocket_route {
+        if !connection_upgrade
+            || !websocket_upgrade
+            || tcp_upgrade
+            || size.is_some_and(|size| size != 0)
+        {
+            return Err(Rejected::bad("expected WebSocket attach upgrade"));
+        }
+        Some(super::websocket::accept(
+            websocket_key.as_deref().unwrap_or(""),
+            websocket_version.as_deref().unwrap_or(""),
+        )?)
+    } else {
+        None
+    };
     let mut query = BTreeMap::new();
     let mut image_names = Vec::new();
     let save = method == "GET" && matches!(path, "/v1.44/images/get" | "/images/get");
@@ -514,6 +552,7 @@ fn parse(
         archive,
         close,
         tcp_upgrade: connection_upgrade && tcp_upgrade,
+        websocket_accept,
     }))
 }
 
@@ -597,6 +636,7 @@ enum Action {
         stdin: bool,
         detach: Option<Vec<u8>>,
         cursors: [usize; 2],
+        websocket: Option<String>,
     },
     Logs(Arc<Item>, [bool; 2], u64, bool, Option<usize>),
     Exec(Arc<super::exec::Entry>, Value),
@@ -1048,7 +1088,9 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
     let allowed_query: &[&str] = match (method, action) {
         ("HEAD" | "GET", "archive") => &["path"],
         ("PUT", "archive") => &["path", "noOverwriteDirNonDir", "copyUIDGID"],
-        ("POST", "attach") => &["stdin", "stdout", "stderr", "logs", "stream", "detachKeys"],
+        ("POST", "attach") | ("GET", "attach/ws") => {
+            &["stdin", "stdout", "stderr", "logs", "stream", "detachKeys"]
+        }
         ("GET", "logs") => &[
             "stdout",
             "stderr",
@@ -1182,11 +1224,14 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             let generation = item.state().generation;
             return Ok(Action::Wait(item, condition.to_owned(), generation));
         }
-        ("POST", "attach") => {
+        ("POST", "attach") | ("GET", "attach/ws") => {
             let stdin = !disabled(query.get("stdin"));
-            if stdin && (item.container.config["OpenStdin"] != true || !request.tcp_upgrade) {
+            if stdin
+                && (item.container.config["OpenStdin"] != true
+                    || (!request.tcp_upgrade && request.websocket_accept.is_none()))
+            {
                 return Err(Rejected::bad(
-                    "attached stdin requires an open workload input and TCP upgrade",
+                    "attached stdin requires open workload input and a transport upgrade",
                 ));
             }
             let keys = query.get("detachKeys");
@@ -1220,6 +1265,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                 stdin,
                 detach,
                 cursors,
+                websocket: request.websocket_accept.clone(),
             });
         }
         ("GET", "logs") => {
@@ -1440,9 +1486,38 @@ fn send_output(
     enabled: [bool; 2],
     generation: u64,
     follow: bool,
+    tail: Option<usize>,
+    cursors: [usize; 2],
+    writer: &mut UnixStream,
+) -> io::Result<()> {
+    let peer = writer.try_clone()?;
+    output_frames(
+        item,
+        enabled,
+        generation,
+        follow,
+        tail,
+        cursors,
+        || client_disconnected(&peer),
+        |stream, data| {
+            if item.container.config["Tty"] == true {
+                writer.write_all(data)
+            } else {
+                send_frame(writer, stream, data)
+            }
+        },
+    )
+}
+
+fn output_frames(
+    item: &Item,
+    enabled: [bool; 2],
+    generation: u64,
+    follow: bool,
     mut tail: Option<usize>,
     mut cursors: [usize; 2],
-    writer: &mut UnixStream,
+    disconnected: impl Fn() -> bool,
+    mut emit: impl FnMut(u8, &[u8]) -> io::Result<()>,
 ) -> io::Result<()> {
     let tty = item.container.config["Tty"] == true;
     let enabled = if tty {
@@ -1485,7 +1560,7 @@ fn send_output(
                 break (chunks, complete, failure);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() || client_disconnected(writer) {
+            if remaining.is_zero() || disconnected() {
                 return Ok(());
             }
             let (next, _) = item
@@ -1500,20 +1575,12 @@ fn send_output(
             if chunk.is_empty() {
                 continue;
             }
-            if tty {
-                writer.write_all(&chunk)?;
-            } else {
-                send_frame(writer, index as u8 + 1, &chunk)?;
-            }
+            emit(index as u8 + 1, &chunk)?;
             cursors[index] += chunk.len();
         }
         if !follow || (empty && finished) {
             if let Some(error) = failure {
-                if tty {
-                    writer.write_all(error.as_bytes())?;
-                } else {
-                    send_frame(writer, 3, error.as_bytes())?;
-                }
+                emit(3, error.as_bytes())?;
             }
             return Ok(());
         }
@@ -1653,16 +1720,78 @@ pub(super) fn serve(
                 stdin,
                 detach,
                 cursors,
+                websocket,
             }) => {
-                if stdin {
-                    let Ok(_input) = item.input_attachment.try_lock() else {
-                        Reply::json(
-                            409,
-                            json!({"message":"native workload input already has an attachment"}),
-                        )
-                        .send(&mut stream, false, true)?;
-                        break;
-                    };
+                let _input = if stdin {
+                    match item.input_attachment.try_lock() {
+                        Ok(input) => Some(input),
+                        Err(_) => {
+                            Reply::json(
+                                409,
+                                json!({"message":"native workload input already has an attachment"}),
+                            ).send(&mut stream, false, true)?;
+                            break;
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Some(accept) = websocket {
+                    header(&mut stream, 101, &format!(
+                        "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: {accept}\r\n"
+                    ))?;
+                    let socket = super::websocket::Socket::new(reader)?;
+                    std::thread::scope(|tasks| -> io::Result<()> {
+                        let channel = stream.try_clone()?;
+                        let input = tasks.spawn({
+                            let socket = &socket;
+                            let item = &item;
+                            move || {
+                                let mut reader = socket.reader();
+                                let outcome = if stdin {
+                                    let result = super::workload_input::relay(
+                                        owner,
+                                        &item,
+                                        generation,
+                                        &mut reader,
+                                        detach.as_deref(),
+                                    );
+                                    if matches!(result, Ok(true)) {
+                                        let _ = socket.close();
+                                    }
+                                    if matches!(result, Ok(false)) && !reader.ended {
+                                        return Ok(());
+                                    }
+                                    result.map(|_| ())
+                                } else {
+                                    super::websocket::consume(reader)
+                                };
+                                let _ = channel.shutdown(Shutdown::Both);
+                                item.changed.notify_all();
+                                outcome
+                            }
+                        });
+                        let output = output_frames(
+                            &item,
+                            streams,
+                            generation,
+                            true,
+                            None,
+                            cursors,
+                            || client_disconnected(&stream),
+                            |_, bytes| socket.send(bytes),
+                        );
+                        let _ = socket.close();
+                        let _ = stream.shutdown(Shutdown::Read);
+                        let received = input.join().map_err(|_| {
+                            io::Error::other("native WebSocket input worker stopped")
+                        })?;
+                        output.and(received)
+                    })?;
+                } else if stdin {
+                    reader
+                        .get_ref()
+                        .set_read_timeout(Some(Duration::from_millis(250)))?;
                     let channel = reader.get_ref().try_clone()?;
                     std::thread::scope(|tasks| -> io::Result<()> {
                         let input = tasks.spawn(|| {
