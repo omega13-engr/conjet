@@ -317,6 +317,7 @@
       "acceptance": "Configured syscall allow and deny behavior matches policy; unsupported profiles fail before start.",
       "test_file": "cases/test_security.py",
       "test_name": "test_seccomp",
+      "support_files": ["cases/support.py", "fixtures/dc023-uname.S"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

@@ -7,6 +7,7 @@ use conjet_launch_service::spec::{
     parse_cpu_set, Account, CpuBandwidth, LaunchSpec, OpenFilesLimit, ResourceLimits,
     CPU_PERIOD_US, WORKLOAD_GID, WORKLOAD_UID,
 };
+use conjet_launch_service::spec::{DeniedSyscall, SyscallDenial, MAX_SYSCALL_DENIALS};
 use serde_json::{json, Map, Value};
 
 use super::Rejected;
@@ -257,15 +258,7 @@ impl Image {
                 ))
             }
         };
-        let security = &host["SecurityOpt"];
-        if !(security.is_null()
-            || security == &json!([])
-            || security == &json!(["no-new-privileges"])
-            || security == &json!(["no-new-privileges=true"])
-            || security == &json!(["no-new-privileges:true"]))
-        {
-            return Err(Rejected::bad("only no-new-privileges is supported"));
-        }
+        let syscall_denials = security_options(&host["SecurityOpt"])?;
         if !host["MemorySwappiness"].is_null() && host["MemorySwappiness"].as_i64() != Some(-1) {
             return Err(Rejected::bad("explicit memory swappiness is unsupported"));
         }
@@ -352,6 +345,7 @@ impl Image {
             docker_resource_defaults: limits.has_unlimited(),
             docker_default_capabilities: host["CapDrop"] != json!(["ALL"]),
             docker_net_admin,
+            syscall_denials,
             memory_swap_disabled: false,
             open_files_limit: open_files_limit(&host["Ulimits"])?,
             open_stdin,
@@ -429,6 +423,91 @@ fn tmpfs_mounts(value: &Value) -> Result<Vec<TmpfsMount>, Rejected> {
             Ok(mount)
         })
         .collect()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SeccompProfile {
+    default_action: String,
+    #[serde(default)]
+    architectures: Vec<String>,
+    #[serde(default)]
+    syscalls: Vec<SeccompRule>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SeccompRule {
+    names: Vec<DeniedSyscall>,
+    action: String,
+    errno_ret: Option<u16>,
+}
+
+fn security_options(data: &Value) -> Result<Vec<SyscallDenial>, Rejected> {
+    if data.is_null() {
+        return Ok(Vec::new());
+    }
+    let options = strings(data)?;
+    if options.len() > 2 {
+        return Err(Rejected::bad("too many native Docker security options"));
+    }
+    let mut no_new_privileges = false;
+    let mut seccomp = None;
+    for option in &options {
+        match option.as_str() {
+            "no-new-privileges" | "no-new-privileges=true" | "no-new-privileges:true"
+                if !no_new_privileges =>
+            {
+                no_new_privileges = true
+            }
+            option if seccomp.is_none() => {
+                let json = option
+                    .strip_prefix("seccomp=")
+                    .or_else(|| option.strip_prefix("seccomp:"))
+                    .filter(|value| value.len() <= 8192)
+                    .ok_or_else(|| Rejected::bad("unsupported native Docker security option"))?;
+                seccomp = Some(
+                    serde_json::from_str::<SeccompProfile>(json)
+                        .map_err(|_| Rejected::bad("invalid or unsupported seccomp profile"))?,
+                );
+            }
+            _ => {
+                return Err(Rejected::bad(
+                    "duplicate or unsupported native Docker security option",
+                ))
+            }
+        }
+    }
+    let Some(profile) = seccomp else {
+        return Ok(Vec::new());
+    };
+    if profile.default_action != "SCMP_ACT_ALLOW"
+        || !matches!(profile.architectures.as_slice(), [] | [_])
+        || profile
+            .architectures
+            .iter()
+            .any(|arch| arch != "SCMP_ARCH_AARCH64")
+    {
+        return Err(Rejected::bad(
+            "native seccomp profiles must add Linux ARM64 syscall denials",
+        ));
+    }
+    let mut denials = Vec::<SyscallDenial>::new();
+    for rule in profile.syscalls {
+        let errno = rule.errno_ret.unwrap_or(1);
+        if rule.action != "SCMP_ACT_ERRNO" || !(1..=4095).contains(&errno) || rule.names.is_empty()
+        {
+            return Err(Rejected::bad("invalid or unsupported native seccomp rule"));
+        }
+        for name in rule.names {
+            if denials.len() >= MAX_SYSCALL_DENIALS || denials.iter().any(|rule| rule.name == name)
+            {
+                return Err(Rejected::bad("duplicate or excessive native seccomp rules"));
+            }
+            denials.push(SyscallDenial { name, errno });
+        }
+    }
+    Ok(denials)
 }
 
 pub(super) fn default_memory_swap(host: &mut Value) {

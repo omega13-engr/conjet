@@ -9,8 +9,36 @@ from tempfile import TemporaryDirectory
 import unittest
 import uuid
 
-from support import API, alpine, container, exec_command
+from support import API, alpine, container, demultiplex, exec_command
 
+
+def compile_probe(test, connection, filename, checksum):
+    clang = Path('/Applications/Xcode.app/Contents/Developer/Toolchains/'
+                 'XcodeDefault.xctoolchain/usr/bin/clang')
+    lld = (Path.home() / '.rustup/toolchains/stable-aarch64-apple-darwin'
+           / 'lib/rustlib/aarch64-apple-darwin/bin/rust-lld')
+    tools = (
+        (clang, 'ee029330bf58ab6e481385f4237cc54602eaa8b81526242e5c5ab5b76e8c5a7e'),
+        (lld, 'f719ec5b06dcf9ec5f8e4dc2a5032a72c6469ba4e195c17011090d10b4229c5c'),
+    )
+    for tool, expected in tools:
+        with tool.open('rb') as source:
+            test.assertEqual(hashlib.file_digest(source, 'sha256').hexdigest(), expected, tool)
+    source = Path(__file__).resolve().parents[1] / 'fixtures' / filename
+    with TemporaryDirectory(dir=connection.root) as scratch:
+        root = Path(scratch)
+        obj, executable = root / 'probe.o', root / 'probe'
+        for command in (
+                [clang, '--target=aarch64-linux-musl', '-c', source, '-o', obj],
+                [lld, '-flavor', 'gnu', '-m', 'aarch64linux', '--build-id=none', '-static',
+                 '-s', '-o', executable, obj]):
+            compiled = subprocess.run(command, cwd=root, env={'HOME': scratch,
+                                       'PATH': '/usr/bin:/bin'}, capture_output=True,
+                                      text=True, timeout=10)
+            test.assertEqual(compiled.returncode, 0, compiled.stderr)
+        payload = executable.read_bytes()
+        test.assertEqual(hashlib.sha256(payload).hexdigest(), checksum)
+        return base64.b64encode(payload).decode()
 
 class CompatibilityTests(unittest.TestCase):
     def test_cap_drop(self):
@@ -164,33 +192,8 @@ class CompatibilityTests(unittest.TestCase):
         session = self.compatibility
         connection = session.connection
         name = 'conjet-no-privs-' + uuid.uuid4().hex[:16]
-        clang = Path('/Applications/Xcode.app/Contents/Developer/Toolchains/'
-                     'XcodeDefault.xctoolchain/usr/bin/clang')
-        lld = (Path.home() / '.rustup/toolchains/stable-aarch64-apple-darwin'
-               / 'lib/rustlib/aarch64-apple-darwin/bin/rust-lld')
-        tools = (
-            (clang, 'ee029330bf58ab6e481385f4237cc54602eaa8b81526242e5c5ab5b76e8c5a7e'),
-            (lld, 'f719ec5b06dcf9ec5f8e4dc2a5032a72c6469ba4e195c17011090d10b4229c5c'),
-        )
-        for tool, expected in tools:
-            with tool.open('rb') as source:
-                self.assertEqual(hashlib.file_digest(source, 'sha256').hexdigest(), expected, tool)
-        source = Path(__file__).resolve().parents[1] / 'fixtures' / 'dc022-euid.S'
-        with TemporaryDirectory(dir=connection.root) as scratch:
-            root = Path(scratch)
-            obj, executable = root / 'probe.o', root / 'probe'
-            for command in (
-                    [clang, '--target=aarch64-linux-musl', '-c', source, '-o', obj],
-                    [lld, '-flavor', 'gnu', '-m', 'aarch64linux', '--build-id=none', '-static',
-                     '-s', '-o', executable, obj]):
-                compiled = subprocess.run(command, cwd=root, env={'HOME': scratch,
-                                           'PATH': '/usr/bin:/bin'}, capture_output=True,
-                                          text=True, timeout=10)
-                self.assertEqual(compiled.returncode, 0, compiled.stderr)
-            payload = executable.read_bytes()
-            checksum = hashlib.sha256(payload).hexdigest()
-            self.assertEqual(checksum, '83bc5382718ef77495eab41820adfc583c72aafe3e9e615951b98ada10e52b50')
-            data = base64.b64encode(payload).decode()
+        checksum = '83bc5382718ef77495eab41820adfc583c72aafe3e9e615951b98ada10e52b50'
+        data = compile_probe(self, connection, 'dc022-euid.S', checksum)
 
         with alpine(self, session) as image, container(self, session, name, {
                 'Image': image, 'Cmd': ['/bin/sleep', '120'],
@@ -222,7 +225,75 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_seccomp(self):
         'DC-023: Configured syscall allow and deny behavior matches policy; unsupported profiles fail before start.'
-        self.fail('UNIMPLEMENTED DC-023; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-seccomp-' + uuid.uuid4().hex[:16]
+        supported = {
+            'defaultAction': 'SCMP_ACT_ALLOW', 'architectures': ['SCMP_ARCH_AARCH64'],
+            'syscalls': [{'names': ['uname'], 'action': 'SCMP_ACT_ERRNO', 'errnoRet': 1}],
+        }
+
+        def profile(data):
+            return 'seccomp=' + json.dumps(data, separators=(',', ':'))
+
+        def start(path):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+
+        data = compile_probe(self, session.connection, 'dc023-uname.S',
+                             '7036343e64dc599d09c0a0b9152e2773d9f4992ed193a3c1d5fdc9f355def097')
+        fragments = [data[index:index + 480] for index in range(0, len(data), 480)]
+        install = 'printf %s "$@" | base64 -d >/tmp/syscall-probe && chmod 755 /tmp/syscall-probe'
+        expected_stdout = b'allowed\n'
+        with alpine(self, session) as image:
+            for label, options, expected in (('control', [], 0), ('restricted', [profile(supported)], 40)):
+                host = {'NetworkMode': 'none', 'SecurityOpt': options}
+                with container(self, session, f'{name}-{label}', {
+                        'Image': image, 'HostConfig': host,
+                        'Cmd': ['/bin/sh', '-c', install + ' && printf "allowed\n" && exec /tmp/syscall-probe',
+                                'fixture', *fragments],
+                }) as (path, _):
+                    start(path)
+                    status, raw = session.request('POST', path + '/wait?condition=not-running')
+                    self.assertEqual(status, 200, raw)
+                    self.assertEqual(json.loads(raw)['StatusCode'], expected)
+                    status, raw = session.request('GET', path + '/logs?stdout=true&stderr=true')
+                    self.assertEqual(status, 200, raw)
+                    self.assertEqual(demultiplex(self, raw), (expected_stdout, b''))
+
+                with container(self, session, f'{name}-{label}-exec', {
+                        'Image': image, 'HostConfig': host, 'Cmd': ['/bin/sleep', '120'],
+                }) as (path, _):
+                    start(path)
+                    self.assertEqual(exec_command(self, session, path,
+                                                  ['/bin/sh', '-c', install, 'fixture', *fragments]),
+                                     (0, b'', b''))
+                    self.assertEqual(exec_command(self, session, path, ['/tmp/syscall-probe']),
+                                     (expected, b'', b''))
+
+            invalid_name = name + '-invalid'
+            path = API + '/containers/' + invalid_name
+            marker = b'invalid-profile-executed'
+            try:
+                invalid = {**supported, 'defaultAction': 'SCMP_ACT_UNKNOWN_FIXTURE'}
+                config = {'Image': image, 'Cmd': ['/bin/echo', marker.decode()],
+                          'HostConfig': {'NetworkMode': 'none', 'SecurityOpt': [profile(invalid)]}}
+                status, raw = session.request('POST', API + '/containers/create?name=' + invalid_name, config)
+                self.assertIn(status, (201, 400, 500), raw)
+                if status == 201:
+                    status, raw = session.request('POST', path + '/start')
+                    self.assertIn(status, (400, 500), raw)
+                    self.assertRegex(json.loads(raw)['message'].lower(), r'seccomp|action')
+                    status, observed = session.request('GET', path + '/logs?stdout=true')
+                    self.assertIn(status, (200, 404), observed)
+                    self.assertNotIn(marker, observed)
+                else:
+                    self.assertRegex(json.loads(raw)['message'].lower(), r'seccomp|action')
+                    self.assertEqual(session.request('GET', path + '/json')[0], 404)
+            finally:
+                status, raw = session.request('DELETE', path + '?force=true')
+                self.assertIn(status, (204, 404), raw)
+        session.record({'allowed_operation': 'echo', 'denied_syscall': 'uname',
+                        'errno': 'EPERM', 'invalid_profile_blocked_before_exec': True})
 
     def test_namespace_sharing(self):
         'DC-024: Verify private, host and container PID and IPC modes against guest identities without contaminating supervisor namespaces.'

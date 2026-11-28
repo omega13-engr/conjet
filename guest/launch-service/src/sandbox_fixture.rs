@@ -59,6 +59,7 @@ pub(crate) struct Sandbox {
     buildkit_registry: bool,
     policy: WorkloadPolicy,
     docker_net_admin: bool,
+    syscall_denials: Vec<crate::spec::SyscallDenial>,
 }
 
 enum RootMode {
@@ -605,6 +606,7 @@ impl Sandbox {
                 buildkit_registry: oci.is_some_and(LaunchSpec::buildkit_registry),
                 policy,
                 docker_net_admin: oci.is_some_and(|spec| spec.docker_net_admin),
+                syscall_denials: oci.map_or_else(Vec::new, |spec| spec.syscall_denials.clone()),
             })
         })();
         if setup.is_err() {
@@ -890,6 +892,10 @@ impl Sandbox {
         )?;
         before_filter()?;
         step("exec signals", security::prepare_exec_signals())?;
+        step(
+            "seccomp syscall denials",
+            security::install_syscall_denials(&self.syscall_denials),
+        )?;
         step("seccomp", self.filter.install())
     }
 

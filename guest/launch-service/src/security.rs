@@ -649,6 +649,38 @@ impl WorkloadFilter {
     }
 }
 
+pub(crate) fn install_syscall_denials(denials: &[crate::spec::SyscallDenial]) -> io::Result<()> {
+    use crate::spec::DeniedSyscall;
+
+    if denials.is_empty() {
+        return Ok(());
+    }
+    let op = |code, k, jt, jf| libc::sock_filter { code, jt, jf, k };
+    let mut program = vec![
+        op(BPF_LOAD_WORD, 4, 0, 0),
+        op(BPF_JUMP_EQUAL, AUDIT_ARCH_AARCH64, 1, 0),
+        op(BPF_RETURN, RET_KILL_PROCESS, 0, 0),
+        op(BPF_LOAD_WORD, 0, 0, 0),
+    ];
+    for denial in denials {
+        let number = match denial.name {
+            DeniedSyscall::Uname => libc::SYS_uname,
+            DeniedSyscall::Getpid => libc::SYS_getpid,
+            DeniedSyscall::Getppid => libc::SYS_getppid,
+            DeniedSyscall::Getuid => libc::SYS_getuid,
+            DeniedSyscall::Geteuid => libc::SYS_geteuid,
+            DeniedSyscall::Getgid => libc::SYS_getgid,
+            DeniedSyscall::Getegid => libc::SYS_getegid,
+            DeniedSyscall::Sysinfo => libc::SYS_sysinfo,
+        };
+        program.push(op(BPF_JUMP_EQUAL, number as u32, 0, 1));
+        program.push(op(BPF_RETURN, RET_ERRNO | u32::from(denial.errno), 0, 0));
+    }
+    // All other calls still pass through the base workload seccomp filter.
+    program.push(op(BPF_RETURN, RET_ALLOW, 0, 0));
+    WorkloadFilter { program }.install()
+}
+
 pub(crate) fn checked(result: libc::c_int) -> io::Result<()> {
     if result == 0 {
         Ok(())

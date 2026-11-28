@@ -136,6 +136,8 @@ pub struct LaunchSpec {
     pub docker_default_capabilities: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub docker_net_admin: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub syscall_denials: Vec<SyscallDenial>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub memory_swap_disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +164,28 @@ impl OpenFilesLimit {
         self.soft <= self.hard && self.hard <= Self::MAXIMUM
     }
 }
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeniedSyscall {
+    Uname,
+    Getpid,
+    Getppid,
+    Getuid,
+    Geteuid,
+    Getgid,
+    Getegid,
+    Sysinfo,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SyscallDenial {
+    pub name: DeniedSyscall,
+    pub errno: u16,
+}
+
+pub const MAX_SYSCALL_DENIALS: usize = 8;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -469,6 +493,8 @@ pub enum SpecError {
     BuildSnapshot,
     #[error("resource limits exceed the native launch profile")]
     Resources,
+    #[error("invalid restrictive native seccomp profile")]
+    Seccomp,
 }
 
 impl SpecError {
@@ -811,6 +837,18 @@ impl LaunchSpec {
                 return Err(SpecError::Environment);
             }
         }
+        if spec.syscall_denials.len() > MAX_SYSCALL_DENIALS
+            || (!spec.syscall_denials.is_empty()
+                && (!search_path || spec.build_snapshot.is_some() || spec.buildkit_worker))
+            || spec.syscall_denials.iter().enumerate().any(|(i, rule)| {
+                !(1..=4095).contains(&rule.errno)
+                    || spec.syscall_denials[..i]
+                        .iter()
+                        .any(|other| other.name == rule.name)
+            })
+        {
+            return Err(SpecError::Seccomp);
+        }
         if (spec.docker_default_capabilities || spec.docker_net_admin)
             && (!search_path || spec.build_snapshot.is_some() || spec.buildkit_worker)
         {
@@ -949,6 +987,7 @@ mod tests {
                 docker_resource_defaults: false,
                 docker_default_capabilities: false,
                 docker_net_admin: false,
+                syscall_denials: Vec::new(),
                 memory_swap_disabled: false,
                 open_files_limit: None,
                 open_stdin: false,

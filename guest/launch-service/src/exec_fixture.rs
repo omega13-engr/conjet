@@ -654,6 +654,7 @@ pub fn run_helper(
             }
             checked(unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) as i32 })?;
             security::prepare_exec_signals()?;
+            security::install_syscall_denials(&spec.syscall_denials)?;
             filter.install()
         })();
         if setup.is_err() {

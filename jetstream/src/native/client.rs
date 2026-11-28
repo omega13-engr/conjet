@@ -624,6 +624,7 @@ fn execute(
         docker_resource_defaults: false,
         docker_default_capabilities: false,
         docker_net_admin: false,
+        syscall_denials: Vec::new(),
         memory_swap_disabled: false,
         open_files_limit: None,
         open_stdin: false,
