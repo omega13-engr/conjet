@@ -104,6 +104,8 @@
       "acceptance": "Write a checksum to a container layer; restart engine; start same container and verify bytes and metadata.",
       "test_file": "cases/test_lifecycle.py",
       "test_name": "test_durable_container",
+      "required_restarts": 1,
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
@@ -116,6 +118,8 @@
       "acceptance": "Local image aliases resolve to the same image after engine restart.",
       "test_file": "cases/test_lifecycle.py",
       "test_name": "test_durable_tags",
+      "required_restarts": 2,
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

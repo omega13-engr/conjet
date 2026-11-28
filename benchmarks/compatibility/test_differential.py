@@ -95,6 +95,17 @@ class LaneCaseTests(unittest.TestCase):
         with patch.object(run.CaseSession, 'resources', side_effect=[before, after]):
             return run.execute_case(fixture, None, timeout)
 
+    def test_restart_cleanup_only_allows_default_bridge_id_to_change(self):
+        bridge = {'Name': 'bridge', 'Driver': 'bridge', 'Scope': 'local', 'Internal': False}
+        custom = {**bridge, 'Name': 'fixture-net'}
+        first = {'networks': [('before', bridge), ('custom', custom)]}
+        second = {'networks': [('after', bridge), ('custom', custom)]}
+        self.assertEqual(run.ignore_engine_bridge_recreation(first), run.ignore_engine_bridge_recreation(second))
+        for changed in ({'networks': [('after', {**bridge, 'Internal': True}), ('custom', custom)]},
+                        {'networks': [('after', bridge), ('other', custom)]}):
+            self.assertNotEqual(run.ignore_engine_bridge_recreation(first),
+                                run.ignore_engine_bridge_recreation(changed))
+
     def test_timeout_records_failure_and_checks_cleanup(self):
         row = self.execute_fixture(lambda: time.sleep(1), timeout=0.02)
         self.assertFalse(row['passed'])

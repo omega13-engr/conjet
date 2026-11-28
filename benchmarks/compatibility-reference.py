@@ -118,6 +118,19 @@ portForwards:
         def guest(*args, **opts):
             return vm('shell', '--workdir', '/tmp', 'r', *args, **opts).stdout.strip()
 
+        def daemon_pid():
+            pid = guest('sudo', '-n', 'cat', '/run/conjet-reference-dockerd.pid', timeout=10)
+            if (not pid.isdecimal() or int(pid) <= 1 or guest(
+                    'sudo', '-n', 'readlink', f'/proc/{pid}/exe', timeout=10) != f'{remote_dir}/docker/dockerd'):
+                raise RuntimeError('reference dockerd PID file does not identify the private engine')
+            return int(pid)
+
+        def stop_daemon():
+            pid = daemon_pid()
+            guest('sudo', '-n', 'kill', '-TERM', str(pid), timeout=15)
+            daemon.wait(timeout=20)
+            return pid
+
         def lima_ready():
             events = lima_home / 'r/ha.stdout.log'
             if not events.is_file():
@@ -142,19 +155,43 @@ portForwards:
             report['kernel_sha256'] = guest('sudo', '-n', 'sha256sum',
                                            '/boot/vmlinuz-' + report['kernel_release']).split()[0]
             daemon_log = resources.enter_context(receipt.with_suffix('.dockerd.log').open('x'))
-            daemon = subprocess.Popen([lima, '--tty=false', 'shell', '--workdir', '/tmp', 'r',
-                'sudo', '-n', 'env', f'PATH={remote_dir}/docker:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin',
-                f'{remote_dir}/docker/dockerd', '--host', f'unix://{run_path}', '--group', group,
-                '--data-root', '/var/lib/conjet-reference/docker', '--exec-root', '/run/conjet-reference',
-                '--pidfile', '/run/conjet-reference-dockerd.pid'], env=env, stdout=daemon_log, stderr=daemon_log)
-            wait_ready(daemon, lambda: 'API listen on ' + run_path in receipt.with_suffix('.dockerd.log').read_text(),
-                       time.monotonic() + 55, 'foreground dockerd')
             proxy_log = resources.enter_context(receipt.with_suffix('.ssh.log').open('x'))
-            proxy = subprocess.Popen([ssh, '-F', ssh_config, '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
-                '-o', 'ExitOnForwardFailure=yes', '-N', '-L', f'{socket}:{run_path}', 'lima-r'],
-                env=env, stdout=proxy_log, stderr=proxy_log)
-            wait_ready(proxy, socket.is_socket, time.monotonic() + 12, 'SSH Unix forward')
-            client = DockerConnection(socket, root, production_sockets(docker), proxy.pid)
+            forbidden = production_sockets(docker)
+
+            def start_daemon():
+                nonlocal daemon
+                offset = receipt.with_suffix('.dockerd.log').stat().st_size
+                daemon = subprocess.Popen([lima, '--tty=false', 'shell', '--workdir', '/tmp', 'r',
+                    'sudo', '-n', 'env', f'PATH={remote_dir}/docker:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin',
+                    f'{remote_dir}/docker/dockerd', '--host', f'unix://{run_path}', '--group', group,
+                    '--data-root', '/var/lib/conjet-reference/docker', '--exec-root', '/run/conjet-reference',
+                    '--pidfile', '/run/conjet-reference-dockerd.pid'], env=env, stdout=daemon_log, stderr=daemon_log)
+                wait_ready(daemon, lambda: ('API listen on ' + run_path).encode() in
+                           receipt.with_suffix('.dockerd.log').read_bytes()[offset:],
+                           time.monotonic() + 55, 'foreground dockerd')
+
+            def start_proxy():
+                nonlocal proxy
+                proxy = subprocess.Popen([ssh, '-F', ssh_config, '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+                    '-o', 'ExitOnForwardFailure=yes', '-N', '-L', f'{socket}:{run_path}', 'lima-r'],
+                    env=env, stdout=proxy_log, stderr=proxy_log)
+                wait_ready(proxy, socket.is_socket, time.monotonic() + 12, 'SSH Unix forward')
+
+            def restart_engine():
+                previous = stop_daemon()
+                terminate(proxy)
+                socket.unlink(missing_ok=True)
+                start_daemon()
+                current = daemon_pid()
+                if current == previous:
+                    raise RuntimeError('reference Docker engine did not replace its private daemon')
+                report.setdefault('daemon_restarts', []).append({'before_pid': previous, 'after_pid': current})
+                start_proxy()
+                return DockerConnection(socket, root, forbidden, proxy.pid)
+
+            start_daemon()
+            start_proxy()
+            client = DockerConnection(socket, root, forbidden, proxy.pid)
             report['identity'] = client.capture(ssh)
             expected = {'Version': '29.10.1', 'ApiVersion': '1.57', 'Os': 'linux', 'Arch': 'arm64',
                         'KernelVersion': report['kernel_release'], 'platform': 'Docker Engine - Community'}
@@ -165,7 +202,8 @@ portForwards:
             if not report['rootful']:
                 raise RuntimeError('reference Docker socket is not root-owned')
             if args.profile:
-                report['compatibility'] = record_lane(args.profile, client, ssh, report['identity'])
+                report['compatibility'] = record_lane(args.profile, client, ssh, report['identity'],
+                                                      restart_engine=restart_engine)
             if args.direct_egress_ip:
                 config = root / 'docker-config'
                 config.mkdir(mode=0o700)
@@ -186,10 +224,7 @@ portForwards:
         finally:
             try:
                 if daemon is not None and daemon.poll() is None:
-                    pid = guest('sudo', '-n', 'cat', '/run/conjet-reference-dockerd.pid',
-                                checked=False, timeout=10)
-                    if pid.isdecimal() and int(pid) > 1:
-                        guest('sudo', '-n', 'kill', '-TERM', pid, checked=False, timeout=15)
+                    stop_daemon()
                 if proxy is not None:
                     terminate(proxy)
                 if daemon is not None:

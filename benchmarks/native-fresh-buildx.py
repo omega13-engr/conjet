@@ -222,7 +222,12 @@ def qualify(args, root, report):
                 for path in sorted(native_core.rglob('*')) if path.is_file()
             }
             if args.compatibility_profile:
-                lane = record_lane(args.compatibility_profile, client, core, report['identity'])
+                def restart_engine():
+                    LAUNCH['daemon_request'](control, proc.pid, 'vm-stop', timeout=30)
+                    return DockerConnection(endpoint, root, client.forbidden, start())
+
+                lane = record_lane(args.compatibility_profile, client, core, report['identity'],
+                                   restart_engine=restart_engine)
                 report['compatibility'] = lane
                 report['passed'] = (lane['endpoint_verified_after'] and bool(lane['cases'])
                                     and all(row['passed'] for row in lane['cases'].values()))
@@ -488,7 +493,7 @@ def qualify(args, root, report):
         ready_path = home / 'logs/native-boot.jsonl'
         if ready_path.is_file():
             try:
-                ready = json.loads(ready_path.read_text().splitlines()[0])
+                ready = json.loads(ready_path.read_text().splitlines()[-1])
                 session = Path(ready['session'])
                 if session.parent != home / 'run' or LAUNCH['processes']().get(ready['pid']) != core:
                     raise RuntimeError('diagnostic session ownership changed')

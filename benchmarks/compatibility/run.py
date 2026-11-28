@@ -55,6 +55,9 @@ def validate(matrix, root=HERE):
                 isinstance(node, ast.FunctionDef) and node.name == case['test_name']
                 for node in classes[0].body):
             raise ValueError('missing test method: ' + case['id'])
+        restarts = case.get('required_restarts', 0)
+        if type(restarts) is not int or not 0 <= restarts <= 8:
+            raise ValueError('invalid restart count: ' + case['id'])
         if not case['acceptance'].strip():
             raise ValueError('missing acceptance: ' + case['id'])
     if not seen:
@@ -81,9 +84,17 @@ def load_tests():
 
 
 class CaseSession:
-    def __init__(self, connection):
+    def __init__(self, connection, restart=None):
         self.connection = connection
+        self._restart = restart
+        self.restarts = 0
         self.observation = None
+
+    def restart_engine(self):
+        if self._restart is None:
+            raise RuntimeError('launcher did not provide verified engine restart')
+        self.connection = self._restart()
+        self.restarts += 1
 
     def request(self, method, path, body=None):
         payload = json.dumps(body).encode() if body is not None else None
@@ -122,13 +133,27 @@ class CaseSession:
                     (item[key], sorted(item.get('RepoTags') or []), sorted(item.get('RepoDigests') or []))
                     for item in items
                 )
+            elif kind == 'networks':
+                fields = ('Name', 'Driver', 'Scope', 'Internal', 'Attachable', 'Ingress',
+                          'EnableIPv6', 'IPAM', 'Options', 'Labels')
+                inventory[kind] = sorted((item[key], {field: item.get(field) for field in fields})
+                                         for item in items)
             else:
                 inventory[kind] = sorted(item[key] for item in items)
         return inventory
 
 
-def execute_case(test, connection, timeout):
-    session = CaseSession(connection)
+def ignore_engine_bridge_recreation(inventory):
+    networks = sorted(
+        ('default-bridge' if metadata['Name'] == metadata['Driver'] == 'bridge'
+         and metadata['Scope'] == 'local' else identifier, metadata)
+        for identifier, metadata in inventory['networks']
+    )
+    return {**inventory, 'networks': networks}
+
+
+def execute_case(test, connection, timeout, restart=None):
+    session = CaseSession(connection, restart)
     row = {'passed': False, 'cleanup': False}
     started = time.monotonic()
 
@@ -160,6 +185,13 @@ def execute_case(test, connection, timeout):
             if baseline is not None:
                 after = session.resources()
                 row['cleanup'] = after == baseline
+                if session.restarts and not row['cleanup']:
+                    # Dockerd rebuilds the system bridge on restart. Compare
+                    # its full configuration and every custom network ID.
+                    row['cleanup'] = (ignore_engine_bridge_recreation(after)
+                                      == ignore_engine_bridge_recreation(baseline))
+                    if row['cleanup']:
+                        row['engine_managed_bridge_recreated'] = True
                 if not row['cleanup']:
                     row['resources'] = {'before': baseline, 'after': after}
         except (ValueError, KeyError, OSError, http.client.HTTPException, RuntimeError) as error:
@@ -181,7 +213,14 @@ def runner_hashes():
     return {file: sha256(HERE / file) for file in RUNNER_FILES}
 
 
-def record_lane(profile, connection, executable, identity, timeout=60):
+def same_engine_new_peer(before, after):
+    old, new = before['endpoint'], after['endpoint']
+    return (all(new[key] == old[key] for key in ('path', 'peer_path', 'peer_sha256'))
+            and new['peer_pid'] != old['peer_pid']
+            and after['version'] == before['version'])
+
+
+def record_lane(profile, connection, executable, identity, timeout=60, restart_engine=None):
     matrix = sha256(MATRIX)
     harness = runner_hashes()
     selected = selection(profile)
@@ -193,12 +232,32 @@ def record_lane(profile, connection, executable, identity, timeout=60):
     start = connection.capture(executable)
     if start != identity:
         raise RuntimeError('Docker endpoint changed before running the compatibility lane')
+    live = start
+    transitions = []
+
+    def restart():
+        nonlocal connection, live
+        if connection.capture(executable) != live:
+            raise RuntimeError('Docker endpoint changed before the fixture restart')
+        previous = live
+        connection = restart_engine()
+        live = connection.capture(executable)
+        if not same_engine_new_peer(previous, live):
+            raise RuntimeError('restart did not restore the same engine in a new process')
+        transitions.append({'case': case['id'], 'before': previous, 'after': live})
+        return connection
+
     for case in selected:
         key = Path(case['test_file']).stem + '.' + case['test_name']
         fixture = fixtures[case['id']]
         if case_hash(case) != fixture:
             raise RuntimeError(f"fixture changed before running {case['id']}")
-        row = execute_case(tests[key], connection, timeout)
+        prior_restarts = len(transitions)
+        row = execute_case(tests[key], connection, timeout, restart if restart_engine else None)
+        count = len(transitions) - prior_restarts
+        if count != case.get('required_restarts', 0):
+            row['passed'] = False
+            row['restart_error'] = f"expected {case.get('required_restarts', 0)} verified restarts, got {count}"
         row['fixture_sha256'] = fixture
         rows[case['id']] = row
         if row.get('interrupted') or not row['cleanup']:
@@ -207,7 +266,7 @@ def record_lane(profile, connection, executable, identity, timeout=60):
             or any(case_hash(case) != fixtures[case['id']] for case in selected)):
         raise RuntimeError('compatibility harness changed while running the lane')
     return {'profile': profile, 'matrix_sha256': matrix, 'harness_sha256': harness, 'cases': rows,
-            'endpoint_verified_after': connection.capture(executable) == start}
+            'restarts': transitions, 'endpoint_verified_after': connection.capture(executable) == live}
 
 
 def compare(profile, candidate, reference):
@@ -254,12 +313,30 @@ def compare(profile, candidate, reference):
         raise ValueError('launcher artifact identity is incomplete or mismatched')
     receipt['identities'] = {'candidate': left, 'reference': right}
     receipt['artifacts'] = artifacts
-    for key in expected:
+    restart_counts = []
+    receipt['restarts'] = {}
+    for role, report in (('candidate', candidate), ('reference', reference)):
+        transitions = report['compatibility'].get('restarts', [])
+        latest = report['identity']
+        counts = {}
+        for transition in transitions:
+            key, before, after = (transition[field] for field in ('case', 'before', 'after'))
+            if key not in expected or before != latest or not same_engine_new_peer(before, after):
+                raise ValueError('unexpected restart evidence for ' + role)
+            counts[key] = counts.get(key, 0) + 1
+            latest = after
+        restart_counts.append(counts)
+        receipt['restarts'][role] = transitions
+
+    for case in selected:
+        key = case['id']
         a, b = (report['compatibility']['cases'][key] for report in (candidate, reference))
         observations = [json.dumps(row.get('observation'), sort_keys=True, allow_nan=False)
                         for row in (a, b)]
         receipt['cases'][key] = {
             'passed': (a.get('passed') is True and b.get('passed') is True
+                       and all(counts.get(key, 0) == case.get('required_restarts', 0)
+                               for counts in restart_counts)
                        and a.get('cleanup') is True and b.get('cleanup') is True
                        and bool(a.get('observation')) and observations[0] == observations[1]),
             'candidate': a, 'reference': b,

@@ -1960,11 +1960,17 @@ impl Owner {
                 "image config belongs to several registry references".into(),
             ));
         }
-        if (owned.is_none() && !ledger.active.is_empty()) || self.boot_reference(reference) {
-            return Err(Rejected(
-                409,
-                "image is referenced by the boot or a container".into(),
-            ));
+        if self.boot_reference(reference) {
+            return Err(Rejected(409, "image is referenced by the boot".into()));
+        }
+        if owned.is_none() {
+            // A removed local tag is not a request to resolve a registry pull.
+            if !reference.contains('@') {
+                return Err(Rejected(404, "image is not staged".into()));
+            }
+            if !ledger.active.is_empty() {
+                return Err(Rejected(409, "image is referenced by a container".into()));
+            }
         }
         let mut store = self.image_store(&ledger)?;
         let image = store

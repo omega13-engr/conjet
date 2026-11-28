@@ -1,20 +1,103 @@
 """Lifecycle conformance fixtures and pending contracts."""
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 from threading import Barrier
 import unittest
 from urllib.parse import quote, urlencode
 import uuid
 
+from support import API, alpine, container, exec_command
+
 
 class CompatibilityTests(unittest.TestCase):
     def test_durable_container(self):
         'DC-007: Write a checksum to a container layer; restart engine; start same container and verify bytes and metadata.'
-        self.fail('UNIMPLEMENTED DC-007; no runtime compatibility evidence')
+        session = self.compatibility
+        token = uuid.uuid4().hex
+        name = 'conjet-durable-container-' + token
+        label = {'dev.conjet.fixture': 'durable-container'}
+        content = b'container-rootfs-canary\n'
+        checksum = hashlib.sha256(content).hexdigest().encode()
+
+        def start(path):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+
+        with alpine(self, session) as image, container(self, session, name, {
+                'Image': image, 'Cmd': ['/bin/sleep', '120'], 'Labels': label,
+                'HostConfig': {'NetworkMode': 'none'},
+        }) as (path, identifier):
+            start(path)
+            result = exec_command(self, session, path, ['/bin/sh', '-c',
+                                  "printf '%s\\n' container-rootfs-canary >/tmp/canary; sync"])
+            self.assertEqual(result, (0, b'', b''))
+            status, raw = session.request('POST', path + '/stop?t=1')
+            self.assertEqual(status, 204, raw)
+            session.restart_engine()
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            inspect = json.loads(raw)
+            self.assertEqual(inspect['Id'], identifier)
+            self.assertEqual(inspect['Name'], '/' + name)
+            self.assertEqual(inspect['Config']['Labels'], label)
+            self.assertIs(inspect['State']['Running'], False)
+            start(path)
+            result = exec_command(self, session, path, ['/bin/sh', '-c', 'sha256sum /tmp/canary'])
+            self.assertEqual(result, (0, checksum + b'  /tmp/canary\n', b''))
+        session.record({'layer_sha256': checksum.decode(), 'same_container': True, 'labels': label})
 
     def test_durable_tags(self):
         'DC-008: Local image aliases resolve to the same image after engine restart.'
-        self.fail('UNIMPLEMENTED DC-008; no runtime compatibility evidence')
+        session = self.compatibility
+        repository = 'conjet-durable-tags-' + uuid.uuid4().hex
+        image_path = API + '/images/'
+        alias_paths = [image_path + repository + ':' + tag for tag in ('first', 'second')]
+
+        def inspect(path):
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            return json.loads(raw)
+
+        with alpine(self, session) as reference:
+            source = image_path + quote(reference, safe='')
+            original = inspect(source)['Id']
+            try:
+                for tag in ('first', 'second'):
+                    tagged, raw = session.request('POST', source + '/tag?' + urlencode({
+                        'repo': repository, 'tag': tag,
+                    }))
+                    self.assertEqual(tagged, 201, raw)
+                for path in alias_paths:
+                    self.assertEqual(inspect(path)['Id'], original)
+
+                session.restart_engine()
+                for path in alias_paths:
+                    self.assertEqual(inspect(path)['Id'], original)
+                self.assertEqual(inspect(source)['Id'], original)
+                with container(self, session, repository, {
+                        'Image': repository + ':first', 'Cmd': ['/bin/echo', 'tag-restored'],
+                        'HostConfig': {'NetworkMode': 'none'},
+                }) as (path, _):
+                    self.assertEqual(session.request('POST', path + '/start')[0], 204)
+                    status, raw = session.request('POST', path + '/wait?condition=not-running')
+                    self.assertEqual(status, 200, raw)
+                    self.assertEqual(json.loads(raw)['StatusCode'], 0)
+                    status, raw = session.request('GET', path + '/logs?stdout=true&follow=false')
+                    self.assertEqual(status, 200, raw)
+                    self.assertEqual(raw, b'\x01\0\0\0\0\0\0\x0dtag-restored\n')
+
+                self.assertEqual(session.request('DELETE', alias_paths[1])[0], 200)
+                session.restart_engine()
+                self.assertEqual(session.request('GET', alias_paths[1] + '/json')[0], 404)
+                self.assertEqual(inspect(alias_paths[0])['Id'], original)
+                self.assertEqual(inspect(source)['Id'], original)
+            finally:
+                for path in alias_paths:
+                    status, raw = session.request('DELETE', path)
+                    self.assertIn(status, (200, 404), raw)
+        session.record({'both_aliases_restored': True, 'alias_executed': True,
+                        'deleted_alias_stayed_absent': True, 'original_image_retained': True})
 
     def test_restart_policy(self):
         'DC-009: Verify no, always, unless-stopped and on-failure across exit, explicit stop and engine restart.'
