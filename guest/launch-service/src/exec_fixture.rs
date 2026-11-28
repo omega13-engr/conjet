@@ -626,6 +626,7 @@ pub fn run_helper(
             security::set_process_limits(
                 security::BUILDKIT_OPEN_FILES,
                 security::BUILDKIT_FILE_SIZE,
+                spec.open_files_limit,
             )?;
             security::drop_workload_identity(
                 spec.uid,

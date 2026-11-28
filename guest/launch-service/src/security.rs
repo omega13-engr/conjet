@@ -133,7 +133,7 @@ pub(crate) const DEFAULT_OPEN_FILES: u64 = 32;
 pub(crate) const DEFAULT_FILE_SIZE: u64 = 16 * 1024 * 1024;
 // Docker does not impose the launch fixture's descriptor or file-size limits.
 // Memory/tasks remain governed by the workload cgroup and the private VM/disk.
-pub(crate) const BUILDKIT_OPEN_FILES: u64 = 1_048_576;
+pub(crate) const BUILDKIT_OPEN_FILES: u64 = crate::spec::OpenFilesLimit::MAXIMUM;
 pub(crate) const BUILDKIT_FILE_SIZE: u64 = libc::RLIM_INFINITY;
 // The pinned Redis server's default client limit requires this many
 // descriptors. Its cgroup still bounds memory, CPU and tasks.
@@ -154,15 +154,23 @@ pub(crate) fn prepare_open_files(maximum: u64) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn set_process_limits(open_files: u64, file_size: u64) -> io::Result<()> {
-    for (resource, maximum) in [
-        (libc::RLIMIT_CORE, 0),
-        (libc::RLIMIT_NOFILE, open_files),
-        (libc::RLIMIT_FSIZE, file_size),
+pub(crate) fn set_process_limits(
+    open_files: u64,
+    file_size: u64,
+    open_files_limit: Option<crate::spec::OpenFilesLimit>,
+) -> io::Result<()> {
+    let open_files = open_files_limit.unwrap_or(crate::spec::OpenFilesLimit {
+        soft: open_files,
+        hard: open_files,
+    });
+    for (resource, soft, hard) in [
+        (libc::RLIMIT_CORE, 0, 0),
+        (libc::RLIMIT_NOFILE, open_files.soft, open_files.hard),
+        (libc::RLIMIT_FSIZE, file_size, file_size),
     ] {
         let bounds = libc::rlimit {
-            rlim_cur: maximum,
-            rlim_max: maximum,
+            rlim_cur: soft,
+            rlim_max: hard,
         };
         checked(unsafe { libc::setrlimit(resource, &bounds) })?;
     }

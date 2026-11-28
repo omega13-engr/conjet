@@ -39,6 +39,7 @@ pub(crate) struct Sandbox {
     new_root: CString,
     root: RootMode,
     rootfs_read_only: bool,
+    open_files_limit: Option<crate::spec::OpenFilesLimit>,
     _retained_layer: Option<crate::workload_layers::Layer>,
     cwd: CString,
     filter: WorkloadFilter,
@@ -544,6 +545,7 @@ impl Sandbox {
                     ))?),
                 },
                 rootfs_read_only: oci.is_some_and(|spec| spec.rootfs_read_only),
+                open_files_limit: oci.and_then(|spec| spec.open_files_limit),
                 _retained_layer: retained,
                 filter: WorkloadFilter::new(
                     bridge,
@@ -841,7 +843,7 @@ impl Sandbox {
         };
         step(
             "resource limits",
-            security::set_process_limits(open_files, file_size),
+            security::set_process_limits(open_files, file_size, self.open_files_limit),
         )?;
         step(
             "credentials and capabilities",

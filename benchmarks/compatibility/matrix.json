@@ -408,6 +408,7 @@
       "acceptance": "Fork and file-open fixtures hit configured PID and descriptor limits without exhausting guest.",
       "test_file": "cases/test_limits.py",
       "test_name": "test_pids_ulimits",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

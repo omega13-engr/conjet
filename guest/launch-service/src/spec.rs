@@ -132,12 +132,29 @@ pub struct LaunchSpec {
     pub docker_default_capabilities: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub memory_swap_disabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_files_limit: Option<OpenFilesLimit>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub open_stdin: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub redis_bootstrap: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub buildkit_worker: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenFilesLimit {
+    pub soft: u64,
+    pub hard: u64,
+}
+
+impl OpenFilesLimit {
+    pub const MAXIMUM: u64 = 1_048_576;
+
+    pub fn valid(self) -> bool {
+        self.soft <= self.hard && self.hard <= Self::MAXIMUM
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -780,6 +797,9 @@ impl LaunchSpec {
                     .is_none_or(|snapshot| snapshot.live_worker),
         ) || (spec.memory_swap_disabled
             && (!search_path || spec.build_snapshot.is_some() || spec.limits.memory_bytes == 0))
+            || spec.open_files_limit.is_some_and(|limit| {
+                !search_path || spec.build_snapshot.is_some() || !limit.valid()
+            })
         {
             return Err(SpecError::Resources);
         }
@@ -848,6 +868,7 @@ mod tests {
                 docker_resource_defaults: false,
                 docker_default_capabilities: false,
                 memory_swap_disabled: false,
+                open_files_limit: None,
                 open_stdin: false,
                 redis_bootstrap: false,
                 buildkit_worker: false,

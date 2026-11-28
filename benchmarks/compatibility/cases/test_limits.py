@@ -5,7 +5,7 @@ import time
 import unittest
 import uuid
 
-from support import API, alpine, container, exec_command
+from support import API, alpine, container, demultiplex, exec_command
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -177,7 +177,72 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_pids_ulimits(self):
         'DC-030: Fork and file-open fixtures hit configured PID and descriptor limits without exhausting guest.'
-        self.fail('UNIMPLEMENTED DC-030; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-ulimits-' + uuid.uuid4().hex
+        pids, soft, hard = 8, 32, 48
+        run = r'''
+            i=0
+            while [ "$i" -lt 12 ]; do
+                sleep 30 &
+                i=$((i+1))
+                printf 'child %s\n' "$i"
+            done
+            wait
+        '''
+        descriptor_probe = r'''
+            ulimit -Sn; ulimit -Hn
+            i=0
+            while [ "$i" -lt 64 ]; do
+                printf '%s\n' "$i" > "/tmp/conjet-fd-$i" || exit 2
+                i=$((i+1))
+            done
+            exec awk 'BEGIN {
+                for (i=0; i<64; i++) {
+                    path="/tmp/conjet-fd-" i;
+                    if ((getline value < path) != 1) {print "opened", i; exit 0}
+                    if (value != i) exit 2;
+                }
+                exit 3;
+            }'
+        '''
+
+        with alpine(self, session) as image, container(self, session, name, {
+                'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                'HostConfig': {'NetworkMode': 'none', 'PidsLimit': pids,
+                               'Ulimits': [{'Name': 'nofile', 'Soft': soft, 'Hard': hard}]},
+        }) as (path, _):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            config = json.loads(raw)['HostConfig']
+            self.assertEqual(config['PidsLimit'], pids)
+            self.assertIn({'Name': 'nofile', 'Soft': soft, 'Hard': hard}, config['Ulimits'])
+            code, output, error = exec_command(self, session, path, [
+                '/usr/bin/awk', '/^Max open files/{print $4, $5}', '/proc/1/limits',
+            ])
+            self.assertEqual((code, output, error), (0, f'{soft} {hard}\n'.encode(), b''))
+            code, output, error = exec_command(self, session, path, ['/bin/sh', '-c', descriptor_probe])
+            self.assertEqual((code, output, error), (0, f'{soft}\n{hard}\nopened {soft - 3}\n'.encode(), b''))
+
+            with container(self, session, name + '-fork', {
+                    'Image': image, 'Cmd': ['/bin/sh', '-c', run],
+                    'HostConfig': {'NetworkMode': 'none', 'PidsLimit': pids},
+            }) as (fork_path, _):
+                status, raw = session.request('POST', fork_path + '/start')
+                self.assertEqual(status, 204, raw)
+                status, raw = session.request('POST', fork_path + '/wait?condition=not-running')
+                self.assertEqual(status, 200, raw)
+                self.assertNotEqual(json.loads(raw)['StatusCode'], 0)
+                status, raw = session.request('GET', fork_path + '/logs?stdout=true&stderr=true')
+                self.assertEqual(status, 200, raw)
+                output, error = demultiplex(self, raw)
+                self.assertEqual(output.splitlines(), [f'child {i}'.encode() for i in range(1, pids)])
+                self.assertIn(b'Resource temporarily unavailable', error)
+            code, output, error = exec_command(self, session, path, ['/bin/echo', 'healthy'])
+            self.assertEqual((code, output, error), (0, b'healthy\n', b''))
+        session.record({'pid_ceiling': pids, 'fork_denied_at_ceiling': True,
+                        'nofile_soft': soft, 'nofile_hard': hard, 'file_open_denied': True})
 
     def test_transactional_update(self):
         'DC-031: Invalid multi-field update leaves all previously effective limits unchanged.'

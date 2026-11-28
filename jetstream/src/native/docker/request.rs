@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::{ensure, Context};
 use conjet_launch_service::handshake::unhex;
 use conjet_launch_service::spec::{
-    parse_cpu_set, Account, CpuBandwidth, LaunchSpec, ResourceLimits, CPU_PERIOD_US, WORKLOAD_GID,
-    WORKLOAD_UID,
+    parse_cpu_set, Account, CpuBandwidth, LaunchSpec, OpenFilesLimit, ResourceLimits,
+    CPU_PERIOD_US, WORKLOAD_GID, WORKLOAD_UID,
 };
 use serde_json::{json, Map, Value};
 
@@ -209,6 +209,7 @@ impl Image {
                 "CpuQuota",
                 "CpusetCpus",
                 "PidsLimit",
+                "Ulimits",
                 "AutoRemove",
                 "ConsoleSize",
                 "RestartPolicy",
@@ -329,6 +330,7 @@ impl Image {
             docker_resource_defaults: limits.has_unlimited(),
             docker_default_capabilities: host["CapDrop"] != json!(["ALL"]),
             memory_swap_disabled,
+            open_files_limit: open_files_limit(&host["Ulimits"])?,
             open_stdin,
             redis_bootstrap: false,
             buildkit_worker: false,
@@ -367,6 +369,32 @@ pub(super) fn resource_options(host: &Value) -> Result<ResourceOptions, Rejected
         limits,
         disable_swap,
     })
+}
+
+fn open_files_limit(value: &Value) -> Result<Option<OpenFilesLimit>, Rejected> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let options = value
+        .as_array()
+        .ok_or_else(|| Rejected::bad("expected a Docker Ulimits array"))?;
+    let option = match options.as_slice() {
+        [] => return Ok(None),
+        [option] if option["Name"] == "nofile" => option,
+        _ => return Err(Rejected::bad("only a single nofile ulimit is supported")),
+    };
+    let limit = OpenFilesLimit {
+        soft: option["Soft"]
+            .as_u64()
+            .ok_or_else(|| Rejected::bad("invalid nofile soft limit"))?,
+        hard: option["Hard"]
+            .as_u64()
+            .ok_or_else(|| Rejected::bad("invalid nofile hard limit"))?,
+    };
+    if !limit.valid() {
+        return Err(Rejected::bad("invalid nofile bounds"));
+    }
+    Ok(Some(limit))
 }
 
 fn resources(host: &Value) -> Result<ResourceLimits, Rejected> {

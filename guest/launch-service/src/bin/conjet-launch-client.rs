@@ -45,6 +45,7 @@ fn launch(
             docker_resource_defaults: false,
             docker_default_capabilities: false,
             memory_swap_disabled: false,
+            open_files_limit: None,
             open_stdin: false,
             redis_bootstrap: false,
             buildkit_worker: false,

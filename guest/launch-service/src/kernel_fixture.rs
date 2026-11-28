@@ -471,7 +471,10 @@ fn clone_and_reap(
         return Ok(None);
     }
     if process.is_some_and(|spec| spec.redis_bootstrap) {
-        security::prepare_open_files(security::REDIS_OPEN_FILES)?;
+        let open_files = process
+            .and_then(|spec| spec.open_files_limit)
+            .map_or(security::REDIS_OPEN_FILES, |limit| limit.hard);
+        security::prepare_open_files(open_files)?;
     } else if process.is_some() {
         security::prepare_open_files(security::BUILDKIT_OPEN_FILES)?;
     }

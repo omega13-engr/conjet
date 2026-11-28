@@ -39,14 +39,7 @@ def container(test, session, name, specification):
         test.assertIn(status, (204, 404), data)
 
 
-def exec_command(test, session, container_path, command):
-    status, data = session.request('POST', container_path + '/exec', {
-        'Cmd': command, 'AttachStdout': True, 'AttachStderr': True, 'Tty': False,
-    })
-    test.assertEqual(status, 201, data)
-    path = API + '/exec/' + json.loads(data)['Id']
-    status, data = session.request('POST', path + '/start', {'Detach': False, 'Tty': False})
-    test.assertEqual(status, 200, data)
+def demultiplex(test, data):
     streams = {1: bytearray(), 2: bytearray()}
     offset = 0
     while offset < len(data):
@@ -60,9 +53,21 @@ def exec_command(test, session, container_path, command):
         test.assertLessEqual(offset + size, len(data))
         streams[stream].extend(data[offset:offset + size])
         offset += size
+    return bytes(streams[1]), bytes(streams[2])
+
+
+def exec_command(test, session, container_path, command):
+    status, data = session.request('POST', container_path + '/exec', {
+        'Cmd': command, 'AttachStdout': True, 'AttachStderr': True, 'Tty': False,
+    })
+    test.assertEqual(status, 201, data)
+    path = API + '/exec/' + json.loads(data)['Id']
+    status, data = session.request('POST', path + '/start', {'Detach': False, 'Tty': False})
+    test.assertEqual(status, 200, data)
+    stdout, stderr = demultiplex(test, data)
     status, data = session.request('GET', path + '/json')
     test.assertEqual(status, 200, data)
     inspected = json.loads(data)
     test.assertIs(inspected['Running'], False)
     test.assertIs(type(inspected['ExitCode']), int)
-    return inspected['ExitCode'], bytes(streams[1]), bytes(streams[2])
+    return inspected['ExitCode'], stdout, stderr
