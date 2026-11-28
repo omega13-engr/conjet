@@ -14,9 +14,11 @@ use sha2::{Digest, Sha256};
 
 use crate::native::oci_stage;
 
-pub(super) const LIMIT: usize = 64 * 1024 * 1024;
+// Archive payloads are spooled to private files, not retained in RAM.
+// The OCI store independently enforces its encoding-specific ingest budget.
+pub(super) const LIMIT: usize = 4 * 1024 * 1024 * 1024;
 pub(super) const LOCAL: &str = "conjet.local/archive";
-const MAX_MEMBERS: usize = 128;
+const MAX_MEMBERS: usize = 4 * oci_stage::LAYERS_LIMIT + 16;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -169,7 +171,7 @@ pub(super) fn read(mut file: &File, layer_limit: u64) -> anyhow::Result<Import<'
         .ok()
         .context("expected one Docker image")?;
     ensure!(
-        (1..=16).contains(&record.layers.len()),
+        (1..=oci_stage::LAYERS_LIMIT).contains(&record.layers.len()),
         "invalid Docker archive layer count"
     );
     let config = read_metadata(
@@ -306,4 +308,104 @@ pub(super) fn export(
     );
     spool.rewind()?;
     Ok(spool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_and_oci_manifest_share_the_layer_count_bound() {
+        for count in [17, oci_stage::LAYERS_LIMIT, oci_stage::LAYERS_LIMIT + 1] {
+            let mut builder = tar::Builder::new(tempfile::tempfile().unwrap());
+            let config = b"{}";
+            let name = format!("{}.json", hex(&Sha256::digest(config)));
+            let layers = (0..count)
+                .map(|i| format!("layer-{i}.tar"))
+                .collect::<Vec<_>>();
+            let metadata = serde_json::to_vec(&json!([{"Config":name,"Layers":layers}])).unwrap();
+            for (name, bytes) in [
+                (name.as_str(), config.as_slice()),
+                ("manifest.json", metadata.as_slice()),
+            ]
+            .into_iter()
+            .chain(
+                layers
+                    .iter()
+                    .map(|name| (name.as_str(), b"layer".as_slice())),
+            ) {
+                let mut header = tar::Header::new_ustar();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, name, bytes).unwrap();
+            }
+            let mut file = builder.into_inner().unwrap();
+            file.rewind().unwrap();
+            let result = read(&file, 1024 * 1024);
+            if count > oci_stage::LAYERS_LIMIT {
+                assert!(result.err().unwrap().to_string().contains("layer count"));
+                continue;
+            }
+            let imported = result.unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let blobs = root.path().join("blobs/sha256");
+            std::fs::create_dir_all(&blobs).unwrap();
+            let manifest = imported.manifest.strip_prefix("sha256:").unwrap();
+            let mut output = File::create(blobs.join(manifest)).unwrap();
+            imported.blobs[&imported.manifest]
+                .copy_to(&mut output)
+                .unwrap();
+            assert_eq!(
+                oci_stage::read_manifest(root.path(), &imported.manifest)
+                    .unwrap()
+                    .layers
+                    .len(),
+                count
+            );
+        }
+    }
+
+    #[test]
+    fn large_image_layers_are_file_backed_and_respect_ingest_budget() {
+        let size = 65 * 1024 * 1024;
+        let file = tempfile::tempfile().unwrap();
+        let mut archive = tar::Builder::new(file);
+        let config = b"{}";
+        let name = format!("{}.json", hex(&Sha256::digest(config)));
+        let metadata = serde_json::to_vec(&json!([{
+            "Config": name, "RepoTags":["large:local"], "Layers":["layer.tar"]
+        }]))
+        .unwrap();
+        for (name, bytes) in [
+            (name.as_str(), config.as_slice()),
+            ("manifest.json", metadata.as_slice()),
+        ] {
+            let mut header = tar::Header::new_ustar();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive.append_data(&mut header, name, bytes).unwrap();
+        }
+        let mut header = tar::Header::new_ustar();
+        header.set_size(size);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "layer.tar", io::repeat(0).take(size))
+            .unwrap();
+        let mut file = archive.into_inner().unwrap();
+        file.rewind().unwrap();
+        let image = read(&file, size).unwrap();
+        assert!(image.blobs.values().any(
+            |blob| matches!(blob, Blob::Extent { bytes, .. } if bytes.end - bytes.start == size)
+        ));
+        drop(image);
+        file.rewind().unwrap();
+        assert!(read(&file, size - 1)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("ingest bound"));
+    }
 }

@@ -32,6 +32,9 @@ pub(super) struct Options {
     /// Existing directory in which to create a temporary private session.
     #[arg(long)]
     pub(super) scratch: PathBuf,
+    /// Maximum guest memory; Core continues to grow and reclaim within this ceiling.
+    #[arg(long, default_value_t = 2048, value_parser = clap::value_parser!(u64).range(512..=8192))]
+    memory_mib: u64,
     /// Verified Conjet Core AArch64 Linux Image.
     #[arg(long)]
     kernel: PathBuf,
@@ -299,9 +302,15 @@ pub(super) fn host_monotonic_ns() -> Option<u64> {
     Some(stamp.tv_sec as u64 * 1_000_000_000 + stamp.tv_nsec as u64)
 }
 
+fn default_memory_mib() -> u64 {
+    2048
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Identity {
+    #[serde(default = "default_memory_mib")]
+    pub(super) memory_mib: u64,
     pub(super) pid: libc::pid_t,
     pub(super) image_digest: String,
 }
@@ -405,6 +414,7 @@ pub(super) fn serve(
     );
     let key = random::<32>()?;
     let identity = Identity {
+        memory_mib: options.memory_mib,
         pid: std::process::id().try_into()?,
         image_digest,
     };
@@ -434,7 +444,7 @@ pub(super) fn serve(
         },
     )?;
     let machine = MachineBuilder::new(JetstreamConfig {
-        memory_mib: 2048,
+        memory_mib: options.memory_mib,
         vcpu_count: 2,
         boot_source: BootSource {
             name: if parent.is_some() {
@@ -898,6 +908,9 @@ fn build_archive(
     append("dev/console", 0o020600, &[], 5, 1, 0, 0)?;
     append("dev/null", 0o020666, &[], 1, 3, 0, 0)?;
     append("dev/zero", 0o020666, &[], 1, 5, 0, 0)?;
+    append("dev/full", 0o020666, &[], 1, 7, 0, 0)?;
+    append("dev/random", 0o020666, &[], 1, 8, 0, 0)?;
+    append("dev/urandom", 0o020666, &[], 1, 9, 0, 0)?;
     if files.bind_filesystem {
         append("dev/fuse", 0o020600, &[], 10, 229, 0, 0)?;
     }
@@ -1036,4 +1049,116 @@ fn build_archive(
     }
     append("TRAILER!!!", 0, &[], 0, 0, 0, 0)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod memory_configuration_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Command {
+        #[command(flatten)]
+        options: Options,
+    }
+
+    #[test]
+    fn boot_archive_provides_verified_standard_devices() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "conjet-devices-{}-{unique}.cpio",
+            std::process::id()
+        ));
+        build_archive(
+            &path,
+            b"init",
+            b"probe",
+            b"{}",
+            b"key",
+            None,
+            GuestBootFiles {
+                memory: None,
+                disk: None,
+                bind_filesystem: false,
+            },
+        )
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mut offset = 0;
+        let mut devices = std::collections::BTreeMap::new();
+        while offset < bytes.len() {
+            let header = &bytes[offset..offset + 110];
+            assert_eq!(&header[..6], b"070701");
+            let field = |index: usize| {
+                usize::from_str_radix(
+                    std::str::from_utf8(&header[6 + index * 8..14 + index * 8]).unwrap(),
+                    16,
+                )
+                .unwrap()
+            };
+            let size = field(6);
+            let namesize = field(11);
+            let name =
+                std::str::from_utf8(&bytes[offset + 110..offset + 110 + namesize - 1]).unwrap();
+            if name.starts_with("dev/") {
+                devices.insert(name.to_owned(), (field(1), field(9), field(10)));
+            }
+            offset = (offset + 110 + namesize + 3) & !3;
+            offset = (offset + size + 3) & !3;
+        }
+        for (name, minor) in [
+            ("null", 3),
+            ("zero", 5),
+            ("full", 7),
+            ("random", 8),
+            ("urandom", 9),
+        ] {
+            assert_eq!(
+                devices.get(&format!("dev/{name}")),
+                Some(&(0o020666, 1, minor))
+            );
+        }
+    }
+
+    #[test]
+    fn native_memory_ceiling_is_bounded_and_retains_legacy_default() {
+        let base = [
+            "probe",
+            "--scratch",
+            "/tmp",
+            "--kernel",
+            "/Image",
+            "--kernel-sha512",
+            "unused",
+            "--executable",
+            "/probe",
+            "--sha256",
+            "unused",
+        ];
+        assert_eq!(
+            Command::try_parse_from(base).unwrap().options.memory_mib,
+            2048
+        );
+        for memory in ["512", "4096", "8192"] {
+            assert_eq!(
+                Command::try_parse_from(base.into_iter().chain(["--memory-mib", memory]))
+                    .unwrap()
+                    .options
+                    .memory_mib,
+                memory.parse::<u64>().unwrap()
+            );
+        }
+        for memory in ["0", "511", "8193"] {
+            assert!(
+                Command::try_parse_from(base.into_iter().chain(["--memory-mib", memory])).is_err()
+            );
+        }
+        let legacy: Identity =
+            serde_json::from_value(json!({"pid":1,"image_digest":"test"})).unwrap();
+        assert_eq!(legacy.memory_mib, 2048);
+    }
 }

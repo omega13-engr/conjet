@@ -33,8 +33,16 @@ impl Config {
                 "Docker healthcheck requires an explicit command",
             ));
         };
-        if head != "CMD" || argv.is_empty() {
-            return Err(Rejected::bad("only direct CMD healthchecks are supported"));
+        if head == "NONE" && argv.is_empty() {
+            return Ok(None);
+        }
+        if !matches!(head.as_str(), Some("CMD" | "CMD-SHELL")) || argv.is_empty() {
+            return Err(Rejected::bad("invalid Docker healthcheck command"));
+        }
+        if head == "CMD-SHELL" && (argv.len() != 1 || !argv[0].is_string()) {
+            return Err(Rejected::bad(
+                "CMD-SHELL healthcheck requires one command string",
+            ));
         }
         let mut spec: LaunchSpec = serde_json::from_value(process.clone())
             .map_err(|_| Rejected::internal("cannot read native healthcheck process defaults"))?;
@@ -47,6 +55,9 @@ impl Config {
                     .ok_or_else(|| Rejected::bad("invalid Docker healthcheck argument"))
             })
             .collect::<Result<_, _>>()?;
+        if head == "CMD-SHELL" {
+            spec.argv.splice(..0, ["/bin/sh".into(), "-c".into()]);
+        }
         spec.validate_exec()
             .map_err(|error| Rejected::bad(error.to_string()))?;
         let duration = |key: &str, fallback: u64, max: u64| {
@@ -64,7 +75,7 @@ impl Config {
                 })
         };
         let interval = duration("Interval", 30_000_000_000, 30_000_000_000)?;
-        let timeout = duration("Timeout", 2_000_000_000, 2_000_000_000)?;
+        let timeout = duration("Timeout", 30_000_000_000, 30_000_000_000)?;
         let retries = match &raw["Retries"] {
             Value::Null => 3,
             value if value == &json!(0) => 3,
@@ -156,6 +167,34 @@ pub(super) fn probe(owner: &Owner, item: &Item, generation: u64, handle: &Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compose_shell_healthcheck_preserves_command_and_timeout() {
+        let process = json!({"image_digest":format!("sha256:{}", "a".repeat(64)),
+            "argv":["/bin/true"], "env":[], "cwd":"/", "uid":0,"gid":0,
+            "network":"none", "limits":{"memory_bytes":16777216,"pids":4,"cpu_millicores":500}});
+        let config = Config::parse(
+            &json!({"Test":["CMD-SHELL", "pg_isready -U artex -d artex"],
+            "Interval":5_000_000_000u64,"Timeout":3_000_000_000u64,"Retries":10}),
+            &process,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            config.argv,
+            ["/bin/sh", "-c", "pg_isready -U artex -d artex"]
+        );
+        assert_eq!(config.budget_ms, 3000);
+        assert!(Config::parse(&json!({"Test":["NONE"]}), &process)
+            .unwrap()
+            .is_none());
+        assert!(Config::parse(&json!({"Test":["CMD-SHELL", "true", "extra"]}), &process).is_err());
+        assert!(Config::parse(
+            &json!({"Test":["CMD", "true"],"Timeout":30_000_000_001u64}),
+            &process
+        )
+        .is_err());
+    }
+
     #[test]
     fn health_generation_starts_fresh_and_requires_the_retry_threshold() {
         let now = Instant::now();

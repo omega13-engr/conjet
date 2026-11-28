@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 
 pub(super) const METADATA_LIMIT: usize = 64 * 1024;
 pub(super) const LAYER_BUDGET: usize = 40 * 1024 * 1024;
-const LAYERS_LIMIT: usize = 16;
-pub(super) const DISK_COMPRESSED_BUDGET: u64 = 512 * 1024 * 1024;
+pub(super) const LAYERS_LIMIT: usize = 64;
+pub(super) const DISK_COMPRESSED_BUDGET: u64 = packed::BYTE_LIMIT;
 
 #[derive(Debug, Args)]
 pub(super) struct Options {

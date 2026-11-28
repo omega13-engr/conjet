@@ -208,13 +208,17 @@ mod framing_tests {
     #[test]
     fn archive_framing_rejects_ambiguity_truncation_and_unbounded_chunks() {
         let scratch = tempfile::tempdir().unwrap();
+        let oversized_chunk = format!(
+            "Transfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            super::super::archive::LIMIT + 1
+        );
         for (headers_and_body, status) in [
             (
                 &b"Content-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"[..],
                 400,
             ),
             (&b"Transfer-Encoding: chunked\r\n\r\n4\r\nab"[..], 400),
-            (&b"Transfer-Encoding: chunked\r\n\r\n4000001\r\n"[..], 413),
+            (oversized_chunk.as_bytes(), 413),
             (
                 &b"Transfer-Encoding: chunked\r\n\r\n0\r\nExtra: value\r\n\r\n"[..],
                 400,
@@ -578,7 +582,7 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             200,
             json!({
                 "SystemTime":super::events::daemon_time()?,
-                "OSType":"linux","Architecture":"aarch64","NCPU":2,"MemTotal":2147483648u64,
+                "OSType":"linux","Architecture":"aarch64","NCPU":2,"MemTotal":owner.memory_bytes,
                 "Containers":owner.ledger.lock().unwrap().active.len(),"Driver":BACKEND,
             }),
         ),

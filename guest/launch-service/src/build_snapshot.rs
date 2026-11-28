@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
 pub(crate) mod bundle;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub(crate) mod mounts;
@@ -54,6 +54,8 @@ pub struct Snapshot {
     pub bundle_policy: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub live_worker: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supplementary_groups: Option<Vec<u32>>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -255,6 +257,7 @@ pub(crate) mod guest {
             inode: info.ino(),
             bundle_policy: false,
             live_worker: false,
+            supplementary_groups: None,
         };
         Ok(OpenSnapshot {
             root: rootfs,
@@ -293,6 +296,7 @@ pub(crate) mod guest {
                 inode: info.ino(),
                 bundle_policy: true,
                 live_worker: true,
+                supplementary_groups: None,
             })
         }
 
@@ -317,7 +321,7 @@ pub(crate) mod guest {
         }
     }
 
-    fn clone_worker_overlay(namespace: &File, root: &File) -> io::Result<OwnedFd> {
+    pub(super) fn clone_worker_overlay(namespace: &File, root: &File) -> io::Result<OwnedFd> {
         use crate::security::checked;
         // open_tree can only clone an attached mount from its owning mount
         // namespace. Join it on a short-lived thread with private fs state.

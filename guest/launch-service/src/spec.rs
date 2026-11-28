@@ -77,6 +77,9 @@ const MAX_ENTRIES: usize = 32;
 const MAX_VALUE_BYTES: usize = 1_024;
 const MAX_OCI_ARGUMENT_BYTES: usize = 4_096;
 const MAX_ARG_ENV_BYTES: usize = 8 * 1_024;
+const MAX_BUILD_VALUE_BYTES: usize = 32 * 1024;
+const MAX_BUILD_ARG_ENV_BYTES: usize = 64 * 1024;
+const MAX_BUILD_ENTRIES: usize = 128;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -111,11 +114,15 @@ pub struct LaunchSpec {
     pub volume: Option<VolumeMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<BindMount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub binds: Vec<BindMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_snapshot: Option<crate::build_snapshot::Snapshot>,
     pub limits: ResourceLimits,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub docker_resource_defaults: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub docker_default_capabilities: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub memory_swap_disabled: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -142,8 +149,21 @@ pub struct VolumeMount {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BindMount {
+    #[serde(default = "default_bind_target")]
+    pub target: String,
     pub lease: String,
     pub read_only: bool,
+}
+
+fn default_bind_target() -> String {
+    "/dataset".into()
+}
+
+pub fn valid_bind_target(path: &str) -> bool {
+    canonical_absolute(path, false)
+        && !["/proc", "/sys", "/dev", "/run/conjet"].iter().any(|root| {
+            path == *root || path.strip_prefix(root).is_some_and(|p| p.starts_with('/'))
+        })
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -190,7 +210,11 @@ fn is_data_target(target: &str) -> bool {
 pub fn valid_volume_target(target: &str) -> bool {
     matches!(
         target,
-        VOLUME_TARGET | "/dataset" | "/var/lib/registry" | "/var/lib/buildkit"
+        VOLUME_TARGET
+            | "/dataset"
+            | "/var/lib/registry"
+            | "/var/lib/buildkit"
+            | "/var/lib/postgresql/data"
     )
 }
 
@@ -203,7 +227,7 @@ pub struct ResourceLimits {
 }
 
 impl ResourceLimits {
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
     pub(crate) const UNBOUNDED: Self = Self {
         memory_bytes: 0,
         pids: 0,
@@ -380,6 +404,9 @@ impl LaunchRequest {
 }
 
 impl LaunchSpec {
+    pub fn host_binds(&self) -> impl Iterator<Item = &BindMount> {
+        self.bind.iter().chain(self.binds.iter())
+    }
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     pub(crate) fn build_sysfs_view(&self) -> bool {
         self.build_snapshot.as_ref().is_some_and(|snapshot| {
@@ -394,7 +421,7 @@ impl LaunchSpec {
             && self.cwd == "/"
             && self.env.as_slice() == [BUILDKIT_PATH]
             && self.build_snapshot.is_none()
-            && self.bind.is_none()
+            && (self.bind.is_none() && self.binds.is_empty())
             && !self.open_stdin
             && !self.redis_bootstrap
             && self
@@ -445,7 +472,7 @@ impl LaunchSpec {
             && self.gid == 0
             && self.cwd == "/data"
             && self.build_snapshot.is_none()
-            && self.bind.is_none()
+            && (self.bind.is_none() && self.binds.is_empty())
             && self
                 .volume
                 .as_ref()
@@ -506,9 +533,17 @@ impl LaunchSpec {
                 || snapshot.device == 0
                 || (snapshot.live_worker && !snapshot.bundle_policy)
                 || spec.volume.is_some()
-                || spec.bind.is_some()
+                || (spec.bind.is_some() || !spec.binds.is_empty())
                 || spec.network != "none"
-                || spec.open_stdin
+                || (spec.open_stdin && !snapshot.live_worker)
+                || snapshot
+                    .supplementary_groups
+                    .as_ref()
+                    .is_some_and(|groups| {
+                        !snapshot.live_worker
+                            || groups.len() > 128
+                            || groups.iter().any(|gid| *gid >= ID_MAP_WIDTH)
+                    })
         }) {
             return Err(SpecError::BuildSnapshot);
         }
@@ -519,13 +554,25 @@ impl LaunchSpec {
         }) {
             return Err(SpecError::Volume);
         }
-        if spec.bind.as_ref().is_some_and(|bind| {
-            !search_path
-                || spec.volume.is_some()
-                || spec.uid != 0
-                || spec.gid != 0
-                || handshake::unhex::<16>(&bind.lease).is_err()
-        }) {
+        let mounts: Vec<_> = spec.host_binds().collect();
+        if mounts.len() > 8
+            || mounts.iter().enumerate().any(|(index, bind)| {
+                mounts[..index].iter().any(|other| {
+                    bind.lease == other.lease
+                        || bind.target == other.target
+                        || bind.target.starts_with(&(other.target.clone() + "/"))
+                        || other.target.starts_with(&(bind.target.clone() + "/"))
+                })
+            })
+            || mounts.iter().any(|bind| {
+                !search_path
+                    || spec.volume.is_some()
+                    || spec.uid != 0
+                    || spec.gid != 0
+                    || !valid_bind_target(&bind.target)
+                    || handshake::unhex::<16>(&bind.lease).is_err()
+            })
+        {
             return Err(SpecError::Volume);
         }
         let digest = spec
@@ -533,19 +580,32 @@ impl LaunchSpec {
             .strip_prefix("sha256:")
             .and_then(|value| handshake::unhex(value).ok())
             .ok_or(SpecError::Image)?;
-        if spec.argv.is_empty() || spec.argv.len() > MAX_ENTRIES || spec.env.len() > MAX_ENTRIES {
+        let live_build = spec.build_snapshot.as_ref().is_some_and(|s| s.live_worker);
+        let entries = if live_build {
+            MAX_BUILD_ENTRIES
+        } else {
+            MAX_ENTRIES
+        };
+        if spec.argv.is_empty() || spec.argv.len() > entries || spec.env.len() > entries {
             return Err(SpecError::Strings);
         }
-        let argument_bound = if search_path && spec.build_snapshot.is_none() {
+        let argument_bound = if live_build {
+            MAX_BUILD_VALUE_BYTES
+        } else if search_path && spec.build_snapshot.is_none() {
             MAX_OCI_ARGUMENT_BYTES
         } else {
             MAX_VALUE_BYTES
         };
         let mut strings = 0;
+        let environment_bound = if live_build {
+            MAX_BUILD_VALUE_BYTES
+        } else {
+            MAX_VALUE_BYTES
+        };
         let bounded_values = spec.argv[..1]
             .iter()
-            .chain(&spec.env)
             .map(|value| (value, MAX_VALUE_BYTES))
+            .chain(spec.env.iter().map(|value| (value, environment_bound)))
             .chain(spec.argv[1..].iter().map(|value| (value, argument_bound)));
         for (entry, bound) in bounded_values {
             if entry.len() > bound || entry.as_bytes().contains(&0) {
@@ -553,7 +613,20 @@ impl LaunchSpec {
             }
             strings += entry.len() + 1;
         }
-        if strings > MAX_ARG_ENV_BYTES {
+        let total_bound = if live_build {
+            MAX_BUILD_ARG_ENV_BYTES
+        } else {
+            MAX_ARG_ENV_BYTES
+        };
+        // The helper receives a serialized spec as one exec argument. Account for
+        // JSON escaping below Linux's 128 KiB single-string limit as well.
+        if strings > total_bound
+            || (live_build
+                && serde_json::to_vec(spec)
+                    .map_err(|_| SpecError::Strings)?
+                    .len()
+                    > 120 * 1024)
+        {
             return Err(SpecError::Strings);
         }
         let executable = &spec.argv[0];
@@ -573,6 +646,11 @@ impl LaunchSpec {
                 return Err(SpecError::Environment);
             }
         }
+        if spec.docker_default_capabilities
+            && (!search_path || spec.build_snapshot.is_some() || spec.buildkit_worker)
+        {
+            return Err(SpecError::Identity);
+        }
         if spec.uid >= ID_MAP_WIDTH
             || spec.gid >= ID_MAP_WIDTH
             || spec.build_snapshot.as_ref().is_some_and(|snapshot| {
@@ -585,7 +663,7 @@ impl LaunchSpec {
             || spec.account.as_ref().is_some_and(|account| {
                 !search_path
                     || spec.build_snapshot.is_some()
-                    || spec.bind.is_some()
+                    || (spec.bind.is_some() || !spec.binds.is_empty())
                     || spec.uid != 0
                     || spec.gid != 0
                     || !account.valid()
@@ -683,6 +761,7 @@ mod tests {
                 network_alias_project: None,
                 volume: None,
                 bind: None,
+                binds: Vec::new(),
                 build_snapshot: None,
                 limits: ResourceLimits {
                     memory_bytes: MIN_MEMORY_BYTES,
@@ -690,6 +769,7 @@ mod tests {
                     cpu_millicores: 500,
                 },
                 docker_resource_defaults: false,
+                docker_default_capabilities: false,
                 memory_swap_disabled: false,
                 open_stdin: false,
                 redis_bootstrap: false,
@@ -742,6 +822,72 @@ mod tests {
     }
 
     #[test]
+    fn long_commands_are_bounded_and_scoped_to_live_builds() {
+        let mut spec = valid().spec;
+        spec.argv = vec!["/bin/sh".into(), "-c".into(), "x".repeat(12 * 1024)];
+        assert_eq!(spec.validate().err(), Some(SpecError::Strings));
+        spec.build_snapshot = Some(crate::build_snapshot::Snapshot {
+            id: "longRun".into(),
+            device: 1,
+            inode: 1,
+            bundle_policy: true,
+            live_worker: true,
+            supplementary_groups: None,
+        });
+        assert!(spec.validate().is_ok());
+        spec.argv[2] = "x".repeat(MAX_BUILD_VALUE_BYTES + 1);
+        assert_eq!(spec.validate().err(), Some(SpecError::Strings));
+        spec.argv[2] = "\u{1}".repeat(MAX_BUILD_VALUE_BYTES);
+        assert_eq!(spec.validate().err(), Some(SpecError::Strings));
+        spec.argv[2] = "x".repeat(MAX_BUILD_VALUE_BYTES);
+        spec.env = vec![
+            format!("A={}", "x".repeat(MAX_BUILD_VALUE_BYTES - 2)),
+            "B=x".into(),
+        ];
+        assert_eq!(spec.validate().err(), Some(SpecError::Strings));
+    }
+
+    #[test]
+    fn binds_require_distinct_owned_leases_and_safe_nonoverlapping_targets() {
+        let mut spec = valid().spec;
+        spec.uid = 0;
+        spec.gid = 0;
+        spec.binds = ["/app/data", "/app/keys", "/app/skills"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, target)| BindMount {
+                target: target.into(),
+                lease: format!("{i:032x}"),
+                read_only: false,
+            })
+            .collect();
+        assert!(spec.validate_exec().is_ok());
+        assert_eq!(spec.validate().err(), Some(SpecError::Volume));
+        let original = spec.binds.clone();
+        for target in [
+            "/",
+            "/proc/self",
+            "/dev",
+            "/sys/a",
+            "/run/conjet/a",
+            "/app/../etc",
+            "/app/data",
+            "/app/data/nested",
+        ] {
+            spec.binds = original.clone();
+            spec.binds[1].target = target.into();
+            assert_eq!(
+                spec.validate_exec().err(),
+                Some(SpecError::Volume),
+                "{target}"
+            );
+        }
+        spec.binds = original;
+        spec.binds[1].lease = spec.binds[0].lease.clone();
+        assert_eq!(spec.validate_exec().err(), Some(SpecError::Volume));
+    }
+
+    #[test]
     fn rejects_unbounded_and_unsupported_resources() {
         let mut request = valid();
         request.spec.limits.pids = 0;
@@ -780,6 +926,7 @@ mod tests {
             inode: 1,
             bundle_policy: true,
             live_worker: false,
+            supplementary_groups: None,
         });
         assert_eq!(request.spec.validate().err(), Some(SpecError::Identity));
     }

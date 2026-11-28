@@ -228,7 +228,8 @@ impl Image {
         if !(security.is_null()
             || security == &json!([])
             || security == &json!(["no-new-privileges"])
-            || security == &json!(["no-new-privileges=true"]))
+            || security == &json!(["no-new-privileges=true"])
+            || security == &json!(["no-new-privileges:true"]))
         {
             return Err(Rejected::bad("only no-new-privileges is supported"));
         }
@@ -325,9 +326,11 @@ impl Image {
             network_alias_project: None,
             volume: None,
             bind: None,
+            binds: Vec::new(),
             build_snapshot: None,
             limits,
             docker_resource_defaults: limits.has_unlimited(),
+            docker_default_capabilities: host["CapDrop"] != json!(["ALL"]),
             memory_swap_disabled,
             open_stdin,
             redis_bootstrap: false,
@@ -396,6 +399,27 @@ mod tests {
         assert!(resources(&json!({"NanoCpus":500000001})).is_err());
         assert!(resources(&json!({"PidsLimit":-2})).is_err());
         assert!(resources(&json!({"Memory":-1})).is_err());
+    }
+
+    #[test]
+    fn docker_default_capabilities_respect_drop_all_and_no_new_privileges() {
+        let reference = format!("docker.io/library/alpine@sha256:{}", "a".repeat(64));
+        let image = Image::new(
+            reference.clone(),
+            json!({"config_digest":format!("sha256:{}", "b".repeat(64)),
+            "process":{"Cmd":["/bin/true"],"Entrypoint":[],"Env":[],"WorkingDir":"/","User":""}}),
+        )
+        .unwrap();
+        let mut input = json!({"Image":reference, "HostConfig":{"NetworkMode":"none", "SecurityOpt":["no-new-privileges:true"]}});
+        let defaults: LaunchSpec =
+            serde_json::from_value(image.process(&input, true).unwrap()).unwrap();
+        assert!(defaults.docker_default_capabilities);
+        input["HostConfig"]["CapDrop"] = json!(["ALL"]);
+        let dropped: LaunchSpec =
+            serde_json::from_value(image.process(&input, true).unwrap()).unwrap();
+        assert!(!dropped.docker_default_capabilities);
+        input["HostConfig"]["CapAdd"] = json!(["SYS_ADMIN"]);
+        assert!(image.process(&input, true).is_err());
     }
 
     #[test]

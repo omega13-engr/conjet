@@ -17,10 +17,24 @@ const BUILDKIT_CAPABILITIES: u32 = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 21);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkloadPolicy {
     Standard,
+    DockerDefault,
+    DockerRestricted,
     RedisBootstrap,
     BuildKitWorker,
     BuildKitRun,
     BuildKitControl,
+}
+
+/// Rust ignores SIGPIPE in its own runtime. A manually exec'd OCI process
+/// must receive normal Unix signal state rather than inheriting that choice.
+pub(crate) fn prepare_exec_signals() -> io::Result<()> {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    action.sa_sigaction = libc::SIG_DFL;
+    checked(unsafe { libc::sigemptyset(&mut action.sa_mask) })?;
+    checked(unsafe { libc::sigaction(libc::SIGPIPE, &action, std::ptr::null_mut()) })?;
+    let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+    checked(unsafe { libc::sigemptyset(&mut mask) })?;
+    checked(unsafe { libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) })
 }
 
 pub(crate) fn clear_supplementary_groups() -> io::Result<()> {
@@ -33,7 +47,7 @@ pub(crate) fn drop_workload_identity(
     supplementary_groups: &[u32],
     policy: WorkloadPolicy,
 ) -> io::Result<()> {
-    let mut groups = [0; 16];
+    let mut groups = [0; 128];
     let count = unsafe { libc::getgroups(groups.len() as i32, groups.as_mut_ptr()) };
     if count < 0 || groups.get(..count as usize) != Some(supplementary_groups) {
         return Err(io::Error::other(
@@ -52,6 +66,9 @@ pub(crate) fn drop_workload_identity(
     let allowed = match policy {
         WorkloadPolicy::RedisBootstrap => REDIS_CAPABILITIES,
         WorkloadPolicy::BuildKitWorker => BUILDKIT_CAPABILITIES,
+        // Exact capabilities in the admitted BuildKit root OCI preset, confined
+        // to the mapped user namespace; no SYS_ADMIN or host capabilities.
+        WorkloadPolicy::BuildKitRun | WorkloadPolicy::DockerDefault if uid == 0 => 0xa80425fb,
         _ => 0,
     };
     for capability in 0..64 {
@@ -114,23 +131,24 @@ pub(crate) fn verify_empty_capabilities() -> io::Result<()> {
 
 pub(crate) const DEFAULT_OPEN_FILES: u64 = 32;
 pub(crate) const DEFAULT_FILE_SIZE: u64 = 16 * 1024 * 1024;
-pub(crate) const BUILDKIT_OPEN_FILES: u64 = 256;
-// The pinned Rust image stores a 299,606,552-byte compiler library.
-pub(crate) const BUILDKIT_FILE_SIZE: u64 = 512 * 1024 * 1024;
+// Docker does not impose the launch fixture's descriptor or file-size limits.
+// Memory/tasks remain governed by the workload cgroup and the private VM/disk.
+pub(crate) const BUILDKIT_OPEN_FILES: u64 = 1_048_576;
+pub(crate) const BUILDKIT_FILE_SIZE: u64 = libc::RLIM_INFINITY;
 // The pinned Redis server's default client limit requires this many
 // descriptors. Its cgroup still bounds memory, CPU and tasks.
 pub(crate) const REDIS_OPEN_FILES: u64 = 10_032;
 
-pub(crate) fn prepare_redis_open_files() -> io::Result<()> {
+pub(crate) fn prepare_open_files(maximum: u64) -> io::Result<()> {
     let mut bounds = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
     };
     checked(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut bounds) })?;
-    if bounds.rlim_max < REDIS_OPEN_FILES {
+    if bounds.rlim_max < maximum {
         // Raise the ceiling in the private helper before entering the user
         // namespace, where the child cannot raise an inherited hard limit.
-        bounds.rlim_max = REDIS_OPEN_FILES;
+        bounds.rlim_max = maximum;
         checked(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &bounds) })?;
     }
     Ok(())
@@ -157,6 +175,19 @@ pub(crate) struct WorkloadFilter {
 
 impl WorkloadFilter {
     pub(crate) fn new(bridge: bool, ordinary_oci: bool, policy: WorkloadPolicy) -> Self {
+        if matches!(
+            policy,
+            WorkloadPolicy::BuildKitRun
+                | WorkloadPolicy::DockerDefault
+                | WorkloadPolicy::DockerRestricted
+        ) {
+            return Self {
+                program: crate::build_filter::program()
+                    .into_iter()
+                    .map(|(code, jt, jf, k)| libc::sock_filter { code, jt, jf, k })
+                    .collect(),
+            };
+        }
         fn statement(code: u16, k: u32) -> libc::sock_filter {
             libc::sock_filter {
                 code,
@@ -418,58 +449,6 @@ impl WorkloadFilter {
             policy,
             WorkloadPolicy::BuildKitWorker | WorkloadPolicy::BuildKitControl
         );
-        if policy == WorkloadPolicy::BuildKitRun {
-            // Compilers lock files and spawn helpers from the build directory.
-            // Session changes leave the helper in the RUN's PID namespace and
-            // cgroup. The RUN retains its empty capability set and nosuid.
-            for syscall in [
-                libc::SYS_fchmod,
-                libc::SYS_fchmodat,
-                libc::SYS_faccessat,
-                libc::SYS_faccessat2,
-                libc::SYS_flock,
-                libc::SYS_chdir,
-                libc::SYS_recvfrom,
-                libc::SYS_sendto,
-                libc::SYS_setsid,
-                libc::SYS_waitid,
-            ] {
-                program.push(next_or_skip(syscall as u32));
-                program.push(statement(BPF_RETURN, RET_ALLOW));
-            }
-            // Rust uses a connected Unix pair to report child exec errors.
-            let denied = RET_ERRNO | libc::EPERM as u32;
-            let exec_pair = [
-                statement(BPF_LOAD_WORD, 16),
-                libc::sock_filter {
-                    code: BPF_JUMP_EQUAL,
-                    k: libc::AF_UNIX as u32,
-                    jt: 1,
-                    jf: 0,
-                },
-                statement(BPF_RETURN, denied),
-                statement(BPF_LOAD_WORD, 24),
-                statement(BPF_AND, !(libc::SOCK_CLOEXEC as u32)),
-                libc::sock_filter {
-                    code: BPF_JUMP_EQUAL,
-                    k: libc::SOCK_SEQPACKET as u32,
-                    jt: 1,
-                    jf: 0,
-                },
-                statement(BPF_RETURN, denied),
-                statement(BPF_LOAD_WORD, 32),
-                next_or_skip(0),
-                statement(BPF_RETURN, RET_ALLOW),
-                statement(BPF_RETURN, denied),
-            ];
-            program.push(libc::sock_filter {
-                code: BPF_JUMP_EQUAL,
-                k: libc::SYS_socketpair as u32,
-                jt: 0,
-                jf: exec_pair.len() as u8,
-            });
-            program.extend(exec_pair);
-        }
         if policy == WorkloadPolicy::BuildKitWorker {
             let denied = RET_ERRNO | libc::EPERM as u32;
             // BuildKit starts its runtime in a new process group. Permit

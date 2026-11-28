@@ -332,6 +332,11 @@ fn run(
         "benchmark" => crate::sandbox_fixture::BENCHMARK_EXECUTABLE,
         _ => "/init",
     };
+    let _ = live_mounts
+        .as_ref()
+        .map(|mounts| mounts.enter_network())
+        .transpose()?
+        .unwrap_or(false);
     let sandbox = with_sandbox
         .then(|| Sandbox::prepare(network, executable, process, id, stdin, live_mounts))
         .transpose()?;
@@ -459,7 +464,9 @@ fn clone_and_reap(
         return Ok(None);
     }
     if process.is_some_and(|spec| spec.redis_bootstrap) {
-        security::prepare_redis_open_files()?;
+        security::prepare_open_files(security::REDIS_OPEN_FILES)?;
+    } else if process.is_some() {
+        security::prepare_open_files(security::BUILDKIT_OPEN_FILES)?;
     }
     let executable = if mode == "missing-executable" {
         c"/bin/absent"
@@ -518,7 +525,11 @@ fn clone_and_reap(
     let flags = libc::CLONE_PIDFD
         | libc::CLONE_NEWUSER
         | libc::CLONE_NEWNS
-        | libc::CLONE_NEWNET
+        | if sandbox.is_some_and(Sandbox::inherits_worker_network) {
+            0
+        } else {
+            libc::CLONE_NEWNET
+        }
         | libc::CLONE_NEWPID
         | libc::CLONE_NEWIPC
         | libc::CLONE_NEWUTS;

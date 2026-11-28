@@ -1,7 +1,7 @@
-//! Standalone noninteractive runtime verbs used by the pinned BuildKit worker.
+//! Owned execution and bounded duplex I/O for verified BuildKit workers.
 
 use std::error::Error;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::{SocketAddr, UnixStream};
 use std::path::Path;
@@ -140,8 +140,55 @@ fn run_workload(worker: bool, id: &str) -> Result<i32, Box<dyn Error>> {
     let handle = &admitted["handle"];
     let mut stdout = 0;
     let mut stderr = 0;
-    let deadline = Instant::now() + Duration::from_secs(33);
+    let mut input = Vec::new();
+    let mut eof = false;
+    let mut input_closed = false;
+    let mut cleanup = CancelOnDrop {
+        worker,
+        id,
+        complete: false,
+    };
     loop {
+        if admitted["stdin"] == true && !input_closed {
+            if input.is_empty() && !eof {
+                let mut fd = libc::pollfd {
+                    fd: 0,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut fd, 1, 0) };
+                if ready < 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+                if ready > 0 {
+                    let mut bytes = [0u8; 4096];
+                    let count = unsafe { libc::read(0, bytes.as_mut_ptr().cast(), bytes.len()) };
+                    if count < 0 {
+                        return Err(io::Error::last_os_error().into());
+                    }
+                    eof = count == 0;
+                    input.extend_from_slice(&bytes[..count as usize]);
+                }
+            }
+            if !input.is_empty() || eof {
+                let data = (!input.is_empty())
+                    .then(|| base64::engine::general_purpose::STANDARD.encode(&input));
+                match exchange(worker, id, json!({"action":"input", "data":data})) {
+                    Ok(reply) if reply["accepted"] == true => {
+                        input.clear();
+                        input_closed = eof;
+                    }
+                    Ok(_) => {}
+                    Err(RuntimeError::Peer { code, .. }) if code == "input_closed" => {
+                        // A process may finish between output polls. Drain its
+                        // final output and report its exit, not a pipe race.
+                        input.clear();
+                        input_closed = true;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         let state = exchange(
             worker,
             id,
@@ -163,6 +210,7 @@ fn run_workload(worker: bool, id: &str) -> Result<i32, Box<dyn Error>> {
         if out && err && state["cleanup"] == "complete" {
             if state["helper_failed"] != false || state["exec"] != "confirmed" {
                 if state["cancelled"] == true && state["helper_failed"] == false {
+                    cleanup.complete = true;
                     return Ok(137);
                 }
                 return Err("build workload exec could not be verified".into());
@@ -172,11 +220,237 @@ fn run_workload(worker: bool, id: &str) -> Result<i32, Box<dyn Error>> {
                 .or_else(|| state["exit"]["signal"].as_i64().map(|signal| 128 + signal))
                 .filter(|&code| (0..=255).contains(&code))
                 .ok_or("missing build exit status")?;
+            cleanup.complete = true;
             return Ok(code as i32);
-        }
-        if Instant::now() >= deadline {
-            return Err("build runtime wait exceeded its verified cleanup deadline".into());
         }
         std::thread::sleep(POLL);
     }
+}
+
+struct CancelOnDrop<'a> {
+    worker: bool,
+    id: &'a str,
+    complete: bool,
+}
+impl Drop for CancelOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            let _ = exchange(self.worker, self.id, json!({"action":"kill"}));
+        }
+    }
+}
+
+/// Executed by the packaged E2E fixture inside a real BuildKit RUN container.
+pub fn verify_policy() -> Result<(), Box<dyn Error>> {
+    let stage = |name: &str, error: io::Error| io::Error::other(format!("{name}: {error}"));
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| stage("read process status", e))?;
+    if !status
+        .lines()
+        .any(|line| line.split_whitespace().collect::<Vec<_>>() == ["CapEff:", "00000000a80425fb"])
+    {
+        return Err("build RUN capabilities differ from the admitted OCI policy".into());
+    }
+    let map =
+        std::fs::read_to_string("/proc/self/uid_map").map_err(|e| stage("read uid map", e))?;
+    if map.split_whitespace().collect::<Vec<_>>() != ["0", "100000", "65536"] {
+        return Err("build RUN escaped its mapped user identity".into());
+    }
+    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
+    if fd >= 0 {
+        unsafe {
+            libc::close(fd);
+        }
+        return Err("build RUN can create host vsock sockets".into());
+    }
+    if io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
+        return Err("vsock was not denied by the build policy".into());
+    }
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } == 0
+        || io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+    {
+        return Err("build RUN can create an unapproved namespace".into());
+    }
+    let mut groups = [0u32; 128];
+    let count = unsafe { libc::getgroups(groups.len() as i32, groups.as_mut_ptr()) };
+    if count < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let check = |operation: &str, result| -> io::Result<()> {
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "{operation}: {}",
+                io::Error::last_os_error()
+            )))
+        }
+    };
+    check("setgroups nobody", unsafe {
+        libc::setgroups(1, [65534u32].as_ptr())
+    })?;
+    check("restore groups", unsafe {
+        libc::setgroups(count as usize, groups.as_ptr())
+    })?;
+    check("setegid 65534", unsafe { libc::setegid(65534) })?;
+    check("setegid 0", unsafe { libc::setegid(0) })?;
+    check("seteuid 42", unsafe { libc::seteuid(42) })?;
+    check("seteuid 0", unsafe { libc::seteuid(0) })?;
+    for (resource, expected) in [
+        (libc::RLIMIT_NOFILE, crate::security::BUILDKIT_OPEN_FILES),
+        (libc::RLIMIT_FSIZE, crate::security::BUILDKIT_FILE_SIZE),
+    ] {
+        let mut limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        check("getrlimit", unsafe {
+            libc::getrlimit(resource, &mut limits)
+        })?;
+        if limits.rlim_cur != expected || limits.rlim_max != expected {
+            return Err("container resource limits differ from the admitted policy".into());
+        }
+    }
+    let mut random = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .map_err(|e| stage("open urandom", e))?
+        .read_exact(&mut random)
+        .map_err(|e| stage("read urandom", e))?;
+    let metadata = std::fs::metadata("/dev/urandom").map_err(|e| stage("stat urandom", e))?;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    if !metadata.file_type().is_char_device()
+        || libc::major(metadata.rdev()) != 1
+        || libc::minor(metadata.rdev()) != 9
+    {
+        return Err("urandom is not the verified Linux random device".into());
+    }
+    let path = "/tmp/conjet-build-policy-file";
+    let mut file = std::fs::File::create_new(path).map_err(|e| stage("create probe file", e))?;
+    let bytes = vec![0x5a; 1024 * 1024];
+    for _ in 0..32 {
+        file.write_all(&bytes)
+            .map_err(|e| stage("write probe file", e))?;
+    }
+    file.sync_all().map_err(|e| stage("sync probe file", e))?;
+    if file
+        .metadata()
+        .map_err(|e| stage("stat probe file", e))?
+        .len()
+        != 32 * 1024 * 1024
+    {
+        return Err("large build file was truncated".into());
+    }
+    drop(file);
+    std::fs::remove_file(path).map_err(|e| stage("remove probe file", e))?;
+    println!("conjet-build-policy-ok");
+    Ok(())
+}
+
+/// Session-scoped E2E server for the packaged multiple-bind/port fixture.
+pub fn serve_bind_fixture() -> Result<(), Box<dyn Error>> {
+    let mut body = Vec::new();
+    for name in ["data", "keys", "skills"] {
+        body.extend(std::fs::read(format!("/app/{name}/marker"))?);
+    }
+    std::fs::write("/app/data/index.html", &body)?;
+    let listeners = [
+        std::net::TcpListener::bind("0.0.0.0:8787")?,
+        std::net::TcpListener::bind("0.0.0.0:8788")?,
+    ];
+    for listener in &listeners {
+        listener.set_nonblocking(true)?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(90);
+    std::thread::scope(|scope| -> io::Result<()> {
+        let handles = listeners
+            .into_iter()
+            .map(|listener| {
+                let body = &body;
+                scope.spawn(move || -> io::Result<()> {
+                    while Instant::now() < deadline {
+                        let (mut stream, _) = match listener.accept() {
+                            Ok(pair) => pair,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                std::thread::sleep(Duration::from_millis(10));
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+                        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+                        let mut header = Vec::new();
+                        let mut byte = [0u8];
+                        while !header.ends_with(b"\r\n\r\n") {
+                            if header.len() == 4096 {
+                                return Err(io::Error::other(
+                                    "fixture request header exceeded bound",
+                                ));
+                            }
+                            stream.read_exact(&mut byte)?;
+                            header.push(byte[0]);
+                        }
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )?;
+                        stream.write_all(body)?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| io::Error::other("fixture server panicked"))??;
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Hold eight public TLS tunnels while requiring a ninth registry request to progress.
+pub fn verify_relay_capacity() -> Result<(), Box<dyn Error>> {
+    fn header(stream: &mut std::net::TcpStream) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        while !bytes.ends_with(b"\r\n\r\n") {
+            if bytes.len() == 4096 {
+                return Err(io::Error::other("relay probe header exceeded bound"));
+            }
+            let mut byte = [0];
+            stream.read_exact(&mut byte)?;
+            bytes.push(byte[0]);
+        }
+        Ok(bytes)
+    }
+    let open = || -> io::Result<std::net::TcpStream> {
+        let socket = std::net::TcpStream::connect_timeout(
+            &"198.18.1.1:5001".parse().expect("fixture proxy address"),
+            Duration::from_secs(5),
+        )?;
+        socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+        socket.set_write_timeout(Some(Duration::from_secs(5)))?;
+        Ok(socket)
+    };
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        let mut socket = open()?;
+        socket.write_all(
+            b"CONNECT registry-1.docker.io:443 HTTP/1.1\r\nHost: registry-1.docker.io:443\r\n\r\n",
+        )?;
+        if !header(&mut socket)?.starts_with(b"HTTP/1.1 200 ") {
+            return Err("relay probe TLS tunnel failed".into());
+        }
+        held.push(socket);
+    }
+    println!("conjet-relay-eight-tunnels-held");
+    let mut ping = open()?;
+    ping.write_all(b"GET /v2/ HTTP/1.1\r\nHost: registry\r\nConnection: close\r\n\r\n")?;
+    if !header(&mut ping)?.starts_with(b"HTTP/1.1 200 ") {
+        return Err("registry request did not progress beside held TLS tunnels".into());
+    }
+    drop(held);
+    println!("conjet-relay-capacity-ok");
+    Ok(())
 }

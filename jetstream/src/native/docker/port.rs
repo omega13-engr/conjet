@@ -16,7 +16,7 @@ use super::{client, request, session, Rejected};
 const MAX_PEERS: usize = 2;
 const IDLE: Duration = Duration::from_secs(15);
 
-pub(super) struct RequestedPort {
+struct RequestedMapping {
     guest: u16,
     host: u16,
 }
@@ -28,7 +28,7 @@ fn port(value: &str) -> Option<u16> {
         .filter(|number| number.to_string() == value)
 }
 
-impl RequestedPort {
+impl RequestedMapping {
     pub(super) fn parse(config: &Value) -> Result<Option<Self>, Rejected> {
         let exposed = request::object(&config["ExposedPorts"], "exposed ports")?;
         let bindings = request::object(&config["HostConfig"]["PortBindings"], "port bindings")?;
@@ -77,6 +77,75 @@ impl RequestedPort {
     }
 }
 
+/// A bounded collection owns every listener, so partial setup rolls back all ports.
+pub(super) struct RequestedPort(Vec<RequestedMapping>);
+
+impl RequestedPort {
+    pub(super) fn parse(config: &Value) -> Result<Option<Self>, Rejected> {
+        let Some(bindings) =
+            request::object(&config["HostConfig"]["PortBindings"], "port bindings")?
+                .filter(|b| !b.is_empty())
+        else {
+            return RequestedMapping::parse(config).map(|p| p.map(|p| Self(vec![p])));
+        };
+        if bindings.len() > 8 {
+            return Err(Rejected::bad(
+                "native TCP publication supports at most eight ports",
+            ));
+        }
+        if let Some(exposed) = request::object(&config["ExposedPorts"], "exposed ports")? {
+            if exposed.keys().any(|key| !bindings.contains_key(key)) {
+                return Err(Rejected::bad(
+                    "exposed port differs from the published ports",
+                ));
+            }
+        }
+        let mut ports = Vec::with_capacity(bindings.len());
+        for (key, value) in bindings {
+            let mut entry = config.clone();
+            entry["HostConfig"]["PortBindings"] = json!({(key):value});
+            entry["ExposedPorts"] = match config["ExposedPorts"].get(key) {
+                Some(value) => json!({(key):value}),
+                None => Value::Null,
+            };
+            ports.push(RequestedMapping::parse(&entry)?.expect("nonempty binding"));
+        }
+        Ok(Some(Self(ports)))
+    }
+}
+
+pub(super) struct PublishedPort(Vec<PublishedMapping>);
+
+impl PublishedPort {
+    pub(super) fn bind(request: RequestedPort, endpoint: Endpoint) -> Result<Self, Rejected> {
+        request
+            .0
+            .into_iter()
+            .map(|p| PublishedMapping::bind(p, endpoint.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
+    }
+    pub(super) fn live_address(&self, guest: u16) -> Option<std::net::SocketAddr> {
+        self.0.iter().find_map(|port| port.live_address(guest))
+    }
+    pub(super) fn set_target(&self, handle: Option<Value>) {
+        for port in &self.0 {
+            port.set_target(handle.clone());
+        }
+    }
+    pub(super) fn inspect(&self, active: bool) -> Value {
+        let mut result = serde_json::Map::new();
+        for port in &self.0 {
+            result.extend(port.inspect(active).as_object().unwrap().clone());
+        }
+        Value::Object(result)
+    }
+    pub(super) fn summary(&self) -> Vec<Value> {
+        self.0.iter().map(PublishedMapping::summary).collect()
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct Endpoint {
     pub directory: PathBuf,
     pub identity: session::Identity,
@@ -90,7 +159,7 @@ struct Target {
     cancelled: Arc<AtomicBool>,
 }
 
-pub(super) struct PublishedPort {
+struct PublishedMapping {
     port: u16,
     guest: u16,
     target: Arc<Mutex<Option<Target>>>,
@@ -98,13 +167,13 @@ pub(super) struct PublishedPort {
     task: Option<JoinHandle<()>>,
 }
 
-impl PublishedPort {
+impl PublishedMapping {
     pub(super) fn live_address(&self, guest: u16) -> Option<std::net::SocketAddr> {
         (self.guest == guest && self.target.lock().unwrap().is_some())
             .then(|| (Ipv4Addr::LOCALHOST, self.port).into())
     }
 
-    pub(super) fn bind(request: RequestedPort, endpoint: Endpoint) -> Result<Self, Rejected> {
+    pub(super) fn bind(request: RequestedMapping, endpoint: Endpoint) -> Result<Self, Rejected> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, request.host)).map_err(|error| {
             if error.kind() == io::ErrorKind::AddrInUse {
                 Rejected(409, "requested loopback port is already in use".into())
@@ -173,7 +242,7 @@ impl PublishedPort {
     }
 }
 
-impl Drop for PublishedPort {
+impl Drop for PublishedMapping {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Release);
         self.set_target(None);
@@ -263,8 +332,58 @@ mod tests {
                 "HostConfig":{"PortBindings":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":host}]}}
             });
             let port = RequestedPort::parse(&config).unwrap().unwrap();
-            assert_eq!((port.guest, port.host), (8080, expected));
+            assert_eq!((port.0[0].guest, port.0[0].host), (8080, expected));
         }
+    }
+
+    #[test]
+    fn failed_second_listener_releases_the_first() {
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let temporary = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let first = temporary.local_addr().unwrap().port();
+        drop(temporary);
+        let endpoint = Endpoint {
+            directory: PathBuf::from("/unused"),
+            identity: session::Identity {
+                pid: 1,
+                image_digest: "test".into(),
+                memory_mib: 2048,
+            },
+            key: [0; 32],
+            boot: "test".into(),
+        };
+        let request = RequestedPort(vec![
+            RequestedMapping {
+                guest: 8787,
+                host: first,
+            },
+            RequestedMapping {
+                guest: 8788,
+                host: occupied.local_addr().unwrap().port(),
+            },
+        ]);
+        assert!(PublishedPort::bind(request, endpoint).is_err());
+        assert!(TcpListener::bind((Ipv4Addr::LOCALHOST, first)).is_ok());
+    }
+
+    #[test]
+    fn accepts_multiple_loopback_mappings_and_preserves_each_target() {
+        let config = json!({"ExposedPorts":{"8787/tcp":{},"8788/tcp":{}},
+            "HostConfig":{"PortBindings":{
+                "8787/tcp":[{"HostIp":"127.0.0.1","HostPort":"18787"}],
+                "8788/tcp":[{"HostIp":"127.0.0.1","HostPort":"18788"}]}}});
+        let parsed = RequestedPort::parse(&config).unwrap().unwrap();
+        assert_eq!(
+            parsed
+                .0
+                .iter()
+                .map(|p| (p.guest, p.host))
+                .collect::<Vec<_>>(),
+            [(8787, 18787), (8788, 18788)]
+        );
+        let mut invalid = config.clone();
+        invalid["HostConfig"]["PortBindings"]["8788/tcp"][0]["HostIp"] = json!("0.0.0.0");
+        assert!(RequestedPort::parse(&invalid).is_err());
     }
 
     #[test]

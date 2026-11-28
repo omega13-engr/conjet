@@ -583,6 +583,7 @@ pub fn run_helper(
         crate::kernel_fixture::cgroup_scope(&workload, false, true)
     };
     crate::cgroups::write_control(&cgroup, "cgroup.procs", "0")?;
+    security::prepare_open_files(security::BUILDKIT_OPEN_FILES)?;
     security::clear_supplementary_groups()?;
     let flags = libc::CLONE_NEWUSER
         | libc::CLONE_NEWNS
@@ -605,8 +606,10 @@ pub fn run_helper(
         spec.build_snapshot.is_none(),
         if spec.buildkit_worker {
             security::WorkloadPolicy::BuildKitControl
+        } else if spec.docker_default_capabilities {
+            security::WorkloadPolicy::DockerDefault
         } else {
-            security::WorkloadPolicy::Standard
+            security::WorkloadPolicy::DockerRestricted
         },
     );
     let mut lifeline = [-1; 2];
@@ -621,14 +624,18 @@ pub fn run_helper(
         }
         let setup = (|| -> io::Result<()> {
             security::set_process_limits(
-                security::DEFAULT_OPEN_FILES,
-                security::DEFAULT_FILE_SIZE,
+                security::BUILDKIT_OPEN_FILES,
+                security::BUILDKIT_FILE_SIZE,
             )?;
             security::drop_workload_identity(
                 spec.uid,
                 spec.gid,
                 &[],
-                security::WorkloadPolicy::Standard,
+                if spec.docker_default_capabilities {
+                    security::WorkloadPolicy::DockerDefault
+                } else {
+                    security::WorkloadPolicy::Standard
+                },
             )?;
             checked(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;
             let mut poll = libc::pollfd {
@@ -642,6 +649,7 @@ pub fn run_helper(
                 return Err(io::Error::other("exec helper is no longer live"));
             }
             checked(unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) as i32 })?;
+            security::prepare_exec_signals()?;
             filter.install()
         })();
         if setup.is_err() {

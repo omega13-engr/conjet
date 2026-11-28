@@ -41,6 +41,7 @@ fn launch(
         budget_ms: 3_000,
         spec: LaunchSpec {
             docker_resource_defaults: false,
+            docker_default_capabilities: false,
             memory_swap_disabled: false,
             open_stdin: false,
             redis_bootstrap: false,
@@ -58,6 +59,7 @@ fn launch(
             network_alias_project: None,
             volume: None,
             bind: None,
+            binds: Vec::new(),
             build_snapshot: None,
             limits: ResourceLimits {
                 memory_bytes: MIN_MEMORY_BYTES,

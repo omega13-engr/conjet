@@ -10,7 +10,7 @@ use super::{Kind, Record, Root};
 const MAGIC: &[u8; 8] = b"CJOCI\x02\0\0";
 const METADATA_LIMIT: usize = 8192;
 pub const RECORD_LIMIT: usize = 32_768;
-pub const BYTE_LIMIT: u64 = 1200 * 1024 * 1024;
+pub const BYTE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 
 pub fn write_header(target: &mut impl Write, config_digest: &str, count: usize) -> io::Result<()> {
     ensure!(
@@ -172,6 +172,41 @@ mod tests {
 
     fn read(bytes: &[u8]) -> io::Result<Index> {
         Index::read(&mut Cursor::new(bytes), bytes.len() as u64)
+    }
+
+    #[test]
+    fn indexes_large_sparse_extents_without_reading_payload_into_memory() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("conjet-packed-{}-{unique}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let mut bytes = frame(&[("large", Kind::File, "", b"")]);
+        let extent = 2 * 1024 * 1024 * 1024u64;
+        let offset = bytes.len() - 8;
+        bytes[offset..].copy_from_slice(&extent.to_le_bytes());
+        file.write_all(&bytes).unwrap();
+        let size = bytes.len() as u64 + extent;
+        file.set_len(size).unwrap();
+        file.rewind().unwrap();
+        let index = Index::read(&mut file, size).unwrap();
+        assert!(index.root.records[0].data.is_empty());
+        assert_eq!(
+            index.extents["large"].end - index.extents["large"].start,
+            extent
+        );
+        file.rewind().unwrap();
+        assert!(Index::read(&mut file, BYTE_LIMIT + 1).is_err());
     }
 
     #[test]

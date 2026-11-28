@@ -4,6 +4,7 @@ mod bind;
 mod bind_fuse;
 mod build_api;
 mod build_mirror;
+mod build_proxy;
 mod build_registry;
 mod buildkit;
 mod discovery;
@@ -415,7 +416,7 @@ fn serve_endpoint(
         bind_root,
         pinned_build_registry,
         build_client,
-    ));
+    )?);
     // Managed boot logs retain the pinned registry's source and digest without
     // enabling the standalone diagnostic trace for general Docker requests.
     let _registry = pinned_build_registry
@@ -570,9 +571,11 @@ impl Native {
         let sequence = self.sequence;
         let identity = json!({"boot_id":peer.boot,"sequence":sequence,"operation_id":operation});
         self.pending.insert(sequence, identity);
+        // This is an upper bound, not a delay. A cold Core restore can exceed
+        // the old fixture's one-second grant budget at larger memory ceilings.
         let result = peer.exchange(
             Kind::Launch, Kind::State,
-            &json!({"boot_id":peer.boot,"sequence":sequence,"operation_id":operation,"budget_ms":1000,"spec":spec}),
+            &json!({"boot_id":peer.boot,"sequence":sequence,"operation_id":operation,"budget_ms":30_000,"spec":spec}),
             Duration::from_secs(2),
         ).context("native launch outcome is unresolved");
         let state = match result {
@@ -751,7 +754,8 @@ fn wait_for_native(
     } else {
         ensure!(
             state["exec"] == "confirmed" && state["helper_failed"] == false,
-            "native guest did not confirm OCI exec"
+            "native guest did not confirm OCI exec (exec={}, helper_failed={}, exit={}, cleanup={})",
+            state["exec"], state["helper_failed"], state["exit"], state["cleanup"]
         );
         match state["exit"]["code"].as_i64() {
             Some(code) => code,
@@ -885,7 +889,7 @@ impl Container {
         self.volume
             .iter()
             .map(volume::mount_metadata)
-            .chain(self.bind.iter().map(bind::Binding::metadata))
+            .chain(self.bind.iter().flat_map(bind::Binding::metadata))
             .collect()
     }
 
@@ -1037,6 +1041,7 @@ fn checked_network_address(address: &str, scope: BridgeScope) -> anyhow::Result<
 }
 
 struct Owner {
+    memory_bytes: u64,
     image: request::Image,
     mapped_ids: bool,
     native: Mutex<Native>,
@@ -1059,8 +1064,14 @@ impl Owner {
         bind_root: Option<bind::Root>,
         pinned_build_registry: bool,
         build_client: Option<build_api::Client>,
-    ) -> Self {
-        Self {
+    ) -> anyhow::Result<Self> {
+        let tags = store
+            .as_ref()
+            .map(|store| image::Tags::load(store.root()))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self {
+            memory_bytes: native.identity.memory_mib * 1024 * 1024,
             image,
             mapped_ids: native.mapped_ids,
             archive_root: store.as_ref().map(|store| store.root().to_owned()),
@@ -1069,11 +1080,24 @@ impl Owner {
             build_client,
             built_in_bridge: network::Network::built_in(&native.boot),
             native: Mutex::new(native),
-            ledger: Mutex::new(Ledger::default()),
+            ledger: Mutex::new(Ledger {
+                tags,
+                ..Ledger::default()
+            }),
             store: store.map(Mutex::new),
             exec_peer: Mutex::new(None),
             event_changed: Condvar::new(),
+        })
+    }
+
+    fn publish_tags(&self, ledger: &mut Ledger, tags: image::Tags) -> Result<(), Rejected> {
+        if let Some(root) = &self.archive_root {
+            tags.save(root).map_err(|error| {
+                Rejected::internal(format!("cannot persist image tags: {error:#}"))
+            })?;
         }
+        ledger.tags = tags;
+        Ok(())
     }
 
     fn boot_reference(&self, reference: &str) -> bool {
@@ -1348,7 +1372,7 @@ impl Owner {
             });
             let ports = item.published.lock().unwrap().as_ref()
                 .filter(|_| state.network_address.is_some())
-                .map(port::PublishedPort::summary).into_iter().collect::<Vec<_>>();
+                .map(port::PublishedPort::summary).unwrap_or_default();
             Some(json!({"Id":container.id,"Names":[format!("/{name}")],
                         "Image":container.config["Image"],"ImageID":container.spec["image_digest"],
                         "Command":command,"Created":container.created,"Labels":labels,
@@ -1636,7 +1660,9 @@ impl Owner {
                 .metadata
                 .reference
         };
-        ledger.tags.insert(repository, tag, target)
+        let mut tags = ledger.tags.clone();
+        tags.insert(repository, tag, target)?;
+        self.publish_tags(&mut ledger, tags)
     }
 
     fn pull_image(&self, reference: &str) -> Result<Value, Rejected> {
@@ -1709,7 +1735,7 @@ impl Owner {
                 tag,
                 image.metadata.reference.clone(),
             )?;
-            ledger.tags = tags;
+            self.publish_tags(&mut ledger, tags)?;
         }
         Ok(json!({"status":"Image is staged","id":reference}))
     }
@@ -1770,7 +1796,7 @@ impl Owner {
         store
             .import(archive)
             .map_err(|error| Rejected::bad(format!("{error:#}")))?;
-        ledger.tags = tags;
+        self.publish_tags(&mut ledger, tags)?;
         if transient {
             ledger.transient_build_archives.insert(reference);
         }
@@ -1859,8 +1885,9 @@ impl Owner {
         let mut tags = ledger.tags.clone();
         if let Some(tag) = tags.remove(reference) {
             let mut response = vec![json!({"Untagged":tag})];
+            self.publish_tags(&mut ledger, tags)?;
             if ledger.transient_build_archives.contains(&reference_target)
-                && !tags.references_manifest(&reference_target)
+                && !ledger.tags.references_manifest(&reference_target)
             {
                 let mut store = self.image_store(&ledger)?;
                 if let Some(config) =
@@ -1869,7 +1896,6 @@ impl Owner {
                     response.push(json!({"Deleted":config}));
                 }
             }
-            ledger.tags = tags;
             return Ok(json!(response));
         }
         let mut registered = ledger
@@ -2108,6 +2134,7 @@ impl Owner {
             spec["argv"] = json!(args);
             spec["env"] = json!([BUILDKIT_PATH]);
             spec["buildkit_worker"] = json!(true);
+            spec["docker_default_capabilities"] = json!(false);
         }
         if spec["image_digest"] == conjet_launch_service::spec::REDIS_CONFIG
             && config["HostConfig"]["CapDrop"] != json!(["ALL"])
@@ -2260,7 +2287,7 @@ impl Owner {
                     || state.error.is_some()
                     || state.removed
             },
-            3,
+            30,
         )?;
         if state.network_address.is_none() {
             return Err(Rejected(
@@ -2487,7 +2514,7 @@ impl Owner {
             .transpose()?;
         let bound_spec = bind.as_ref().map(|lease| {
             let mut spec = spec.clone();
-            spec["bind"] = json!(lease.binding);
+            spec["binds"] = json!(lease.bindings());
             spec
         });
         let admitted = self

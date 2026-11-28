@@ -1,6 +1,8 @@
 mod bridge_dns;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub mod bridge_fixture;
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+mod build_filter;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub mod build_runtime;
 pub mod build_snapshot;

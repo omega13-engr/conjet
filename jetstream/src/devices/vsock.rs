@@ -29,7 +29,9 @@ pub const DEFAULT_GUEST_CID: u64 = 3;
 pub const DOCKER_BRIDGE_PORT: u32 = 2375;
 pub const MEMORY_BRIDGE_PORT: u32 = 2376;
 const NATIVE_LAUNCH_PORT: u32 = 2380;
-const MAX_NATIVE_BRIDGE_STREAMS: usize = 10;
+// Match the guest handshake connection bound; reserve room beyond build relays
+// for lifecycle, memory admission, cancellation and Docker attach traffic.
+const MAX_NATIVE_BRIDGE_STREAMS: usize = conjet_launch_service::handshake::MAX_CONNECTIONS;
 #[cfg(target_os = "macos")]
 const NATIVE_BRIDGE_SEND_BUFFER: libc::c_int = 128 * 1024;
 const STREAM_TYPE: u16 = 1;

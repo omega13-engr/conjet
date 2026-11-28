@@ -1,6 +1,6 @@
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use conjet_launch_service::socket::Stream;
 use super::{Owner, STOP};
 
 const HEADER_LIMIT: u64 = 8192;
-const WORKERS: usize = 3;
+const WORKERS: usize = conjet_launch_service::handshake::BUILD_RELAY_CONNECTIONS;
 
 pub(super) struct Relay {
     stop: Arc<AtomicBool>,
@@ -23,7 +23,9 @@ impl Relay {
             stop: Arc::new(AtomicBool::new(false)),
             workers: Vec::with_capacity(WORKERS),
         };
+        let acceptance = Arc::new(Mutex::new(()));
         for _ in 0..WORKERS {
+            let acceptance = acceptance.clone();
             let owner = owner.clone();
             let stop = relay.stop.clone();
             relay.workers.push(
@@ -33,6 +35,12 @@ impl Relay {
                         let stopping =
                             || stop.load(Ordering::Acquire) || STOP.load(Ordering::Acquire);
                         while !stopping() {
+                            // Only one idle poller holds a control connection.
+                            // Busy transfers release this gate to the next worker.
+                            let mut gate = Some(acceptance.lock().unwrap());
+                            if stopping() {
+                                break;
+                            }
                             if !owner.has_build_registry_worker() {
                                 thread::sleep(Duration::from_millis(50));
                                 continue;
@@ -44,8 +52,12 @@ impl Relay {
                             while !stopping() && owner.has_build_registry_worker() {
                                 match peer.poll_build_registry() {
                                     Ok(true) => {
-                                        let _ =
-                                            serve(&owner, &mut peer.into_build_registry(), trace);
+                                        drop(gate.take());
+                                        if let Err(error) =
+                                            serve(&owner, &mut peer.into_build_registry(), trace)
+                                        {
+                                            eprintln!("native build relay failed: {error:#}");
+                                        }
                                         break;
                                     }
                                     Ok(false) => thread::sleep(Duration::from_millis(50)),
@@ -130,23 +142,31 @@ fn request(line: &str) -> anyhow::Result<(bool, Object<'_>)> {
 }
 
 fn serve(owner: &Owner, stream: &mut Stream, trace: bool) -> anyhow::Result<()> {
-    let mut line = String::new();
-    {
-        let mut reader = BufReader::new((&mut *stream).take(HEADER_LIMIT));
-        reader.read_line(&mut line)?;
-        let mut header = Vec::new();
-        loop {
-            header.clear();
-            ensure!(
-                reader.read_until(b'\n', &mut header)? > 0,
-                "truncated registry headers"
-            );
-            if header == b"\r\n" {
-                break;
-            }
-        }
+    // Do not prefetch and discard a CONNECT tunnel's first TLS bytes.
+    let mut header = Vec::new();
+    while !header.ends_with(b"\r\n\r\n") {
+        ensure!(
+            header.len() < HEADER_LIMIT as usize,
+            "registry header limit exceeded"
+        );
+        let mut byte = [0];
+        stream.read_exact(&mut byte)?;
+        header.push(byte[0]);
     }
-    let (head, object) = match request(&line) {
+    let header = std::str::from_utf8(&header)?;
+    let line = header
+        .split("\r\n")
+        .next()
+        .context("missing registry request")?;
+    if line.starts_with("CONNECT ")
+        || line
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|url| url.starts_with("http://"))
+    {
+        return super::build_proxy::serve(owner, stream, header);
+    }
+    let (head, object) = match request(line) {
         Ok(request) => request,
         Err(error) => {
             stream.write_all(

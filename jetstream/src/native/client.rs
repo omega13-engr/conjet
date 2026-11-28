@@ -620,6 +620,7 @@ fn execute(
 ) -> anyhow::Result<()> {
     let spec = LaunchSpec {
         docker_resource_defaults: false,
+        docker_default_capabilities: false,
         memory_swap_disabled: false,
         open_stdin: false,
         redis_bootstrap: false,
@@ -637,6 +638,7 @@ fn execute(
         network_alias_project: None,
         volume: None,
         bind: None,
+        binds: Vec::new(),
         build_snapshot: None,
         limits: NATIVE_LIMITS,
     };

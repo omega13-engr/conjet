@@ -554,7 +554,7 @@ impl<'a> RelaySlot<'a> {
     fn reserve(slots: &'a AtomicUsize) -> Option<Self> {
         slots
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < 2).then_some(count + 1)
+                (count < crate::handshake::MAX_RELAY_CONNECTIONS).then_some(count + 1)
             })
             .ok()?;
         Some(Self(slots))

@@ -84,7 +84,9 @@ pub(crate) struct Sources {
     hosts: WorkerFile,
     resolver: WorkerFile,
     tracing: WorkerFile,
+    metadata: Option<WorkerFile>,
     null: File,
+    devices: [File; 5],
 }
 
 enum WorkerFile {
@@ -118,30 +120,58 @@ pub(crate) struct LiveMounts {
     hosts: OwnedFd,
     resolver: OwnedFd,
     tracing: OwnedFd,
+    network: OwnedFd,
+    metadata: Option<OwnedFd>,
 }
 
 impl LiveMounts {
+    pub(crate) fn inherits_network(&self) -> bool {
+        self.metadata.is_none()
+    }
+
+    pub(crate) fn enter_network(&self) -> io::Result<bool> {
+        if self.metadata.is_some() {
+            return Ok(false);
+        }
+        // An OCI RUN without a network namespace inherits its verified worker's
+        // network, never the supervisor's or host's network.
+        checked(unsafe { libc::setns(self.network.as_raw_fd(), libc::CLONE_NEWNET) })?;
+        Ok(true)
+    }
+
     pub(crate) fn capture(
         root: OwnedFd,
         executor: &File,
         cache: &File,
         hosts: &str,
+        worker_root: &File,
+        worker_pidfd: &OwnedFd,
+        metadata: Option<&str>,
     ) -> io::Result<Self> {
         Ok(Self {
             root,
             hosts: live_source(executor, &CString::new(hosts)?, false)?,
             resolver: live_source(executor, c"resolv.conf", false)?,
             tracing: live_source(cache, c"otel-grpc.sock", true)?,
+            network: crate::exec_fixture::target_network(worker_pidfd)?.into(),
+            metadata: metadata
+                .map(|name| metadata_source(worker_root, worker_pidfd, name))
+                .transpose()?,
         })
     }
 
-    pub(crate) fn descriptors(&self) -> [i32; 4] {
-        [
+    pub(crate) fn descriptors(&self) -> Vec<i32> {
+        let mut fds = vec![
             self.root.as_raw_fd(),
             self.hosts.as_raw_fd(),
             self.resolver.as_raw_fd(),
             self.tracing.as_raw_fd(),
-        ]
+            self.network.as_raw_fd(),
+        ];
+        if let Some(metadata) = &self.metadata {
+            fds.push(metadata.as_raw_fd());
+        }
+        fds
     }
 
     pub(crate) fn inherited(required: bool) -> io::Result<Option<Self>> {
@@ -159,10 +189,15 @@ impl LiveMounts {
             .map(str::parse::<i32>)
             .collect::<Result<Vec<_>, _>>()
             .map_err(io::Error::other)?;
-        let [root, hosts, resolver, tracing]: [i32; 4] = fds
-            .try_into()
-            .map_err(|_| io::Error::other("wrong number of live build mount descriptors"))?;
-        let mut distinct = [root, hosts, resolver, tracing];
+        if !(5..=6).contains(&fds.len()) {
+            return Err(io::Error::other(
+                "wrong number of live build mount descriptors",
+            ));
+        }
+        let (root, hosts, resolver, tracing) = (fds[0], fds[1], fds[2], fds[3]);
+        let network = fds[4];
+        let metadata = fds.get(5).copied();
+        let mut distinct = fds;
         distinct.sort_unstable();
         if distinct[0] <= 2 || distinct.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(io::Error::other(
@@ -179,6 +214,8 @@ impl LiveMounts {
                 hosts: OwnedFd::from_raw_fd(hosts),
                 resolver: OwnedFd::from_raw_fd(resolver),
                 tracing: OwnedFd::from_raw_fd(tracing),
+                network: OwnedFd::from_raw_fd(network),
+                metadata: metadata.map(|fd| OwnedFd::from_raw_fd(fd)),
             }
         }))
     }
@@ -188,9 +225,56 @@ impl LiveMounts {
             hosts: WorkerFile::Detached(self.hosts.try_clone()?),
             resolver: WorkerFile::Detached(self.resolver.try_clone()?),
             tracing: WorkerFile::Detached(self.tracing.try_clone()?),
+            metadata: self
+                .metadata
+                .as_ref()
+                .map(|fd| fd.try_clone().map(WorkerFile::Detached))
+                .transpose()?,
             null: File::open("/dev/null")?,
+            devices: crate::sandbox_fixture::standard_devices()?,
         })
     }
+}
+
+fn metadata_source(root: &File, pidfd: &OwnedFd, name: &str) -> io::Result<OwnedFd> {
+    let suffix = name.strip_prefix("buildkit-metadata").unwrap_or("");
+    if suffix.is_empty() || suffix.len() > 32 || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(io::Error::other("invalid owned metadata directory"));
+    }
+    let open = |parent: &File, name: &CStr| -> io::Result<File> {
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { File::from_raw_fd(fd) })
+    };
+    let tmp = open(root, c"tmp")?;
+    let source = open(&tmp, &CString::new(name)?)?;
+    let info = source.metadata()?;
+    if info.uid() != crate::spec::UID_BASE || info.dev() != tmp.metadata()?.dev() {
+        return Err(io::Error::other("frontend metadata ownership changed"));
+    }
+    let namespace = crate::exec_fixture::target_mount_namespace(pidfd)?;
+    let tree = super::guest::clone_worker_overlay(&namespace, &source)?;
+    super::guest::set_mount_attributes(
+        &tree,
+        &libc::mount_attr {
+            attr_set: libc::MOUNT_ATTR_RDONLY
+                | libc::MOUNT_ATTR_NOSUID
+                | libc::MOUNT_ATTR_NODEV
+                | libc::MOUNT_ATTR_NOEXEC,
+            attr_clr: 0,
+            propagation: 0,
+            userns_fd: 0,
+        },
+    )?;
+    Ok(tree)
 }
 
 fn live_source(directory: &File, name: &CStr, socket: bool) -> io::Result<OwnedFd> {
@@ -314,7 +398,9 @@ impl MountPlan {
             hosts: WorkerFile::Bind(self.hosts.reopen()?),
             resolver: WorkerFile::Bind(self.resolver.reopen()?),
             tracing: WorkerFile::Bind(self.tracing.reopen()?),
+            metadata: None,
             null: File::open("/dev/null")?,
+            devices: crate::sandbox_fixture::standard_devices()?,
         })
     }
 }
@@ -379,7 +465,20 @@ impl Sources {
             file.mount(&target)
                 .map_err(|error| io::Error::other(format!("worker mount {path}: {error}")))?;
         }
-        bind(&self.null, &mount_file_target(root, "dev/null")?, true)?;
+        if let Some(metadata) = self.metadata {
+            metadata.mount(&directory(root, "run/config/buildkit/metadata")?)?;
+        }
+        let root_path = CString::new(root.as_os_str().as_bytes())?;
+        crate::sandbox_fixture::mount_standard_devices(&root_path, self.devices)?;
+        for (name, target) in [
+            ("fd", "/proc/self/fd"),
+            ("stdin", "/proc/self/fd/0"),
+            ("stdout", "/proc/self/fd/1"),
+            ("stderr", "/proc/self/fd/2"),
+            ("ptmx", "pts/ptmx"),
+        ] {
+            std::os::unix::fs::symlink(target, root.join("dev").join(name))?;
+        }
         for path in MASKED {
             let target = root.join(path);
             if let Some(info) = optional_metadata(&target)? {

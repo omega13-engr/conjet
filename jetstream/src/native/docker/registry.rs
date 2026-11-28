@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -17,7 +18,7 @@ use super::{archive, client, image, private_directory, public_registry, request,
 use crate::native::oci_stage;
 
 const MAX_STORED: u64 = 256 * 1024 * 1024;
-const MAX_DISK_STORED: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_DISK_STORED: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_IMAGES: usize = 16;
 const MAX_HEADERS: usize = 8192;
 const IO_TIMEOUT: Duration = Duration::from_secs(4);
@@ -39,7 +40,7 @@ pub(super) struct Store {
 }
 
 struct Reference<'a> {
-    repository: &'a str,
+    repository: Cow<'a, str>,
     manifest: &'a str,
     origin: Origin,
 }
@@ -134,7 +135,13 @@ impl Store {
             (&lock).take(128).read_to_end(&mut version)?;
             ensure!(version == STORE_VERSION, "unrecognised image store version");
         }
-        for directory in ["images", "blobs", "blobs/sha256"] {
+        let indexes = root.join("indexes");
+        match fs::create_dir(&indexes) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        for directory in ["images", "blobs", "blobs/sha256", "indexes"] {
             let path = root.join(directory);
             ensure!(
                 path.canonicalize()? == path && path.is_dir(),
@@ -192,10 +199,19 @@ impl Store {
                 .map(String::as_str)
         }) {
             return Ok(Reference {
-                repository,
+                repository: repository.into(),
                 manifest,
                 origin: Origin::Public,
             });
+        }
+        if self.public.enabled() {
+            if let Ok((repository, manifest)) = public_registry::pinned(reference) {
+                return Ok(Reference {
+                    repository,
+                    manifest,
+                    origin: Origin::Public,
+                });
+            }
         }
         let (authority, repository) = name
             .split_once('/')
@@ -219,7 +235,7 @@ impl Store {
             "native pull requires a valid repository at the allowlisted registry"
         );
         Ok(Reference {
-            repository,
+            repository: repository.into(),
             manifest,
             origin: Origin::Loopback(registry),
         })
@@ -284,6 +300,23 @@ impl Store {
     }
 
     fn recover(&self) -> anyhow::Result<()> {
+        for entry in self.root.join("indexes").read_dir()? {
+            let entry = entry?;
+            ensure!(entry.file_type()?.is_file(), "invalid index proof type");
+            let name = entry.file_name();
+            let name = name.to_str().context("invalid index proof name")?;
+            if name.starts_with(".tmp") {
+                fs::remove_file(entry.path())?;
+                continue;
+            }
+            let digest = format!("sha256:{name}");
+            suffix(&digest)?;
+            let bytes = oci_stage::read_bounded(&self.root, &entry.path(), METADATA)?;
+            let child = public_registry::verified_manifest(&bytes, &digest)?;
+            if !self.path(&child.digest)?.try_exists()? {
+                fs::remove_file(entry.path())?;
+            }
+        }
         let refs = self.inventory()?;
         for item in self.root.join("images").read_dir()? {
             let item = item?;
@@ -310,6 +343,14 @@ impl Store {
 
     fn stored_bytes(&self) -> anyhow::Result<u64> {
         let mut bytes = 0u64;
+        for entry in self.root.join("indexes").read_dir()? {
+            let metadata = entry?.metadata()?;
+            ensure!(
+                metadata.is_file() && metadata.len() <= METADATA as u64,
+                "invalid index proof cache entry"
+            );
+            bytes = bytes.saturating_add(metadata.len());
+        }
         for item in self.root.join("blobs/sha256").read_dir()? {
             bytes = bytes.saturating_add(item?.metadata()?.len());
         }
@@ -340,6 +381,21 @@ impl Store {
     }
 
     pub(super) fn get(&self, reference: &str) -> anyhow::Result<Option<Image>> {
+        if self.public.enabled() {
+            if let Ok((repository, pinned)) = public_registry::pinned(reference) {
+                let proof = self.root.join("indexes").join(suffix(pinned)?);
+                if proof.try_exists()? {
+                    let bytes = oci_stage::read_bounded(&self.root, &proof, METADATA)?;
+                    let resolved = public_registry::verified_manifest(&bytes, pinned)?;
+                    let child = format!("docker.io/{repository}@{}", resolved.digest);
+                    let mut image = self.get_manifest(&child, &resolved.digest)?;
+                    if let Some(image) = &mut image {
+                        image.metadata.reference = format!("docker.io/{repository}@{pinned}");
+                    }
+                    return Ok(image);
+                }
+            }
+        }
         let manifest = match reference
             .strip_prefix(archive::LOCAL)
             .and_then(|r| r.strip_prefix('@'))
@@ -584,7 +640,44 @@ impl Store {
             return Ok(image);
         }
         let name = self.reference(reference)?;
-        self.prepare_reference(reference, &name, None, self.download()?)
+        let mut download = self.download()?;
+        if matches!(name.origin, Origin::Public) {
+            self.receive(&name, "manifests", name.manifest, METADATA, &mut download)?;
+            let bytes = oci_stage::read_bounded(
+                &self.root,
+                &self.root.join("blobs/sha256").join(suffix(name.manifest)?),
+                METADATA,
+            )?;
+            let resolved = public_registry::verified_manifest(&bytes, name.manifest)?;
+            if resolved.digest != name.manifest {
+                let index_path = self.root.join("indexes").join(suffix(name.manifest)?);
+                ensure!(
+                    index_path.try_exists()? || self.root.join("indexes").read_dir()?.count() < 64,
+                    "native public index cache capacity exceeded"
+                );
+                let child_ref = format!("docker.io/{}@{}", name.repository, resolved.digest);
+                let child = Reference {
+                    repository: name.repository.clone(),
+                    manifest: &resolved.digest,
+                    origin: Origin::Public,
+                };
+                let mut image =
+                    self.prepare_reference(&child_ref, &child, Some(resolved.size), download)?;
+                if !index_path.try_exists()? {
+                    let mut proof = tempfile::NamedTempFile::new_in(self.root.join("indexes"))?;
+                    proof.write_all(&bytes)?;
+                    proof.as_file().sync_all()?;
+                    proof.persist_noclobber(&index_path)?;
+                    File::open(self.root.join("indexes"))?.sync_all()?;
+                }
+                image.metadata.reference =
+                    format!("docker.io/{}@{}", name.repository, name.manifest);
+                let repository = name.repository.into_owned();
+                self.resolved_public.insert(resolved.digest, repository);
+                return Ok(image);
+            }
+        }
+        self.prepare_reference(reference, &name, None, download)
     }
 
     pub(super) fn prepare_tagged(
@@ -611,7 +704,7 @@ impl Store {
         download.token = Some(token);
         let reference = format!("docker.io/{repository}@{}", resolved.digest);
         let name = Reference {
-            repository,
+            repository: repository.into(),
             manifest: &resolved.digest,
             origin: Origin::Public,
         };
@@ -744,7 +837,7 @@ impl Store {
             Origin::Public => {
                 if download.token.is_none() {
                     download.token = Some(public_registry::Token::acquire(
-                        name.repository,
+                        &name.repository,
                         download.deadline,
                     )?);
                 }
@@ -753,7 +846,7 @@ impl Store {
                     .as_ref()
                     .expect("scoped public token")
                     .download(
-                        name.repository,
+                        &name.repository,
                         kind,
                         digest,
                         bound,
@@ -968,6 +1061,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn index_identity_survives_reopen_and_rejects_changed_proof() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let open = || {
+            Store::open(
+                root.clone(),
+                root.parent().unwrap(),
+                None,
+                true,
+                &serde_json::json!({}),
+            )
+            .unwrap()
+        };
+        let store = open();
+        let child = format!("sha256:{}", "b".repeat(64));
+        let config = format!("sha256:{}", "c".repeat(64));
+        let index = serde_json::to_vec(&serde_json::json!({"schemaVersion":2,
+            "mediaType":"application/vnd.oci.image.index.v1+json", "manifests":[{
+                "mediaType":"application/vnd.oci.image.manifest.v1+json", "digest":child,"size":512,
+                "platform":{"os":"linux","architecture":"arm64"}}]}))
+        .unwrap();
+        let pinned = format!("sha256:{:x}", Sha256::digest(&index));
+        let path = store.path(&child).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(
+            path.join("receipt.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "manifest_digest":child,"config_digest":config,"layers":[],"process":{}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let proof = root.join("indexes").join(suffix(&pinned).unwrap());
+        fs::write(&proof, &index).unwrap();
+        let reference = format!("postgres:16-alpine@{pinned}");
+        let check = |store: &Store| {
+            let image = store.get(&reference).unwrap().unwrap();
+            assert_eq!(image.manifest, child);
+            assert_eq!(
+                image.metadata.reference,
+                format!("docker.io/library/postgres@{pinned}")
+            );
+        };
+        check(&store);
+        drop(store);
+        let store = open();
+        check(&store);
+        fs::write(&proof, [index.as_slice(), b" "].concat()).unwrap();
+        assert!(store
+            .get(&reference)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("digest mismatch"));
+    }
+
+    #[test]
     fn registry_errors_roll_back_downloaded_objects() {
         use sha2::{Digest, Sha256};
         use std::net::TcpListener;
@@ -1053,6 +1206,7 @@ mod tests {
             _lock: tempfile::tempfile().unwrap(),
         };
         fs::create_dir(root.path().join("images")).unwrap();
+        fs::create_dir(root.path().join("indexes")).unwrap();
         fs::create_dir_all(root.path().join("blobs/sha256")).unwrap();
         let mut source = tempfile::tempfile().unwrap();
         source.write_all(b"original").unwrap();

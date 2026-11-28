@@ -89,7 +89,7 @@ pub(crate) mod guest {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
     use std::path::Path;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use serde::Serialize;
 
@@ -108,6 +108,7 @@ pub(crate) mod guest {
     const PENDING: &str = "/run/conjet/volume-disk/volumes/.pending";
     const LIMIT: usize = 8;
     const METADATA: &CStr = c"trusted.conjet.volume-labels";
+    const CREATED_AT: &CStr = c"trusted.conjet.volume-created-at";
     const UNCLAIMED: &CStr = c"trusted.conjet.volume-unclaimed";
 
     fn path(value: &CStr) -> &Path {
@@ -372,6 +373,20 @@ pub(crate) mod guest {
                     )
                 })?;
             }
+            let created = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(io::Error::other)?
+                .as_secs()
+                .to_le_bytes();
+            checked(unsafe {
+                libc::fsetxattr(
+                    pending.as_raw_fd(),
+                    CREATED_AT.as_ptr(),
+                    created.as_ptr().cast(),
+                    created.len(),
+                    libc::XATTR_CREATE,
+                )
+            })?;
             pending.sync_all()?;
             fs::rename(PENDING, path)?;
             File::open(VOLUMES)?.sync_all()?;
@@ -397,6 +412,8 @@ pub(crate) mod guest {
         mode: u32,
         pub(crate) inode: u64,
         labels: VolumeLabels,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        created_unix_seconds: Option<u64>,
     }
 
     pub(crate) fn inspect(name: &str) -> io::Result<VolumeInfo> {
@@ -425,6 +442,25 @@ pub(crate) mod guest {
         } else {
             info.labels = serde_json::from_slice(&payload[..length as usize])?;
             encode_labels(&info.labels)?;
+        }
+        let mut created = [0; 8];
+        let length = unsafe {
+            libc::fgetxattr(
+                source.as_raw_fd(),
+                CREATED_AT.as_ptr(),
+                created.as_mut_ptr().cast(),
+                created.len(),
+            )
+        };
+        if length < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ENODATA) {
+                return Err(error);
+            }
+        } else if length as usize == created.len() {
+            info.created_unix_seconds = Some(u64::from_le_bytes(created));
+        } else {
+            return Err(io::Error::other("invalid native volume creation time"));
         }
         Ok(info)
     }
@@ -514,37 +550,58 @@ pub(crate) mod guest {
     }
 
     fn checked_info(name: &str, info: &Metadata, base: (u32, u32)) -> io::Result<VolumeInfo> {
-        let owner = (
-            info.uid().checked_sub(base.0),
-            info.gid().checked_sub(base.1),
-        );
-        if !info.is_dir()
-            || !matches!(
-                owner,
-                (Some(0), Some(0))
-                    | (Some(999), Some(0))
-                    | (Some(WORKLOAD_UID), Some(WORKLOAD_GID))
-            )
-            || info.mode() & 0o777 != 0o700
-        {
+        // Container entrypoints may chown/chmod their volume. Ownership must
+        // remain inside the mapped guest range; the private registry parent
+        // and descriptor-relative open retain the access boundary.
+        let owner = super::mapped_volume_owner(info.uid(), info.gid(), base);
+        if !info.is_dir() || owner.is_none() {
             return Err(io::Error::other(
                 "unexpected native volume directory identity",
             ));
         }
         Ok(VolumeInfo {
             name: name.into(),
-            guest_uid: owner.0.expect("validated volume UID"),
-            guest_gid: owner.1.expect("validated volume GID"),
+            guest_uid: owner.expect("validated volume owner").0,
+            guest_gid: owner.expect("validated volume owner").1,
             mode: info.mode() & 0o777,
             inode: info.ino(),
             labels: VolumeLabels::new(),
+            created_unix_seconds: None,
         })
     }
+}
+
+#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+fn mapped_volume_owner(uid: u32, gid: u32, base: (u32, u32)) -> Option<(u32, u32)> {
+    let owner = (uid.checked_sub(base.0)?, gid.checked_sub(base.1)?);
+    (owner.0 < crate::spec::ID_MAP_WIDTH && owner.1 < crate::spec::ID_MAP_WIDTH).then_some(owner)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_owners_accept_mapped_application_accounts_only() {
+        for id in [0, 70, 999, crate::spec::ID_MAP_WIDTH - 1] {
+            assert_eq!(
+                mapped_volume_owner(100_000 + id, 100_000 + id, (100_000, 100_000)),
+                Some((id, id))
+            );
+        }
+        assert_eq!(
+            mapped_volume_owner(99_999, 100_000, (100_000, 100_000)),
+            None
+        );
+        assert_eq!(
+            mapped_volume_owner(100_000, 165_536, (100_000, 100_000)),
+            None
+        );
+        assert_eq!(
+            mapped_volume_owner(u32::MAX, 100_000, (100_000, 100_000)),
+            None
+        );
+    }
 
     #[test]
     fn boot_record_requires_disk_identity_and_valid_epoch() {

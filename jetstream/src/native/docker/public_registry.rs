@@ -82,6 +82,51 @@ pub(super) fn hub_repository(name: &str) -> Cow<'_, str> {
     }
 }
 
+pub(super) fn pinned(reference: &str) -> anyhow::Result<(Cow<'_, str>, &str)> {
+    let (name, digest) = reference.rsplit_once('@').context("missing image digest")?;
+    ensure!(super::request::digest(digest), "invalid image digest");
+    let explicit_hub = name.starts_with("docker.io/") || name.starts_with("index.docker.io/");
+    let name = name
+        .strip_prefix("docker.io/")
+        .or_else(|| name.strip_prefix("index.docker.io/"))
+        .unwrap_or(name);
+    if !explicit_hub {
+        if let Some((authority, _)) = name.split_once('/') {
+            ensure!(
+                !authority.contains(['.', ':']) && authority != "localhost",
+                "not a Docker Hub reference"
+            );
+        }
+    }
+    let name = match name.rsplit_once(':') {
+        Some((name, tag)) => {
+            ensure!(valid_tag(tag), "invalid Docker Hub tag");
+            name
+        }
+        None => name,
+    };
+    let repository = hub_repository(name);
+    ensure!(
+        repository.len() <= 200
+            && repository.split('/').count() == 2
+            && repository.split('/').all(|part| !part.is_empty()
+                && part.as_bytes()[0].is_ascii_alphanumeric()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))),
+        "invalid Docker Hub repository"
+    );
+    Ok((repository, digest))
+}
+
+pub(super) fn verified_manifest(body: &[u8], expected: &str) -> anyhow::Result<ResolvedManifest> {
+    ensure!(
+        format!("sha256:{:x}", Sha256::digest(body)) == expected,
+        "registry manifest digest mismatch"
+    );
+    resolve_manifest(body)
+}
+
 pub(super) fn valid_tag(tag: &str) -> bool {
     !tag.is_empty()
         && tag.len() <= 128
@@ -317,6 +362,52 @@ fn attempt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pinned_hub_names_normalize_without_accepting_other_registries() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        for name in [
+            "postgres:16-alpine",
+            "postgres",
+            "library/postgres",
+            "docker.io/library/postgres:16-alpine",
+            "index.docker.io/library/postgres",
+        ] {
+            let reference = format!("{name}@{digest}");
+            let (repository, actual) = pinned(&reference).unwrap();
+            assert_eq!(repository, "library/postgres");
+            assert_eq!(actual, digest);
+        }
+        for name in [
+            "localhost:5000/postgres",
+            "example.com/postgres",
+            "../postgres",
+            "library/../postgres",
+            "library/postgres?x",
+            "library/Postgres",
+            "postgres:bad/tag",
+            "user@library/postgres",
+        ] {
+            assert!(pinned(&format!("{name}@{digest}")).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn pinned_index_verifies_bytes_before_selecting_arm64() {
+        let child = format!("sha256:{}", "b".repeat(64));
+        let body = serde_json::to_vec(
+            &serde_json::json!({"schemaVersion":2,"mediaType":IMAGE_INDEX,
+            "manifests":[{"mediaType":IMAGE_MANIFEST,"digest":child,"size":512,
+            "platform":{"os":"linux","architecture":"arm64","variant":"v8"}}]}),
+        )
+        .unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(&body));
+        assert_eq!(verified_manifest(&body, &digest).unwrap().digest, child);
+        let mut modified = body.clone();
+        modified.push(b' ');
+        assert!(verified_manifest(&modified, &digest).is_err());
+        assert!(verified_manifest(&body, &format!("sha256:{}", "c".repeat(64))).is_err());
+    }
 
     #[test]
     fn docker_hub_tag_forms_and_unsafe_components() {

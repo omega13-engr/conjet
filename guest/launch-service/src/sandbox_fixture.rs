@@ -43,11 +43,11 @@ pub(crate) struct Sandbox {
     resolver: Option<std::net::Ipv4Addr>,
     standard_devices: bool,
     stdin: File,
-    volume: Option<FileBinding>,
+    volume: Vec<FileBinding>,
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
     build_sysfs_view: bool,
     live_mounts: Option<crate::build_snapshot::mounts::LiveMounts>,
-    groups: &'static [u32],
+    groups: Vec<u32>,
     uid: u32,
     gid: u32,
     redis_bootstrap: bool,
@@ -65,7 +65,8 @@ fn standard_device(name: &str, minor: u32) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
-        .open(Path::new("/dev").join(name))?;
+        .open(Path::new("/dev").join(name))
+        .map_err(|error| io::Error::other(format!("open standard device /dev/{name}: {error}")))?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_char_device()
         || libc::major(metadata.rdev()) != 1
@@ -76,7 +77,17 @@ fn standard_device(name: &str, minor: u32) -> io::Result<File> {
     Ok(file)
 }
 
-fn mount_standard_devices(root: &CStr, devices: [File; 2]) -> io::Result<()> {
+pub(crate) fn standard_devices() -> io::Result<[File; 5]> {
+    Ok([
+        standard_device("null", 3)?,
+        standard_device("zero", 5)?,
+        standard_device("full", 7)?,
+        standard_device("random", 8)?,
+        standard_device("urandom", 9)?,
+    ])
+}
+
+pub(crate) fn mount_standard_devices(root: &CStr, devices: [File; 5]) -> io::Result<()> {
     let directory = Path::new(std::ffi::OsStr::from_bytes(root.to_bytes())).join("dev");
     match directory.symlink_metadata() {
         Ok(metadata) if metadata.is_dir() => {}
@@ -84,7 +95,10 @@ fn mount_standard_devices(root: &CStr, devices: [File; 2]) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&directory)?,
         Err(error) => return Err(error),
     }
-    for (name, file) in ["null", "zero"].into_iter().zip(devices) {
+    for (name, file) in ["null", "zero", "full", "random", "urandom"]
+        .into_iter()
+        .zip(devices)
+    {
         let target_path = directory.join(name);
         match File::create_new(&target_path) {
             Ok(_) => {}
@@ -115,6 +129,44 @@ fn mount_standard_devices(root: &CStr, devices: [File; 2]) -> io::Result<()> {
         })?;
     }
     Ok(())
+}
+
+fn prepare_container_devices(root: &CStr, devices: [File; 5]) -> io::Result<()> {
+    mount_standard_devices(root, devices)?;
+    let directory = Path::new(std::ffi::OsStr::from_bytes(root.to_bytes())).join("dev");
+    for (name, target) in [
+        ("fd", "/proc/self/fd"),
+        ("stdin", "/proc/self/fd/0"),
+        ("stdout", "/proc/self/fd/1"),
+        ("stderr", "/proc/self/fd/2"),
+    ] {
+        let path = directory.join(name);
+        match std::os::unix::fs::symlink(target, &path) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && fs::read_link(&path).is_ok_and(|actual| actual == Path::new(target)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let shm = directory.join("shm");
+    match fs::create_dir(&shm) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == io::ErrorKind::AlreadyExists && shm.symlink_metadata()?.is_dir() => {
+        }
+        Err(error) => return Err(error),
+    }
+    let target = CString::new(shm.as_os_str().as_bytes())?;
+    security::checked(unsafe {
+        libc::mount(
+            c"tmpfs".as_ptr(),
+            target.as_ptr(),
+            c"tmpfs".as_ptr(),
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            c"mode=1777,size=65536k".as_ptr().cast(),
+        )
+    })
 }
 
 enum BindingSource {
@@ -259,8 +311,9 @@ struct FileBinding {
 }
 
 impl FileBinding {
-    fn prepare(spec: &LaunchSpec, root: &Path) -> io::Result<Option<Self>> {
-        let (source, destination, read_only) = if let Some(volume) = &spec.volume {
+    fn prepare(spec: &LaunchSpec, root: &Path) -> io::Result<Vec<Self>> {
+        let mut sources = Vec::new();
+        if let Some(volume) = &spec.volume {
             if !valid_volume_target(&volume.target) {
                 return Err(io::Error::other("unsupported native named volume target"));
             }
@@ -269,24 +322,31 @@ impl FileBinding {
             } else {
                 BindingSource::Volume(volume.clone())
             };
-            (source, volume.target.as_str(), volume.read_only)
-        } else if let Some(bind) = &spec.bind {
-            (
+            sources.push((source, volume.target.clone(), volume.read_only));
+        }
+        for bind in spec.host_binds() {
+            if !crate::spec::valid_bind_target(&bind.target) {
+                return Err(io::Error::other("invalid native bind target"));
+            }
+            sources.push((
                 BindingSource::Bind(bind.clone()),
-                "/dataset",
+                bind.target.clone(),
                 bind.read_only,
-            )
-        } else {
-            return Ok(None);
-        };
-        let path = root.join(destination.trim_start_matches('/'));
-        Ok(Some(Self {
-            source,
-            destination: destination.into(),
-            read_only,
-            target: CString::new(path.as_os_str().as_bytes())?,
-            root: root.to_owned(),
-        }))
+            ));
+        }
+        sources
+            .into_iter()
+            .map(|(source, destination, read_only)| {
+                let path = root.join(destination.trim_start_matches('/'));
+                Ok(Self {
+                    source,
+                    destination,
+                    read_only,
+                    target: CString::new(path.as_os_str().as_bytes())?,
+                    root: root.to_owned(),
+                })
+            })
+            .collect()
     }
 
     fn open(&self) -> io::Result<File> {
@@ -383,13 +443,15 @@ impl Sandbox {
             if snapshot.is_some_and(|snapshot| snapshot.live_worker) != live_mounts.is_some() {
                 return Err(io::Error::other("unexpected live snapshot mount lease"));
             }
-            let groups: &'static [u32] =
-                if live_mounts.is_some() && oci.is_some_and(|spec| spec.uid == 0) {
-                    crate::build_snapshot::bundle::LIVE_GROUPS
+            let groups =
+                if let Some(groups) = snapshot.and_then(|s| s.supplementary_groups.as_ref()) {
+                    groups.clone()
+                } else if live_mounts.is_some() && oci.is_some_and(|spec| spec.uid == 0) {
+                    crate::build_snapshot::bundle::LIVE_GROUPS.to_vec()
                 } else if worker_mounts.is_some() || live_mounts.is_some() {
-                    &[WORKLOAD_GID]
+                    vec![WORKLOAD_GID]
                 } else {
-                    &[]
+                    Vec::new()
                 };
             let lower = if snapshot.is_some() {
                 base.join("lower")
@@ -443,6 +505,10 @@ impl Sandbox {
                 WorkloadPolicy::BuildKitRun
             } else if oci.is_some_and(|spec| spec.redis_bootstrap) {
                 WorkloadPolicy::RedisBootstrap
+            } else if oci.is_some_and(|spec| spec.docker_default_capabilities) {
+                WorkloadPolicy::DockerDefault
+            } else if oci.is_some_and(|spec| spec.build_snapshot.is_none()) {
+                WorkloadPolicy::DockerRestricted
             } else {
                 WorkloadPolicy::Standard
             };
@@ -475,7 +541,7 @@ impl Sandbox {
                 volume: oci
                     .map(|spec| FileBinding::prepare(spec, &base.join("root")))
                     .transpose()?
-                    .flatten(),
+                    .unwrap_or_default(),
                 worker_mounts,
                 build_sysfs_view: oci.is_some_and(LaunchSpec::build_sysfs_view),
                 live_mounts,
@@ -497,7 +563,12 @@ impl Sandbox {
 
     pub(crate) fn mappings(&self, pid: libc::pid_t) -> io::Result<()> {
         let process = Path::new("/proc").join(pid.to_string());
-        if !self.redis_bootstrap {
+        if !self.redis_bootstrap
+            && !matches!(
+                self.policy,
+                WorkloadPolicy::BuildKitRun | WorkloadPolicy::DockerDefault
+            )
+        {
             std::fs::write(process.join("setgroups"), "deny")?;
         }
         std::fs::write(
@@ -524,8 +595,14 @@ impl Sandbox {
             .map_err(|error| io::Error::other(format!("map build snapshot IDs: {error}")))
     }
 
-    pub(crate) fn groups(&self) -> &'static [u32] {
-        self.groups
+    pub(crate) fn inherits_worker_network(&self) -> bool {
+        self.live_mounts
+            .as_ref()
+            .is_some_and(|mounts| mounts.inherits_network())
+    }
+
+    pub(crate) fn groups(&self) -> &[u32] {
+        &self.groups
     }
 
     pub(crate) fn enter(
@@ -542,7 +619,11 @@ impl Sandbox {
         // opened before clone refers to the parent's mount and cannot be used
         // for a bind here. The child still owns its inherited guest UID when
         // opening the registry; only stdio survives into the workload.
-        let volume_source = self.volume.as_ref().map(FileBinding::open).transpose()?;
+        let volume_source = self
+            .volume
+            .iter()
+            .map(FileBinding::open)
+            .collect::<io::Result<Vec<_>>>()?;
         let cgroup = cgroup_path
             .map(|path| {
                 OpenOptions::new()
@@ -560,7 +641,7 @@ impl Sandbox {
                 .transpose()?
         };
         let devices = if self.standard_devices {
-            Some([standard_device("null", 3)?, standard_device("zero", 5)?])
+            Some(standard_devices()?)
         } else {
             None
         };
@@ -617,7 +698,7 @@ impl Sandbox {
                 )?;
             }
         }
-        if let Some((volume, source)) = self.volume.as_ref().zip(volume_source) {
+        for (volume, source) in self.volume.iter().zip(volume_source) {
             step("private workload mount", volume.mount(source))?;
         }
         if let Some(cgroup) = cgroup {
@@ -629,25 +710,35 @@ impl Sandbox {
                 mount_workload_proc(&self.new_root, true),
             )?;
         }
-        if self.policy == WorkloadPolicy::BuildKitWorker {
-            step(
-                "BuildKit worker proc view",
-                mount_workload_proc(&self.new_root, false),
-            )?;
-            step(
-                "BuildKit native runtime",
-                prepare_buildkit_worker(&self.new_root, self.buildkit_registry),
-            )?;
-        } else if self.buildkit_image {
-            step(
-                "pinned BuildKit CPU information",
-                expose_cpu_information(&self.new_root),
-            )?;
+        match self.policy {
+            WorkloadPolicy::DockerDefault | WorkloadPolicy::DockerRestricted => {
+                step(
+                    "container proc view",
+                    mount_workload_proc(&self.new_root, false),
+                )?;
+            }
+            WorkloadPolicy::BuildKitWorker => {
+                step(
+                    "BuildKit worker proc view",
+                    mount_workload_proc(&self.new_root, false),
+                )?;
+                step(
+                    "BuildKit native runtime",
+                    prepare_buildkit_worker(&self.new_root, self.buildkit_registry),
+                )?;
+            }
+            _ if self.buildkit_image => {
+                step(
+                    "pinned BuildKit CPU information",
+                    expose_cpu_information(&self.new_root),
+                )?;
+            }
+            _ => {}
         }
         if let Some(devices) = devices {
             step(
                 "native standard devices",
-                mount_standard_devices(&self.new_root, devices),
+                prepare_container_devices(&self.new_root, devices),
             )?;
         }
         if let Some(worker) = worker {
@@ -697,7 +788,10 @@ impl Sandbox {
             )));
         }
         let (open_files, file_size) = match self.policy {
-            WorkloadPolicy::BuildKitWorker => {
+            WorkloadPolicy::BuildKitWorker
+            | WorkloadPolicy::BuildKitRun
+            | WorkloadPolicy::DockerDefault
+            | WorkloadPolicy::DockerRestricted => {
                 (security::BUILDKIT_OPEN_FILES, security::BUILDKIT_FILE_SIZE)
             }
             WorkloadPolicy::RedisBootstrap => {
@@ -711,9 +805,10 @@ impl Sandbox {
         )?;
         step(
             "credentials and capabilities",
-            security::drop_workload_identity(self.uid, self.gid, self.groups, self.policy),
+            security::drop_workload_identity(self.uid, self.gid, &self.groups, self.policy),
         )?;
         before_filter()?;
+        step("exec signals", security::prepare_exec_signals())?;
         step("seccomp", self.filter.install())
     }
 

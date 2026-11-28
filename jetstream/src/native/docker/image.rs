@@ -20,6 +20,51 @@ const MAX_TAGS: usize = 64;
 pub(super) struct Tags(BTreeMap<String, String>);
 
 impl Tags {
+    pub(super) fn load(root: &Path) -> anyhow::Result<Self> {
+        let path = root.join("tags.json");
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            result => {
+                result?;
+            }
+        }
+        let bytes = super::super::oci_stage::read_bounded(root, &path, 64 * 1024)?;
+        let entries: BTreeMap<String, String> = serde_json::from_slice(&bytes)?;
+        let mut tags = Self::default();
+        for (name, target) in entries {
+            let (repository, tag) = name.rsplit_once(':').context("invalid saved image tag")?;
+            let (source, digest) = target
+                .rsplit_once('@')
+                .context("invalid saved tag target")?;
+            ensure!(
+                !source.is_empty() && source.len() <= 256 && super::request::digest(digest),
+                "invalid saved tag target"
+            );
+            ensure!(
+                Self::key(&name).as_ref() == name,
+                "noncanonical saved image tag"
+            );
+            tags.insert(repository, tag, target)
+                .map_err(|error| anyhow::anyhow!(error.1))?;
+        }
+        Ok(tags)
+    }
+
+    pub(super) fn save(&self, root: &Path) -> anyhow::Result<()> {
+        use std::io::Write;
+        let bytes = serde_json::to_vec(&self.0)?;
+        ensure!(
+            bytes.len() <= 64 * 1024,
+            "saved image tags exceed metadata bound"
+        );
+        let mut file = tempfile::NamedTempFile::new_in(root)?;
+        file.write_all(&bytes)?;
+        file.as_file().sync_all()?;
+        file.persist(root.join("tags.json"))?;
+        std::fs::File::open(root)?.sync_all()?;
+        Ok(())
+    }
+
     pub(super) fn insert(
         &mut self,
         repository: &str,
@@ -107,6 +152,32 @@ impl Tags {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_tags_survive_retarget_removal_and_reject_invalid_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = format!("conjet.local/archive@sha256:{}", "a".repeat(64));
+        let second = format!("conjet.local/archive@sha256:{}", "b".repeat(64));
+        let mut tags = Tags::load(&root).unwrap();
+        tags.insert("artex", "local", first.clone()).unwrap();
+        tags.save(&root).unwrap();
+        assert_eq!(Tags::load(&root).unwrap().resolve("artex:local"), first);
+        tags.insert("artex", "local", second.clone()).unwrap();
+        tags.save(&root).unwrap();
+        assert_eq!(Tags::load(&root).unwrap().resolve("artex:local"), second);
+        tags.remove("artex:local");
+        tags.save(&root).unwrap();
+        assert_eq!(
+            Tags::load(&root).unwrap().resolve("artex:local"),
+            "artex:local"
+        );
+        std::fs::write(root.join("tags.json"), br#"{"artex:local":"invalid"}"#).unwrap();
+        assert!(Tags::load(&root).is_err());
+        std::fs::remove_file(root.join("tags.json")).unwrap();
+        std::os::unix::fs::symlink("missing", root.join("tags.json")).unwrap();
+        assert!(Tags::load(&root).is_err());
+    }
 
     #[test]
     fn tags_resolve_retarget_and_remove_without_network_access() {

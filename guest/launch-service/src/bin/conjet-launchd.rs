@@ -19,6 +19,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut args = std::env::args_os().skip(1);
     match args.next() {
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--verify-build-relay-capacity" && args.next().is_none() => {
+            return conjet_launch_service::build_runtime::verify_relay_capacity();
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--serve-bind-http" && args.next().is_none() => {
+            return conjet_launch_service::build_runtime::serve_bind_fixture();
+        }
+        #[cfg(target_arch = "aarch64")]
+        Some(argument) if argument == "--verify-build-policy" && args.next().is_none() => {
+            // The probe may be container PID 1; it must never enter VM shutdown.
+            return conjet_launch_service::build_runtime::verify_policy();
+        }
         None => {
             conjet_launch_service::guest::serve(
                 Path::new("/etc/conjet/launch.key"),

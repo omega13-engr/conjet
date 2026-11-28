@@ -120,15 +120,15 @@ public final class VirtualMachineController {
         }
         let native = ConjetConfig.nativeDockerDefault
         guard ["aarch64", "arm64"].contains(config.architecture), config.effectiveVMCPUs == native.vmCPUs,
-              config.effectiveMemoryMiB == native.memoryMiB, config.diskGiB == native.diskGiB,
+              (512...8192).contains(config.effectiveMemoryMiB), config.diskGiB == native.diskGiB,
               config.diskImagePath == nil, config.kernelImagePath == nil else {
-            throw ConjetError.invalidArgument("Native Docker requires ARM64, 2 vCPUs, 2048 MiB, a 16 GiB disk, and packaged boot assets")
+            throw ConjetError.invalidArgument("Native Docker requires ARM64, 2 vCPUs, 512–8192 MiB, a 16 GiB disk, and packaged boot assets")
         }
         guard !config.enableRemovableHostMounts else {
             throw ConjetError.invalidArgument("Native Docker host mounts use the profile's private bind directory")
         }
         setProgress(state: .starting, phase: "native-boot", message: "Starting native Docker", resetEvents: true)
-        let run = try ManagedNativeDocker(paths: store.paths, enableHostMounts: config.enableHostMounts)
+        let run = try ManagedNativeDocker(paths: store.paths, enableHostMounts: config.enableHostMounts, memoryMiB: config.effectiveMemoryMiB)
         nativeRun = run
         do {
             try run.start()

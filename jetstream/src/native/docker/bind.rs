@@ -91,6 +91,37 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn compose_binds_preserve_targets_and_reject_overlap_or_outside_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap();
+        let base = path.join("binds");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::set_permissions(&base, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let root = Root::open(base.clone(), &path).unwrap();
+        let mut binds = Vec::new();
+        for name in ["data", "keys", "skills"] {
+            let source = base.join(name);
+            std::fs::create_dir(&source).unwrap();
+            binds.push(format!("{}:/app/{name}:rw", source.display()));
+        }
+        let config = json!({"HostConfig":{"Binds":binds}});
+        let binding = Binding::requested(&config, Some(&root)).unwrap().unwrap();
+        assert_eq!(
+            binding
+                .metadata()
+                .iter()
+                .map(|m| m["Destination"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            ["/app/data", "/app/keys", "/app/skills"]
+        );
+        let overlap = json!({"HostConfig":{"Binds":[binds[0], format!("{}:/app/data/nested:rw",base.join("keys").display())]}});
+        assert!(Binding::requested(&overlap, Some(&root)).is_err());
+        let outside = json!({"HostConfig":{"Binds":[format!("{}:/app/data:rw",path.display())]}});
+        assert!(Binding::requested(&outside, Some(&root)).is_err());
+    }
+
+    #[test]
     fn binds_only_descriptor_relative_directories_on_the_configured_tree() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -108,13 +139,97 @@ mod tests {
     }
 }
 
-pub(super) struct Binding {
+pub(super) struct Binding(Vec<SingleBinding>);
+
+impl Binding {
+    pub(super) fn requested(data: &Value, root: Option<&Root>) -> Result<Option<Self>, Rejected> {
+        let host = &data["HostConfig"];
+        let mut mounts = host["Mounts"].as_array().cloned().unwrap_or_default();
+        if let Some(binds) = host["Binds"].as_array() {
+            for bind in binds {
+                let fields: Vec<_> = bind
+                    .as_str()
+                    .ok_or_else(|| Rejected::bad("invalid host bind"))?
+                    .split(':')
+                    .collect();
+                let (source, target, mode) = match fields.as_slice() {
+                    [source, target] => (*source, *target, "rw"),
+                    [source, target, mode] => (*source, *target, *mode),
+                    _ => return Err(Rejected::bad("invalid host bind syntax")),
+                };
+                if !source.starts_with('/') {
+                    return Ok(None);
+                }
+                if !matches!(mode, "ro" | "rw") {
+                    return Err(Rejected::bad("unsupported host bind mode"));
+                }
+                mounts.push(json!({"Type":"bind", "Source":source, "Target":target, "ReadOnly":mode == "ro"}));
+            }
+        }
+        if !mounts.iter().any(|m| m["Type"] == "bind") {
+            return Ok(None);
+        }
+        if mounts.len() > 8 || mounts.iter().any(|m| m["Type"] != "bind") {
+            return Err(Rejected::bad(
+                "native host binds support up to eight directories without named volumes",
+            ));
+        }
+        let mut bindings: Vec<SingleBinding> = Vec::new();
+        for mount in mounts {
+            let request = json!({"HostConfig":{"Mounts":[mount]}});
+            let binding = SingleBinding::requested(&request, root)?.expect("bind mount");
+            if bindings.iter().any(|other| {
+                binding.target == other.target
+                    || binding.target.starts_with(&(other.target.clone() + "/"))
+                    || other.target.starts_with(&(binding.target.clone() + "/"))
+            }) {
+                return Err(Rejected::bad("native bind targets must not overlap"));
+            }
+            bindings.push(binding);
+        }
+        Ok(Some(Self(bindings)))
+    }
+    pub(super) fn metadata(&self) -> Vec<Value> {
+        self.0.iter().map(SingleBinding::metadata).collect()
+    }
+    pub(super) fn start(&self, owner: &Owner) -> anyhow::Result<Sessions> {
+        self.0
+            .iter()
+            .map(|binding| binding.start(owner))
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map(Sessions)
+    }
+}
+
+pub(super) struct Sessions(Vec<Session>);
+impl Sessions {
+    pub(super) fn bindings(&self) -> Vec<BindMount> {
+        self.0.iter().map(|s| s.binding.clone()).collect()
+    }
+    pub(super) fn finish(self) -> anyhow::Result<()> {
+        let mut first = None;
+        for session in self.0 {
+            if let Err(error) = session.finish() {
+                if first.is_none() {
+                    first = Some(error);
+                }
+            }
+        }
+        match first {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+struct SingleBinding {
+    target: String,
     path: String,
     source: File,
     read_only: bool,
 }
 
-impl Binding {
+impl SingleBinding {
     pub(super) fn requested(data: &Value, root: Option<&Root>) -> Result<Option<Self>, Rejected> {
         let host = &data["HostConfig"];
         let Some(mounts) = host["Mounts"].as_array() else {
@@ -126,13 +241,35 @@ impl Binding {
         let [mount] = mounts.as_slice() else {
             return Err(Rejected::bad("only one isolated host bind is supported"));
         };
-        if !super::request::falsey(&host["Binds"]) || mount["Target"] != "/dataset" {
+        if !super::request::falsey(&host["Binds"]) {
             return Err(Rejected::bad(
-                "isolated host bind requires the /dataset target",
+                "native bind request must use normalized mount fields",
             ));
         }
         if let Some(options) = mount.as_object() {
-            super::request::options(options, &["Type", "Source", "Target", "ReadOnly"], "bind ")?;
+            super::request::options(
+                options,
+                &["Type", "Source", "Target", "ReadOnly", "BindOptions"],
+                "bind ",
+            )?;
+            if let Some(bind_options) =
+                super::request::object(&mount["BindOptions"], "bind options")?
+            {
+                super::request::options(
+                    bind_options,
+                    &["CreateMountpoint", "Propagation"],
+                    "bind option ",
+                )?;
+                if (!mount["BindOptions"]["CreateMountpoint"].is_null()
+                    && !mount["BindOptions"]["CreateMountpoint"].is_boolean())
+                    || !matches!(
+                        mount["BindOptions"]["Propagation"].as_str(),
+                        None | Some("" | "rprivate")
+                    )
+                {
+                    return Err(Rejected::bad("unsupported native bind options"));
+                }
+            }
         }
         let root =
             root.ok_or_else(|| Rejected(501, "native host bind root is not configured".into()))?;
@@ -146,7 +283,12 @@ impl Binding {
                 .as_bool()
                 .ok_or_else(|| Rejected::bad("invalid bind ReadOnly flag"))?
         };
+        let target = mount["Target"]
+            .as_str()
+            .filter(|p| conjet_launch_service::spec::valid_bind_target(p))
+            .ok_or_else(|| Rejected::bad("invalid native bind target"))?;
         Ok(Some(Self {
+            target: target.to_owned(),
             path: path.to_owned(),
             source: root.source(Path::new(path))?,
             read_only,
@@ -154,7 +296,7 @@ impl Binding {
     }
 
     pub(super) fn metadata(&self) -> Value {
-        json!({"Type":"bind","Source":self.path,"Destination":"/dataset",
+        json!({"Type":"bind","Source":self.path,"Destination":self.target,
             "RW":!self.read_only,"Mode":if self.read_only {"ro"} else {"rw"},"Propagation":"rprivate"})
     }
 
@@ -179,6 +321,7 @@ impl Binding {
             .spawn(move || bind_fuse::serve(stream, &remote, source, writable))?;
         Ok(Session {
             binding: BindMount {
+                target: self.target.clone(),
                 lease,
                 read_only: self.read_only,
             },

@@ -124,6 +124,21 @@ mod tests {
             assert!(named_bind(&json!([input])).is_err(), "{input}");
         }
     }
+
+    #[test]
+    fn volume_description_matches_nullable_fields_and_formats_creation_time() {
+        let info = json!({
+            "labels": {"project": "fixture"},
+            "created_unix_seconds": 1_700_000_000,
+        });
+        let description = describe("owned", &info).unwrap();
+        assert_eq!(description["CreatedAt"], "2023-11-14T22:13:20.000000000Z");
+        assert_eq!(description["Options"], Value::Null);
+        assert_eq!(description["Labels"], info["labels"]);
+        assert!(description.get("Status").is_none());
+        let old = describe("owned", &json!({"labels": {}})).unwrap();
+        assert!(old.get("CreatedAt").is_none());
+    }
 }
 
 pub(super) fn ask(owner: &Owner, action: &str, name: Option<&str>) -> Result<Value, Rejected> {
@@ -184,14 +199,24 @@ fn exchange(owner: &Owner, operation: Value) -> Result<Value, Rejected> {
     }
 }
 
-fn describe(name: &str, labels: &Value) -> Value {
-    json!({"Name":name,"Driver":"local","Mountpoint":guest_path(name),"Scope":"local",
-           "Options":{},"Labels":labels})
+fn describe(name: &str, info: &Value) -> Result<Value, Rejected> {
+    let mut description = json!({
+        "Name": name, "Driver": "local", "Mountpoint": guest_path(name), "Scope": "local",
+        "Options": null, "Labels": info["labels"]
+    });
+    if let Some(created) = info.get("created_unix_seconds") {
+        let seconds = created
+            .as_i64()
+            .filter(|seconds| *seconds >= 0)
+            .ok_or_else(|| Rejected::internal("invalid native volume creation time"))?;
+        description["CreatedAt"] = json!(super::events::format_time(seconds, 0)?);
+    }
+    Ok(description)
 }
 
 pub(super) fn inspect(owner: &Owner, name: &str) -> Result<Value, Rejected> {
     let info = ask(owner, "inspect", Some(name))?;
-    Ok(describe(name, &info["labels"]))
+    describe(name, &info)
 }
 
 fn guest_path(name: &str) -> String {
@@ -208,15 +233,15 @@ pub(super) fn list(owner: &Owner, filters: &super::discovery::Filters) -> Result
             info["name"]
                 .as_str()
                 .filter(|name| valid_name(name))
-                .map(|name| (name, &info["labels"]))
+                .map(|name| (name, info))
                 .ok_or_else(|| Rejected::internal("invalid native volume inventory name"))
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .filter(|(name, labels)| filters.matches(name, labels))
-        .map(|(name, labels)| describe(name, labels))
-        .collect::<Vec<_>>();
-    Ok(json!({"Volumes":volumes,"Warnings":[]}))
+        .filter(|(name, info)| filters.matches(name, &info["labels"]))
+        .map(|(name, info)| describe(name, info))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"Volumes":volumes,"Warnings":null}))
 }
 
 pub(super) fn create(owner: &Owner, body: &Value) -> Result<Value, Rejected> {
@@ -243,7 +268,7 @@ pub(super) fn create(owner: &Owner, body: &Value) -> Result<Value, Rejected> {
         owner,
         json!({"action":"create","name":name,"labels":labels}),
     )?;
-    Ok(describe(name, &info["labels"]))
+    describe(name, &info)
 }
 
 pub(super) fn mount_metadata(volume: &VolumeMount) -> Value {

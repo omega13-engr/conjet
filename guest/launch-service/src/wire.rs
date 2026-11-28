@@ -9,7 +9,9 @@ pub const EXEC_OUTPUT_LIMIT: usize = 256 * 1024;
 pub const EXEC_STDIN_LIMIT: usize = 4096;
 pub const EXEC_STREAM_CHUNK: usize = 8192;
 pub const EXEC_STREAM_BUDGET_MS: u64 = 30_000;
-pub const BUILDKIT_EXEC_BUDGET_MS: u64 = 600_000;
+// Only the verified BuildKit control command may request this session budget.
+// Ordinary exec retains EXEC_STREAM_BUDGET_MS and owned disconnect cancellation.
+pub const BUILDKIT_EXEC_BUDGET_MS: u64 = 3_600_000;
 pub const EXEC_STREAM_INPUT: usize = 4096;
 
 #[derive(Deserialize, Serialize)]

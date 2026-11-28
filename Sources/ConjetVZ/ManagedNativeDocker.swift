@@ -9,16 +9,18 @@ final class ManagedNativeDocker {
     private let assets: URL
     private let root: URL
     private let state: URL
+    private let memoryMiB: Int
     private let enableHostMounts: Bool
     private let qualification: Qualification?
     private var boot: ConjetCoreRustVMMRun?
     private var endpoint: ConjetCoreRustVMMRun?
     private var session: URL?
 
-    init(paths: ConjetPaths, enableHostMounts: Bool) throws {
+    init(paths: ConjetPaths, enableHostMounts: Bool, memoryMiB: Int) throws {
         guard let executable = ConjetCoreRustVMMTool.packagedNative() else {
             throw ConjetError.unavailable("The packaged Conjet Core VMM for Native Docker is missing")
         }
+        self.memoryMiB = try Self.validateMemoryMiB(memoryMiB)
         self.paths = paths
         self.executable = executable
         self.assets = URL(fileURLWithPath: executable).deletingLastPathComponent().appendingPathComponent("NativeCore")
@@ -30,6 +32,13 @@ final class ManagedNativeDocker {
               root.appendingPathComponent("cn-XXXXXX/memory-control.sock").path.utf8CString.count <= 104 else {
             throw ConjetError.unavailable("The profile path is too long for native Docker sockets")
         }
+    }
+
+    static func validateMemoryMiB(_ value: Int) throws -> Int {
+        guard (512...8192).contains(value) else {
+            throw ConjetError.invalidArgument("Native Docker memory must be between 512 and 8192 MiB")
+        }
+        return value
     }
 
     var isRunning: Bool { boot?.isRunning == true && endpoint?.isRunning == true }
@@ -87,6 +96,7 @@ final class ManagedNativeDocker {
         let readyLog = paths.logsDirectory.appendingPathComponent("native-boot.jsonl")
         let boot = try process([
             "docker-boot", "--scratch", root.path,
+            "--memory-mib", String(memoryMiB),
             "--kernel", kernel.path, "--kernel-sha512", String(kernelSHA),
             "--oci-package", staged.appendingPathComponent("package.json").path,
             "--sha256", record.package_sha256,

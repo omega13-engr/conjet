@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn cached_blobs_require_a_manifest_grant_and_matching_content() {
         let root = tempfile::tempdir().unwrap();
-        let mut cache = Cache::new(root.path().join("mirror")).unwrap();
+        let mut cache = Cache::new(root.path().canonicalize().unwrap().join("mirror")).unwrap();
         let blob = b"verified blob";
         let blob_hash = format!("sha256:{:x}", Sha256::digest(blob));
         std::fs::write(cache.root.join(&blob_hash[7..]), blob).unwrap();

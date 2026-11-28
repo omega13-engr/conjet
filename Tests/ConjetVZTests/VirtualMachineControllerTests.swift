@@ -3,6 +3,15 @@ import ConjetCore
 import XCTest
 
 final class VirtualMachineControllerTests: XCTestCase {
+    func testNativeMemoryCeilingAcceptsSupportedVMMRange() throws {
+        for value in [512, 2048, 4096, 8192] {
+            XCTAssertEqual(try ManagedNativeDocker.validateMemoryMiB(value), value)
+        }
+        for value in [0, 511, 8193, Int.max] {
+            XCTAssertThrowsError(try ManagedNativeDocker.validateMemoryMiB(value))
+        }
+    }
+
     func testNativeCrashCleanupRemovesOnlyOwnedPrivateSessionDirectory() throws {
         let manager = FileManager.default
         let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)

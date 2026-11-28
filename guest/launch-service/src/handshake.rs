@@ -6,7 +6,10 @@ use sha2::Sha256;
 
 use crate::wire::{Frame, Kind, MAX_PAYLOAD, RequestId, VERSION, WireError, write_error};
 
-pub const MAX_CONNECTIONS: usize = 10;
+// Bound download concurrency while preserving independent mount/port and control headroom.
+pub const BUILD_RELAY_CONNECTIONS: usize = 32;
+pub const MAX_RELAY_CONNECTIONS: usize = BUILD_RELAY_CONNECTIONS + 8;
+pub const MAX_CONNECTIONS: usize = MAX_RELAY_CONNECTIONS + 24;
 pub const MAX_QUEUED_CONTROL: usize = 8;
 pub type Key = [u8; 32];
 pub type BootId = [u8; 16];

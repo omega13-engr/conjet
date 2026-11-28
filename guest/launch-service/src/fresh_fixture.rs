@@ -251,17 +251,21 @@ struct BuildRuntimeRequest {
 enum BuildOperation {
     Run,
     Status { stdout: usize, stderr: usize },
+    Input { data: Option<String> },
     Kill,
     Delete,
 }
 
 #[derive(Default)]
 struct BuildRuntime {
-    active: Option<ActiveBuild>,
+    active: Vec<ActiveBuild>,
+    sequence: u64,
     deleted: Vec<(Option<String>, String)>,
 }
 
 struct ActiveBuild {
+    open_stdin: bool,
+    offsets: [usize; 2],
     id: String,
     handle: Handle,
     owner: Option<String>,
@@ -416,7 +420,7 @@ struct Record {
     slot_expired: bool,
     memory_limit_bytes: u64,
     volume: Option<crate::spec::VolumeMount>,
-    bind_lease: Option<String>,
+    bind_leases: Vec<String>,
     build_snapshot: Option<crate::build_snapshot::Snapshot>,
     build_runtime_owned: bool,
     build_parent: Option<String>,
@@ -1259,7 +1263,7 @@ impl FreshFixture {
                 return Err(("stale_generation", "native volume inode changed"));
             }
         }
-        if let Some(bind) = &spec.bind {
+        for bind in spec.host_binds() {
             crate::bind_mount::source(&bind.lease)
                 .map_err(|_| ("not_found", "native bind lease is unavailable"))?;
         }
@@ -1279,10 +1283,10 @@ impl FreshFixture {
             }
             return Ok((Kind::State, record.state()));
         }
-        if spec.bind.as_ref().is_some_and(|bind| {
+        if spec.host_binds().any(|bind| {
             ledger
                 .active()
-                .any(|record| record.bind_lease.as_deref() == Some(bind.lease.as_str()))
+                .any(|record| record.bind_leases.contains(&bind.lease))
         }) {
             return Err(("busy", "native bind lease already owns a workload"));
         }
@@ -1447,7 +1451,7 @@ impl FreshFixture {
                 .volume
                 .clone()
                 .or_else(|| live.as_ref().map(|build| build.volume.clone())),
-            bind_lease: spec.bind.as_ref().map(|bind| bind.lease.clone()),
+            bind_leases: spec.host_binds().map(|bind| bind.lease.clone()).collect(),
             build_snapshot: spec.build_snapshot.clone(),
             build_runtime_owned: build,
             build_parent: live.as_ref().map(|build| build.owner.clone()),
@@ -1681,22 +1685,48 @@ impl FreshFixture {
             }
         }
         let mut runtime = self.build_runtime.lock().expect("build runtime");
-        if runtime
-            .active
-            .as_ref()
-            .is_some_and(|build| build.owner.as_deref() == Some(owner))
-        {
+        let mut index = 0;
+        while index < runtime.active.len() {
+            if runtime.active[index].owner.as_deref() != Some(owner) {
+                index += 1;
+                continue;
+            }
+            let active = &runtime.active[index];
             let mut ledger = self.ledger.lock().expect("fresh ledger");
-            let active = runtime.active.as_ref().expect("checked worker build");
             let record = ledger
                 .record_mut(&active.handle.workload_id)
                 .filter(|record| record.phase == Phase::Removed && record.handle == active.handle)
                 .ok_or_else(|| io::Error::other("missing terminal worker RUN ownership"))?;
             record.build_runtime_owned = false;
-            let active = runtime.active.take().expect("checked worker build");
+            let active = runtime.active.remove(index);
             runtime.deleted.push((active.owner, active.id));
         }
         Ok(())
+    }
+
+    fn capture_build_output(&self, id: &str, data: &[u8], stderr: bool) {
+        let mut ledger = self.ledger.lock().expect("fresh ledger");
+        loop {
+            let Some(record) = ledger.record_mut(id) else {
+                return;
+            };
+            let capacity = crate::spec::workload_output_limit(&record.image_digest);
+            let captured = if stderr {
+                &mut record.stderr
+            } else {
+                &mut record.stdout
+            };
+            if !record.build_runtime_owned
+                || record.cancelled
+                || record.terminate_requested
+                || captured.bytes.len() + data.len() <= capacity
+            {
+                captured.append_bounded(data, capacity);
+                self.changed.notify_all();
+                return;
+            }
+            ledger = self.changed.wait(ledger).expect("fresh ledger");
+        }
     }
 
     fn run_helper(
@@ -1726,6 +1756,7 @@ impl FreshFixture {
             .as_ref()
             .and_then(|oci| oci.live_mounts.as_ref())
             .map(LiveMounts::descriptors);
+        let inherited_build_fds = build_fds.clone();
         if oci_process.is_some() {
             command.process_group(0);
             let owner_pid = std::process::id() as libc::pid_t;
@@ -1746,8 +1777,8 @@ impl FreshFixture {
                     if let Some(fd) = input_fd {
                         crate::security::checked(libc::fcntl(fd, libc::F_SETFD, 0))?;
                     }
-                    for fd in build_fds.into_iter().flatten() {
-                        crate::security::checked(libc::fcntl(fd, libc::F_SETFD, 0))?;
+                    for fd in inherited_build_fds.iter().flatten() {
+                        crate::security::checked(libc::fcntl(*fd, libc::F_SETFD, 0))?;
                     }
                     Ok(())
                 });
@@ -1760,7 +1791,10 @@ impl FreshFixture {
         if let Some(fds) = build_fds {
             command.env(
                 crate::build_snapshot::mounts::LIVE_FDS,
-                fds.map(|fd| fd.to_string()).join(","),
+                fds.iter()
+                    .map(|fd| fd.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
             );
         }
         let build_owner = oci_process
@@ -1803,20 +1837,14 @@ impl FreshFixture {
         let output_id = workload.clone();
         let stdout = thread::spawn(move || {
             drain(out, |data| {
-                output_owner.update(&output_id, |record| {
-                    let capacity = crate::spec::workload_output_limit(&record.image_digest);
-                    record.stdout.append_bounded(data, capacity);
-                });
+                output_owner.capture_build_output(&output_id, data, false);
             })
         });
         let error_owner = Arc::clone(self);
         let error_id = workload.clone();
         let stderr = thread::spawn(move || {
             drain(err, |data| {
-                error_owner.update(&error_id, |record| {
-                    let capacity = crate::spec::workload_output_limit(&record.image_digest);
-                    record.stderr.append_bounded(data, capacity);
-                });
+                error_owner.capture_build_output(&error_id, data, true);
             })
         });
         self.update(&workload, |record| {
@@ -3275,7 +3303,7 @@ impl FreshFixture {
                 "could not retain live BuildKit root identity",
             )
         })?;
-        let (mut spec, hosts) = crate::build_snapshot::bundle::parse_live(
+        let (mut spec, hosts, metadata) = crate::build_snapshot::bundle::parse_live(
             &bundle.config,
             snapshot,
             &self.image_digest,
@@ -3283,6 +3311,22 @@ impl FreshFixture {
             snapshotter,
         )
         .map_err(|reason| ("unsupported_option", reason))?;
+        if metadata.is_none() {
+            let proxy = format!(
+                "http://{}:{}",
+                BridgeScope::BuiltIn.gateway(),
+                crate::spec::BUILDKIT_REGISTRY_PORT
+            );
+            for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+                if !spec
+                    .env
+                    .iter()
+                    .any(|value| value.starts_with(&format!("{name}=")))
+                {
+                    spec.env.push(format!("{name}={proxy}"));
+                }
+            }
+        }
         let home = spec.env.iter().position(|value| value.starts_with("HOME="));
         if home.is_none_or(|index| spec.env[index] == "HOME=") {
             let home_value = bundle.default_home(spec.uid).map_err(|_| {
@@ -3305,13 +3349,21 @@ impl FreshFixture {
                 "could not detach verified BuildKit snapshot",
             )
         })?;
-        let mounts = LiveMounts::capture(detached, &bundle.executor, &bundle.cache, &hosts)
-            .map_err(|_| {
-                (
-                    "invalid_spec",
-                    "could not pin verified BuildKit auxiliary mounts",
-                )
-            })?;
+        let mounts = LiveMounts::capture(
+            detached,
+            &bundle.executor,
+            &bundle.cache,
+            &hosts,
+            &root,
+            &pidfd,
+            metadata.as_deref(),
+        )
+        .map_err(|_| {
+            (
+                "invalid_spec",
+                "could not pin verified BuildKit auxiliary mounts",
+            )
+        })?;
         Ok((
             spec,
             WorkerBuild {
@@ -3348,8 +3400,15 @@ impl FreshFixture {
                 _ => Err(("stale_generation", "build runtime was already deleted")),
             };
         }
-        if matches!(request.operation, BuildOperation::Run) && runtime.active.is_none() {
-            if runtime.deleted.len() >= BUILD_GENERATIONS {
+        if matches!(request.operation, BuildOperation::Run)
+            && !runtime
+                .active
+                .iter()
+                .any(|b| b.id == request.id && b.owner == owner)
+        {
+            if runtime.sequence >= BUILD_GENERATIONS as u64
+                || runtime.active.len() >= OCI_CONCURRENCY
+            {
                 return Err(("busy", "build runtime boot generation budget is exhausted"));
             }
             let (spec, live) = if let Some(owner) = &owner {
@@ -3367,9 +3426,10 @@ impl FreshFixture {
             let expires = Instant::now() + Duration::from_secs(3);
             // A locally allocated sequence must not consume the host
             // adapter's authenticated request sequence.
+            runtime.sequence += 1;
             let launch = LaunchRequest {
                 boot_id: boot.to_owned(),
-                sequence: BUILD_SEQUENCE_BASE + runtime.deleted.len() as u64 + 1,
+                sequence: BUILD_SEQUENCE_BASE + runtime.sequence,
                 operation_id: Some(hex(&intent)),
                 budget_ms: 3000,
                 spec,
@@ -3377,23 +3437,26 @@ impl FreshFixture {
             let launch = launch
                 .validate()
                 .map_err(|error| (error.code(), "invalid build launch"))?;
-            let (_, state) = self.admit(launch, boot, expires, false, true, live)?;
+            let open_stdin = launch.request().spec.open_stdin;
+            let (_, mut state) = self.admit(launch, boot, expires, false, true, live)?;
+            state["stdin"] = json!(open_stdin);
             let handle = serde_json::from_value(state["handle"].clone())
                 .expect("typed build workload handle");
-            runtime.active = Some(ActiveBuild {
+            runtime.active.push(ActiveBuild {
+                open_stdin,
+                offsets: [0, 0],
                 id: request.id,
                 handle,
                 owner,
             });
             return Ok(state);
         }
-        let active = runtime
+        let index = runtime
             .active
-            .as_ref()
+            .iter()
+            .position(|b| b.id == request.id && b.owner == owner)
             .ok_or(("not_found", "unknown build runtime ID"))?;
-        if active.id != request.id || active.owner != owner {
-            return Err(("busy", "another build runtime owns this worker"));
-        }
+        let active = &mut runtime.active[index];
         let handle = &active.handle;
         let mut ledger = self.ledger.lock().expect("fresh ledger");
         let record = ledger
@@ -3404,16 +3467,67 @@ impl FreshFixture {
                 "build runtime ownership could not be reconciled",
             ))?;
         match request.operation {
-            BuildOperation::Run => Ok(record.state()),
+            BuildOperation::Run => {
+                let mut state = record.state();
+                state["stdin"] = json!(active.open_stdin);
+                Ok(state)
+            }
             BuildOperation::Status { stdout, stderr } => {
-                if stdout > record.stdout.bytes.len() || stderr > record.stderr.bytes.len() {
+                if stdout < active.offsets[0]
+                    || stdout - active.offsets[0] > record.stdout.bytes.len()
+                {
                     return Err(("malformed", "invalid build output cursor"));
                 }
+                if stderr < active.offsets[1]
+                    || stderr - active.offsets[1] > record.stderr.bytes.len()
+                {
+                    return Err(("malformed", "invalid build output cursor"));
+                }
+                record
+                    .stdout
+                    .acknowledge(&mut active.offsets[0], stdout)
+                    .map_err(|_| ("malformed", "invalid build stdout cursor"))?;
+                record
+                    .stderr
+                    .acknowledge(&mut active.offsets[1], stderr)
+                    .map_err(|_| ("malformed", "invalid build stderr cursor"))?;
+                self.changed.notify_all();
                 let mut state = record.state();
                 state["cancelled"] = json!(record.cancelled);
-                state["build_output"] =
-                    output_bundle(record, stdout, stderr, record.phase.terminal());
+                let mut output = output_bundle(record, 0, 0, record.phase.terminal());
+                for (name, base) in [("stdout", stdout), ("stderr", stderr)] {
+                    let next = output[name]["next_offset"].as_u64().unwrap();
+                    output[name]["offset"] = json!(base);
+                    output[name]["next_offset"] = json!(base as u64 + next);
+                }
+                state["build_output"] = output;
                 Ok(state)
+            }
+            BuildOperation::Input { data } => {
+                if record.phase.terminal() {
+                    return Err(("input_closed", "build already exited"));
+                }
+                let Some(writer) = record.input.as_mut() else {
+                    return Ok(json!({"accepted": false}));
+                };
+                let accepted = if let Some(data) = data {
+                    const LIMIT: usize = crate::workload_input::CHUNK;
+                    if data.len() > LIMIT.div_ceil(3) * 4 {
+                        return Err(("malformed", "build input too large"));
+                    }
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .map_err(|_| ("malformed", "invalid build input encoding"))?;
+                    if bytes.is_empty() || bytes.len() > LIMIT {
+                        return Err(("malformed", "invalid build input size"));
+                    }
+                    crate::workload_input::write(writer, &bytes)
+                        .map_err(|_| ("input_closed", "build input pipe closed"))?
+                } else {
+                    record.input = None;
+                    true
+                };
+                Ok(json!({"accepted": accepted}))
             }
             BuildOperation::Kill => {
                 record.cancel();
@@ -3425,7 +3539,7 @@ impl FreshFixture {
                     return Err(("busy", "build runtime cleanup has not been verified"));
                 }
                 record.build_runtime_owned = false;
-                runtime.active = None;
+                runtime.active.remove(index);
                 runtime.deleted.push((owner, request.id));
                 Ok(json!({"deleted": true}))
             }

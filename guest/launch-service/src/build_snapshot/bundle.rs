@@ -10,7 +10,7 @@ use crate::spec::{LaunchSpec, NATIVE_LIMITS, ResourceLimits, WORKLOAD_GID, WORKL
 
 pub(super) const EXECUTOR: &str = "/run/conjet/buildkit/worker/runc-native/executor";
 pub(crate) const LIVE_GROUPS: &[u32] = &[0, 1, 2, 3, 4, 6, 10, 11, 20, 26, 27];
-pub(crate) const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+pub(crate) const MAX_CONFIG_BYTES: u64 = 128 * 1024;
 
 // Canonical policy shared by three independently generated pinned bundles.
 // Dynamic process fields and validated worker-owned paths are excluded.
@@ -105,16 +105,37 @@ pub(crate) fn parse(
 
 pub(crate) fn parse_live(
     bytes: &[u8],
-    snapshot: Snapshot,
+    mut snapshot: Snapshot,
     image_digest: &str,
     worker_image: &str,
     snapshotter: Snapshotter,
-) -> Result<(LaunchSpec, String), &'static str> {
+) -> Result<(LaunchSpec, String, Option<String>), &'static str> {
     if bytes.len() as u64 > MAX_CONFIG_BYTES || !snapshot.live_worker || !valid_id(&snapshot.id) {
         return Err("invalid live build bundle bounds");
     }
     let mut bundle: Value =
         serde_json::from_slice(bytes).map_err(|_| "invalid live BuildKit bundle JSON")?;
+    let groups = bundle["process"]["user"]["additionalGids"]
+        .as_array()
+        .filter(|groups| groups.len() <= 128)
+        .and_then(|groups| {
+            groups
+                .iter()
+                .map(|gid| {
+                    gid.as_u64()
+                        .filter(|gid| *gid < crate::spec::ID_MAP_WIDTH as u64)
+                        .map(|gid| gid as u32)
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+    let metadata = frontend(&mut bundle)?;
+    if bundle["process"]["user"]["uid"] == 0 && bundle["process"]["user"]["gid"] == 0 {
+        let mut groups = groups.ok_or("invalid build supplementary groups")?;
+        groups.sort_unstable();
+        groups.dedup();
+        snapshot.supplementary_groups = Some(groups);
+        bundle["process"]["user"]["additionalGids"] = serde_json::json!(LIVE_GROUPS);
+    }
     let executor = snapshotter.executor();
     let root = format!("{executor}/{}/rootfs", snapshot.id);
     if bundle["root"]["path"].as_str() != Some(root.as_str()) {
@@ -141,7 +162,8 @@ pub(crate) fn parse_live(
     } else {
         (0, 0)
     };
-    let spec = process_spec(&mut bundle, snapshot, image_digest, identity)?;
+    let mut spec = process_spec(&mut bundle, snapshot, image_digest, identity)?;
+    spec.open_stdin = metadata.is_some();
     let resolver = format!("{executor}/resolv.conf");
     if bundle["mounts"][5]["source"].as_str() != Some(resolver.as_str()) {
         return Err("live BuildKit resolver source changed");
@@ -165,7 +187,62 @@ pub(crate) fn parse_live(
     if policy_sha256(&mut bundle)? != live_policy(worker_image)? {
         return Err("unsupported live BuildKit OCI preset");
     }
-    Ok((spec, hosts))
+    Ok((spec, hosts, metadata))
+}
+
+// Interpret only the frontend differences whose semantics the launcher enforces.
+// The remaining policy must still match the verified worker generation exactly.
+fn frontend(bundle: &mut Value) -> Result<Option<String>, &'static str> {
+    let Some(mounts) = bundle["mounts"].as_array_mut() else {
+        return Err("missing build mounts");
+    };
+    if !mounts
+        .iter()
+        .any(|m| m["destination"] == "/run/config/buildkit/metadata")
+    {
+        return Ok(None);
+    }
+    if mounts.len() != 9 || mounts[7]["destination"] != "/run/config/buildkit/metadata" {
+        return Err("unexpected frontend metadata mount layout");
+    }
+    let source = mounts[7]["source"]
+        .as_str()
+        .and_then(|s| s.strip_prefix("/tmp/buildkit-metadata"))
+        .filter(|s| !s.is_empty() && s.len() <= 32 && s.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or("invalid frontend metadata source")?;
+    let source = format!("buildkit-metadata{source}");
+    let mut expected = serde_json::json!({
+        "destination":"/run/config/buildkit/metadata", "source":format!("/tmp/{source}"),
+        "type":"bind", "options":["bind","nodev","noexec","nosuid","ro"]
+    });
+    let options = mounts[7]["options"]
+        .as_array_mut()
+        .ok_or("invalid frontend mount flags")?;
+    options.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    expected.sort_all_objects();
+    if mounts[7] != expected {
+        return Err("unsupported frontend metadata mount");
+    }
+    mounts.remove(7);
+    if bundle["process"]["user"] != serde_json::json!({"uid":0,"gid":0,"additionalGids":[0]}) {
+        return Err("unsupported frontend identity");
+    }
+    bundle["process"]["user"]["additionalGids"] = serde_json::json!(LIVE_GROUPS);
+    let namespaces = bundle["linux"]["namespaces"]
+        .as_array_mut()
+        .ok_or("missing frontend namespaces")?;
+    if namespaces.iter().filter(|n| n["type"] == "network").count() != 1 {
+        return Err("missing isolated frontend network");
+    }
+    let index = namespaces
+        .iter()
+        .position(|n| n["type"] == "network")
+        .unwrap();
+    if namespaces[index] != serde_json::json!({"type":"network"}) {
+        return Err("frontend cannot join another network namespace");
+    }
+    namespaces.remove(index);
+    Ok(Some(source))
 }
 
 fn policy_sha256(bundle: &mut Value) -> Result<String, &'static str> {
@@ -187,6 +264,7 @@ fn process_spec(
     let live = snapshot.live_worker;
     let spec = LaunchSpec {
         docker_resource_defaults: live,
+        docker_default_capabilities: false,
         memory_swap_disabled: false,
         open_stdin: false,
         redis_bootstrap: false,
@@ -205,6 +283,7 @@ fn process_spec(
         network_alias_project: None,
         volume: None,
         bind: None,
+        binds: Vec::new(),
         build_snapshot: Some(snapshot),
         limits: if live {
             ResourceLimits::UNBOUNDED
@@ -231,6 +310,7 @@ mod tests {
             inode: 1,
             bundle_policy: true,
             live_worker: true,
+            supplementary_groups: None,
         };
         let mut bundle = serde_json::json!({
             "root": {"path": format!("{executor}/nativeRun/rootfs")},
@@ -254,5 +334,102 @@ mod tests {
         assert_eq!(error(&bundle), "missing live BuildKit bind flags");
         bundle["mounts"].as_array_mut().unwrap().push(0.into());
         assert_eq!(error(&bundle), "missing live BuildKit bind flags");
+    }
+    fn frontend_bundle() -> (Value, Snapshot) {
+        let mut value: Value =
+            serde_json::from_str(include_str!("fixtures/frontend-policy.json")).unwrap();
+        value["root"]["path"] =
+            format!("{}/nativeRun/rootfs", Snapshotter::Native.executor()).into();
+        value["mounts"][6]["source"] =
+            format!("{}/hosts.test", Snapshotter::Native.executor()).into();
+        value["process"]["args"] = serde_json::json!(["/bin/true"]);
+        value["process"]["env"] = serde_json::json!([]);
+        value["process"]["cwd"] = "/".into();
+        (
+            value,
+            Snapshot {
+                id: "nativeRun".into(),
+                device: 1,
+                inode: 1,
+                bundle_policy: true,
+                live_worker: true,
+                supplementary_groups: None,
+            },
+        )
+    }
+
+    #[test]
+    fn frontend_requires_verified_mount_identity_and_isolation() {
+        let (value, snapshot) = frontend_bundle();
+        let parse = |value: &Value| {
+            parse_live(
+                &serde_json::to_vec(value).unwrap(),
+                snapshot.clone(),
+                crate::spec::BUILDKIT_CONFIG,
+                crate::spec::BUILDKIT_DEFAULT_CONFIG,
+                Snapshotter::Native,
+            )
+        };
+        let (spec, hosts, metadata) = parse(&value).unwrap();
+        assert!(spec.open_stdin);
+        assert_eq!(spec.network, "none");
+        assert_eq!(hosts, "hosts.test");
+        assert_eq!(metadata.as_deref(), Some("buildkit-metadata1778057692"));
+        spec.validate_exec().unwrap();
+        for pointer in [
+            "/mounts/7/source",
+            "/mounts/7/options",
+            "/process/user/additionalGids",
+            "/linux/namespaces/4",
+            "/process/capabilities",
+        ] {
+            let mut invalid = value.clone();
+            *invalid.pointer_mut(pointer).unwrap() = serde_json::json!(null);
+            assert!(parse(&invalid).is_err(), "accepted {pointer}");
+        }
+        let mut invalid = value.clone();
+        invalid["mounts"][7]["source"] = "/tmp/buildkit-metadata1/../secret".into();
+        assert!(parse(&invalid).is_err());
+        let mut invalid = value.clone();
+        invalid["linux"]["namespaces"][4]["path"] = "/proc/1/ns/net".into();
+        assert!(parse(&invalid).is_err());
+    }
+    #[test]
+    fn root_run_preserves_image_groups_within_the_user_mapping() {
+        let (mut value, snapshot) = frontend_bundle();
+        value["mounts"].as_array_mut().unwrap().remove(7);
+        value["linux"]["namespaces"]
+            .as_array_mut()
+            .unwrap()
+            .remove(4);
+        for groups in [serde_json::json!([0]), serde_json::json!([0, 42, 65534])] {
+            value["process"]["user"]["additionalGids"] = groups.clone();
+            let (spec, _, metadata) = parse_live(
+                &serde_json::to_vec(&value).unwrap(),
+                snapshot.clone(),
+                crate::spec::BUILDKIT_CONFIG,
+                crate::spec::BUILDKIT_DEFAULT_CONFIG,
+                Snapshotter::Native,
+            )
+            .unwrap();
+            assert!(!spec.open_stdin);
+            assert!(metadata.is_none());
+            assert_eq!(
+                serde_json::to_value(spec.build_snapshot.unwrap().supplementary_groups.unwrap())
+                    .unwrap(),
+                groups
+            );
+        }
+        value["process"]["user"]["additionalGids"] = serde_json::json!([65536]);
+        assert!(
+            parse_live(
+                &serde_json::to_vec(&value).unwrap(),
+                snapshot,
+                crate::spec::BUILDKIT_CONFIG,
+                crate::spec::BUILDKIT_DEFAULT_CONFIG,
+                Snapshotter::Native
+            )
+            .is_err()
+        );
     }
 }
