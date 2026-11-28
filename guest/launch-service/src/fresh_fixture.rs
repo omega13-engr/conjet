@@ -1826,9 +1826,7 @@ impl FreshFixture {
                 "--run-fresh-fixture",
                 &std::process::id().to_string(),
                 &hex(&id),
-                &limits.memory_bytes.to_string(),
-                &limits.pids.to_string(),
-                &limits.cpu_millicores.to_string(),
+                &serde_json::to_string(&limits).map_err(io::Error::other)?,
                 if mode == "crash-supervisor" {
                     "hold"
                 } else {

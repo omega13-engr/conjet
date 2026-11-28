@@ -350,6 +350,7 @@
       "acceptance": "Quota is applied and sustained load shows throttling; removing quota preserves other limits.",
       "test_file": "cases/test_limits.py",
       "test_name": "test_cpu_quota",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": [
         "https://github.com/libracoder/kiri/issues/129"

@@ -11,7 +11,53 @@ from support import alpine, container, exec_command
 class CompatibilityTests(unittest.TestCase):
     def test_cpu_quota(self):
         'DC-026: Quota is applied and sustained load shows throttling; removing quota preserves other limits.'
-        self.fail('UNIMPLEMENTED DC-026; no runtime compatibility evidence')
+        session = self.compatibility
+        period, quota = 80_000, 8_000
+        memory, pids = 32 * 1024 * 1024, 16
+        limits = {'CpuPeriod': period, 'CpuQuota': quota, 'Memory': memory, 'PidsLimit': pids}
+
+        def usage(path):
+            status, raw = session.request('GET', path + '/stats?stream=false&one-shot=true')
+            self.assertEqual(status, 200, raw)
+            stats = json.loads(raw)
+            self.assertEqual(stats['memory_stats']['limit'], memory)
+            return (stats['cpu_stats']['throttling_data'],
+                    stats['cpu_stats']['cpu_usage']['total_usage'])
+
+        def inspect_host_config(path, expected):
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            inspected = json.loads(raw)
+            self.assertIs(inspected['State']['Running'], True)
+            self.assertEqual({field: inspected['HostConfig'][field] for field in expected}, expected)
+
+        with alpine(self, session) as image, container(self, session, 'conjet-quota-' + uuid.uuid4().hex, {
+                'Image': image, 'Cmd': ['/bin/sh', '-c', 'while :; do :; done'],
+                'HostConfig': {'NetworkMode': 'none', **limits},
+        }) as (path, _):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+            inspect_host_config(path, limits)
+            initial, _ = usage(path)
+            deadline = time.monotonic() + 3
+            while True:
+                throttled, _ = usage(path)
+                if throttled['throttled_periods'] - initial['throttled_periods'] >= 4:
+                    break
+                self.assertLess(time.monotonic(), deadline, throttled)
+                time.sleep(0.15)
+            self.assertGreater(throttled['throttled_time'], initial['throttled_time'])
+            status, raw = session.request('POST', path + '/update', {'CpuQuota': -1})
+            self.assertEqual(status, 200, raw)
+            inspect_host_config(path, {**limits, 'CpuQuota': -1})
+            released, released_cpu = usage(path)
+            time.sleep(1)
+            loaded, loaded_cpu = usage(path)
+            self.assertGreater(loaded_cpu - released_cpu, 100_000_000)
+            self.assertEqual(loaded['throttled_periods'], released['throttled_periods'])
+            self.assertEqual(loaded['throttled_time'], released['throttled_time'])
+        session.record({'period_us': period, 'quota_us': quota, 'sustained_throttling': True,
+                        'quota_removed_under_load': True, 'memory_and_pids_preserved': True})
 
     def test_cpu_affinity(self):
         'DC-027: Requested available CPUs constrain execution; invalid CPU sets are rejected atomically.'

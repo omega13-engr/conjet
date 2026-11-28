@@ -67,6 +67,7 @@ fn launch(
                 memory_bytes: MIN_MEMORY_BYTES,
                 pids: 4,
                 cpu_millicores: 500,
+                cpu_bandwidth: None,
             },
         },
     };

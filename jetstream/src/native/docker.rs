@@ -2621,7 +2621,14 @@ impl Owner {
 
     fn update_resources(&self, item: &Item, patch: &Value) -> Result<(), Rejected> {
         use conjet_launch_service::wire::WorkloadControl;
-        const LIMITS: &[&str] = &["Memory", "MemorySwap", "NanoCpus", "PidsLimit"];
+        const LIMITS: &[&str] = &[
+            "Memory",
+            "MemorySwap",
+            "NanoCpus",
+            "PidsLimit",
+            "CpuPeriod",
+            "CpuQuota",
+        ];
         let fields = patch
             .as_object()
             .ok_or_else(|| Rejected::bad("expected a Docker resource update object"))?;
@@ -2747,6 +2754,11 @@ impl Owner {
             json!({
                 "cpu_usage":{"total_usage":sample.cpu_ns},
                 "system_cpu_usage":sample.system_ns,"online_cpus":sample.cpus,
+                "throttling_data":{
+                    "periods":sample.cpu_periods,
+                    "throttled_periods":sample.cpu_throttled_periods,
+                    "throttled_time":sample.cpu_throttled_ns,
+                },
             })
         };
         Ok(json!({

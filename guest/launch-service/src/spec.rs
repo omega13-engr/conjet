@@ -66,12 +66,14 @@ pub fn workload_output_limit(image: &str) -> usize {
 pub const MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIDS: u32 = 64;
+pub const CPU_PERIOD_US: u32 = 100_000;
 pub const MIN_CPU_MILLICORES: u32 = 10;
 pub const MAX_CPU_MILLICORES: u32 = 1_000;
 pub const NATIVE_LIMITS: ResourceLimits = ResourceLimits {
     memory_bytes: MIN_MEMORY_BYTES,
     pids: 4,
     cpu_millicores: 500,
+    cpu_bandwidth: None,
 };
 const MAX_ENTRIES: usize = 32;
 const MAX_VALUE_BYTES: usize = 1_024;
@@ -229,6 +231,15 @@ pub struct ResourceLimits {
     pub memory_bytes: u64,
     pub pids: u32,
     pub cpu_millicores: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_bandwidth: Option<CpuBandwidth>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CpuBandwidth {
+    pub period_us: u32,
+    pub quota_us: u32,
 }
 
 impl ResourceLimits {
@@ -237,10 +248,18 @@ impl ResourceLimits {
         memory_bytes: 0,
         pids: 0,
         cpu_millicores: 0,
+        cpu_bandwidth: None,
     };
 
     pub fn has_unlimited(self) -> bool {
-        self.memory_bytes == 0 || self.pids == 0 || self.cpu_millicores == 0
+        self.memory_bytes == 0 || self.pids == 0 || self.cpu_bandwidth().quota_us == 0
+    }
+
+    pub fn cpu_bandwidth(self) -> CpuBandwidth {
+        self.cpu_bandwidth.unwrap_or(CpuBandwidth {
+            period_us: CPU_PERIOD_US,
+            quota_us: self.cpu_millicores.saturating_mul(CPU_PERIOD_US / 1_000),
+        })
     }
 
     pub fn valid_docker(self) -> bool {
@@ -251,8 +270,23 @@ impl ResourceLimits {
         ((defaults && self.memory_bytes == 0)
             || (MIN_MEMORY_BYTES..=MAX_MEMORY_BYTES).contains(&self.memory_bytes))
             && ((defaults && self.pids == 0) || (1..=MAX_PIDS).contains(&self.pids))
-            && ((defaults && self.cpu_millicores == 0)
-                || (MIN_CPU_MILLICORES..=MAX_CPU_MILLICORES).contains(&self.cpu_millicores))
+            && match self.cpu_bandwidth {
+                Some(bandwidth) => {
+                    let quota = u64::from(bandwidth.quota_us);
+                    let period = u64::from(bandwidth.period_us);
+                    self.cpu_millicores == 0
+                        && (1_000..=1_000_000).contains(&bandwidth.period_us)
+                        && ((defaults && quota == 0)
+                            || (quota >= 1_000
+                                && (period * u64::from(MIN_CPU_MILLICORES)
+                                    ..=period * u64::from(MAX_CPU_MILLICORES))
+                                    .contains(&(quota * 1_000))))
+                }
+                None => {
+                    (defaults && self.cpu_millicores == 0)
+                        || (MIN_CPU_MILLICORES..=MAX_CPU_MILLICORES).contains(&self.cpu_millicores)
+                }
+            }
     }
 }
 
@@ -787,6 +821,7 @@ mod tests {
                     memory_bytes: MIN_MEMORY_BYTES,
                     pids: 4,
                     cpu_millicores: 500,
+                    cpu_bandwidth: None,
                 },
                 docker_resource_defaults: false,
                 docker_default_capabilities: false,
@@ -949,6 +984,7 @@ mod tests {
             memory_bytes: 128 * 1024 * 1024,
             pids: 0,
             cpu_millicores: 0,
+            cpu_bandwidth: None,
         };
         assert!(request.spec.validate().is_ok());
         request.spec.limits.memory_bytes = MAX_MEMORY_BYTES + 1;

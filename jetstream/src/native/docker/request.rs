@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{ensure, Context};
 use conjet_launch_service::handshake::unhex;
 use conjet_launch_service::spec::{
-    Account, LaunchSpec, ResourceLimits, WORKLOAD_GID, WORKLOAD_UID,
+    Account, CpuBandwidth, LaunchSpec, ResourceLimits, CPU_PERIOD_US, WORKLOAD_GID, WORKLOAD_UID,
 };
 use serde_json::{json, Map, Value};
 
@@ -204,6 +204,8 @@ impl Image {
                 "Memory",
                 "MemorySwap",
                 "NanoCpus",
+                "CpuPeriod",
+                "CpuQuota",
                 "PidsLimit",
                 "AutoRemove",
                 "ConsoleSize",
@@ -378,6 +380,30 @@ fn resources(host: &Value) -> Result<ResourceLimits, Rejected> {
     }
     let cpu_millicores = u32::try_from(nano_cpus / 1_000_000)
         .map_err(|_| Rejected::bad("native CPU limit exceeds its bound"))?;
+    let period = read("CpuPeriod")?;
+    let quota = match &host["CpuQuota"] {
+        Value::Null => 0,
+        value => value
+            .as_i64()
+            .filter(|quota| *quota >= -1)
+            .ok_or_else(|| Rejected::bad("invalid native Docker CpuQuota"))?,
+    };
+    let cpu_bandwidth = if period != 0 || quota != 0 {
+        if nano_cpus != 0 {
+            return Err(Rejected::bad("NanoCpus conflicts with CPU period or quota"));
+        }
+        Some(CpuBandwidth {
+            period_us: if period == 0 {
+                CPU_PERIOD_US
+            } else {
+                u32::try_from(period).map_err(|_| Rejected::bad("invalid CPU period"))?
+            },
+            quota_us: u32::try_from(quota.max(0))
+                .map_err(|_| Rejected::bad("invalid CPU quota"))?,
+        })
+    } else {
+        None
+    };
     let pids = if host["PidsLimit"].as_i64() == Some(-1) {
         0
     } else {
@@ -388,6 +414,7 @@ fn resources(host: &Value) -> Result<ResourceLimits, Rejected> {
         memory_bytes: read("Memory")?,
         pids,
         cpu_millicores,
+        cpu_bandwidth,
     })
 }
 
@@ -403,7 +430,8 @@ mod tests {
             ResourceLimits {
                 memory_bytes: 0,
                 pids: 0,
-                cpu_millicores: 0
+                cpu_millicores: 0,
+                cpu_bandwidth: None,
             }
         );
         let service = resources(&json!({"Memory":134217728, "PidsLimit":64,
@@ -414,7 +442,8 @@ mod tests {
             ResourceLimits {
                 memory_bytes: 134217728,
                 pids: 64,
-                cpu_millicores: 500
+                cpu_millicores: 500,
+                cpu_bandwidth: None,
             }
         );
         assert_eq!(resources(&json!({"PidsLimit":-1})).unwrap().pids, 0);

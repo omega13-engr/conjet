@@ -159,6 +159,7 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
             memory_bytes: MIN_MEMORY_BYTES,
             pids: 4,
             cpu_millicores: 500,
+            cpu_bandwidth: None,
         },
         RunProfile {
             with_sandbox,
@@ -195,11 +196,9 @@ pub fn run_helper(
     }
     let id = args.next().ok_or("fresh workload ID required")?;
     let id = handshake::unhex(id.to_str().ok_or("invalid workload ID")?)?;
-    let limits = ResourceLimits {
-        memory_bytes: number(&mut args)?,
-        pids: number(&mut args)?,
-        cpu_millicores: number(&mut args)?,
-    };
+    let limits = args.next().ok_or("fresh workload limits required")?;
+    let limits: ResourceLimits =
+        serde_json::from_str(limits.to_str().ok_or("invalid fresh workload limits")?)?;
     let mode = args.next().ok_or("fixture helper mode required")?;
     let mode = mode.to_str().ok_or("invalid fixture helper mode")?;
     if !matches!(

@@ -19,6 +19,12 @@ pub struct CgroupUsage {
     pub cpu_ns: u64,
     pub system_ns: u64,
     pub cpus: u64,
+    #[serde(default)]
+    pub cpu_periods: u64,
+    #[serde(default)]
+    pub cpu_throttled_periods: u64,
+    #[serde(default)]
+    pub cpu_throttled_ns: u64,
     pub memory_bytes: u64,
     pub memory_limit: u64,
     pub inactive_file: u64,

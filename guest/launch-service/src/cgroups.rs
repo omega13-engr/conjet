@@ -9,7 +9,6 @@ use crate::handshake::hex;
 use crate::spec::ResourceLimits;
 use crate::wire::CgroupUsage;
 
-const CPU_PERIOD_US: u64 = 100_000;
 pub(crate) const CGROUP2_SUPER_MAGIC: i128 = 0x6367_7270;
 
 pub struct WorkloadCgroup {
@@ -71,6 +70,9 @@ pub(crate) fn usage(directory: &Path) -> io::Result<CgroupUsage> {
             .try_into()
             .map_err(io::Error::other)?,
         cpus: cpus as u64,
+        cpu_periods: number(field(&cpu, "nr_periods")?)?,
+        cpu_throttled_periods: number(field(&cpu, "nr_throttled")?)?,
+        cpu_throttled_ns: number(field(&cpu, "throttled_usec")?)?.saturating_mul(1_000),
         memory_bytes: number(&read(&directory.join("memory.current"))?)?,
         memory_limit,
         inactive_file: number(field(&memory, "inactive_file")?)?,
@@ -116,12 +118,7 @@ impl WorkloadCgroup {
                 write_control(&path, "memory.swap.max", "0")?;
             }
             write_control(&path, "pids.max", &maximum(u64::from(limits.pids)))?;
-            let quota = u64::from(limits.cpu_millicores) * CPU_PERIOD_US / 1_000;
-            write_control(
-                &path,
-                "cpu.max",
-                &format!("{} {CPU_PERIOD_US}", maximum(quota)),
-            )?;
+            write_control(&path, "cpu.max", &cpu_max(limits))?;
             Ok(directory)
         })();
         match result {
@@ -241,15 +238,24 @@ pub(crate) fn freeze(path: &Path, frozen: bool, expires: Instant) -> io::Result<
     Ok(())
 }
 
+fn cpu_max(limits: ResourceLimits) -> String {
+    let bandwidth = limits.cpu_bandwidth();
+    let quota = if bandwidth.quota_us == 0 {
+        "max".to_owned()
+    } else {
+        bandwidth.quota_us.to_string()
+    };
+    format!("{quota} {}", bandwidth.period_us)
+}
+
 pub(crate) fn update_limits(
     path: &Path,
     limits: ResourceLimits,
     disable_swap: bool,
 ) -> io::Result<()> {
     let maximum = |n: u64| if n == 0 { "max".into() } else { n.to_string() };
-    let quota = u64::from(limits.cpu_millicores) * CPU_PERIOD_US / 1_000;
     let next = [
-        ("cpu.max", format!("{} {CPU_PERIOD_US}", maximum(quota))),
+        ("cpu.max", cpu_max(limits)),
         ("pids.max", maximum(u64::from(limits.pids))),
         (
             "memory.swap.max",
