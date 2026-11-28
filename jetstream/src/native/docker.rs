@@ -1888,47 +1888,63 @@ impl Owner {
             ));
         }
         let mut store = self.image_store(&ledger)?;
-        let archive = archive::read(file, store.archive_layer_limit())
-            .map_err(|error| Rejected::bad(format!("{error:#}")))?;
-        let reference = archive.reference();
+        let decompressed = archive::decompress(file, store.root()).map_err(|error| {
+            Rejected::bad(format!("cannot decompress Docker archive: {error:#}"))
+        })?;
+        let archives = archive::read(
+            decompressed.as_ref().unwrap_or(file),
+            store.archive_layer_limit(),
+        )
+        .map_err(|error| Rejected::bad(format!("{error:#}")))?;
         let mut tags = ledger.tags.clone();
         let mut response = Vec::new();
-        for name in &archive.tags {
-            let (repo, tag) = name
-                .rsplit_once(':')
-                .ok_or_else(|| Rejected::bad("untagged Docker archive name"))?;
-            tags.insert(repo, tag, reference.clone())?;
-            serde_json::to_writer(
-                &mut response,
-                &json!({"stream":format!("Loaded image: {name}\n")}),
-            )
-            .map_err(|_| Rejected::internal("cannot report loaded Docker tag"))?;
-            response.push(b'\n');
-        }
-        if response.is_empty() {
-            serde_json::to_writer(
-                &mut response,
-                &json!({"stream":format!("Loaded image: {}\n", archive.manifest)}),
-            )
-            .map_err(|_| Rejected::internal("cannot report loaded Docker image"))?;
-            response.push(b'\n');
+        let mut tagged = BTreeSet::new();
+        for archive in &archives {
+            let reference = archive.reference();
+            for name in &archive.tags {
+                let (repo, tag) = name
+                    .rsplit_once(':')
+                    .ok_or_else(|| Rejected::bad("untagged Docker archive name"))?;
+                tags.insert(repo, tag, reference.clone())?;
+                serde_json::to_writer(
+                    &mut response,
+                    &json!({"stream":format!("Loaded image: {name}\n")}),
+                )
+                .map_err(|_| Rejected::internal("cannot report loaded Docker tag"))?;
+                response.push(b'\n');
+            }
+            if archive.tags.is_empty() {
+                serde_json::to_writer(
+                    &mut response,
+                    &json!({"stream":format!("Loaded image: {}\n", archive.manifest)}),
+                )
+                .map_err(|_| Rejected::internal("cannot report loaded Docker image"))?;
+                response.push(b'\n');
+            } else {
+                tagged.insert(archive.manifest.clone());
+            }
         }
         self.retire_build_archives(&mut ledger, &mut store)?;
-        let transient = !archive.tags.is_empty()
-            && ledger
-                .active
-                .iter()
-                .any(|item| item.container.buildkit_worker)
-            && store
-                .get(&reference)
-                .map_err(|error| Rejected::internal(error.to_string()))?
-                .is_none();
-        store
-            .import(archive)
+        let imported = store
+            .import(archives)
             .map_err(|error| Rejected::bad(format!("{error:#}")))?;
-        self.publish_tags(&mut ledger, tags)?;
-        if transient {
-            ledger.transient_build_archives.insert(reference);
+        if let Err(error) = self.publish_tags(&mut ledger, tags) {
+            // The tag file rename may have happened before a failed sync.
+            // Keep the content so either version still resolves.
+            ledger.poisoned = true;
+            return Err(error);
+        }
+        if ledger
+            .active
+            .iter()
+            .any(|item| item.container.buildkit_worker)
+        {
+            ledger.transient_build_archives.extend(
+                imported
+                    .into_iter()
+                    .filter(|manifest| tagged.contains(manifest))
+                    .map(|manifest| format!("{}@{manifest}", archive::LOCAL)),
+            );
         }
         Ok(response)
     }
@@ -2009,25 +2025,25 @@ impl Owner {
             .map_err(|error| Rejected::internal(format!("image history unavailable: {error:#}")))
     }
 
-    fn save_archive(&self, name: &str) -> Result<fs::File, Rejected> {
+    fn save_archives(&self, names: &[String]) -> Result<fs::File, Rejected> {
         let ledger = self.ledger.lock().unwrap();
-        let reference = ledger.tags.resolve(name);
         let store = self.image_store(&ledger)?;
-        let canonical = self.archived_image(&store, reference)?;
-        let manifest = canonical
-            .rsplit_once('@')
-            .expect("immutable image reference")
-            .1;
-        let tags = if name == reference {
-            ledger
-                .tags
-                .names_for(canonical)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        } else {
-            vec![image::Tags::key(name).into_owned()]
-        };
-        archive::export(store.root(), manifest, &tags, store.archive_layer_limit())
+        let mut targets = BTreeMap::<&str, BTreeSet<String>>::new();
+        for name in names {
+            let reference = ledger.tags.resolve(name);
+            let canonical = self.archived_image(&store, reference)?;
+            let manifest = canonical
+                .rsplit_once('@')
+                .expect("immutable image reference")
+                .1;
+            let tags = targets.entry(manifest).or_default();
+            if name == reference {
+                tags.extend(ledger.tags.names_for(canonical).map(str::to_owned));
+            } else {
+                tags.insert(image::Tags::key(name).into_owned());
+            }
+        }
+        archive::export(store.root(), targets, store.archive_layer_limit())
             .map_err(|error| Rejected(404, format!("image archive source unavailable: {error:#}")))
     }
 

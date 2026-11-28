@@ -24,6 +24,7 @@ struct Request {
     path: String,
     query: BTreeMap<String, String>,
     create_options: BTreeMap<String, Vec<String>>,
+    image_names: Vec<String>,
     body: Vec<u8>,
     archive: Option<File>,
     close: bool,
@@ -440,6 +441,8 @@ fn parse(
         }
     }
     let mut query = BTreeMap::new();
+    let mut image_names = Vec::new();
+    let save = method == "GET" && matches!(path, "/v1.44/images/get" | "/images/get");
     let mut create_options = BTreeMap::<String, Vec<String>>::new();
     let create = (method == "POST").then(|| path.strip_prefix("/v1.44").unwrap_or(path));
     for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
@@ -449,7 +452,12 @@ fn parse(
         let duplicated = create == Some("/networks/create")
             || (create == Some("/containers/create")
                 && !matches!(key.as_str(), "name" | "platform"));
-        if duplicated {
+        if save && matches!(key.as_str(), "names" | "names[]") {
+            if value.is_empty() || image_names.len() >= super::archive::MAX_IMAGES {
+                return Err(Rejected::bad("invalid Docker image save names"));
+            }
+            image_names.push(value);
+        } else if duplicated {
             create_options.entry(key).or_default().push(value);
         } else if query.insert(key, value).is_some() {
             return Err(Rejected::bad("duplicate query option"));
@@ -501,6 +509,7 @@ fn parse(
         path: path.into(),
         query,
         create_options,
+        image_names,
         body,
         archive,
         close,
@@ -855,22 +864,17 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             }
         }
         ("GET", "/images/get") => {
-            if query.len() != 1 || !request.body.is_empty() {
-                return Err(Rejected::bad("image save requires one image"));
+            if !query.is_empty() || request.image_names.is_empty() || !request.body.is_empty() {
+                return Err(Rejected::bad("invalid Docker image save options"));
             }
-            let name = query
-                .get("names")
-                .or_else(|| query.get("names[]"))
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| Rejected::bad("missing Docker image name"))?;
-            return Ok(Action::Archive(owner.save_archive(name)?));
+            return Ok(Action::Archive(owner.save_archives(&request.image_names)?));
         }
         ("GET", _) if path.starts_with("/images/") && path.ends_with("/get") => {
             if !query.is_empty() || !request.body.is_empty() {
                 return Err(Rejected::bad("unsupported image save option"));
             }
             return Ok(Action::Archive(
-                owner.save_archive(&image_reference(path, "/get")?)?,
+                owner.save_archives(&[image_reference(path, "/get")?])?,
             ));
         }
         ("GET", "/images/json") => {

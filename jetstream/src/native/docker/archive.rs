@@ -1,13 +1,14 @@
 //! Bounded Docker archive import and export using the verified OCI store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{ensure, Context};
-use conjet_launch_service::handshake::hex;
+use conjet_launch_service::handshake::{hex, unhex};
+use flate2::read::MultiGzDecoder;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -18,7 +19,8 @@ use crate::native::oci_stage;
 // The OCI store independently enforces its encoding-specific ingest budget.
 pub(super) const LIMIT: usize = 4 * 1024 * 1024 * 1024;
 pub(super) const LOCAL: &str = "conjet.local/archive";
-const MAX_MEMBERS: usize = 4 * oci_stage::LAYERS_LIMIT + 16;
+pub(super) const MAX_IMAGES: usize = 8;
+const MAX_MEMBERS: usize = MAX_IMAGES * (4 * oci_stage::LAYERS_LIMIT + 16);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -96,7 +98,26 @@ fn read_metadata(mut file: &File, extent: Range<u64>) -> anyhow::Result<Vec<u8>>
     Ok(bytes)
 }
 
-pub(super) fn read(mut file: &File, layer_limit: u64) -> anyhow::Result<Import<'_>> {
+pub(super) fn decompress(mut file: &File, scratch: &Path) -> anyhow::Result<Option<File>> {
+    file.rewind()?;
+    let mut magic = [0; 2];
+    file.read_exact(&mut magic)?;
+    file.rewind()?;
+    if magic != [0x1f, 0x8b] {
+        return Ok(None);
+    }
+    let mut output = tempfile::tempfile_in(scratch)?;
+    let mut gzip = MultiGzDecoder::new(file).take(LIMIT as u64 + 1);
+    ensure!(
+        io::copy(&mut gzip, &mut output)? <= LIMIT as u64,
+        "uncompressed Docker archive exceeds its byte bound"
+    );
+    output.rewind()?;
+    Ok(Some(output))
+}
+
+pub(super) fn read(mut file: &File, layer_limit: u64) -> anyhow::Result<Vec<Import<'_>>> {
+    file.rewind()?;
     let length = file.metadata()?.len();
     ensure!(
         length <= LIMIT as u64,
@@ -166,10 +187,29 @@ pub(super) fn read(mut file: &File, layer_limit: u64) -> anyhow::Result<Import<'
             .remove("manifest.json")
             .context("missing Docker archive manifest")?,
     )?)?;
-    let [record]: [Record; 1] = records
-        .try_into()
-        .ok()
-        .context("expected one Docker image")?;
+    ensure!(
+        (1..=MAX_IMAGES).contains(&records.len()),
+        "invalid Docker archive image count"
+    );
+    let mut descriptors = BTreeMap::new();
+    records
+        .into_iter()
+        .map(|record| read_record(file, &parts, &mut descriptors, record, layer_limit))
+        .collect()
+}
+
+struct Layer {
+    digest: String,
+    media: &'static str,
+}
+
+fn read_record<'a>(
+    mut file: &'a File,
+    parts: &BTreeMap<String, Range<u64>>,
+    descriptors: &mut BTreeMap<String, Layer>,
+    record: Record,
+    layer_limit: u64,
+) -> anyhow::Result<Import<'a>> {
     ensure!(
         (1..=oci_stage::LAYERS_LIMIT).contains(&record.layers.len()),
         "invalid Docker archive layer count"
@@ -177,7 +217,8 @@ pub(super) fn read(mut file: &File, layer_limit: u64) -> anyhow::Result<Import<'
     let config = read_metadata(
         file,
         parts
-            .remove(&record.config)
+            .get(&record.config)
+            .cloned()
             .context("missing Docker archive config")?,
     )?;
     let config_digest = digest(&config);
@@ -205,27 +246,33 @@ pub(super) fn read(mut file: &File, layer_limit: u64) -> anyhow::Result<Import<'
             total <= layer_limit,
             "Docker archive layers exceed their ingest bound"
         );
-        let mut hash = Sha256::new();
-        layer.copy_to(&mut hash)?;
-        let image_digest = format!("sha256:{}", hex(&hash.finalize()));
-        if let Some(expected) = name.strip_prefix("blobs/sha256/") {
-            ensure!(
-                image_digest == format!("sha256:{expected}"),
-                "Docker archive layer digest mismatch"
-            );
-        }
-        let mut magic = [0; 2];
-        if size >= 2 {
-            file.seek(SeekFrom::Start(bytes.start))?;
-            file.read_exact(&mut magic)?;
-        }
-        let media = if magic == [0x1f, 0x8b] {
-            "application/vnd.oci.image.layer.v1.tar+gzip"
-        } else {
-            "application/vnd.oci.image.layer.v1.tar"
+        let descriptor = match descriptors.entry(name) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let mut hash = Sha256::new();
+                layer.copy_to(&mut hash)?;
+                let digest = format!("sha256:{}", hex(&hash.finalize()));
+                if let Some(expected) = entry.key().strip_prefix("blobs/sha256/") {
+                    ensure!(
+                        digest == format!("sha256:{expected}"),
+                        "Docker archive layer digest mismatch"
+                    );
+                }
+                let mut magic = [0; 2];
+                if size >= 2 {
+                    file.seek(SeekFrom::Start(bytes.start))?;
+                    file.read_exact(&mut magic)?;
+                }
+                let media = if magic == [0x1f, 0x8b] {
+                    "application/vnd.oci.image.layer.v1.tar+gzip"
+                } else {
+                    "application/vnd.oci.image.layer.v1.tar"
+                };
+                entry.insert(Layer { digest, media })
+            }
         };
-        layers.push(json!({"mediaType":media,"digest":image_digest,"size":size}));
-        blobs.entry(image_digest).or_insert(layer);
+        layers.push(json!({"mediaType":descriptor.media,"digest":descriptor.digest,"size":size}));
+        blobs.entry(descriptor.digest.clone()).or_insert(layer);
     }
     let oci = serde_json::to_vec(&json!({
         "schemaVersion":2, "mediaType":"application/vnd.oci.image.manifest.v1+json",
@@ -343,20 +390,18 @@ pub(super) fn history(root: &Path, manifest: &str, tags: &[String]) -> anyhow::R
 
 pub(super) fn export(
     root: &Path,
-    manifest: &str,
-    tags: &[String],
+    targets: BTreeMap<&str, BTreeSet<String>>,
     mut budget: u64,
 ) -> anyhow::Result<File> {
-    let image = oci_stage::read_manifest(root, manifest)?;
-    let config = image
-        .config
-        .digest
-        .strip_prefix("sha256:")
-        .context("invalid config digest")?;
-    let config = format!("{config}.json");
     let spool = tempfile::tempfile_in(root)?;
     let mut tar = tar::Builder::new(spool);
+    let mut bytes = 0;
     let mut append = |name: &str, size: u64, data: &mut dyn Read| -> anyhow::Result<()> {
+        bytes += 512 + size.div_ceil(512) * 512;
+        ensure!(
+            bytes + 1024 <= LIMIT as u64,
+            "Docker archive exceeds its byte bound"
+        );
         let mut header = tar::Header::new_ustar();
         header.set_size(size);
         header.set_mode(0o644);
@@ -364,36 +409,45 @@ pub(super) fn export(
         tar.append_data(&mut header, name, data.take(size))?;
         Ok(())
     };
-    let config_bytes = oci_stage::blob(root, &image.config.digest, oci_stage::METADATA_LIMIT)?;
-    append(
-        &config,
-        config_bytes.len() as u64,
-        &mut config_bytes.as_slice(),
-    )?;
-    let mut layers = Vec::with_capacity(image.layers.len());
-    for (index, layer) in image.layers.iter().enumerate() {
-        let path = format!("layer-{index}/layer.tar");
-        let size = layer.size as u64;
-        budget = budget
-            .checked_sub(size)
-            .context("Docker export exceeds its layer budget")?;
-        let expected = layer
+    let mut records = Vec::with_capacity(targets.len());
+    let mut written = BTreeSet::new();
+    for (manifest, tags) in targets {
+        let image = oci_stage::read_manifest(root, manifest)?;
+        let config = image
+            .config
             .digest
             .strip_prefix("sha256:")
-            .context("missing layer digest")?;
-        conjet_launch_service::handshake::unhex::<32>(expected)?;
-        let mut source =
-            oci_stage::open_bounded(root, &root.join("blobs/sha256").join(expected), size)?;
-        ensure!(
-            oci_stage::digest_file(&mut source, size)? == expected,
-            "stored layer digest changed"
-        );
-        append(&path, size, &mut source)?;
-        layers.push(path);
+            .context("invalid config digest")?;
+        let config = format!("{config}.json");
+        if written.insert(config.clone()) {
+            let data = oci_stage::blob(root, &image.config.digest, oci_stage::METADATA_LIMIT)?;
+            append(&config, data.len() as u64, &mut data.as_slice())?;
+        }
+        let mut layers = Vec::with_capacity(image.layers.len());
+        for layer in image.layers {
+            let expected = layer
+                .digest
+                .strip_prefix("sha256:")
+                .context("missing layer digest")?;
+            unhex::<32>(expected)?;
+            let path = format!("blobs/sha256/{expected}");
+            if written.insert(path.clone()) {
+                let size = layer.size as u64;
+                budget = budget
+                    .checked_sub(size)
+                    .context("Docker export exceeds its layer budget")?;
+                let mut source = oci_stage::open_bounded(root, &root.join(&path), size)?;
+                ensure!(
+                    oci_stage::digest_file(&mut source, size)? == expected,
+                    "stored layer digest changed"
+                );
+                append(&path, size, &mut source)?;
+            }
+            layers.push(path);
+        }
+        records.push(json!({"Config":config,"RepoTags":tags,"Layers":layers}));
     }
-    let metadata = serde_json::to_vec(&json!([{
-        "Config":config, "RepoTags":tags, "Layers":layers
-    }]))?;
+    let metadata = serde_json::to_vec(&records)?;
     append(
         "manifest.json",
         metadata.len() as u64,
@@ -447,6 +501,8 @@ mod tests {
                 continue;
             }
             let imported = result.unwrap();
+            assert_eq!(imported.len(), 1);
+            let imported = &imported[0];
             let root = tempfile::tempdir().unwrap();
             let blobs = root.path().join("blobs/sha256");
             std::fs::create_dir_all(&blobs).unwrap();
@@ -463,6 +519,32 @@ mod tests {
                 count
             );
         }
+    }
+
+    #[test]
+    fn gzip_requires_a_complete_verified_stream() {
+        use flate2::{write::GzEncoder, Compression};
+
+        let root = tempfile::tempdir().unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        let bytes = b"uncompressed Docker archive";
+        encoder.write_all(bytes).unwrap();
+        let gzip = encoder.finish().unwrap();
+        let mut input = tempfile::tempfile_in(root.path()).unwrap();
+
+        input.write_all(bytes).unwrap();
+        assert!(decompress(&input, root.path()).unwrap().is_none());
+
+        input.set_len(0).unwrap();
+        input.rewind().unwrap();
+        input.write_all(&gzip).unwrap();
+        let mut unpacked = decompress(&input, root.path()).unwrap().unwrap();
+        let mut actual = Vec::new();
+        unpacked.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, bytes);
+
+        input.set_len(gzip.len() as u64 - 1).unwrap();
+        assert!(decompress(&input, root.path()).is_err());
     }
 
     #[test]
@@ -495,11 +577,12 @@ mod tests {
             .unwrap();
         let mut file = archive.into_inner().unwrap();
         file.rewind().unwrap();
-        let image = read(&file, size).unwrap();
-        assert!(image.blobs.values().any(
+        let images = read(&file, size).unwrap();
+        assert_eq!(images.len(), 1);
+        assert!(images[0].blobs.values().any(
             |blob| matches!(blob, Blob::Extent { bytes, .. } if bytes.end - bytes.start == size)
         ));
-        drop(image);
+        drop(images);
         file.rewind().unwrap();
         assert!(read(&file, size - 1)
             .err()

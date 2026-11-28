@@ -488,8 +488,29 @@ impl Store {
         }
     }
 
-    pub(super) fn import(&self, archive: archive::Import<'_>) -> anyhow::Result<()> {
-        self.publish_blobs(&archive.manifest, archive.blobs)
+    pub(super) fn import(&self, images: Vec<archive::Import<'_>>) -> anyhow::Result<Vec<String>> {
+        let mut manifests = Vec::new();
+        let mut created = Vec::new();
+        for image in images {
+            match self.publish_blobs(&image.manifest, image.blobs) {
+                Ok(Some(blobs)) => {
+                    created.extend(blobs);
+                    manifests.push(image.manifest);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    for manifest in &manifests {
+                        fs::remove_dir_all(self.path(manifest)?)
+                            .context("cannot roll back a Docker archive image")?;
+                    }
+                    for path in created {
+                        fs::remove_file(path).context("cannot roll back a Docker archive blob")?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(manifests)
     }
 
     pub(super) fn seed_layout(
@@ -544,7 +565,7 @@ impl Store {
                 },
             );
         }
-        self.publish_blobs(manifest, blobs)
+        self.publish_blobs(manifest, blobs).map(|_| ())
     }
 
     pub(super) fn seed_frozen_layout(&self, layout: &Path) -> anyhow::Result<()> {
@@ -581,11 +602,11 @@ impl Store {
         &self,
         manifest: &str,
         blobs: BTreeMap<String, archive::Blob<'_>>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<Vec<PathBuf>>> {
         let target = self.path(manifest)?;
         if target.try_exists()? {
             self.receipt(manifest)?;
-            return Ok(());
+            return Ok(None);
         }
         ensure!(
             self.root.join("images").read_dir()?.count() < MAX_IMAGES,
@@ -628,11 +649,11 @@ impl Store {
             Ok(())
         })();
         if result.is_err() {
-            for path in created {
+            for path in &created {
                 fs::remove_file(path).context("cannot roll back an archive blob")?;
             }
         }
-        result
+        result.map(|()| Some(created))
     }
 
     pub(super) fn prepare(&mut self, reference: &str) -> anyhow::Result<Image> {

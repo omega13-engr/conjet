@@ -1,10 +1,13 @@
 """Unimplemented conformance contracts; replace each failure with its real fixture."""
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import gzip
 import hashlib
+import http.client
 import io
 import json
 from pathlib import Path
+import socket
 import subprocess
 import tarfile
 from tempfile import TemporaryDirectory
@@ -12,6 +15,7 @@ import unittest
 from urllib.parse import quote, urlencode
 import uuid
 
+import image_archives
 from support import API, alpine
 
 
@@ -135,11 +139,103 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_archive_roundtrip(self):
         'DC-040: Save and load compressed and multi-image archives preserving tags, metadata and runnable contents.'
-        self.fail('UNIMPLEMENTED DC-040; no runtime compatibility evidence')
+        session = self.compatibility
+        prefix = 'conjet-image-archive-' + uuid.uuid4().hex[:12]
+        expected = {prefix + ':alpha': 'neutral-archive-alpha', prefix + ':beta': 'neutral-archive-beta'}
+        result = {}
+        with alpine(self, session) as image:
+            (_, base_config, layers), = image_archives.records(
+                self, image_archives.saved(self, session, image))
+            configs = {tag: image_archives.variant(base_config, marker) for tag, marker in expected.items()}
+            try:
+                for tag, config in configs.items():
+                    image_archives.load(self, session, image_archives.build_archive({tag: config}, layers))
+                    self.assertEqual(image_archives.inspect(self, session, tag)['Config']['Cmd'],
+                                     ['/bin/echo', expected[tag]])
+                archive = image_archives.saved(self, session, *expected)
+                saved = image_archives.records(self, archive)
+                self.assertEqual(len(saved), 2)
+                saved_tags = set()
+                for item, config, _ in saved:
+                    tag, = item['RepoTags']
+                    saved_tags.add(tag)
+                    self.assertEqual(hashlib.sha256(config).hexdigest(),
+                                     hashlib.sha256(configs[tag]).hexdigest())
+                self.assertEqual(saved_tags, set(expected))
+
+                for tag in expected:
+                    image_archives.clean(self, session, tag)
+                image_archives.load(self, session, gzip.compress(archive, mtime=0))
+                for index, (tag, marker) in enumerate(expected.items()):
+                    detail = image_archives.inspect(self, session, tag)
+                    self.assertIn(tag, detail['RepoTags'])
+                    self.assertEqual(detail['Architecture'], 'arm64')
+                    self.assertEqual(detail['Os'], 'linux')
+                    self.assertEqual(detail['Config']['Cmd'], ['/bin/echo', marker])
+                    image_archives.runnable(self, session, prefix + '-' + str(index), tag, marker)
+                    result[tag.rsplit(':', 1)[1]] = {
+                        'config_sha256': hashlib.sha256(configs[tag]).hexdigest(), 'stdout': marker,
+                    }
+            finally:
+                for tag in expected:
+                    image_archives.clean(self, session, tag)
+        session.record({'multi_image_tar_count': 2, 'gzip_load': True, 'images': result})
 
     def test_concurrent_ingest(self):
         'DC-041: Concurrent loads sharing layers and canceled transfers preserve atomic image publication and reference counts.'
-        self.fail('UNIMPLEMENTED DC-041; no runtime compatibility evidence')
+        session = self.compatibility
+        prefix = 'conjet-image-concurrent-' + uuid.uuid4().hex[:12]
+        names = [prefix + ':first', prefix + ':second', prefix + ':canceled']
+        markers = ['neutral-shared-first', 'neutral-shared-second', 'neutral-shared-canceled']
+        with alpine(self, session) as image:
+            (_, base_config, layers), = image_archives.records(
+                self, image_archives.saved(self, session, image))
+            inputs = [image_archives.build_archive({tag: image_archives.variant(base_config, marker)}, layers)
+                      for tag, marker in zip(names, markers, strict=True)]
+            try:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    pending = [pool.submit(image_archives.load, self, session, payload)
+                               for payload in inputs[:2]]
+                    for result in pending:
+                        result.result(timeout=25)
+
+                owned = session.resources()
+                abandoned = session.connection.peer(timeout=5)
+                try:
+                    abandoned.connect()
+                    channel = abandoned.sock
+                    target = API + '/images/load?quiet=false'
+                    channel.sendall((
+                        f'POST {target} HTTP/1.1\r\nHost: localhost\r\n'
+                        f'Content-Length: {len(inputs[2])}\r\n'
+                        'Content-Type: application/x-tar\r\nConnection: close\r\n\r\n'
+                    ).encode())
+                    channel.sendall(inputs[2][:65_536])
+                    channel.shutdown(socket.SHUT_WR)
+                    response = http.client.HTTPResponse(channel)
+                    response.begin()
+                    with response:
+                        self.assertLessEqual(len(response.read(65_537)), 65_536)
+                        self.assertIn(response.status, (200, 400, 408, 500))
+                finally:
+                    abandoned.close()
+                self.assertEqual(session.resources(), owned)
+                self.assertEqual(session.request('GET', image_archives.image_path(names[2]) + '/json')[0],
+                                 404)
+
+                first, second = [image_archives.inspect(self, session, tag) for tag in names[:2]]
+                self.assertNotEqual(first['Id'], second['Id'])
+                layer_ids = first['RootFS']['Layers']
+                self.assertTrue(layer_ids)
+                self.assertEqual(second['RootFS']['Layers'], layer_ids)
+                image_archives.runnable(self, session, prefix + '-before', names[0], markers[0])
+                image_archives.clean(self, session, names[0])
+                image_archives.runnable(self, session, prefix + '-after', names[1], markers[1])
+            finally:
+                for tag in names:
+                    image_archives.clean(self, session, tag)
+        session.record({'shared_diff_ids': layer_ids, 'concurrent_images': 2,
+                        'cancel_preserved_inventory': True, 'remaining_image_runnable': True})
 
     def test_prune_references(self):
         'DC-042: Prune and replacement reclaim only unused content; referenced image and layer data remain intact.'
