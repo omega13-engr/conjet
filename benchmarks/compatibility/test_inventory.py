@@ -38,6 +38,16 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'escaping support file'):
             RUNNER['validate'](matrix)
 
+    def test_explicit_case_timeout_is_bounded(self):
+        matrix = copy.deepcopy(MATRIX)
+        case = matrix['cases'][0]
+        for value in (0, True, 9 * 60 * 60 + 1):
+            with self.subTest(timeout=value), self.assertRaisesRegex(ValueError, 'case timeout'):
+                case['timeout_seconds'] = value
+                RUNNER['validate'](matrix)
+        case['timeout_seconds'] = 8 * 60 * 60 + 60
+        RUNNER['validate'](matrix)
+
     def test_skips_and_expected_failures_block_qualification(self):
         result = unittest.TestResult()
         result.testsRun = 1

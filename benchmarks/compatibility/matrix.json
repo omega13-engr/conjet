@@ -816,6 +816,8 @@
       "acceptance": "Unchanged, source-only and dependency changes reuse only valid cache; outputs have expected checksums.",
       "test_file": "cases/test_build.py",
       "test_name": "test_cache_invalidation",
+      "support_files": ["cases/support.py"],
+      "timeout_seconds": 330,
       "status": "UNTESTED",
       "upstream_issues": []
     },
@@ -1137,6 +1139,7 @@
       "acceptance": "Advertised GPU or CDI devices perform a real workload; unavailable hardware is not reported as supported.",
       "test_file": "cases/test_advanced.py",
       "test_name": "test_gpu_cdi",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

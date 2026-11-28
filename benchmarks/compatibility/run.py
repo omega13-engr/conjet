@@ -21,6 +21,7 @@ else:
 
 HERE = Path(__file__).resolve().parent
 MATRIX = HERE / 'matrix.json'
+MAX_CASE_TIMEOUT_SECONDS = 9 * 60 * 60
 RUNNER_FILES = ('run.py', 'identity.py', 'workloads.py')
 RESOURCE_LISTS = {
     'containers': ('/containers/json?all=1', None, 'Id'),
@@ -60,6 +61,10 @@ def validate(matrix, root=HERE):
         restarts = case.get('required_restarts', 0)
         if type(restarts) is not int or not 0 <= restarts <= 8:
             raise ValueError('invalid restart count: ' + case['id'])
+        if 'timeout_seconds' in case:
+            timeout = case['timeout_seconds']
+            if type(timeout) is not int or not 1 <= timeout <= MAX_CASE_TIMEOUT_SECONDS:
+                raise ValueError('invalid case timeout: ' + case['id'])
         if not case['acceptance'].strip():
             raise ValueError('missing acceptance: ' + case['id'])
     if not seen:
@@ -226,7 +231,7 @@ def record_lane(profile, connection, executable, identity, timeout=60, restart_e
     matrix = sha256(MATRIX)
     harness = runner_hashes()
     selected = selection(profile)
-    if not selected or not 0 < timeout <= 3600:
+    if not selected or not 0 < timeout <= MAX_CASE_TIMEOUT_SECONDS:
         raise ValueError('a non-empty profile and bounded case timeout are required')
     fixtures = {case['id']: case_hash(case) for case in selected}
     tests = load_tests()
@@ -258,7 +263,8 @@ def record_lane(profile, connection, executable, identity, timeout=60, restart_e
         if case_hash(case) != fixture:
             raise RuntimeError(f"fixture changed before running {case['id']}")
         prior_restarts = len(transitions)
-        row = execute_case(tests[key], connection, timeout, restart if restart_engine else None)
+        row = execute_case(tests[key], connection, case.get('timeout_seconds', timeout),
+                           restart if restart_engine else None)
         count = len(transitions) - prior_restarts
         if count != case.get('required_restarts', 0):
             row['passed'] = False
