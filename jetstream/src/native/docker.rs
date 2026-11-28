@@ -2047,6 +2047,103 @@ impl Owner {
             .map_err(|error| Rejected(404, format!("image archive source unavailable: {error:#}")))
     }
 
+    fn prune_images(&self, mut filters: BTreeMap<String, Vec<String>>) -> Result<Value, Rejected> {
+        let dangling = match filters.remove("dangling").as_deref() {
+            None => true,
+            Some([value]) if matches!(value.as_str(), "true" | "1") => true,
+            Some([value]) if matches!(value.as_str(), "false" | "0") => false,
+            _ => return Err(Rejected::bad("invalid dangling image prune filter")),
+        };
+        let required = filters.remove("label").unwrap_or_default();
+        let excluded = filters.remove("label!").unwrap_or_default();
+        let until = match filters.remove("until").as_deref() {
+            None => None,
+            Some([value]) => Some(
+                value
+                    .parse()
+                    .or_else(|_| archive::image_time(value))
+                    .map_err(|_| Rejected::bad("expected an image prune timestamp"))?,
+            ),
+            _ => return Err(Rejected::bad("invalid until image prune filter")),
+        };
+        if !filters.is_empty() {
+            return Err(Rejected::bad("unsupported image prune filter"));
+        }
+
+        let mut ledger = self.ledger.lock().unwrap();
+        if ledger.poisoned || ledger.closing {
+            return Err(Rejected(409, "native OCI state is unresolved".into()));
+        }
+        let mut store = self.image_store(&ledger)?;
+        let failed = |error| Rejected::internal(format!("cannot prune images: {error:#}"));
+        let mut aliases = BTreeMap::<String, Vec<String>>::new();
+        for (tag, reference) in ledger.tags.entries() {
+            if !self.boot_reference(reference) {
+                if let Some(image) = store.get(reference).map_err(failed)? {
+                    aliases
+                        .entry(image.manifest)
+                        .or_default()
+                        .push(tag.to_owned());
+                }
+            }
+        }
+        let mut candidates = Vec::new();
+        for image in store.list(&ledger.registry_images).map_err(failed)? {
+            if image.metadata.config_digest == self.image.config_digest
+                || ledger
+                    .active
+                    .iter()
+                    .any(|item| item.container.spec["image_digest"] == image.metadata.config_digest)
+            {
+                continue;
+            }
+            let tags = aliases.remove(&image.manifest).unwrap_or_default();
+            if dangling && !tags.is_empty() {
+                continue;
+            }
+            if !required.is_empty() || !excluded.is_empty() || until.is_some() {
+                let config = store.image_config(&image).map_err(failed)?;
+                let labels = &config["config"]["Labels"];
+                if !discovery::labels_match(&required, labels)
+                    || excluded
+                        .iter()
+                        .any(|key| discovery::labels_match(std::slice::from_ref(key), labels))
+                {
+                    continue;
+                }
+                if let (Some(until), Some(created)) = (until, config["created"].as_str()) {
+                    if archive::image_time(created).map_err(failed)? >= until {
+                        continue;
+                    }
+                }
+            }
+            candidates.push((image, tags));
+        }
+
+        let mut deleted = Vec::new();
+        let mut bytes = 0u64;
+        for (image, names) in candidates {
+            if !names.is_empty() {
+                let mut tags = ledger.tags.clone();
+                for name in names {
+                    tags.remove(&name);
+                    deleted.push(json!({"Untagged": name}));
+                }
+                self.publish_tags(&mut ledger, tags)?;
+            }
+            let target = image.metadata.reference.clone();
+            let manifest = image.manifest.clone();
+            bytes += self.with_guest(|peer| store.remove(peer, image))?;
+            ledger.registry_images.remove(&target);
+            ledger.transient_build_archives.remove(&target);
+            deleted.push(json!({"Deleted": manifest}));
+        }
+        Ok(json!({
+            "ImagesDeleted": (!deleted.is_empty()).then_some(deleted),
+            "SpaceReclaimed": bytes,
+        }))
+    }
+
     fn remove_image(&self, reference: &str) -> Result<Value, Rejected> {
         let mut ledger = self.ledger.lock().unwrap();
         if ledger.poisoned || ledger.closing {

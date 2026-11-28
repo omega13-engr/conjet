@@ -944,6 +944,13 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             )?;
             Reply::empty(201)
         }
+        ("POST", "/images/prune") => {
+            if query.keys().any(|key| key != "filters") || !request.body.is_empty() {
+                return Err(Rejected::bad("invalid image prune options"));
+            }
+            let filters = super::discovery::parse_filters(query.get("filters"))?;
+            Reply::json(200, owner.prune_images(filters)?)
+        }
         ("POST", "/images/create") => {
             if query
                 .keys()

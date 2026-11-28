@@ -16,7 +16,7 @@ from urllib.parse import quote, urlencode
 import uuid
 
 import image_archives
-from support import API, alpine
+from support import API, alpine, container, demultiplex
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -239,4 +239,94 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_prune_references(self):
         'DC-042: Prune and replacement reclaim only unused content; referenced image and layer data remain intact.'
-        self.fail('UNIMPLEMENTED DC-042; no runtime compatibility evidence')
+        session = self.compatibility
+        prefix = 'conjet-image-prune-' + uuid.uuid4().hex[:12]
+        scope_label = 'io.conjet.compatibility.prune'
+        replacement = prefix + ':moving'
+        protected = prefix + ':protected'
+        independent = prefix + ':independent'
+        archived = {}
+        closed = set()
+
+        def prepare(config, layers, tag, marker, label_value):
+            variant = json.loads(image_archives.variant(config, marker))
+            variant['config']['Labels'] = {scope_label: label_value}
+            encoded = json.dumps(variant, sort_keys=True, separators=(',', ':')).encode()
+            image_archives.load(self, session, image_archives.build_archive({tag: encoded}, layers))
+            detail = image_archives.inspect(self, session, tag)
+            archived[marker] = (detail['Id'], next(iter(
+                digest for digest in detail.get('RepoDigests') or () if digest.startswith('conjet.local/archive@')
+            ), detail['Id']))
+            self.assertTrue(detail['RootFS']['Layers'])
+            return detail
+
+        def prune(dangling):
+            data = {'dangling': [str(dangling).lower()], 'label': [f'{scope_label}={prefix}']}
+            target = API + '/images/prune?' + urlencode({'filters': json.dumps(data)})
+            status, raw = session.request('POST', target)
+            self.assertEqual(status, 200, raw)
+            return json.loads(raw)
+
+        def ids():
+            return {ident for ident, _, _ in session.resources()['images']}
+
+        with alpine(self, session) as image:
+            (_, base_config, layers), = image_archives.records(
+                self, image_archives.saved(self, session, image))
+            try:
+                old = prepare(base_config, layers, replacement, 'archive-old', prefix)
+                preserve = prepare(base_config, layers, protected, 'archive-protected', prefix)
+                other = prepare(base_config, layers, independent, 'archive-independent', 'other')
+                replacement_detail = prepare(base_config, layers, replacement, 'archive-replacement', prefix)
+                self.assertNotEqual(old['Id'], replacement_detail['Id'])
+                self.assertEqual(image_archives.inspect(self, session, replacement)['Id'],
+                                 replacement_detail['Id'])
+                self.assertIn(old['Id'], ids())
+                self.assertEqual(preserve['RootFS']['Layers'], replacement_detail['RootFS']['Layers'])
+                self.assertEqual(other['RootFS']['Layers'], replacement_detail['RootFS']['Layers'])
+
+                with container(self, session, prefix + '-reference', {
+                        'Image': protected, 'HostConfig': {'NetworkMode': 'none'},
+                }) as (path, _):
+                    self.assertEqual(session.request('POST', path + '/start')[0], 204)
+                    self.assertEqual(session.request('POST', path + '/wait?condition=not-running')[0], 200)
+                    report = prune(True)
+                    self.assertTrue(report['ImagesDeleted'])
+                    self.assertGreater(report['SpaceReclaimed'], 0)
+                    self.assertNotIn(old['Id'], ids())
+                    closed.add(old['Id'])
+                    for detail in (preserve, other, replacement_detail):
+                        self.assertIn(detail['Id'], ids())
+                    image_archives.runnable(self, session, prefix + '-replacement', replacement,
+                                            'archive-replacement')
+
+                    report = prune(False)
+                    self.assertTrue(report['ImagesDeleted'])
+                    self.assertGreater(report['SpaceReclaimed'], 0)
+                    self.assertNotIn(replacement_detail['Id'], ids())
+                    closed.add(replacement_detail['Id'])
+                    self.assertEqual(session.request('GET', image_archives.image_path(replacement) + '/json')[0],
+                                     404)
+                    self.assertIn(preserve['Id'], ids())
+                    self.assertIn(other['Id'], ids())
+                    self.assertEqual(session.request('POST', path + '/start')[0], 204)
+                    status, raw = session.request('POST', path + '/wait?condition=not-running')
+                    self.assertEqual(status, 200, raw)
+                    self.assertEqual(json.loads(raw)['StatusCode'], 0)
+                    status, raw = session.request('GET', path + '/logs?stdout=true&stderr=true')
+                    self.assertEqual(status, 200, raw)
+                    stdout, stderr = demultiplex(self, raw)
+                    self.assertEqual(stderr, b'')
+                    self.assertEqual(stdout.splitlines()[-1], b'archive-protected')
+                image_archives.runnable(self, session, prefix + '-independent', independent,
+                                        'archive-independent')
+            finally:
+                for tag in (replacement, protected, independent):
+                    image_archives.clean(self, session, tag)
+                for ident, reference in archived.values():
+                    if ident not in closed and ident in ids():
+                        status, raw = session.request('DELETE', image_archives.image_path(reference))
+                        self.assertIn(status, (200, 404), raw)
+        session.record({'dangling_reclaimed': True, 'unreferenced_tag_reclaimed': True,
+                        'stopped_container_restarted': True, 'shared_layer_runnable': True,
+                        'independent_label_retained': True})

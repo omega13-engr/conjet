@@ -573,6 +573,7 @@
       "acceptance": "Prune and replacement reclaim only unused content; referenced image and layer data remain intact.",
       "test_file": "cases/test_images.py",
       "test_name": "test_prune_references",
+      "support_files": ["cases/support.py", "cases/image_archives.py"],
       "status": "UNTESTED",
       "upstream_issues": [
         "https://github.com/libracoder/kiri/issues/864",

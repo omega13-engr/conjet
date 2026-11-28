@@ -300,7 +300,7 @@ struct HistoryStep {
     empty_layer: bool,
 }
 
-fn history_time(value: &str) -> anyhow::Result<i64> {
+pub(super) fn image_time(value: &str) -> anyhow::Result<i64> {
     let (base, zone) = value
         .get(..19)
         .zip(value.get(19..))
@@ -370,7 +370,7 @@ pub(super) fn history(root: &Path, manifest: &str, tags: &[String]) -> anyhow::R
         let created = step
             .created
             .as_deref()
-            .map(history_time)
+            .map(image_time)
             .transpose()?
             .unwrap_or_default();
         records.push(json!({

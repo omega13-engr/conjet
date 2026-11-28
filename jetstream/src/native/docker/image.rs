@@ -128,6 +128,12 @@ impl Tags {
             .map_or(reference, String::as_str)
     }
 
+    pub(super) fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(name, target)| (name.as_str(), target.as_str()))
+    }
+
     pub(super) fn names_for<'a>(&'a self, reference: &'a str) -> impl Iterator<Item = &'a str> {
         self.0
             .iter()

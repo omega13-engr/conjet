@@ -64,7 +64,7 @@ fn incomplete_entry(name: &str) -> bool {
 pub(super) struct Image {
     pub(super) metadata: request::Image,
     receipt: Value,
-    manifest: String,
+    pub(super) manifest: String,
 }
 
 fn suffix(digest: &str) -> anyhow::Result<&str> {
@@ -457,6 +457,11 @@ impl Store {
             });
         }
         Ok(images)
+    }
+
+    pub(super) fn image_config(&self, image: &Image) -> anyhow::Result<Value> {
+        let bytes = oci_stage::blob(&self.root, &image.metadata.config_digest, METADATA)?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 
     pub(super) fn root(&self) -> &Path {
@@ -965,7 +970,7 @@ impl Store {
         &mut self,
         peer: &mut client::Connection,
         image: Image,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let removed = Self::references(&image.receipt)?;
         if self.installed.contains_key(&image.metadata.config_digest) {
             // Another manifest can share the same config and the installed root.
@@ -993,12 +998,16 @@ impl Store {
             .join(format!(".deleted-{}", suffix(&image.manifest)?));
         fs::rename(self.path(&image.manifest)?, &retired)?;
         let used = self.inventory()?;
+        let mut reclaimed = 0u64;
         for digest in removed.difference(&used) {
-            fs::remove_file(self.root.join("blobs/sha256").join(suffix(digest)?))?;
+            let file = self.root.join("blobs/sha256").join(suffix(digest)?);
+            let bytes = file.metadata()?.len();
+            fs::remove_file(file)?;
+            reclaimed += bytes;
         }
         fs::remove_dir_all(retired)?;
         self.resolved_public.remove(&image.manifest);
-        Ok(())
+        Ok(reclaimed)
     }
 }
 
