@@ -1995,14 +1995,13 @@ impl FreshFixture {
                                 Some(json!({"code": libc::WEXITSTATUS(status)}))
                             } else if libc::WIFSIGNALED(status) {
                                 let signal = libc::WTERMSIG(status);
-                                Some(if signal == libc::SIGKILL && oom_killed {
-                                    json!({"signal":signal,"oom_killed":true})
-                                } else {
-                                    json!({"signal":signal})
-                                })
+                                Some(json!({"signal":signal}))
                             } else {
                                 None
                             };
+                            if oom_killed && let Some(exit) = &mut record.exit {
+                                exit["oom_killed"] = json!(true);
+                            }
                             record.change(Phase::Cleaning);
                         });
                     }

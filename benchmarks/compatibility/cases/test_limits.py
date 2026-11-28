@@ -45,7 +45,8 @@ class CompatibilityTests(unittest.TestCase):
             start(sibling)
             sibling_alive(sibling)
             with container(self, session, token + '-bounded', {
-                    'Image': image, 'Cmd': ['/usr/bin/awk', allocation],
+                    'Image': image, 'Cmd': ['/bin/sh', '-c',
+                        'awk "$1"; result=$?; sleep 0.5; exit "$result"', 'fixture', allocation],
                     'HostConfig': {'NetworkMode': 'none', 'Memory': memory, 'MemorySwap': memory},
             }) as (limited, limited_id):
                 self.assertNotEqual(limited_id, sibling_id)

@@ -394,11 +394,7 @@ fn run(
     if mode == "exhaust-memory" {
         eprintln!("workload memory.events: {}", cgroup.memory_events()?);
     }
-    if controlled
-        && process.is_some()
-        && matches!(probe, Ok(Some(status)) if libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL)
-        && cgroup.oom_killed()?
-    {
+    if controlled && process.is_some() && matches!(probe, Ok(Some(_))) && cgroup.oom_killed()? {
         notify_control(b'O', &[])?;
     }
     let exit_report = match &probe {
