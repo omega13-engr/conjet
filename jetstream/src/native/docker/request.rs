@@ -204,6 +204,7 @@ impl Image {
                 "NetworkMode",
                 "Memory",
                 "MemorySwap",
+                "MemoryReservation",
                 "NanoCpus",
                 "CpuPeriod",
                 "CpuQuota",
@@ -301,10 +302,7 @@ impl Image {
         {
             return Err(Rejected::bad("invalid native stdin options"));
         }
-        let ResourceOptions {
-            limits,
-            disable_swap: memory_swap_disabled,
-        } = resource_options(host)?;
+        let limits = resource_limits(host)?;
         let spec = LaunchSpec {
             retained_layer: None,
             rootfs_read_only: host["ReadonlyRootfs"] == true,
@@ -329,7 +327,7 @@ impl Image {
             limits,
             docker_resource_defaults: limits.has_unlimited(),
             docker_default_capabilities: host["CapDrop"] != json!(["ALL"]),
-            memory_swap_disabled,
+            memory_swap_disabled: false,
             open_files_limit: open_files_limit(&host["Ulimits"])?,
             open_stdin,
             redis_bootstrap: false,
@@ -342,33 +340,27 @@ impl Image {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct ResourceOptions {
-    pub(super) limits: ResourceLimits,
-    pub(super) disable_swap: bool,
+pub(super) fn default_memory_swap(host: &mut Value) {
+    if !host["MemorySwap"].is_null() && host["MemorySwap"] != 0 {
+        return;
+    }
+    if let Some(total) = host["Memory"]
+        .as_i64()
+        .filter(|bytes| *bytes > 0)
+        .and_then(|bytes| bytes.checked_mul(2))
+    {
+        host["MemorySwap"] = json!(total);
+    }
 }
 
-pub(super) fn resource_options(host: &Value) -> Result<ResourceOptions, Rejected> {
+pub(super) fn resource_limits(host: &Value) -> Result<ResourceLimits, Rejected> {
     let limits = resources(host)?;
     if !limits.valid_docker() {
         return Err(Rejected::bad(
             "native Docker resource limits are outside their bounds",
         ));
     }
-    let disable_swap = match &host["MemorySwap"] {
-        Value::Null => false,
-        value if value.as_u64() == Some(0) => false,
-        value if value.as_u64() == Some(limits.memory_bytes) => true,
-        _ => {
-            return Err(Rejected::bad(
-                "native MemorySwap must equal the requested memory limit",
-            ))
-        }
-    };
-    Ok(ResourceOptions {
-        limits,
-        disable_swap,
-    })
+    Ok(limits)
 }
 
 fn open_files_limit(value: &Value) -> Result<Option<OpenFilesLimit>, Rejected> {
@@ -450,8 +442,25 @@ fn resources(host: &Value) -> Result<ResourceLimits, Rejected> {
         u32::try_from(read("PidsLimit")?)
             .map_err(|_| Rejected::bad("native PID limit exceeds its bound"))?
     };
+    let memory_bytes = read("Memory")?;
+    let memory_swap_bytes = match &host["MemorySwap"] {
+        Value::Null => None,
+        value if value.as_i64() == Some(-1) => None,
+        value if value.as_i64() == Some(0) => None,
+        value => Some(
+            value
+                .as_u64()
+                .filter(|total| *total <= i64::MAX as u64 && memory_bytes > 0)
+                .and_then(|total| total.checked_sub(memory_bytes))
+                .ok_or_else(|| {
+                    Rejected::bad("MemorySwap requires a valid memory-plus-swap total")
+                })?,
+        ),
+    };
     Ok(ResourceLimits {
-        memory_bytes: read("Memory")?,
+        memory_bytes,
+        memory_reservation_bytes: read("MemoryReservation")?,
+        memory_swap_bytes,
         pids,
         cpu_millicores,
         cpu_bandwidth,
@@ -474,6 +483,8 @@ mod tests {
                 cpu_millicores: 0,
                 cpu_bandwidth: None,
                 cpu_affinity: None,
+                memory_reservation_bytes: 0,
+                memory_swap_bytes: None,
             }
         );
         let service = resources(&json!({"Memory":134217728, "PidsLimit":64,
@@ -487,6 +498,8 @@ mod tests {
                 cpu_millicores: 500,
                 cpu_bandwidth: None,
                 cpu_affinity: None,
+                memory_reservation_bytes: 0,
+                memory_swap_bytes: None,
             }
         );
         assert_eq!(resources(&json!({"PidsLimit":-1})).unwrap().pids, 0);

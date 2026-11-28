@@ -114,8 +114,15 @@ impl WorkloadCgroup {
                 }
             };
             write_control(&path, "memory.max", &maximum(limits.memory_bytes))?;
-            if disable_swap {
-                write_control(&path, "memory.swap.max", "0")?;
+            if limits.memory_reservation_bytes != 0 {
+                write_control(
+                    &path,
+                    "memory.low",
+                    &limits.memory_reservation_bytes.to_string(),
+                )?;
+            }
+            if let Some(swap) = swap_limit(limits, disable_swap) {
+                write_control(&path, "memory.swap.max", &swap.to_string())?;
             }
             write_control(&path, "pids.max", &maximum(u64::from(limits.pids)))?;
             if let Some(mask) = limits.cpu_affinity {
@@ -269,6 +276,14 @@ fn cpu_set(path: &Path, mask: u64) -> io::Result<String> {
         .join(","))
 }
 
+fn swap_limit(limits: ResourceLimits, legacy_disabled: bool) -> Option<u64> {
+    if legacy_disabled {
+        Some(0)
+    } else {
+        limits.memory_swap_bytes
+    }
+}
+
 pub(crate) fn update_limits(
     path: &Path,
     limits: ResourceLimits,
@@ -280,8 +295,10 @@ pub(crate) fn update_limits(
         ("pids.max", maximum(u64::from(limits.pids))),
         (
             "memory.swap.max",
-            (if disable_swap { "0" } else { "max" }).to_owned(),
+            swap_limit(limits, disable_swap)
+                .map_or_else(|| "max".to_owned(), |bytes| bytes.to_string()),
         ),
+        ("memory.low", limits.memory_reservation_bytes.to_string()),
         ("memory.max", maximum(limits.memory_bytes)),
     ];
     let affinity = match limits.cpu_affinity {

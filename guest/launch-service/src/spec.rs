@@ -75,6 +75,8 @@ pub const NATIVE_LIMITS: ResourceLimits = ResourceLimits {
     cpu_millicores: 500,
     cpu_bandwidth: None,
     cpu_affinity: None,
+    memory_reservation_bytes: 0,
+    memory_swap_bytes: None,
 };
 const MAX_ENTRIES: usize = 32;
 const MAX_VALUE_BYTES: usize = 1_024;
@@ -253,6 +255,14 @@ pub struct ResourceLimits {
     pub cpu_bandwidth: Option<CpuBandwidth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_affinity: Option<u64>,
+    #[serde(default, skip_serializing_if = "zero")]
+    pub memory_reservation_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_swap_bytes: Option<u64>,
+}
+
+fn zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -286,6 +296,8 @@ impl ResourceLimits {
         cpu_millicores: 0,
         cpu_bandwidth: None,
         cpu_affinity: None,
+        memory_reservation_bytes: 0,
+        memory_swap_bytes: None,
     };
 
     pub fn has_unlimited(self) -> bool {
@@ -307,6 +319,13 @@ impl ResourceLimits {
         ((defaults && self.memory_bytes == 0)
             || (MIN_MEMORY_BYTES..=MAX_MEMORY_BYTES).contains(&self.memory_bytes))
             && ((defaults && self.pids == 0) || (1..=MAX_PIDS).contains(&self.pids))
+            && (self.memory_reservation_bytes == 0
+                || ((6 * 1024 * 1024..=MAX_MEMORY_BYTES).contains(&self.memory_reservation_bytes)
+                    && (self.memory_bytes == 0
+                        || self.memory_reservation_bytes <= self.memory_bytes)))
+            && self.memory_swap_bytes.is_none_or(|swap| {
+                self.memory_bytes != 0 && swap <= (i64::MAX as u64 - self.memory_bytes)
+            })
             && self.cpu_affinity != Some(0)
             && match self.cpu_bandwidth {
                 Some(bandwidth) => {
@@ -796,7 +815,10 @@ impl LaunchSpec {
                     .as_ref()
                     .is_none_or(|snapshot| snapshot.live_worker),
         ) || (spec.memory_swap_disabled
-            && (!search_path || spec.build_snapshot.is_some() || spec.limits.memory_bytes == 0))
+            && (!search_path
+                || spec.build_snapshot.is_some()
+                || spec.limits.memory_bytes == 0
+                || spec.limits.memory_swap_bytes.is_some()))
             || spec.open_files_limit.is_some_and(|limit| {
                 !search_path || spec.build_snapshot.is_some() || !limit.valid()
             })
@@ -864,6 +886,8 @@ mod tests {
                     cpu_millicores: 500,
                     cpu_bandwidth: None,
                     cpu_affinity: None,
+                    memory_reservation_bytes: 0,
+                    memory_swap_bytes: None,
                 },
                 docker_resource_defaults: false,
                 docker_default_capabilities: false,
@@ -1029,6 +1053,8 @@ mod tests {
             cpu_millicores: 0,
             cpu_bandwidth: None,
             cpu_affinity: None,
+            memory_reservation_bytes: 0,
+            memory_swap_bytes: None,
         };
         assert!(request.spec.validate().is_ok());
         request.spec.limits.memory_bytes = MAX_MEMORY_BYTES + 1;

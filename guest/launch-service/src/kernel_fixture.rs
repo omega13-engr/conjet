@@ -161,6 +161,8 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
             cpu_millicores: 500,
             cpu_bandwidth: None,
             cpu_affinity: None,
+            memory_reservation_bytes: 0,
+            memory_swap_bytes: None,
         },
         RunProfile {
             with_sandbox,

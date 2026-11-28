@@ -173,7 +173,98 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_reservation_swap(self):
         'DC-029: Reservation and memory-plus-swap combinations match reference cgroup behavior; unsupported settings are explicit.'
-        self.fail('UNIMPLEMENTED DC-029; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-memory-policy-' + uuid.uuid4().hex[:16]
+        mib = 1024 * 1024
+        memory, reservation = 48 * mib, 16 * mib
+        initial = {'Memory': memory, 'MemoryReservation': reservation}
+
+        def measure(path, wanted, controls):
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            inspected = json.loads(raw)
+            self.assertIs(inspected['State']['Running'], True)
+            host = inspected['HostConfig']
+            self.assertEqual({key: host.get(key, 0) for key in wanted}, wanted)
+            code, stdout, stderr = exec_command(self, session, path, [
+                '/bin/cat', '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.low',
+                '/sys/fs/cgroup/memory.swap.max',
+            ])
+            self.assertEqual((code, stderr), (0, b''))
+            actual = stdout.decode().splitlines()
+            self.assertEqual(actual, [str(value) for value in controls])
+            return actual
+
+        policies = {}
+        with alpine(self, session) as image:
+            for suffix, swap, expected_swap, cgroup_swap in (
+                    ('default', None, 2 * memory, memory), ('disabled', memory, memory, 0),
+                    ('finite', 80 * mib, 80 * mib, 32 * mib), ('unlimited', -1, -1, 'max')):
+                settings = initial if swap is None else {**initial, 'MemorySwap': swap}
+                with container(self, session, f'{name}-{suffix}', {
+                        'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                        'HostConfig': {'NetworkMode': 'none', **settings},
+                }) as (path, _):
+                    status, raw = session.request('POST', path + '/start')
+                    self.assertEqual(status, 204, raw)
+                    policies[suffix] = measure(path, {**initial, 'MemorySwap': expected_swap},
+                                               (memory, reservation, cgroup_swap))
+                    if suffix == 'finite':
+                        patch = {'MemoryReservation': 24 * mib, 'MemorySwap': 96 * mib}
+                        status, raw = session.request('POST', path + '/update', patch)
+                        self.assertEqual(status, 200, raw)
+                        policies['updated'] = measure(path, {**initial, **patch},
+                                                      (memory, 24 * mib, 48 * mib))
+            with container(self, session, name + '-reservation-only', {
+                    'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                    'HostConfig': {'NetworkMode': 'none', 'MemoryReservation': reservation},
+            }) as (path, _):
+                status, raw = session.request('POST', path + '/start')
+                self.assertEqual(status, 204, raw)
+                policies['reservation_only'] = measure(path, {'Memory': 0, 'MemorySwap': 0,
+                                                        'MemoryReservation': reservation},
+                                                      ('max', reservation, 'max'))
+
+            for suffix, invalid in (('swap-below-memory', {**initial, 'MemorySwap': 32 * mib}),
+                                    ('reservation-above-memory', {**initial, 'MemoryReservation': 64 * mib}),
+                                    ('swap-without-memory', {'MemorySwap': 80 * mib})):
+                invalid_name = f'{name}-{suffix}'
+                path = API + '/containers/' + invalid_name
+                try:
+                    status, raw = session.request('POST', API + '/containers/create?name=' + invalid_name,
+                                                  {'Image': image, 'HostConfig': {'NetworkMode': 'none', **invalid}})
+                    self.assertIn(status, (400, 500), raw)
+                    self.assertIsInstance(json.loads(raw)['message'], str)
+                    self.assertEqual(session.request('GET', path + '/json')[0], 404)
+                finally:
+                    status, raw = session.request('DELETE', path + '?force=true')
+                    self.assertIn(status, (204, 404), raw)
+            path = API + '/containers/' + name + '-swappiness'
+            try:
+                status, raw = session.request('POST', API + '/containers/create?name='
+                                              + name + '-swappiness', {
+                    'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                    'HostConfig': {'NetworkMode': 'none', **initial, 'MemorySwappiness': 10},
+                })
+                self.assertIn(status, (201, 400, 500), raw)
+                result = json.loads(raw)
+                if status == 201:
+                    self.assertTrue(any('swappiness' in message.lower()
+                                        and 'support' in message.lower()
+                                        for message in result['Warnings']), result)
+                    status, raw = session.request('GET', path + '/json')
+                    self.assertEqual(status, 200, raw)
+                    self.assertIsNone(json.loads(raw)['HostConfig']['MemorySwappiness'])
+                else:
+                    self.assertIn('swappiness', result['message'].lower())
+                    self.assertIn('unsupport', result['message'].lower())
+                    self.assertEqual(session.request('GET', path + '/json')[0], 404)
+            finally:
+                status, raw = session.request('DELETE', path + '?force=true')
+                self.assertIn(status, (204, 404), raw)
+        session.record({'cgroup_memory_low_and_swap': policies,
+                        'invalid_combinations_rejected': True,
+                        'unavailable_swappiness_reported': True})
 
     def test_pids_ulimits(self):
         'DC-030: Fork and file-open fixtures hit configured PID and descriptor limits without exhausting guest.'

@@ -70,6 +70,8 @@ fn launch(
                 cpu_millicores: 500,
                 cpu_bandwidth: None,
                 cpu_affinity: None,
+                memory_reservation_bytes: 0,
+                memory_swap_bytes: None,
             },
         },
     };

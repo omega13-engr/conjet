@@ -2826,7 +2826,10 @@ impl FreshFixture {
                         limits,
                         disable_swap,
                     } => {
-                        if !limits.valid_docker() || (disable_swap && limits.memory_bytes == 0) {
+                        if !limits.valid_docker()
+                            || (disable_swap
+                                && (limits.memory_bytes == 0 || limits.memory_swap_bytes.is_some()))
+                        {
                             return Err(("invalid_spec", "invalid Docker resource update"));
                         }
                         crate::cgroups::update_limits(&path, limits, disable_swap)

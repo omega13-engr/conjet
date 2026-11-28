@@ -964,7 +964,7 @@ struct Lifecycle {
     manually_stopped: bool,
     restarting: bool,
     paused: bool,
-    resource_override: Option<(Value, request::ResourceOptions)>,
+    resource_override: Option<(Value, conjet_launch_service::spec::ResourceLimits)>,
     previous: VecDeque<(u64, Arc<Terminal>)>,
     live: [Vec<u8>; 2],
     native_handle: Option<Value>,
@@ -2172,6 +2172,9 @@ impl Owner {
         if let Some((_, record)) = restored {
             config["Image"] = json!(record.image);
         }
+        if let Some(host) = config.get_mut("HostConfig") {
+            request::default_memory_swap(host);
+        }
         let bind = bind::Binding::requested(&config, self.bind_root.as_ref())?;
         let mount = if bind.is_none() {
             volume::requested(&config)?
@@ -2625,6 +2628,7 @@ impl Owner {
         const LIMITS: &[&str] = &[
             "Memory",
             "MemorySwap",
+            "MemoryReservation",
             "NanoCpus",
             "PidsLimit",
             "CpuPeriod",
@@ -2654,23 +2658,29 @@ impl Owner {
                 .resource_override
                 .as_ref()
                 .map_or(&item.container.config["HostConfig"], |(host, _)| host);
-            let previous = request::resource_options(current)?;
+            let previous = request::resource_limits(current)?;
             let mut updated = current.clone();
             for (field, value) in fields {
-                if !value.is_null() && !(field == "CpusetCpus" && value == "") {
+                let omitted = match field.as_str() {
+                    "CpusetCpus" => value == "",
+                    "PidsLimit" => false,
+                    _ => value == 0,
+                };
+                if !value.is_null() && !omitted {
                     updated[field] = value.clone();
                 }
             }
+            request::default_memory_swap(&mut updated);
             (updated, previous, state.native_handle.clone())
         };
         // Validate the complete resulting configuration before any kernel write.
-        let updated = request::resource_options(&after)?;
-        let apply = |handle: &Value, resources: request::ResourceOptions| {
+        let updated = request::resource_limits(&after)?;
+        let apply = |handle: &Value, limits| {
             self.workload_control(
                 handle,
                 WorkloadControl::Limits {
-                    limits: resources.limits,
-                    disable_swap: resources.disable_swap,
+                    limits,
+                    disable_swap: false,
                 },
             )
         };
@@ -2894,9 +2904,8 @@ impl Owner {
             spec["network"] = json!("none");
         }
         if let Some((_, resources)) = &state.resource_override {
-            spec["limits"] = json!(resources.limits);
-            spec["docker_resource_defaults"] = json!(resources.limits.has_unlimited());
-            spec["memory_swap_disabled"] = json!(resources.disable_swap);
+            spec["limits"] = json!(resources);
+            spec["docker_resource_defaults"] = json!(resources.has_unlimited());
         }
         Some(spec)
     }
