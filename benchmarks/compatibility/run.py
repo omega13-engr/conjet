@@ -14,12 +14,14 @@ import unittest
 
 if __package__:
     from .identity import SCRATCH, sha256
+    from .workloads import ensure_alpine
 else:
     from identity import SCRATCH, sha256
+    from workloads import ensure_alpine
 
 HERE = Path(__file__).resolve().parent
 MATRIX = HERE / 'matrix.json'
-RUNNER_FILES = ('run.py', 'identity.py')
+RUNNER_FILES = ('run.py', 'identity.py', 'workloads.py')
 RESOURCE_LISTS = {
     'containers': ('/containers/json?all=1', None, 'Id'),
     'images': ('/images/json?all=1', None, 'Id'),
@@ -233,6 +235,9 @@ def record_lane(profile, connection, executable, identity, timeout=60, restart_e
     if start != identity:
         raise RuntimeError('Docker endpoint changed before running the compatibility lane')
     live = start
+    # Pull the immutable workload once per disposable lane. In-memory case
+    # inventories still verify every resource relative to their own baseline.
+    seeded = ensure_alpine(CaseSession(connection))
     transitions = []
 
     def restart():
@@ -266,7 +271,7 @@ def record_lane(profile, connection, executable, identity, timeout=60, restart_e
             or any(case_hash(case) != fixtures[case['id']] for case in selected)):
         raise RuntimeError('compatibility harness changed while running the lane')
     return {'profile': profile, 'matrix_sha256': matrix, 'harness_sha256': harness, 'cases': rows,
-            'restarts': transitions, 'endpoint_verified_after': connection.capture(executable) == live}
+            'seeded_alpine': seeded, 'restarts': transitions, 'endpoint_verified_after': connection.capture(executable) == live}
 
 
 def compare(profile, candidate, reference):

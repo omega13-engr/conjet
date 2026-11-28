@@ -41,6 +41,7 @@ fn launch(
         budget_ms: 3_000,
         spec: LaunchSpec {
             retained_layer: None,
+            rootfs_read_only: false,
             docker_resource_defaults: false,
             docker_default_capabilities: false,
             memory_swap_disabled: false,

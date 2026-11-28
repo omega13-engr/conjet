@@ -98,6 +98,8 @@ pub struct LaunchSpec {
     pub image_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_layer: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rootfs_read_only: bool,
     pub argv: Vec<String>,
     pub env: Vec<String>,
     pub cwd: String,
@@ -424,6 +426,7 @@ impl LaunchSpec {
             && self.cwd == "/"
             && self.env.as_slice() == [BUILDKIT_PATH]
             && self.build_snapshot.is_none()
+            && !self.rootfs_read_only
             && (self.bind.is_none() && self.binds.is_empty())
             && !self.open_stdin
             && !self.redis_bootstrap
@@ -530,6 +533,9 @@ impl LaunchSpec {
 
     fn validate_process(&self, search_path: bool) -> Result<[u8; 32], SpecError> {
         let spec = self;
+        if spec.rootfs_read_only && (spec.build_snapshot.is_some() || spec.buildkit_worker) {
+            return Err(SpecError::Volume);
+        }
         if spec.retained_layer.as_ref().is_some_and(|id| {
             !valid_retained_layer_id(id) || spec.build_snapshot.is_some() || spec.buildkit_worker
         }) {
@@ -757,6 +763,7 @@ mod tests {
             budget_ms: 500,
             spec: LaunchSpec {
                 retained_layer: None,
+                rootfs_read_only: false,
                 image_digest: format!("sha256:{}", "a0".repeat(32)),
                 argv: vec!["/bin/probe".into()],
                 env: vec!["LANG=C".into()],

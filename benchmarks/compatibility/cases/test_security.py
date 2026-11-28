@@ -1,9 +1,11 @@
 """Security conformance fixtures and pending contracts."""
 
+import hashlib
+import json
 import unittest
 import uuid
 
-from support import alpine, container, exec_command
+from support import API, alpine, container, exec_command
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -55,7 +57,39 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_read_only(self):
         'DC-021: Rootfs write fails while writable named volume succeeds.'
-        self.fail('UNIMPLEMENTED DC-021; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-readonly-' + uuid.uuid4().hex
+        volume = API + '/volumes/' + name
+        canary = b'writable-volume-canary'
+        digest = hashlib.sha256(canary).hexdigest()
+        with alpine(self, session) as image:
+            try:
+                status, body = session.request('POST', API + '/volumes/create', {'Name': name})
+                self.assertEqual(status, 201, body)
+                config = {'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                          'HostConfig': {'NetworkMode': 'none', 'ReadonlyRootfs': True,
+                                         'Mounts': [{'Type': 'volume', 'Source': name, 'Target': '/data'}]}}
+                with container(self, session, name, config) as (path, _):
+                    status, body = session.request('POST', path + '/start')
+                    self.assertEqual(status, 204, body)
+                    status, body = session.request('GET', path + '/json')
+                    self.assertEqual(status, 200, body)
+                    self.assertIs(json.loads(body)['HostConfig']['ReadonlyRootfs'], True)
+                    result = exec_command(self, session, path,
+                                          ['/bin/sh', '-c', 'printf test >/tmp/owned-file'])
+                    self.assertNotEqual(result[0], 0)
+                    self.assertEqual(result[1], b'')
+                    self.assertIn(b'Read-only file system', result[2])
+                    result = exec_command(self, session, path, [
+                        '/bin/sh', '-c',
+                        'test ! -e /tmp/owned-file && printf %s "$1" >/data/proof && sha256sum /data/proof',
+                        'conjet-fixture', canary.decode(),
+                    ])
+                    self.assertEqual(result, (0, digest.encode() + b'  /data/proof\n', b''))
+            finally:
+                status, body = session.request('DELETE', volume)
+                self.assertIn(status, (204, 404), body)
+        session.record({'root_write': 'EROFS', 'volume_checksum': digest})
 
     def test_no_new_privileges(self):
         'DC-022: Kernel NoNewPrivs is set and a controlled setuid elevation is denied.'

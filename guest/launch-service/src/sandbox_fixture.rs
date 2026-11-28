@@ -38,6 +38,7 @@ pub(crate) struct Sandbox {
     base: PathBuf,
     new_root: CString,
     root: RootMode,
+    rootfs_read_only: bool,
     _retained_layer: Option<crate::workload_layers::Layer>,
     cwd: CString,
     filter: WorkloadFilter,
@@ -542,6 +543,7 @@ impl Sandbox {
                         writable.display()
                     ))?),
                 },
+                rootfs_read_only: oci.is_some_and(|spec| spec.rootfs_read_only),
                 _retained_layer: retained,
                 filter: WorkloadFilter::new(
                     bridge,
@@ -796,6 +798,26 @@ impl Sandbox {
             writeln!(
                 File::create_new("/etc/resolv.conf")?,
                 "nameserver {gateway}"
+            )?;
+        }
+        if self.rootfs_read_only {
+            // The outer root can be made read-only without changing the
+            // independently mounted named volumes or standard devices.
+            step(
+                "read-only workload root",
+                security::checked(unsafe {
+                    libc::mount(
+                        std::ptr::null(),
+                        c"/".as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND
+                            | libc::MS_REMOUNT
+                            | libc::MS_RDONLY
+                            | libc::MS_NODEV
+                            | libc::MS_NOSUID,
+                        std::ptr::null(),
+                    )
+                }),
             )?;
         }
         // Only stdio may survive. The fixture's syscall code needs no inherited directory handle.

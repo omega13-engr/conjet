@@ -1,5 +1,11 @@
-"""Unimplemented conformance contracts; replace each failure with its real fixture."""
+"""Resource-limit conformance fixtures and pending contracts."""
+
+import json
+import time
 import unittest
+import uuid
+
+from support import alpine, container, exec_command
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -13,7 +19,57 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_memory_oom(self):
         'DC-028: Hard limit triggers expected OOM state while sibling workload remains healthy.'
-        self.fail('UNIMPLEMENTED DC-028; no runtime compatibility evidence')
+        session = self.compatibility
+        token = 'conjet-limit-' + uuid.uuid4().hex
+        memory = 16 * 1024 * 1024
+        allocation = (
+            'BEGIN {part="a"; for (i=0;i<20;i++) part=part part; '
+            'for (i=0;i<64;i++) blocks[i]=sprintf("%03d%s",i,part); '
+            'print length(blocks[63])}'
+        )
+
+        def start(path):
+            status, body = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, body)
+
+        def sibling_alive(path):
+            status, body = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, body)
+            self.assertIs(json.loads(body)['State']['Running'], True)
+            result = exec_command(self, session, path, ['/bin/echo', 'sibling-alive'])
+            self.assertEqual(result, (0, b'sibling-alive\n', b''))
+
+        with alpine(self, session) as image, container(self, session, token + '-control', {
+                'Image': image, 'Cmd': ['/bin/sleep', '120'], 'HostConfig': {'NetworkMode': 'none'},
+        }) as (sibling, sibling_id):
+            start(sibling)
+            sibling_alive(sibling)
+            with container(self, session, token + '-bounded', {
+                    'Image': image, 'Cmd': ['/usr/bin/awk', allocation],
+                    'HostConfig': {'NetworkMode': 'none', 'Memory': memory, 'MemorySwap': memory},
+            }) as (limited, limited_id):
+                self.assertNotEqual(limited_id, sibling_id)
+                start(limited)
+                status, raw = session.request('POST', limited + '/wait?condition=not-running')
+                self.assertEqual(status, 200, raw)
+                self.assertEqual(json.loads(raw)['StatusCode'], 137)
+                deadline = time.monotonic() + 3
+                while True:
+                    status, raw = session.request('GET', limited + '/json')
+                    self.assertEqual(status, 200, raw)
+                    inspected = json.loads(raw)
+                    # Docker's OOM monitor may notify after the task exit.
+                    if inspected['State']['OOMKilled'] is True or time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.03)
+                self.assertEqual(inspected['Id'], limited_id)
+                self.assertEqual(inspected['HostConfig']['Memory'], memory)
+                self.assertIs(inspected['State']['OOMKilled'], True)
+                self.assertIs(inspected['State']['Running'], False)
+                self.assertEqual(inspected['State']['ExitCode'], 137)
+            sibling_alive(sibling)
+        session.record({'memory_bytes': memory, 'oom_killed': True, 'exit': 137,
+                        'sibling_healthy_before_and_after': True})
 
     def test_reservation_swap(self):
         'DC-029: Reservation and memory-plus-swap combinations match reference cgroup behavior; unsupported settings are explicit.'

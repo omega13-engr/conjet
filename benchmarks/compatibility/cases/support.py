@@ -2,36 +2,27 @@
 
 from contextlib import contextmanager
 import json
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 
 
-ALPINE = ('docker.io/library/alpine@sha256:'
-          'e233f2058b0628266762f745a2c17e623b418e0090f47d223909d1f9a7d4367e')
-API = '/v1.44'
+try:
+    from compatibility.workloads import API, ALPINE, ALPINE_PATH, ensure_alpine
+except ModuleNotFoundError as error:
+    if error.name != 'compatibility':
+        raise
+    from workloads import API, ALPINE, ALPINE_PATH, ensure_alpine
 
 
 @contextmanager
 def alpine(test, session):
-    repository, digest = ALPINE.split('@')
-    config_digest = 'sha256:062964a69725bb96611dae2ac911a5a1ab3f8d32fe6f096f267d77f09e55a99c'
-    image_path = API + '/images/' + quote(ALPINE, safe='')
-    original, _ = session.request('GET', image_path + '/json')
+    original, _ = session.request('GET', ALPINE_PATH + '/json')
     test.assertIn(original, (200, 404))
     try:
-        if original == 404:
-            query = urlencode({'fromImage': repository, 'tag': digest, 'platform': 'linux/arm64'})
-            pull = type(session)(session.connection.peer(timeout=25))
-            test.assertEqual(pull.request('POST', API + '/images/create?' + query)[0], 200)
-        status, data = session.request('GET', image_path + '/json')
-        test.assertEqual(status, 200, data)
-        inspected = json.loads(data)
-        test.assertIn(inspected['Id'], (config_digest, digest))
-        test.assertEqual(inspected['Architecture'], 'arm64')
-        test.assertTrue(any(item.rsplit('@', 1)[-1] == digest for item in inspected['RepoDigests']))
+        ensure_alpine(session)
         yield ALPINE
     finally:
         if original == 404:
-            removed, body = session.request('DELETE', image_path)
+            removed, body = session.request('DELETE', ALPINE_PATH)
             test.assertIn(removed, (200, 404), body)
 
 

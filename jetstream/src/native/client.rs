@@ -620,6 +620,7 @@ fn execute(
 ) -> anyhow::Result<()> {
     let spec = LaunchSpec {
         retained_layer: None,
+        rootfs_read_only: false,
         docker_resource_defaults: false,
         docker_default_capabilities: false,
         memory_swap_disabled: false,

@@ -212,11 +212,15 @@ impl Image {
                 "MemorySwappiness",
                 "CapDrop",
                 "SecurityOpt",
+                "ReadonlyRootfs",
             ],
             "HostConfig ",
         )?;
         if !host["AutoRemove"].is_null() && !host["AutoRemove"].is_boolean() {
             return Err(Rejected::bad("invalid AutoRemove"));
+        }
+        if !host["ReadonlyRootfs"].is_null() && !host["ReadonlyRootfs"].is_boolean() {
+            return Err(Rejected::bad("invalid ReadonlyRootfs"));
         }
         if !(host["CapDrop"].is_null()
             || host["CapDrop"] == json!([])
@@ -311,6 +315,7 @@ impl Image {
         };
         let spec = LaunchSpec {
             retained_layer: None,
+            rootfs_read_only: host["ReadonlyRootfs"] == true,
             image_digest: self.config_digest.clone(),
             argv,
             env: environment

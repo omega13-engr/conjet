@@ -264,6 +264,7 @@ fn process_spec(
     let live = snapshot.live_worker;
     let spec = LaunchSpec {
         retained_layer: None,
+        rootfs_read_only: false,
         docker_resource_defaults: live,
         docker_default_capabilities: false,
         memory_swap_disabled: false,

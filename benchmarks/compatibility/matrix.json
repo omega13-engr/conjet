@@ -286,6 +286,7 @@
       "acceptance": "Rootfs write fails while writable named volume succeeds.",
       "test_file": "cases/test_security.py",
       "test_name": "test_read_only",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
@@ -374,6 +375,7 @@
       "acceptance": "Hard limit triggers expected OOM state while sibling workload remains healthy.",
       "test_file": "cases/test_limits.py",
       "test_name": "test_memory_oom",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
@@ -719,6 +721,7 @@
       "acceptance": "Internal network prevents egress while allowed peers communicate; configured bridge isolation is enforced.",
       "test_file": "cases/test_network.py",
       "test_name": "test_internal_isolation",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
