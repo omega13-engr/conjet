@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::handshake::hex;
-use crate::spec::ResourceLimits;
+use crate::spec::{ResourceLimits, parse_cpu_set};
 use crate::wire::CgroupUsage;
 
 pub(crate) const CGROUP2_SUPER_MAGIC: i128 = 0x6367_7270;
@@ -118,6 +118,9 @@ impl WorkloadCgroup {
                 write_control(&path, "memory.swap.max", "0")?;
             }
             write_control(&path, "pids.max", &maximum(u64::from(limits.pids)))?;
+            if let Some(mask) = limits.cpu_affinity {
+                write_control(&path, "cpuset.cpus", &cpu_set(&path, mask)?)?;
+            }
             write_control(&path, "cpu.max", &cpu_max(limits))?;
             Ok(directory)
         })();
@@ -248,13 +251,31 @@ fn cpu_max(limits: ResourceLimits) -> String {
     format!("{quota} {}", bandwidth.period_us)
 }
 
+fn cpu_set(path: &Path, mask: u64) -> io::Result<String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing workload cgroup parent"))?;
+    let allowed = std::fs::read_to_string(parent.join("cpuset.cpus.effective"))?;
+    if parse_cpu_set(allowed.trim()).is_none_or(|available| mask & !available != 0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "workload CPU set exceeds its cgroup parent",
+        ));
+    }
+    Ok((0..64)
+        .filter(|cpu| mask & (1 << cpu) != 0)
+        .map(|cpu| cpu.to_string())
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
 pub(crate) fn update_limits(
     path: &Path,
     limits: ResourceLimits,
     disable_swap: bool,
 ) -> io::Result<()> {
     let maximum = |n: u64| if n == 0 { "max".into() } else { n.to_string() };
-    let next = [
+    let mut next = vec![
         ("cpu.max", cpu_max(limits)),
         ("pids.max", maximum(u64::from(limits.pids))),
         (
@@ -263,6 +284,22 @@ pub(crate) fn update_limits(
         ),
         ("memory.max", maximum(limits.memory_bytes)),
     ];
+    let affinity = match limits.cpu_affinity {
+        Some(mask) => Some(cpu_set(path, mask)?),
+        None if path.join("cpuset.cpus").try_exists()? => Some(String::new()),
+        None => None,
+    };
+    if let Some(affinity) = affinity {
+        next.push(("cpuset.cpus", affinity));
+    }
+    let write = |name, value: &str| {
+        let payload = if value.is_empty() { "\n" } else { value };
+        OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path.join(name))
+            .and_then(|mut file| file.write_all(payload.as_bytes()))
+    };
     let previous = next
         .iter()
         .map(|(name, _)| std::fs::read_to_string(path.join(name)))
@@ -273,15 +310,10 @@ pub(crate) fn update_limits(
         }
         // The kernel can otherwise block the controller while reclaiming
         // pages from a workload whose limit was lowered.
-        let wrote = OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path.join(name))
-            .and_then(|mut file| file.write_all(value.as_bytes()));
-        if let Err(error) = wrote {
+        if let Err(error) = write(name, value) {
             for ((old_name, applied), original) in next[..index].iter().zip(&previous).rev() {
                 if applied != original.trim() {
-                    write_control(path, old_name, original.trim())?;
+                    write(old_name, original.trim())?;
                 }
             }
             return Err(error);

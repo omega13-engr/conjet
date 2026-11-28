@@ -160,6 +160,7 @@ pub fn check(with_sandbox: bool) -> Result<(), Box<dyn std::error::Error>> {
             pids: 4,
             cpu_millicores: 500,
             cpu_bandwidth: None,
+            cpu_affinity: None,
         },
         RunProfile {
             with_sandbox,
@@ -358,12 +359,23 @@ fn run(
     inject(mode, "fault-mount");
     let scope = match build_owner {
         Some(owner) => build_cgroup_path(owner),
-        None => prepare_cgroup_scope(
-            &mount_path,
-            &root_name,
-            if prepared { "prepared" } else { "active" },
-            CONTROLLERS,
-        )?,
+        None => {
+            let controllers = if process.is_some()
+                && std::fs::read_to_string(mount_path.join("cgroup.controllers"))?
+                    .split_ascii_whitespace()
+                    .any(|name| name == "cpuset")
+            {
+                "+cpu +memory +pids +cpuset"
+            } else {
+                CONTROLLERS
+            };
+            prepare_cgroup_scope(
+                &mount_path,
+                &root_name,
+                if prepared { "prepared" } else { "active" },
+                controllers,
+            )?
+        }
     };
     let worker = process.is_some_and(|spec| spec.buildkit_worker);
     let cgroup = WorkloadCgroup::create(

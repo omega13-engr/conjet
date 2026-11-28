@@ -68,6 +68,7 @@ fn launch(
                 pids: 4,
                 cpu_millicores: 500,
                 cpu_bandwidth: None,
+                cpu_affinity: None,
             },
         },
     };

@@ -693,7 +693,7 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             200,
             json!({
                 "SystemTime":super::events::daemon_time()?,
-                "OSType":"linux","Architecture":"aarch64","NCPU":2,"MemTotal":owner.memory_bytes,
+                "OSType":"linux","Architecture":"aarch64","NCPU":super::super::session::NATIVE_VCPU_COUNT,"MemTotal":owner.memory_bytes,
                 "Containers":owner.ledger.lock().unwrap().active.len(),"Driver":BACKEND,
             }),
         ),

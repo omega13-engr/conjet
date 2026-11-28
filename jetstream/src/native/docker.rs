@@ -2628,6 +2628,7 @@ impl Owner {
             "PidsLimit",
             "CpuPeriod",
             "CpuQuota",
+            "CpusetCpus",
         ];
         let fields = patch
             .as_object()
@@ -2655,7 +2656,7 @@ impl Owner {
             let previous = request::resource_options(current)?;
             let mut updated = current.clone();
             for (field, value) in fields {
-                if !value.is_null() {
+                if !value.is_null() && !(field == "CpusetCpus" && value == "") {
                     updated[field] = value.clone();
                 }
             }

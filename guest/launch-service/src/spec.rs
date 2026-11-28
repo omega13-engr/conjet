@@ -74,6 +74,7 @@ pub const NATIVE_LIMITS: ResourceLimits = ResourceLimits {
     pids: 4,
     cpu_millicores: 500,
     cpu_bandwidth: None,
+    cpu_affinity: None,
 };
 const MAX_ENTRIES: usize = 32;
 const MAX_VALUE_BYTES: usize = 1_024;
@@ -233,6 +234,8 @@ pub struct ResourceLimits {
     pub cpu_millicores: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_bandwidth: Option<CpuBandwidth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_affinity: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -242,6 +245,22 @@ pub struct CpuBandwidth {
     pub quota_us: u32,
 }
 
+pub fn parse_cpu_set(value: &str) -> Option<u64> {
+    let mut mask = 0u64;
+    for range in value.split(',') {
+        let (first, last) = range.split_once('-').unwrap_or((range, range));
+        let first = first.parse::<u32>().ok()?;
+        let last = last.parse::<u32>().ok()?;
+        if !(first..64).contains(&last) {
+            return None;
+        }
+        for cpu in first..=last {
+            mask |= 1 << cpu;
+        }
+    }
+    Some(mask)
+}
+
 impl ResourceLimits {
     #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
     pub(crate) const UNBOUNDED: Self = Self {
@@ -249,6 +268,7 @@ impl ResourceLimits {
         pids: 0,
         cpu_millicores: 0,
         cpu_bandwidth: None,
+        cpu_affinity: None,
     };
 
     pub fn has_unlimited(self) -> bool {
@@ -270,6 +290,7 @@ impl ResourceLimits {
         ((defaults && self.memory_bytes == 0)
             || (MIN_MEMORY_BYTES..=MAX_MEMORY_BYTES).contains(&self.memory_bytes))
             && ((defaults && self.pids == 0) || (1..=MAX_PIDS).contains(&self.pids))
+            && self.cpu_affinity != Some(0)
             && match self.cpu_bandwidth {
                 Some(bandwidth) => {
                     let quota = u64::from(bandwidth.quota_us);
@@ -822,6 +843,7 @@ mod tests {
                     pids: 4,
                     cpu_millicores: 500,
                     cpu_bandwidth: None,
+                    cpu_affinity: None,
                 },
                 docker_resource_defaults: false,
                 docker_default_capabilities: false,
@@ -985,6 +1007,7 @@ mod tests {
             pids: 0,
             cpu_millicores: 0,
             cpu_bandwidth: None,
+            cpu_affinity: None,
         };
         assert!(request.spec.validate().is_ok());
         request.spec.limits.memory_bytes = MAX_MEMORY_BYTES + 1;

@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use anyhow::{ensure, Context};
 use conjet_launch_service::handshake::unhex;
 use conjet_launch_service::spec::{
-    Account, CpuBandwidth, LaunchSpec, ResourceLimits, CPU_PERIOD_US, WORKLOAD_GID, WORKLOAD_UID,
+    parse_cpu_set, Account, CpuBandwidth, LaunchSpec, ResourceLimits, CPU_PERIOD_US, WORKLOAD_GID,
+    WORKLOAD_UID,
 };
 use serde_json::{json, Map, Value};
 
@@ -206,6 +207,7 @@ impl Image {
                 "NanoCpus",
                 "CpuPeriod",
                 "CpuQuota",
+                "CpusetCpus",
                 "PidsLimit",
                 "AutoRemove",
                 "ConsoleSize",
@@ -404,6 +406,16 @@ fn resources(host: &Value) -> Result<ResourceLimits, Rejected> {
     } else {
         None
     };
+    let cpu_affinity = match &host["CpusetCpus"] {
+        Value::Null => None,
+        Value::String(value) if value.is_empty() => None,
+        Value::String(value) => Some(
+            parse_cpu_set(value)
+                .filter(|mask| mask >> super::super::session::NATIVE_VCPU_COUNT == 0)
+                .ok_or_else(|| Rejected::bad("CpusetCpus requests an unavailable guest CPU"))?,
+        ),
+        _ => return Err(Rejected::bad("invalid native Docker CpusetCpus")),
+    };
     let pids = if host["PidsLimit"].as_i64() == Some(-1) {
         0
     } else {
@@ -415,6 +427,7 @@ fn resources(host: &Value) -> Result<ResourceLimits, Rejected> {
         pids,
         cpu_millicores,
         cpu_bandwidth,
+        cpu_affinity,
     })
 }
 
@@ -432,6 +445,7 @@ mod tests {
                 pids: 0,
                 cpu_millicores: 0,
                 cpu_bandwidth: None,
+                cpu_affinity: None,
             }
         );
         let service = resources(&json!({"Memory":134217728, "PidsLimit":64,
@@ -444,6 +458,7 @@ mod tests {
                 pids: 64,
                 cpu_millicores: 500,
                 cpu_bandwidth: None,
+                cpu_affinity: None,
             }
         );
         assert_eq!(resources(&json!({"PidsLimit":-1})).unwrap().pids, 0);

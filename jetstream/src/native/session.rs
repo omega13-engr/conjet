@@ -20,6 +20,7 @@ use super::volume_disk::VolumeDisk;
 use crate::{HvfBootOptions, JetstreamConfig, MachineBuilder};
 use jetstream::vmm::config::BootSource;
 
+pub(super) const NATIVE_VCPU_COUNT: u8 = 2;
 pub(super) const ENDPOINT: &str = "native-launch.sock";
 pub(super) const KEY: &str = "launch.key";
 pub(super) const MANIFEST: &str = "native-session.json";
@@ -445,7 +446,7 @@ pub(super) fn serve(
     )?;
     let machine = MachineBuilder::new(JetstreamConfig {
         memory_mib: options.memory_mib,
-        vcpu_count: 2,
+        vcpu_count: NATIVE_VCPU_COUNT,
         boot_source: BootSource {
             name: if parent.is_some() {
                 "native-docker"

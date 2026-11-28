@@ -5,7 +5,7 @@ import time
 import unittest
 import uuid
 
-from support import alpine, container, exec_command
+from support import API, alpine, container, exec_command
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -61,7 +61,60 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_cpu_affinity(self):
         'DC-027: Requested available CPUs constrain execution; invalid CPU sets are rejected atomically.'
-        self.fail('UNIMPLEMENTED DC-027; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-affinity-' + uuid.uuid4().hex
+        memory, pids = 32 * 1024 * 1024, 16
+        status, raw = session.request('GET', API + '/info')
+        self.assertEqual(status, 200, raw)
+        cpus = json.loads(raw)['NCPU']
+        self.assertGreaterEqual(cpus, 2)
+        unavailable = f'1,{cpus}'
+
+        def verify(path, expected):
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            inspected = json.loads(raw)
+            self.assertIs(inspected['State']['Running'], True)
+            host = inspected['HostConfig']
+            self.assertEqual((host['CpusetCpus'], host['Memory'], host['PidsLimit']),
+                             (expected, memory, pids))
+            code, output, error = exec_command(self, session, path, [
+                '/usr/bin/awk', '/^Cpus_allowed_list:/{print $2}',
+                '/proc/1/status', '/proc/self/status',
+            ])
+            self.assertEqual((code, output, error),
+                             (0, (expected + '\n' + expected + '\n').encode(), b''))
+
+        with alpine(self, session) as image:
+            config = {'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                      'HostConfig': {'NetworkMode': 'none', 'Memory': memory, 'PidsLimit': pids,
+                                     'CpusetCpus': '1'}}
+            invalid = {**config, 'HostConfig': {**config['HostConfig'], 'CpusetCpus': unavailable}}
+            try:
+                status, raw = session.request('POST', API + '/containers/create?name=' + name + '-invalid',
+                                              invalid)
+                self.assertIn(status, (400, 500), raw)
+                self.assertIsInstance(json.loads(raw)['message'], str)
+                self.assertEqual(session.request('GET', API + '/containers/' + name + '-invalid/json')[0],
+                                 404)
+            finally:
+                status, raw = session.request('DELETE', API + '/containers/' + name + '-invalid?force=1')
+                self.assertIn(status, (204, 404), raw)
+
+            with container(self, session, name, config) as (path, _):
+                status, raw = session.request('POST', path + '/start')
+                self.assertEqual(status, 204, raw)
+                verify(path, '1')
+                status, raw = session.request('POST', path + '/update',
+                                              {'CpusetCpus': unavailable, 'PidsLimit': 20})
+                self.assertIn(status, (400, 500), raw)
+                self.assertIsInstance(json.loads(raw)['message'], str)
+                verify(path, '1')
+                status, raw = session.request('POST', path + '/update', {'CpusetCpus': '0'})
+                self.assertEqual(status, 200, raw)
+                verify(path, '0')
+        session.record({'process_and_exec_cpu': 1, 'invalid_create_rejected': True,
+                        'invalid_update_preserved_cgroup': True, 'updated_process_and_exec_cpu': 0})
 
     def test_memory_oom(self):
         'DC-028: Hard limit triggers expected OOM state while sibling workload remains healthy.'
