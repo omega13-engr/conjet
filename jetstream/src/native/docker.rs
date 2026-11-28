@@ -749,23 +749,7 @@ fn wait_for_native(
     {
         state["host_terminal_ns"] = json!(stamp);
     }
-    let code = if sent_signal != 0 && state["exit"].is_null() && state["helper_failed"] == false {
-        128 + i64::from(sent_signal)
-    } else {
-        ensure!(
-            state["exec"] == "confirmed" && state["helper_failed"] == false,
-            "native guest did not confirm OCI exec (exec={}, helper_failed={}, exit={}, cleanup={})",
-            state["exec"], state["helper_failed"], state["exit"], state["cleanup"]
-        );
-        match state["exit"]["code"].as_i64() {
-            Some(code) => code,
-            None => {
-                128 + state["exit"]["signal"]
-                    .as_i64()
-                    .context("missing guest exit status")?
-            }
-        }
-    };
+    let (code, failed_exec) = terminal_code(&state, sent_signal)?;
     let bundle = state
         .as_object_mut()
         .and_then(|map| map.remove("terminal_output"));
@@ -805,8 +789,14 @@ fn wait_for_native(
         capacity,
     )
     .context("drain native workload stderr")?;
-    let delivery_error = (stdout_dropped || stderr_dropped)
-        .then(|| "OCI output exceeds the Docker adapter limit".into());
+    let delivery_error = if failed_exec {
+        Some(format!(
+            "native guest could not execute the OCI command (exit {code})"
+        ))
+    } else {
+        (stdout_dropped || stderr_dropped)
+            .then(|| "OCI output exceeds the Docker adapter limit".into())
+    };
     state["adapter_timings_ns"] = json!({
         "authenticate":0, "admit":(admitted-began).as_nanos(),
         "terminal":(terminal-admitted).as_nanos(), "output":terminal.elapsed().as_nanos(),
@@ -820,6 +810,58 @@ fn wait_for_native(
         witness: state,
         delivery_error,
     })
+}
+
+fn terminal_code(state: &Value, sent_signal: u8) -> anyhow::Result<(i64, bool)> {
+    ensure!(
+        state["cleanup"] == "complete" && state["helper_failed"] == false,
+        "native guest did not verify OCI teardown (helper_failed={}, cleanup={})",
+        state["helper_failed"],
+        state["cleanup"]
+    );
+    if sent_signal != 0 && state["exit"].is_null() {
+        return Ok((128 + i64::from(sent_signal), false));
+    }
+    let code = state["exit"]["code"].as_i64();
+    // The helper reported an execution failure and the guest proved teardown.
+    // Release this admission without treating the rest of the engine as lost.
+    if let (Some("failed"), Some(code @ (126 | 127))) = (state["exec"].as_str(), code) {
+        return Ok((code, true));
+    }
+    ensure!(
+        state["exec"] == "confirmed",
+        "native guest did not confirm OCI exec (exec={}, exit={})",
+        state["exec"],
+        state["exit"]
+    );
+    let code = match code {
+        Some(code) => code,
+        None => {
+            128 + state["exit"]["signal"]
+                .as_i64()
+                .context("missing guest exit status")?
+        }
+    };
+    Ok((code, false))
+}
+
+#[cfg(test)]
+#[test]
+fn only_verified_command_failures_are_releasable_terminal_results() {
+    let state = json!({"exec": "failed", "exit": {"code": 127},
+                       "cleanup": "complete", "helper_failed": false});
+    assert_eq!(terminal_code(&state, 0).unwrap(), (127, true));
+    for (field, value) in [
+        ("exec", json!("indeterminate")),
+        ("cleanup", json!("failed")),
+        ("helper_failed", json!(true)),
+        ("exit", json!({"code": 0})),
+        ("exit", Value::Null),
+    ] {
+        let mut invalid = state.clone();
+        invalid[field] = value;
+        assert!(terminal_code(&invalid, 0).is_err(), "{invalid}");
+    }
 }
 
 fn interrupted_worker_observation(error: &WireError) -> bool {

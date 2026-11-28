@@ -52,12 +52,21 @@ class EndpointIdentityTests(unittest.TestCase):
                 self.assertEqual(result['version'], self.version)
                 self.assertEqual(result['endpoint']['inode'], self.path.stat().st_ino)
                 self.assertEqual(result['endpoint']['peer_pid'], os.getpid())
+                peer = client.peer(timeout=2)
+                self.assertEqual(peer.server_version, client.server_version)
             finally:
                 server.join(timeout=6)
             self.path.rename(self.root / 'retired.sock')
             with self.listener():
                 with self.assertRaisesRegex(RuntimeError, 'changed after identity'):
                     client.connect()
+                with self.assertRaisesRegex(RuntimeError, 'changed after identity'):
+                    peer.connect()
+
+    def test_an_unverified_connection_cannot_open_a_peer(self):
+        client = DockerConnection(self.path, self.root, set(), os.getpid())
+        with self.assertRaisesRegex(RuntimeError, 'capture the Docker endpoint'):
+            client.peer()
 
     def test_wrong_peer_refused_before_transmitting_http(self):
         with self.listener() as listener:

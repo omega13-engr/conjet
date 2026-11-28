@@ -72,6 +72,15 @@ class DockerConnection(http.client.HTTPConnection):
         self.identity = None
         self.server_version = None
 
+    def peer(self, *, timeout=None):
+        if self.identity is None or self.server_version is None:
+            raise RuntimeError('capture the Docker endpoint before opening another connection')
+        connection = DockerConnection(self.endpoint, self.root, self.forbidden, self.expected_pid,
+                                      timeout=self.timeout if timeout is None else timeout)
+        connection.identity = self.identity
+        connection.server_version = self.server_version.copy()
+        return connection
+
     def connect(self):
         before = socket_stat(self.endpoint, self.root, self.forbidden)
         channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
