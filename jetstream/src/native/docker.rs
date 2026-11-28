@@ -1412,16 +1412,20 @@ impl Owner {
         ledger: &Ledger,
         name: &str,
         config: &Value,
-        attachment: &network::Attachment,
+        attachment: Option<&network::Attachment>,
     ) -> Option<(String, String)> {
         let (previous, final_name) = name.split_once('_')?;
         let project = config["Labels"]["com.docker.compose.project"].as_str()?;
         let service = config["Labels"]["com.docker.compose.service"].as_str()?;
         let number = config["Labels"]["com.docker.compose.container-number"].as_str()?;
-        if previous.len() != 12
-            || attachment.network.labels["com.docker.compose.project"] != project
-            || final_name != format!("{project}-{service}-{number}")
-        {
+        if previous.len() != 12 || final_name != format!("{project}-{service}-{number}") {
+            return None;
+        }
+        let owned_network = match attachment {
+            Some(connection) => connection.network.labels["com.docker.compose.project"] == project,
+            None => config["HostConfig"]["NetworkMode"] == "none",
+        };
+        if !owned_network {
             return None;
         }
         ledger.active.iter().find_map(|item| {
@@ -1435,13 +1439,15 @@ impl Owner {
             {
                 return None;
             }
-            item.state()
-                .network
-                .as_ref()
-                .filter(|entry| {
-                    entry.network.id == attachment.network.id && entry.aliases == attachment.aliases
-                })
-                .map(|_| (old.id.clone(), final_name.to_owned()))
+            let state = item.state();
+            let same_network = match (state.network.as_ref(), attachment) {
+                (Some(old), Some(new)) => {
+                    old.network.id == new.network.id && old.aliases == new.aliases
+                }
+                (None, None) => old.config["HostConfig"]["NetworkMode"] == "none",
+                _ => false,
+            };
+            same_network.then(|| (old.id.clone(), final_name.to_owned()))
         })
     }
 
@@ -2227,9 +2233,7 @@ impl Owner {
             ledger.network.as_ref(),
             if buildkit_worker { &id[..12] } else { &name },
         )?;
-        let replacement = network
-            .as_ref()
-            .and_then(|entry| Self::compose_replacement(&ledger, &name, &config, entry));
+        let replacement = Self::compose_replacement(&ledger, &name, &config, network.as_ref());
         if let Some(attachment) = &network {
             Self::check_network_aliases(
                 &ledger,
@@ -2384,6 +2388,7 @@ impl Owner {
                 id.clone(),
                 container_store::Record {
                     name: name.clone(),
+                    replacement_name: replacement.as_ref().map(|(_, name)| name.clone()),
                     created,
                     config: config.clone(),
                     image,
@@ -2403,6 +2408,7 @@ impl Owner {
             ..Lifecycle::default()
         };
         if let Some((_, record)) = restored {
+            state.replacement_name.clone_from(&record.replacement_name);
             state.started = record.started_at.is_some();
             state.started_at = record.started_at.clone();
             state.generation = record.generation;
@@ -2830,6 +2836,15 @@ impl Owner {
                 409,
                 "container name is occupied or unresolved".into(),
             ));
+        }
+        if ledger.saved_containers.contains_key(&item.container.id) {
+            let mut records = ledger.saved_containers.clone();
+            let record = records
+                .get_mut(&item.container.id)
+                .expect("saved container");
+            record.name = name.to_owned();
+            record.replacement_name = None;
+            self.publish_containers(&mut ledger, records)?;
         }
         *item.container.name() = name.to_owned();
         state.replacement_name = None;

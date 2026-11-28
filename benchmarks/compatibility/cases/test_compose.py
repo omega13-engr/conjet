@@ -356,7 +356,109 @@ services:
 
     def test_lifecycle_scale(self):
         'DC-071: Scale, recreate, restart, orphan removal and down preserve or remove resources according to flags.'
-        self.fail('UNIMPLEMENTED DC-071; no runtime compatibility evidence')
+        session = self.compatibility
+        connection = session.connection
+        project = 'conjet-lifecycle-' + uuid.uuid4().hex[:12]
+        worker_one, worker_two, orphan = (
+            f'{project}-worker-1', f'{project}-worker-2', f'{project}-retired-1',
+        )
+        volume_path = API + f'/volumes/{project}_state'
+        marker = b'compose-retained-bytes\n'
+        base = f'''services:
+  worker:
+    image: "{ALPINE}"
+    pull_policy: never
+    network_mode: none
+    command: ["/bin/sleep", "120"]
+    volumes: ["state:/data"]
+'''
+        removed_service = f'''  retired:
+    image: "{ALPINE}"
+    pull_policy: never
+    network_mode: none
+    command: ["/bin/sleep", "120"]
+'''
+        volumes = 'volumes:\n  state:\n'
+
+        def path(name):
+            return API + '/containers/' + name
+
+        def inspect(name, running=True):
+            status, raw = session.request('GET', path(name) + '/json')
+            if not running:
+                self.assertEqual(status, 404, raw)
+                return None
+            self.assertEqual(status, 200, raw)
+            data = json.loads(raw)
+            self.assertIs(data['State']['Running'], True)
+            return data
+
+        def read_marker(name):
+            self.assertEqual(exec_command(self, session, path(name), ['/bin/cat', '/data/marker']),
+                             (0, marker, b''))
+
+        with TemporaryDirectory(dir=connection.root) as scratch:
+            root = Path(scratch)
+            file = root / 'compose.yaml'
+            file.write_text(base + removed_service + volumes)
+            call = compose_command(self, connection, root, project, ('-f', file))
+
+            def completed(*args):
+                result = call(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result
+
+            def up(*args):
+                completed('up', '--detach', '--wait', '--wait-timeout', '10', *args)
+
+            try:
+                up('--scale', 'worker=2')
+                first, second = inspect(worker_one), inspect(worker_two)
+                self.assertNotEqual(first['Id'], second['Id'])
+                inspect(orphan)
+                write = exec_command(self, session, path(worker_one), ['/bin/sh', '-c',
+                    'printf "%s\n" compose-retained-bytes > /data/marker'])
+                self.assertEqual(write, (0, b'', b''))
+                read_marker(worker_two)
+
+                up('--scale', 'worker=1')
+                self.assertEqual(inspect(worker_one)['Id'], first['Id'])
+                inspect(worker_two, False)
+                completed('restart', '--timeout', '0', 'worker')
+                restarted = inspect(worker_one)
+                self.assertEqual(restarted['Id'], first['Id'])
+                self.assertGreater(datetime.fromisoformat(restarted['State']['StartedAt']),
+                                   datetime.fromisoformat(first['State']['StartedAt']))
+                read_marker(worker_one)
+
+                file.write_text(base + volumes)
+                up('--force-recreate', '--remove-orphans')
+                recreated = inspect(worker_one)
+                self.assertNotEqual(recreated['Id'], first['Id'])
+                inspect(orphan, False)
+                read_marker(worker_one)
+
+                completed('down', '--timeout', '0')
+                inspect(worker_one, False)
+                self.assertEqual(session.request('GET', volume_path)[0], 200)
+                up()
+                read_marker(worker_one)
+                completed('down', '--volumes', '--timeout', '0')
+                inspect(worker_one, False)
+                self.assertEqual(session.request('GET', volume_path)[0], 404)
+            finally:
+                try:
+                    completed('down', '--volumes', '--remove-orphans', '--timeout', '0')
+                finally:
+                    for name in (worker_one, worker_two, orphan):
+                        status, raw = session.request('DELETE', path(name) + '?force=true')
+                        self.assertIn(status, (204, 404), raw)
+                    status, raw = session.request('DELETE', volume_path)
+                    self.assertIn(status, (204, 404), raw)
+
+        session.record({'scales': [2, 1], 'restart_preserved_id': True, 'recreated_with_new_id': True,
+                        'orphan_removed': True, 'volume_on_down': 'kept',
+                        'volume_on_down_with_volumes': 'removed', 'persisted_bytes': marker.decode()})
 
     def test_watch_hooks(self):
         'DC-072: Supported watch and lifecycle hooks execute in correct order; failures and unsupported configuration are explicit.'

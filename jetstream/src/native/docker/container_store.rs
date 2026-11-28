@@ -20,6 +20,8 @@ const LIMIT: usize = 2 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub(super) struct Record {
     pub(super) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) replacement_name: Option<String>,
     pub(super) created: u64,
     pub(super) config: Value,
     pub(super) image: String,
@@ -55,6 +57,18 @@ pub(super) fn load(root: &Path) -> anyhow::Result<Records> {
         ensure!(
             request::name(&record.name) && names.insert(&record.name),
             "invalid or duplicate saved container name"
+        );
+        ensure!(
+            record.replacement_name.as_deref().is_none_or(|name| {
+                request::name(name)
+                    && record.name.split_once('_').is_some_and(|(id, suffix)| {
+                        id.len() == 12
+                            && suffix == name
+                            && id.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                    && record.started_at.is_none()
+            }),
+            "invalid saved Compose replacement"
         );
         ensure!(
             record.config.is_object()
@@ -104,6 +118,7 @@ mod tests {
         let id = "9".repeat(64);
         let record = Record {
             name: "owned".into(),
+            replacement_name: None,
             created: 17,
             config: json!({"Image":"tag:local"}),
             image: format!("docker.io/library/alpine@sha256:{}", "a".repeat(64)),
