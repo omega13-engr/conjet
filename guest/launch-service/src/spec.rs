@@ -145,6 +145,8 @@ pub struct LaunchSpec {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub open_stdin: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tty: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub redis_bootstrap: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub buildkit_worker: bool,
@@ -710,6 +712,9 @@ impl LaunchSpec {
         {
             return Err(SpecError::Volume);
         }
+        if spec.tty && (!search_path || spec.build_snapshot.is_some() || spec.buildkit_worker) {
+            return Err(SpecError::Identity);
+        }
         if spec.rootfs_read_only && (spec.build_snapshot.is_some() || spec.buildkit_worker) {
             return Err(SpecError::Volume);
         }
@@ -991,6 +996,7 @@ mod tests {
                 memory_swap_disabled: false,
                 open_files_limit: None,
                 open_stdin: false,
+                tty: false,
                 redis_bootstrap: false,
                 buildkit_worker: false,
             },

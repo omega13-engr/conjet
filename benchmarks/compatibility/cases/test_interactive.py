@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import json
 import time
 import unittest
+from urllib.parse import urlencode
 import uuid
 
 from support import API, alpine, container, exec_command
@@ -179,7 +180,81 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_detach_keys(self):
         'DC-017: Detach sequence split across reads detaches without dropping ordinary input or stopping container.'
-        self.fail('UNIMPLEMENTED DC-017; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-detach-' + uuid.uuid4().hex[:16]
+        script = (
+            'stty -echo || exit 40; printf "terminal-ready\n"; '
+            'while IFS= read -r line; do '
+            'printf "received:%s\n" "$line"; [ "$line" != finish ] || exit 23; done; exit 99'
+        )
+
+        @contextmanager
+        def live(path, logs):
+            options = {'stream': 'true', 'stdin': 'true', 'stdout': 'true', 'stderr': 'true',
+                       'detachKeys': 'x,y', 'logs': str(logs).lower()}
+            deadline = time.monotonic() + 5
+            while True:
+                peer = session.connection.peer(timeout=5)
+                try:
+                    peer.connect()
+                    channel = peer.sock
+                    channel.sendall((
+                        f'POST {path}/attach?{urlencode(options)} HTTP/1.1\r\nHost: localhost\r\n'
+                        'Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n'
+                    ).encode())
+                    with channel.makefile('rb', buffering=0) as wire:
+                        result = wire.readline(512)
+                        headers = {}
+                        while True:
+                            line = wire.readline(512)
+                            self.assertTrue(line.endswith(b'\r\n'), repr(line))
+                            if line == b'\r\n':
+                                break
+                            key, value = line.split(b':', 1)
+                            headers[key.lower()] = value.strip()
+                            self.assertLessEqual(len(headers), 32)
+                        if not (result.startswith(b'HTTP/1.1 409 ') and time.monotonic() < deadline):
+                            self.assertTrue(result.startswith(b'HTTP/1.1 101 '), repr(result))
+                            self.assertEqual(headers[b'upgrade'].lower(), b'tcp')
+                            yield channel, wire
+                            return
+                finally:
+                    peer.close()
+                time.sleep(0.03)
+
+        with alpine(self, session) as image, container(self, session, name, {
+                'Image': image, 'Cmd': ['/bin/sh', '-c', script], 'Tty': True,
+                'OpenStdin': True, 'StdinOnce': False, 'AttachStdin': True, 'AttachStdout': True,
+                'HostConfig': {'NetworkMode': 'none'},
+        }) as (path, _):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+            with live(path, logs=True) as (channel, wire):
+                self.assertEqual(wire.readline(256), b'terminal-ready\r\n')
+                channel.sendall(b'ordinary-before\n')
+                self.assertEqual(wire.readline(256), b'received:ordinary-before\r\n')
+                channel.sendall(b'x')
+                time.sleep(0.12)
+                channel.sendall(b'z\n')
+                self.assertEqual(wire.readline(256), b'received:xz\r\n')
+                channel.sendall(b'x')
+                time.sleep(0.12)
+                channel.sendall(b'y')
+                self.assertEqual(wire.read(1), b'')
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            detail = json.loads(raw)
+            self.assertIs(detail['Config']['Tty'], True)
+            self.assertIs(detail['State']['Running'], True)
+            with live(path, logs=False) as (channel, wire):
+                channel.sendall(b'ordinary-after\nfinish\n')
+                self.assertEqual(wire.readline(256), b'received:ordinary-after\r\n')
+                self.assertEqual(wire.readline(256), b'received:finish\r\n')
+            status, raw = session.request('POST', path + '/wait?condition=not-running')
+            self.assertEqual(status, 200, raw)
+            self.assertEqual(json.loads(raw)['StatusCode'], 23)
+        session.record({'split_detach': True, 'mismatched_prefix_preserved': True,
+                        'reattached_live_tty': True, 'exit': 23})
 
     def test_websocket_attach(self):
         'DC-018: WebSocket masking, ping, close, backpressure and disconnect have bounded memory and correct stream behavior.'

@@ -16,7 +16,7 @@ pub(crate) fn pipe() -> io::Result<(File, File)> {
     Ok((reader, writer))
 }
 
-pub(crate) fn inherited(expected: bool) -> io::Result<Option<File>> {
+pub(crate) fn inherited(expected: bool, tty: bool) -> io::Result<Option<File>> {
     match (expected, std::env::var_os(FD_ENV)) {
         (false, None) => Ok(None),
         (true, Some(value)) => {
@@ -28,7 +28,13 @@ pub(crate) fn inherited(expected: bool) -> io::Result<Option<File>> {
             crate::security::checked(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) })?;
             // Only the supervisor's socket-owned setup can supply this inherited descriptor.
             let reader = unsafe { File::from_raw_fd(fd) };
-            if !reader.metadata()?.file_type().is_fifo() {
+            let valid = if tty {
+                reader.metadata()?.file_type().is_char_device()
+                    && unsafe { libc::isatty(reader.as_raw_fd()) } == 1
+            } else {
+                reader.metadata()?.file_type().is_fifo()
+            };
+            if !valid {
                 return Err(io::Error::other("invalid inherited workload input type"));
             }
             Ok(Some(reader))

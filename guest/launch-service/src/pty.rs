@@ -1,8 +1,10 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::security::checked;
 
@@ -73,6 +75,43 @@ pub(crate) fn pair() -> io::Result<(Master, File)> {
 pub(crate) struct Master(Arc<File>);
 
 impl Master {
+    pub(crate) fn nonblocking(&self) -> io::Result<()> {
+        checked(unsafe { libc::fcntl(self.0.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) })
+    }
+
+    pub(crate) fn forward_input(&self, mut source: File, stopped: &AtomicBool) -> io::Result<()> {
+        let mut data = [0; crate::workload_input::CHUNK];
+        while !stopped.load(Ordering::Acquire) {
+            let bytes = source.read(&mut data)?;
+            if bytes == 0 {
+                break;
+            }
+            let mut pending = &data[..bytes];
+            while !pending.is_empty() && !stopped.load(Ordering::Acquire) {
+                match (&*self.0).write(pending) {
+                    Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                    Ok(bytes) => pending = &pending[bytes..],
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        let deadline = Instant::now() + Duration::from_millis(100);
+                        if let Err(error) = crate::socket::wait(
+                            self.0.as_raw_fd(),
+                            libc::POLLOUT,
+                            None,
+                            Some(deadline),
+                        ) && error.kind() != io::ErrorKind::TimedOut
+                        {
+                            return Err(error);
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => return Ok(()),
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn resize(&self, height: u16, width: u16) -> io::Result<()> {
         let size = libc::winsize {
             ws_row: height,
@@ -86,9 +125,18 @@ impl Master {
 
 impl Read for Master {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        match (&*self.0).read(output) {
-            Err(error) if error.raw_os_error() == Some(libc::EIO) => Ok(0),
-            result => result,
+        loop {
+            match (&*self.0).read(output) {
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => return Ok(0),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    match crate::socket::wait(self.0.as_raw_fd(), libc::POLLIN, None, None) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(0),
+                        Err(error) => return Err(error),
+                    }
+                }
+                result => return result,
+            }
         }
     }
 }

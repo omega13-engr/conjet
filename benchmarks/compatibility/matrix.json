@@ -237,6 +237,7 @@
       "acceptance": "Detach sequence split across reads detaches without dropping ordinary input or stopping container.",
       "test_file": "cases/test_interactive.py",
       "test_name": "test_detach_keys",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": [
         "https://github.com/libracoder/kiri/issues/128"

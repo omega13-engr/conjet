@@ -628,6 +628,7 @@ fn execute(
         memory_swap_disabled: false,
         open_files_limit: None,
         open_stdin: false,
+        tty: false,
         redis_bootstrap: false,
         buildkit_worker: false,
         image_digest: identity.image_digest.clone(),

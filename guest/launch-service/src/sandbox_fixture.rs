@@ -46,6 +46,7 @@ pub(crate) struct Sandbox {
     resolver: Option<std::net::Ipv4Addr>,
     standard_devices: bool,
     stdin: File,
+    tty: bool,
     volume: Vec<FileBinding>,
     tmpfs: Vec<crate::spec::TmpfsMount>,
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
@@ -585,6 +586,7 @@ impl Sandbox {
                     .and_then(|spec| spec.bridge_scope())
                     .map(|scope| scope.gateway()),
                 standard_devices: oci.is_some_and(|spec| spec.build_snapshot.is_none()),
+                tty: oci.is_some_and(|spec| spec.tty),
                 stdin: match stdin {
                     Some(stdin) => stdin,
                     None => File::open("/dev/null")?,
@@ -804,6 +806,17 @@ impl Sandbox {
             }
             let root = Path::new(std::ffi::OsStr::from_bytes(self.new_root.as_bytes()));
             worker.mount(root, sysfs)?;
+        }
+        if self.tty {
+            if unsafe { libc::setsid() } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            step(
+                "workload controlling terminal",
+                security::checked(unsafe {
+                    libc::ioctl(self.stdin.as_raw_fd(), libc::TIOCSCTTY, 0)
+                }),
+            )?;
         }
         if unsafe { libc::dup2(self.stdin.as_raw_fd(), libc::STDIN_FILENO) } < 0 {
             return Err(io::Error::other(format!(

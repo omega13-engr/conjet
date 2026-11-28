@@ -205,6 +205,7 @@ impl Image {
                 "AttachStdin",
                 "OpenStdin",
                 "StdinOnce",
+                "Tty",
                 "Labels",
                 "Healthcheck",
                 "NetworkingConfig",
@@ -307,6 +308,9 @@ impl Image {
             .ok_or_else(|| Rejected::bad("invalid working directory"))?;
         let (uid, gid, account) = identity(&data["User"], &self.defaults["User"], mapped_ids)?;
         let flags = ["AttachStdin", "OpenStdin", "StdinOnce"];
+        if !data["Tty"].is_null() && !data["Tty"].is_boolean() {
+            return Err(Rejected::bad("invalid Docker Tty setting"));
+        }
         let open_stdin = data["OpenStdin"] == true;
         if flags
             .iter()
@@ -349,6 +353,7 @@ impl Image {
             memory_swap_disabled: false,
             open_files_limit: open_files_limit(&host["Ulimits"])?,
             open_stdin,
+            tty: data["Tty"] == true,
             redis_bootstrap: false,
             buildkit_worker: false,
         };

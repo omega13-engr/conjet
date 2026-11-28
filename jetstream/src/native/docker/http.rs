@@ -586,6 +586,7 @@ enum Action {
         streams: [bool; 2],
         generation: u64,
         stdin: bool,
+        detach: Option<Vec<u8>>,
         cursors: [usize; 2],
     },
     Logs(Arc<Item>, [bool; 2], u64, bool, Option<usize>),
@@ -1036,7 +1037,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
     let allowed_query: &[&str] = match (method, action) {
         ("HEAD" | "GET", "archive") => &["path"],
         ("PUT", "archive") => &["path", "noOverwriteDirNonDir", "copyUIDGID"],
-        ("POST", "attach") => &["stdin", "stdout", "stderr", "logs", "stream"],
+        ("POST", "attach") => &["stdin", "stdout", "stderr", "logs", "stream", "detachKeys"],
         ("GET", "logs") => &[
             "stdout",
             "stderr",
@@ -1177,6 +1178,15 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                     "attached stdin requires an open workload input and TCP upgrade",
                 ));
             }
+            let keys = query.get("detachKeys");
+            let keys = if item.container.config["Tty"] == true || keys.is_some() {
+                Some(super::workload_input::detach_keys(
+                    keys.map_or("", String::as_str),
+                )?)
+            } else {
+                None
+            };
+            let detach = keys.filter(|_| item.container.config["Tty"] == true);
             let streams = ["stdout", "stderr"]
                 .map(|name| query.get(name).is_none() || !disabled(query.get(name)));
             let state = item.state();
@@ -1197,6 +1207,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                 streams,
                 generation,
                 stdin,
+                detach,
                 cursors,
             });
         }
@@ -1243,7 +1254,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                 .as_ref()
                 .map_or(&container.config["HostConfig"], |(host, _)| host)
                 .clone();
-            config["Tty"] = json!(false);
+            config["Tty"] = json!(container.config["Tty"] == true);
             let networks = state.network.as_ref().map_or_else(|| json!({}), |attachment| {
                 json!({(attachment.network.name.as_str()):attachment.inspect(state.network_address.as_deref())})
             });
@@ -1362,8 +1373,23 @@ fn attach(
     cursors: [usize; 2],
     writer: &mut UnixStream,
 ) -> io::Result<()> {
-    header(writer, 101, "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
+    header(
+        writer,
+        101,
+        &format!(
+            "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: {}\r\n",
+            output_type(item)
+        ),
+    )?;
     send_output(item, enabled, generation, true, None, cursors, writer)
+}
+
+fn output_type(item: &Item) -> &'static str {
+    if item.container.config["Tty"] == true {
+        "application/vnd.docker.raw-stream"
+    } else {
+        "application/vnd.docker.multiplexed-stream"
+    }
 }
 
 fn tail_offsets(streams: [&[u8]; 2], enabled: [bool; 2], mut lines: usize) -> [usize; 2] {
@@ -1402,6 +1428,12 @@ fn send_output(
     mut cursors: [usize; 2],
     writer: &mut UnixStream,
 ) -> io::Result<()> {
+    let tty = item.container.config["Tty"] == true;
+    let enabled = if tty {
+        [enabled[0] || enabled[1], false]
+    } else {
+        enabled
+    };
     let deadline = Instant::now() + Duration::from_secs(35);
     loop {
         let mut state = item.state();
@@ -1452,12 +1484,20 @@ fn send_output(
             if chunk.is_empty() {
                 continue;
             }
-            send_frame(writer, index as u8 + 1, &chunk)?;
+            if tty {
+                writer.write_all(&chunk)?;
+            } else {
+                send_frame(writer, index as u8 + 1, &chunk)?;
+            }
             cursors[index] += chunk.len();
         }
         if !follow || (empty && finished) {
             if let Some(error) = failure {
-                send_frame(writer, 3, error.as_bytes())?;
+                if tty {
+                    writer.write_all(error.as_bytes())?;
+                } else {
+                    send_frame(writer, 3, error.as_bytes())?;
+                }
             }
             return Ok(());
         }
@@ -1595,6 +1635,7 @@ pub(super) fn serve(
                 streams,
                 generation,
                 stdin,
+                detach,
                 cursors,
             }) => {
                 if stdin {
@@ -1606,18 +1647,37 @@ pub(super) fn serve(
                         .send(&mut stream, false, true)?;
                         break;
                     };
+                    let channel = reader.get_ref().try_clone()?;
                     std::thread::scope(|tasks| -> io::Result<()> {
                         let input = tasks.spawn(|| {
-                            super::workload_input::relay(owner, &item, generation, reader)
+                            let outcome = super::workload_input::relay(
+                                owner,
+                                &item,
+                                generation,
+                                reader,
+                                detach.as_deref(),
+                            );
+                            if matches!(outcome, Ok(true)) {
+                                let _ = channel.shutdown(Shutdown::Both);
+                                item.changed.notify_all();
+                            }
+                            outcome
                         });
                         let output = attach(&item, streams, generation, cursors, &mut stream);
                         let _ = stream.shutdown(Shutdown::Read);
                         let sent = input
                             .join()
                             .map_err(|_| io::Error::other("native input worker stopped"))?;
+                        if matches!(sent, Ok(true)) {
+                            return Ok(());
+                        }
                         output?;
                         if let Err(error) = sent {
-                            send_frame(&mut stream, 3, error.to_string().as_bytes())?;
+                            if item.container.config["Tty"] == true {
+                                stream.write_all(error.to_string().as_bytes())?;
+                            } else {
+                                send_frame(&mut stream, 3, error.to_string().as_bytes())?;
+                            }
                         }
                         Ok(())
                     })?;
@@ -1627,7 +1687,14 @@ pub(super) fn serve(
                 break;
             }
             Ok(Action::Logs(item, streams, generation, follow, tail)) => {
-                header(&mut stream, 200, "Connection: close\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n")?;
+                header(
+                    &mut stream,
+                    200,
+                    &format!(
+                        "Connection: close\r\nContent-Type: {}\r\n",
+                        output_type(&item)
+                    ),
+                )?;
                 send_output(
                     &item,
                     streams,

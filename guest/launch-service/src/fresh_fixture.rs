@@ -7,6 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -300,6 +301,7 @@ struct WorkerBuild {
 struct HelperLaunch {
     spec: String,
     open_stdin: bool,
+    tty: bool,
     live_mounts: Option<LiveMounts>,
     build_owner: Option<String>,
 }
@@ -1517,6 +1519,7 @@ impl FreshFixture {
         let oci_process = self.oci.then(|| HelperLaunch {
             spec: serde_json::to_string(spec).expect("validated OCI spec"),
             open_stdin: spec.open_stdin,
+            tty: spec.tty,
             build_owner: if spec.buildkit_worker {
                 Some(hex(&id))
             } else {
@@ -1782,7 +1785,21 @@ impl FreshFixture {
         } else {
             (None, None)
         };
-        let input_fd = input_reader.as_ref().map(AsRawFd::as_raw_fd);
+        let (terminal, slave) = if oci_process.as_ref().is_some_and(|spec| spec.tty) {
+            let (master, slave) = crate::pty::pair()?;
+            master.nonblocking()?;
+            command
+                .stdout(Stdio::from(slave.try_clone()?))
+                .stderr(Stdio::from(slave.try_clone()?));
+            (Some(master), Some(slave))
+        } else {
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            (None, None)
+        };
+        let input_fd = slave
+            .as_ref()
+            .or(input_reader.as_ref())
+            .map(AsRawFd::as_raw_fd);
         let build_fds = oci_process
             .as_ref()
             .and_then(|oci| oci.live_mounts.as_ref())
@@ -1850,30 +1867,42 @@ impl FreshFixture {
             ])
             .args(oci_process.as_ref().map(|oci| &oci.spec))
             .stdin(Stdio::from(OwnedFd::from(helper)))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()?;
         // The command retains its configured stdin. Close the helper-side
         // control descriptor here so an early helper exit yields EOF.
         drop(command);
-        drop(input_reader);
+        drop(slave);
         drop(oci_process.as_mut().and_then(|oci| oci.live_mounts.take()));
         let helper_spawned = self.trace_core_latency.then(Instant::now);
         let process_group = -(child.id() as libc::pid_t);
-        let out = child.stdout.take().expect("piped stdout");
-        let err = child.stderr.take().expect("piped stderr");
+        let terminal_input = terminal
+            .as_ref()
+            .cloned()
+            .zip(input_reader)
+            .map(|(master, input)| {
+                let stopped = Arc::new(AtomicBool::new(false));
+                let input_stop = Arc::clone(&stopped);
+                let worker = thread::spawn(move || master.forward_input(input, &input_stop));
+                (stopped, worker)
+            });
+        let pipe_stdout = child.stdout.take();
+        let pipe_stderr = child.stderr.take();
         let output_owner = Arc::clone(self);
         let output_id = workload.clone();
         let stdout = thread::spawn(move || {
-            drain(out, |data| {
-                output_owner.capture_build_output(&output_id, data, false);
-            })
+            let capture = |data: &[u8]| output_owner.capture_build_output(&output_id, data, false);
+            match terminal {
+                Some(master) => drain(master, capture),
+                None => drain(pipe_stdout.expect("piped stdout"), capture),
+            }
         });
         let error_owner = Arc::clone(self);
         let error_id = workload.clone();
-        let stderr = thread::spawn(move || {
-            drain(err, |data| {
-                error_owner.capture_build_output(&error_id, data, true);
+        let stderr = pipe_stderr.map(|pipe| {
+            thread::spawn(move || {
+                drain(pipe, |data| {
+                    error_owner.capture_build_output(&error_id, data, true);
+                })
             })
         });
         self.update(&workload, |record| {
@@ -2057,6 +2086,13 @@ impl FreshFixture {
             child.kill()?;
         }
         let finished = child.wait()?;
+        if let Some((input_stop, input)) = terminal_input {
+            input_stop.store(true, Ordering::Release);
+            self.update(&workload, |record| record.input = None);
+            if let Ok(Err(error)) = input.join() {
+                eprintln!("native terminal input closed: {error}");
+            }
+        }
         let recovered = result.is_err() || !finished.success() || !removed;
         if recovered {
             if let Some(owner) = oci_process
@@ -2079,9 +2115,11 @@ impl FreshFixture {
             println!("conjet-launchd recovered helper failure for {}", hex(&id));
         }
         let stdout = stdout.join();
-        let stderr = stderr.join();
+        let stderr = stderr.map(thread::JoinHandle::join);
         stdout.map_err(|_| io::Error::other("stdout reader failed"))??;
-        stderr.map_err(|_| io::Error::other("stderr reader failed"))??;
+        if let Some(stderr) = stderr {
+            stderr.map_err(|_| io::Error::other("stderr reader failed"))??;
+        }
         Ok(recovered)
     }
 

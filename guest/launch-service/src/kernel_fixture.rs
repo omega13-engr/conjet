@@ -254,8 +254,11 @@ pub fn run_helper(
     {
         return Err("unexpected fixture helper arguments".into());
     }
-    let stdin =
-        crate::workload_input::inherited(process.as_ref().is_some_and(|spec| spec.open_stdin))?;
+    let tty = process.as_ref().is_some_and(|spec| spec.tty);
+    let stdin = crate::workload_input::inherited(
+        tty || process.as_ref().is_some_and(|spec| spec.open_stdin),
+        tty,
+    )?;
     let live_mounts = crate::build_snapshot::mounts::LiveMounts::inherited(
         process
             .as_ref()
