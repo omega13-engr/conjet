@@ -288,6 +288,7 @@ fn process_spec(
         volume: None,
         bind: None,
         binds: Vec::new(),
+        tmpfs: Vec::new(),
         build_snapshot: Some(snapshot),
         limits: if live {
             ResourceLimits::UNBOUNDED

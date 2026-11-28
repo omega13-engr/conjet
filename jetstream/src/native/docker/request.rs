@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{ensure, Context};
 use conjet_launch_service::handshake::unhex;
+use conjet_launch_service::spec::TmpfsMount;
 use conjet_launch_service::spec::{
     parse_cpu_set, Account, CpuBandwidth, LaunchSpec, OpenFilesLimit, ResourceLimits,
     CPU_PERIOD_US, WORKLOAD_GID, WORKLOAD_UID,
@@ -231,6 +232,7 @@ impl Image {
                 "CapAdd",
                 "SecurityOpt",
                 "ReadonlyRootfs",
+                "Tmpfs",
             ],
             "HostConfig ",
         )?;
@@ -344,6 +346,7 @@ impl Image {
             volume: None,
             bind: None,
             binds: Vec::new(),
+            tmpfs: tmpfs_mounts(&host["Tmpfs"])?,
             build_snapshot: None,
             limits,
             docker_resource_defaults: limits.has_unlimited(),
@@ -360,6 +363,72 @@ impl Image {
         serde_json::to_value(spec)
             .map_err(|_| Rejected::internal("cannot encode native process spec"))
     }
+}
+
+fn tmpfs_mounts(value: &Value) -> Result<Vec<TmpfsMount>, Rejected> {
+    let Some(mounts) = object(value, "Docker Tmpfs map")? else {
+        return Ok(Vec::new());
+    };
+    if mounts.len() > TmpfsMount::MAX_MOUNTS {
+        return Err(Rejected::bad("too many native tmpfs mounts"));
+    }
+    mounts
+        .iter()
+        .map(|(target, value)| {
+            let value = value
+                .as_str()
+                .ok_or_else(|| Rejected::bad("invalid Docker tmpfs options"))?;
+            let mut mount = TmpfsMount {
+                target: target.clone(),
+                size_bytes: None,
+                mode: 0o1777,
+                uid: 0,
+                gid: 0,
+                read_only: false,
+            };
+            let mut keys = std::collections::BTreeSet::new();
+            for option in value.split(',').filter(|item| !item.is_empty()) {
+                let (key, data) = option.split_once('=').unwrap_or((option, ""));
+                let kind = match key {
+                    "ro" | "rw" => "access",
+                    _ => key,
+                };
+                if !keys.insert(kind) {
+                    return Err(Rejected::bad("duplicate Docker tmpfs option"));
+                }
+                let invalid = || Rejected::bad("invalid Docker tmpfs option value");
+                match key {
+                    "size" => {
+                        let (digits, scale) = match data.as_bytes().last() {
+                            Some(b'k' | b'K') => (&data[..data.len() - 1], 1024),
+                            Some(b'm' | b'M') => (&data[..data.len() - 1], 1024 * 1024),
+                            Some(b'g' | b'G') => (&data[..data.len() - 1], 1024 * 1024 * 1024),
+                            _ => (data, 1),
+                        };
+                        mount.size_bytes = Some(
+                            digits
+                                .parse::<u64>()
+                                .ok()
+                                .and_then(|size| size.checked_mul(scale))
+                                .ok_or_else(invalid)?,
+                        );
+                    }
+                    "mode" => mount.mode = u32::from_str_radix(data, 8).map_err(|_| invalid())?,
+                    "uid" => mount.uid = data.parse().map_err(|_| invalid())?,
+                    "gid" => mount.gid = data.parse().map_err(|_| invalid())?,
+                    "ro" if data.is_empty() => mount.read_only = true,
+                    "rw" | "nosuid" | "nodev" | "noexec" if data.is_empty() => {}
+                    _ => return Err(Rejected::bad("unsupported Docker tmpfs option")),
+                }
+            }
+            if !mount.valid() {
+                return Err(Rejected::bad(
+                    "native Docker tmpfs options are outside their bounds",
+                ));
+            }
+            Ok(mount)
+        })
+        .collect()
 }
 
 pub(super) fn default_memory_swap(host: &mut Value) {

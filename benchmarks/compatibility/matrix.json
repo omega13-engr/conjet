@@ -304,6 +304,7 @@
       "acceptance": "Kernel NoNewPrivs is set and a controlled setuid elevation is denied.",
       "test_file": "cases/test_security.py",
       "test_name": "test_no_new_privileges",
+      "support_files": ["cases/support.py", "fixtures/dc022-euid.S"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
@@ -677,6 +678,7 @@
       "acceptance": "Tmpfs size, UID, GID and mode apply even when image target directory is absent.",
       "test_file": "cases/test_storage.py",
       "test_name": "test_tmpfs_options",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

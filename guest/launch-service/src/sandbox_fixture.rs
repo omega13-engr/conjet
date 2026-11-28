@@ -47,6 +47,7 @@ pub(crate) struct Sandbox {
     standard_devices: bool,
     stdin: File,
     volume: Vec<FileBinding>,
+    tmpfs: Vec<crate::spec::TmpfsMount>,
     worker_mounts: Option<crate::build_snapshot::mounts::MountPlan>,
     build_sysfs_view: bool,
     live_mounts: Option<crate::build_snapshot::mounts::LiveMounts>,
@@ -314,6 +315,48 @@ struct FileBinding {
     target: CString,
 }
 
+fn prepare_mount_target(root: &Path, destination: &str) -> io::Result<PathBuf> {
+    // The overlay has no running workload during setup. Inspect image ancestors
+    // before following them and keep all mounts beneath the private root.
+    let mut target = root.to_path_buf();
+    for segment in destination.trim_start_matches('/').split('/') {
+        target.push(segment);
+        match fs::create_dir(&target) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && target.symlink_metadata()?.is_dir() => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(target)
+}
+
+fn mount_tmpfs(root: &CStr, mount: &crate::spec::TmpfsMount) -> io::Result<()> {
+    let root = Path::new(OsStr::from_bytes(root.to_bytes()));
+    let target = prepare_mount_target(root, &mount.target)?;
+    let target = CString::new(target.as_os_str().as_bytes())?;
+    let mut options = format!("uid={},gid={},mode={:o}", mount.uid, mount.gid, mount.mode);
+    if let Some(bytes) = mount.size_bytes {
+        use std::fmt::Write;
+        write!(options, ",size={bytes}").expect("write string");
+    }
+    let options = CString::new(options)?;
+    let mut flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    if mount.read_only {
+        flags |= libc::MS_RDONLY;
+    }
+    security::checked(unsafe {
+        libc::mount(
+            c"tmpfs".as_ptr(),
+            target.as_ptr(),
+            c"tmpfs".as_ptr(),
+            flags,
+            options.as_ptr().cast(),
+        )
+    })
+}
+
 impl FileBinding {
     fn prepare(spec: &LaunchSpec, root: &Path) -> io::Result<Vec<Self>> {
         let mut sources = Vec::new();
@@ -365,23 +408,7 @@ impl FileBinding {
 
     fn mount(&self, source: File) -> io::Result<()> {
         let source_path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
-        // The overlay is private and has no running workload during setup.
-        // Inspect each image ancestor before following it.
-        let mut target = self.root.clone();
-        for segment in self.destination.trim_start_matches('/').split('/') {
-            target.push(segment);
-            match fs::create_dir(&target) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if !target.symlink_metadata()?.is_dir() {
-                        return Err(io::Error::other(
-                            "native volume path must contain only directories",
-                        ));
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        let target = prepare_mount_target(&self.root, &self.destination)?;
         if fs::read_dir(&target)?.next().is_some() {
             return Err(io::Error::other("native volume target must be empty"));
         }
@@ -565,6 +592,7 @@ impl Sandbox {
                     .map(|spec| FileBinding::prepare(spec, &base.join("root")))
                     .transpose()?
                     .unwrap_or_default(),
+                tmpfs: oci.map_or_else(Vec::new, |spec| spec.tmpfs.clone()),
                 worker_mounts,
                 build_sysfs_view: oci.is_some_and(LaunchSpec::build_sysfs_view),
                 live_mounts,
@@ -724,6 +752,9 @@ impl Sandbox {
         }
         for (volume, source) in self.volume.iter().zip(volume_source) {
             step("private workload mount", volume.mount(source))?;
+        }
+        for mount in &self.tmpfs {
+            step("private tmpfs mount", mount_tmpfs(&self.new_root, mount))?;
         }
         if let Some(cgroup) = cgroup {
             step("workload cgroup view", mount_cgroup(&self.new_root, cgroup))?;

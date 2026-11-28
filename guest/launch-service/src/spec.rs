@@ -125,6 +125,8 @@ pub struct LaunchSpec {
     pub bind: Option<BindMount>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binds: Vec<BindMount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tmpfs: Vec<TmpfsMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_snapshot: Option<crate::build_snapshot::Snapshot>,
     pub limits: ResourceLimits,
@@ -158,6 +160,31 @@ impl OpenFilesLimit {
 
     pub fn valid(self) -> bool {
         self.soft <= self.hard && self.hard <= Self::MAXIMUM
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TmpfsMount {
+    pub target: String,
+    pub size_bytes: Option<u64>,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub read_only: bool,
+}
+
+impl TmpfsMount {
+    pub const MAX_MOUNTS: usize = 4;
+
+    pub fn valid(&self) -> bool {
+        valid_volume_target(&self.target)
+            && self.uid < ID_MAP_WIDTH
+            && self.gid < ID_MAP_WIDTH
+            && self.mode <= 0o7777
+            && self
+                .size_bytes
+                .is_none_or(|size| (1..=MAX_MEMORY_BYTES).contains(&size))
     }
 }
 
@@ -631,6 +658,32 @@ impl LaunchSpec {
 
     fn validate_process(&self, search_path: bool) -> Result<[u8; 32], SpecError> {
         let spec = self;
+        let overlaps = |a: &str, b: &str| {
+            a == b
+                || a.strip_prefix(b)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+                || b.strip_prefix(a)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        };
+        if spec.tmpfs.len() > TmpfsMount::MAX_MOUNTS
+            || (!spec.tmpfs.is_empty()
+                && (!search_path || spec.build_snapshot.is_some() || spec.buildkit_worker))
+            || spec.tmpfs.iter().enumerate().any(|(i, mount)| {
+                !mount.valid()
+                    || spec.tmpfs[..i]
+                        .iter()
+                        .any(|other| overlaps(&mount.target, &other.target))
+                    || spec
+                        .volume
+                        .as_ref()
+                        .is_some_and(|other| overlaps(&mount.target, &other.target))
+                    || spec
+                        .host_binds()
+                        .any(|other| overlaps(&mount.target, &other.target))
+            })
+        {
+            return Err(SpecError::Volume);
+        }
         if spec.rootfs_read_only && (spec.build_snapshot.is_some() || spec.buildkit_worker) {
             return Err(SpecError::Volume);
         }
@@ -882,6 +935,7 @@ mod tests {
                 volume: None,
                 bind: None,
                 binds: Vec::new(),
+                tmpfs: Vec::new(),
                 build_snapshot: None,
                 limits: ResourceLimits {
                     memory_bytes: MIN_MEMORY_BYTES,

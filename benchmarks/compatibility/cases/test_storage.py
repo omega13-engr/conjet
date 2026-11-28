@@ -89,4 +89,61 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_tmpfs_options(self):
         'DC-050: Tmpfs size, UID, GID and mode apply even when image target directory is absent.'
-        self.fail('UNIMPLEMENTED DC-050; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-tmpfs-' + uuid.uuid4().hex[:16]
+        target = '/conjet-ephemeral/cache'
+        options = 'size=65536,uid=1201,gid=1301,mode=0710'
+        mount = {target: options}
+
+        def start(path):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+
+        def inspect_mount(path):
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            detail = json.loads(raw)
+            self.assertIs(detail['State']['Running'], True)
+            self.assertEqual(detail['HostConfig']['Tmpfs'], mount)
+            result = exec_command(self, session, path, ['/bin/busybox', 'stat', '-c', '%u:%g:%a', target])
+            self.assertEqual(result, (0, b'1201:1301:710\n', b''))
+            result = exec_command(self, session, path, [
+                '/bin/sh', '-c', r'df -kP "$1" | awk "NR == 2 { print \$2, \$6 }"', 'fixture', target,
+            ])
+            self.assertEqual(result, (0, f'64 {target}\n'.encode(), b''))
+
+        with alpine(self, session) as image:
+            spec = {'Image': image, 'Cmd': ['/bin/sleep', '120']}
+            with container(self, session, name + '-control', {
+                    **spec, 'HostConfig': {'NetworkMode': 'none'},
+            }) as (path, _):
+                start(path)
+                self.assertEqual(exec_command(self, session, path, [
+                    '/bin/sh', '-c', 'test ! -e "$1"', 'fixture', target,
+                ]), (0, b'', b''))
+
+            with container(self, session, name, {
+                    **spec, 'HostConfig': {'NetworkMode': 'none', 'ReadonlyRootfs': True, 'Tmpfs': mount},
+            }) as (path, _):
+                start(path)
+                inspect_mount(path)
+                result = exec_command(self, session, path, [
+                    '/bin/sh', '-c', 'dd if=/dev/zero of="$1/payload" bs=1024 count=64 2>/dev/null '
+                    '&& wc -c < "$1/payload"', 'fixture', target,
+                ])
+                self.assertEqual(result, (0, b'65536\n', b''))
+                code, _, error = exec_command(self, session, path, [
+                    '/bin/sh', '-c', 'dd if=/dev/zero of="$1/payload" '
+                    'bs=1024 count=1 seek=64 conv=notrunc', 'fixture', target,
+                ])
+                self.assertNotEqual(code, 0)
+                self.assertIn(b'No space left on device', error)
+                status, raw = session.request('POST', path + '/stop?t=1')
+                self.assertEqual(status, 204, raw)
+                start(path)
+                inspect_mount(path)
+                self.assertEqual(exec_command(self, session, path, [
+                    '/bin/sh', '-c', 'test ! -e "$1/payload"', 'fixture', target,
+                ]), (0, b'', b''))
+        session.record({'tmpfs_mode': '0710', 'uid': 1201, 'gid': 1301,
+                        'size_bytes': 65536, 'enospc': True, 'empty_after_restart': True})

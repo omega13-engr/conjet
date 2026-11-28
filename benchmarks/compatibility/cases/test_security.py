@@ -1,7 +1,11 @@
 """Security conformance fixtures and pending contracts."""
 
+import base64
 import hashlib
 import json
+from pathlib import Path
+import subprocess
+from tempfile import TemporaryDirectory
 import unittest
 import uuid
 
@@ -157,7 +161,64 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_no_new_privileges(self):
         'DC-022: Kernel NoNewPrivs is set and a controlled setuid elevation is denied.'
-        self.fail('UNIMPLEMENTED DC-022; no runtime compatibility evidence')
+        session = self.compatibility
+        connection = session.connection
+        name = 'conjet-no-privs-' + uuid.uuid4().hex[:16]
+        clang = Path('/Applications/Xcode.app/Contents/Developer/Toolchains/'
+                     'XcodeDefault.xctoolchain/usr/bin/clang')
+        lld = (Path.home() / '.rustup/toolchains/stable-aarch64-apple-darwin'
+               / 'lib/rustlib/aarch64-apple-darwin/bin/rust-lld')
+        tools = (
+            (clang, 'ee029330bf58ab6e481385f4237cc54602eaa8b81526242e5c5ab5b76e8c5a7e'),
+            (lld, 'f719ec5b06dcf9ec5f8e4dc2a5032a72c6469ba4e195c17011090d10b4229c5c'),
+        )
+        for tool, expected in tools:
+            with tool.open('rb') as source:
+                self.assertEqual(hashlib.file_digest(source, 'sha256').hexdigest(), expected, tool)
+        source = Path(__file__).resolve().parents[1] / 'fixtures' / 'dc022-euid.S'
+        with TemporaryDirectory(dir=connection.root) as scratch:
+            root = Path(scratch)
+            obj, executable = root / 'probe.o', root / 'probe'
+            for command in (
+                    [clang, '--target=aarch64-linux-musl', '-c', source, '-o', obj],
+                    [lld, '-flavor', 'gnu', '-m', 'aarch64linux', '--build-id=none', '-static',
+                     '-s', '-o', executable, obj]):
+                compiled = subprocess.run(command, cwd=root, env={'HOME': scratch,
+                                           'PATH': '/usr/bin:/bin'}, capture_output=True,
+                                          text=True, timeout=10)
+                self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            payload = executable.read_bytes()
+            checksum = hashlib.sha256(payload).hexdigest()
+            self.assertEqual(checksum, '83bc5382718ef77495eab41820adfc583c72aafe3e9e615951b98ada10e52b50')
+            data = base64.b64encode(payload).decode()
+
+        with alpine(self, session) as image, container(self, session, name, {
+                'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                'HostConfig': {'NetworkMode': 'none', 'SecurityOpt': ['no-new-privileges:true']},
+        }) as (path, _):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+            setup = exec_command(self, session, path, ['/bin/sh', '-c',
+                'printf %s "$1" | base64 -d >/tmp/suid-probe && '
+                'cp /tmp/suid-probe /tmp/plain-probe && '
+                'chmod 4755 /tmp/suid-probe && chmod 755 /tmp/plain-probe',
+                'fixture', data])
+            self.assertEqual(setup, (0, b'', b''))
+            flags = exec_command(self, session, path, [
+                '/usr/bin/awk', '/^NoNewPrivs:/{print $2}', '/proc/1/status',
+            ])
+            self.assertEqual(flags, (0, b'1\n', b''))
+            stats = exec_command(self, session, path, [
+                '/bin/busybox', 'stat', '-c', '%u:%g:%a', '/tmp/suid-probe', '/tmp/plain-probe',
+            ])
+            self.assertEqual(stats, (0, b'0:0:4755\n0:0:755\n', b''))
+            probes = exec_command(self, session, path, ['/bin/busybox', 'su', '-s', '/bin/sh', '-c',
+                r'id -u && awk "/^NoNewPrivs:/{print \$2}" /proc/self/status && '
+                '/tmp/plain-probe && /tmp/suid-probe', 'nobody',
+            ])
+            self.assertEqual(probes, (0, b'65534\n1\n', b''))
+        session.record({'no_new_privileges': True, 'setid_file_mode': '4755',
+                        'effective_uid_preserved': 65534, 'neutral_probe_sha256': checksum})
 
     def test_seccomp(self):
         'DC-023: Configured syscall allow and deny behavior matches policy; unsupported profiles fail before start.'

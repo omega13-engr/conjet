@@ -2326,6 +2326,12 @@ impl Owner {
                 "isolated host binds require the mapped root identity",
             ));
         }
+        if !spec["tmpfs"].is_null() {
+            serde_json::from_value::<conjet_launch_service::spec::LaunchSpec>(spec.clone())
+                .map_err(|error| Rejected::internal(error.to_string()))?
+                .validate_exec()
+                .map_err(|error| Rejected::bad(error.to_string()))?;
+        }
         let healthcheck = health::Config::parse(&config["Healthcheck"], &spec)?;
         let published = publication
             .map(|request| {

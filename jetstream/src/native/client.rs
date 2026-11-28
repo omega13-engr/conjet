@@ -643,6 +643,7 @@ fn execute(
         volume: None,
         bind: None,
         binds: Vec::new(),
+        tmpfs: Vec::new(),
         build_snapshot: None,
         limits: NATIVE_LIMITS,
     };
