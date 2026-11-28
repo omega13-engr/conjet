@@ -5,6 +5,7 @@ import io
 import json
 import tarfile
 import unittest
+from urllib.parse import urlencode
 import uuid
 
 import image_archives
@@ -165,7 +166,84 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_archive_ownership(self):
         'DC-045: Copy in and out preserve expected UID, GID, mode, links and directory-content semantics.'
-        self.fail('UNIMPLEMENTED DC-045; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-copy-tree-' + uuid.uuid4().hex[:12]
+        root = '/tmp/conjet-archive-fixture'
+        marker = b'owned archive metadata\n'
+        checksum = hashlib.sha256(marker).hexdigest()
+        export = io.BytesIO()
+        with tarfile.open(fileobj=export, mode='w', format=tarfile.USTAR_FORMAT) as archive:
+            def add(name, kind, uid, gid, mode, payload=None, link=''):
+                info = tarfile.TarInfo(name)
+                info.type, info.uid, info.gid, info.mode = kind, uid, gid, mode
+                info.linkname = link
+                if payload is not None:
+                    info.size = len(payload)
+                archive.addfile(info, None if payload is None else io.BytesIO(payload))
+
+            add('nested', tarfile.DIRTYPE, 1201, 1301, 0o751)
+            add('nested/data', tarfile.REGTYPE, 1202, 1302, 0o640, marker)
+            add('nested/hard', tarfile.LNKTYPE, 1202, 1302, 0o640, link='nested/data')
+            add('nested/relative', tarfile.SYMTYPE, 1203, 1303, 0o777, link='data')
+
+        def archive_at(path, cleaned):
+            return path + '/archive?' + urlencode({'path': cleaned})
+
+        def inspect_archive(path, content_only):
+            target = root + '/nested' + ('/.' if content_only else '')
+            status, raw = image_archives.transfer(self, session, 'GET', archive_at(path, target))
+            self.assertEqual(status, 200, raw[:1024])
+            with tarfile.open(fileobj=io.BytesIO(raw), mode='r:*') as result:
+                members = {}
+                for member in result:
+                    self.assertFalse(member.name.startswith('/'))
+                    token = member.name.removeprefix('./')
+                    self.assertNotIn(token, members)
+                    members[token] = member
+                prefix = '' if content_only else 'nested/'
+                self.assertEqual(members.keys(), {prefix + leaf for leaf in ('data', 'hard', 'relative')}
+                                 | ({'.'} if content_only else {'nested'}))
+                directory = members['.' if content_only else 'nested']
+                self.assertTrue(directory.isdir())
+                self.assertEqual((directory.uid, directory.gid, directory.mode), (1201, 1301, 0o751))
+                regular, hard = [members[prefix + leaf] for leaf in ('data', 'hard')]
+                data, alias = (regular, hard) if regular.isfile() else (hard, regular)
+                self.assertTrue(data.isfile())
+                self.assertTrue(alias.islnk())
+                self.assertEqual(alias.linkname.removeprefix('./'), data.name.removeprefix('./'))
+                self.assertEqual((data.uid, data.gid, data.mode), (1202, 1302, 0o640))
+                self.assertEqual(result.extractfile(data).read(), marker)
+                link = members[prefix + 'relative']
+                self.assertTrue(link.issym())
+                self.assertEqual((link.linkname, link.uid, link.gid), ('data', 1203, 1303))
+
+        with alpine(self, session) as image, container(self, session, name, {
+                'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                'HostConfig': {'NetworkMode': 'none'},
+        }) as (path, _):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+            self.assertEqual(exec_command(self, session, path,
+                                          ['/bin/mkdir', '-p', root]), (0, b'', b''))
+            status, raw = image_archives.transfer(self, session, 'PUT',
+                archive_at(path, root), export.getvalue())
+            self.assertEqual(status, 200, raw[:1024])
+
+            result = exec_command(self, session, path, [
+                '/bin/sh', '-c',
+                'test "$(stat -c %i "$1/data")" = "$(stat -c %i "$1/hard")" && '
+                'test "$(readlink "$1/relative")" = data && '
+                'stat -c "%u:%g:%a" "$1" "$1/data" "$1/relative" && '
+                'sha256sum "$1/hard"', 'fixture', root + '/nested',
+            ])
+            self.assertEqual(result, (0, (
+                '1201:1301:751\n1202:1302:640\n1203:1303:777\n' +
+                checksum + '  ' + root + '/nested/hard\n').encode(), b''))
+            inspect_archive(path, content_only=False)
+            inspect_archive(path, content_only=True)
+        session.record({'directory_owner_mode': '1201:1301:751', 'file_owner_mode': '1202:1302:640',
+                        'hard_link_verified': True, 'relative_link_verified': True,
+                        'contents_only_export': True, 'archive_file_sha256': checksum})
 
     def test_host_file_events(self):
         'DC-046: Host create, atomic save, rename and delete emit events and trigger application reload.'

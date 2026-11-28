@@ -1,6 +1,6 @@
 use std::ffi::CString;
-use std::fs::{File, Metadata};
-use std::io::{self, Read, Write};
+use std::fs::{self, File, Metadata};
+use std::io::{self, Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::time::{Duration, Instant};
@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 use crate::image_store::ConnectionId;
 use crate::wire::COPY_LIMIT;
 
+mod tree;
+
 const CHUNK: usize = 8192;
 const STREAM_CHUNK: usize = 64 * 1024;
 
@@ -21,6 +23,10 @@ const STREAM_CHUNK: usize = 64 * 1024;
 pub(crate) enum Operation {
     Stat {
         path: String,
+    },
+    List {
+        path: String,
+        identity: Identity,
     },
     Read {
         path: String,
@@ -105,6 +111,53 @@ impl DownloadRequest {
     }
 }
 
+fn visible_owner(id: u32, base: u32) -> u32 {
+    id.checked_sub(base)
+        .filter(|id| *id < crate::spec::ID_MAP_WIDTH)
+        .unwrap_or(65534)
+}
+
+fn link_target(entry: &File) -> io::Result<String> {
+    let mut target = [0; 1025];
+    let size = unsafe {
+        libc::readlinkat(
+            entry.as_raw_fd(),
+            c"".as_ptr(),
+            target.as_mut_ptr().cast(),
+            target.len(),
+        )
+    };
+    match usize::try_from(size) {
+        Ok(size) if (1..target.len()).contains(&size) => {
+            String::from_utf8(target[..size].to_vec()).map_err(|_| rejected())
+        }
+        Ok(_) => Err(rejected()),
+        Err(_) => Err(io::Error::last_os_error()),
+    }
+}
+
+fn list_directory(root: &File, path: &str, identity: &Identity) -> io::Result<Value> {
+    let directory = open_path(root, path, libc::O_RDONLY | libc::O_DIRECTORY)?;
+    if Identity::from(&directory.metadata()?) != *identity {
+        return Err(rejected());
+    }
+    let mut names = Vec::new();
+    let mut bytes = 0;
+    for entry in fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))? {
+        let name = entry?.file_name().into_string().map_err(|_| rejected())?;
+        bytes += name.len();
+        if names.len() == 256 || bytes > 8192 || name.chars().any(char::is_control) {
+            return Err(rejected());
+        }
+        names.push(name);
+    }
+    if Identity::from(&directory.metadata()?) != *identity {
+        return Err(rejected());
+    }
+    names.sort_unstable();
+    Ok(json!({"entries": names}))
+}
+
 fn valid_path(path: &str) -> bool {
     path.len() <= 1024
         && (path == "/"
@@ -167,6 +220,8 @@ pub(crate) struct UploadSpec {
     size: u64,
     mode: u32,
     digest: [u8; 32],
+    #[serde(default)]
+    tree: bool,
 }
 
 pub(crate) struct Upload {
@@ -180,6 +235,7 @@ pub(crate) struct Upload {
     size: u64,
     mode: u32,
     digest: [u8; 32],
+    tree: bool,
     offset: u64,
     hash: Sha256,
     staging: Staging,
@@ -273,7 +329,9 @@ impl Upload {
         }
         let name = CString::new(spec.name)?;
         let parent = open_beneath(root, &spec.path, libc::O_PATH | libc::O_DIRECTORY, true)?;
-        destination(&parent, &name)?;
+        if !spec.tree {
+            destination(&parent, &name)?;
+        }
         let (staging, file) = Staging::create(&parent, owner, workload_uid)?;
         Ok(Self {
             owner,
@@ -286,6 +344,7 @@ impl Upload {
             size: spec.size,
             mode: spec.mode,
             digest: spec.digest,
+            tree: spec.tree,
             offset: 0,
             hash: Sha256::new(),
             staging,
@@ -340,6 +399,12 @@ impl Upload {
         if (current.dev(), current.ino()) != (original.dev(), original.ino()) {
             return Err(rejected());
         }
+        if self.tree {
+            publishing("archive_tree_rewind", self.file.rewind())?;
+            tree::publish(&self.parent, &self.staging, &mut self.file)?;
+            publishing("archive_stage_cleanup", self.staging.remove(true))?;
+            return Ok(json!({"offset":self.size}));
+        }
         let replace = destination(&self.parent, &self.name)?;
         let file = self.file.as_raw_fd();
         publishing(
@@ -385,12 +450,19 @@ struct Staging {
     directory: File,
     name: CString,
     uid: u32,
+    publisher: u32,
 }
 
 impl Staging {
     fn remove(&self, remove_payload: bool) -> io::Result<()> {
         if remove_payload {
             unsafe { libc::unlinkat(self.directory.as_raw_fd(), c"payload".as_ptr(), 0) };
+            let root = format!("/proc/self/fd/{}/tree", self.directory.as_raw_fd());
+            match fs::remove_dir_all(root) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
         }
         let current = unsafe {
             libc::openat(
@@ -429,6 +501,14 @@ impl Staging {
             uid -= 1;
         }
         let uid = crate::spec::UID_BASE + uid;
+        let creator = parent.metadata()?.uid();
+        let creator = if (crate::spec::UID_BASE..crate::spec::UID_BASE + crate::spec::ID_MAP_WIDTH)
+            .contains(&creator)
+        {
+            creator
+        } else {
+            uid
+        };
         let mut name = String::from(".conjet-upload-");
         for byte in owner {
             write!(name, "{byte:02x}").expect("format connection ID");
@@ -438,7 +518,7 @@ impl Staging {
         let dir = parent.as_raw_fd();
         publishing(
             "archive_stage_create",
-            with_filesystem_owner(uid, || {
+            with_filesystem_owner(creator, || {
                 crate::security::checked(unsafe { libc::mkdirat(dir, name.as_ptr(), 0o700) })
             }),
         )?;
@@ -459,10 +539,25 @@ impl Staging {
             directory: unsafe { File::from_raw_fd(fd) },
             name,
             uid,
+            publisher: creator,
         };
         let metadata = staging.directory.metadata()?;
-        if metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+        if metadata.uid() != creator || metadata.mode() & 0o777 != 0o700 {
             return publishing("archive_stage_owner", Err(rejected()));
+        }
+        if creator != uid {
+            publishing(
+                "archive_stage_owner",
+                crate::security::checked(unsafe {
+                    libc::fchownat(
+                        staging.directory.as_raw_fd(),
+                        c"".as_ptr(),
+                        uid,
+                        crate::spec::GID_BASE,
+                        libc::AT_EMPTY_PATH,
+                    )
+                }),
+            )?;
         }
         let file = publishing(
             "archive_stage_file",
@@ -563,20 +658,29 @@ impl Store {
         self.expire();
         match operation {
             Operation::Stat { path } => {
-                let info = open_path(root, &path, libc::O_PATH)?.metadata()?;
-                if !(info.is_dir() || info.is_file()) {
+                let entry = open_path(root, &path, libc::O_PATH)?;
+                let info = entry.metadata()?;
+                let link = if info.is_symlink() {
+                    Some(link_target(&entry)?)
+                } else if info.is_dir() || info.is_file() {
+                    None
+                } else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "unsupported workload archive entry",
                     ));
-                }
+                };
+                let uid = visible_owner(info.uid(), crate::spec::UID_BASE);
+                let gid = visible_owner(info.gid(), crate::spec::GID_BASE);
                 Ok(json!({
                     "name":if path=="/" { "/" } else { path.rsplit('/').next().expect("validated path") },
                     "directory":info.is_dir(),
-                    "mode":info.mode() & 0o777,
+                    "mode":info.mode() & 0o7777,
                     "identity":Identity::from(&info),
+                    "uid":uid, "gid":gid, "link":link,
                 }))
             }
+            Operation::List { path, identity } => list_directory(root, &path, &identity),
             Operation::Read {
                 path,
                 identity,
