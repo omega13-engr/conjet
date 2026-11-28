@@ -35,6 +35,8 @@ mod security;
 pub mod server;
 pub mod socket;
 pub mod spec;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod volume_copy;
 pub mod volume_disk;
 pub mod wire;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]

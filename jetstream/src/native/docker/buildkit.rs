@@ -100,7 +100,9 @@ pub(super) fn requested(
         .iter()
         .any(|key| !request::falsey(&config[*key]))
         || !mount.is_some_and(|mount| {
-            mount.name == cache && mount.target == "/var/lib/buildkit" && !mount.read_only
+            mount.name == Some(cache.as_str())
+                && mount.target == "/var/lib/buildkit"
+                && !mount.read_only
         })
     {
         return Err(Rejected::bad(
@@ -141,9 +143,10 @@ mod tests {
         });
         let name = "buildx_buildkit_fresh0";
         let cache = volume::Mount {
-            name: "buildx_buildkit_fresh0_state",
+            name: Some("buildx_buildkit_fresh0_state"),
             target: "/var/lib/buildkit",
             read_only: false,
+            copy_up: true,
         };
         let resolved = format!("index.docker.io/moby/buildkit@{DEFAULT_MANIFEST}");
         assert_eq!(

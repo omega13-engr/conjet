@@ -1310,14 +1310,19 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             {
                 return Err(Rejected::bad("unsupported container removal options"));
             }
-            // Docker's v flag removes anonymous volumes. Native mounts are
-            // explicitly named and released through their own endpoint.
             owner.remove(
                 &item,
                 query
                     .get("force")
                     .is_some_and(|value| matches!(value.as_str(), "1" | "true")),
             )?;
+            if !disabled(query.get("v")) && item.container.anonymous_volume {
+                let volume = item.container.volume.as_ref().expect("anonymous volume");
+                match owner.remove_volume(&volume.name) {
+                    Ok(()) | Err(Rejected(404 | 409, _)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
             Reply::empty(204)
         }
         _ => return Err(Rejected(501, "unsupported container operation".into())),

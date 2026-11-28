@@ -411,8 +411,10 @@ impl FileBinding {
     fn mount(&self, source: File) -> io::Result<()> {
         let source_path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
         let target = prepare_mount_target(&self.root, &self.destination)?;
-        if fs::read_dir(&target)?.next().is_some() {
-            return Err(io::Error::other("native volume target must be empty"));
+        let docker_volume = matches!(&self.source, BindingSource::Volume(volume)
+            if volume.docker_copy_up.is_some());
+        if !docker_volume && fs::read_dir(&target)?.next().is_some() {
+            return Err(io::Error::other("native mount target must be empty"));
         }
         security::checked(unsafe {
             libc::mount(

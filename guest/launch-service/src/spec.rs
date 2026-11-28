@@ -220,6 +220,8 @@ pub struct VolumeMount {
     pub name: String,
     pub inode: u64,
     pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docker_copy_up: Option<bool>,
     #[serde(
         default = "default_volume_target",
         skip_serializing_if = "is_data_target"
@@ -293,6 +295,14 @@ pub fn valid_retained_layer_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+pub fn mount_paths_overlap(a: &str, b: &str) -> bool {
+    a == b
+        || a.strip_prefix(b)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || b.strip_prefix(a)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 pub fn valid_volume_target(target: &str) -> bool {
@@ -686,13 +696,6 @@ impl LaunchSpec {
 
     fn validate_process(&self, search_path: bool) -> Result<[u8; 32], SpecError> {
         let spec = self;
-        let overlaps = |a: &str, b: &str| {
-            a == b
-                || a.strip_prefix(b)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-                || b.strip_prefix(a)
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-        };
         if spec.tmpfs.len() > TmpfsMount::MAX_MOUNTS
             || (!spec.tmpfs.is_empty()
                 && (!search_path || spec.build_snapshot.is_some() || spec.buildkit_worker))
@@ -700,14 +703,14 @@ impl LaunchSpec {
                 !mount.valid()
                     || spec.tmpfs[..i]
                         .iter()
-                        .any(|other| overlaps(&mount.target, &other.target))
+                        .any(|other| mount_paths_overlap(&mount.target, &other.target))
                     || spec
                         .volume
                         .as_ref()
-                        .is_some_and(|other| overlaps(&mount.target, &other.target))
+                        .is_some_and(|other| mount_paths_overlap(&mount.target, &other.target))
                     || spec
                         .host_binds()
-                        .any(|other| overlaps(&mount.target, &other.target))
+                        .any(|other| mount_paths_overlap(&mount.target, &other.target))
             })
         {
             return Err(SpecError::Volume);
@@ -1207,6 +1210,7 @@ mod tests {
             target: "/data".into(),
             inode: 14,
             read_only: false,
+            docker_copy_up: None,
         });
         request.spec.redis_bootstrap = true;
         assert!(request.spec.validate_exec().is_ok());
@@ -1247,6 +1251,7 @@ mod tests {
             target: "/var/lib/buildkit".into(),
             inode: 14,
             read_only: false,
+            docker_copy_up: None,
         });
         let validate = |spec| LaunchRequest { spec, ..valid() }.validate_oci();
         assert!(validate(spec.clone()).is_ok());

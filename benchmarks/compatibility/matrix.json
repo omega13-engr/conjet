@@ -305,7 +305,7 @@
       "acceptance": "Kernel NoNewPrivs is set and a controlled setuid elevation is denied.",
       "test_file": "cases/test_security.py",
       "test_name": "test_no_new_privileges",
-      "support_files": ["cases/support.py", "fixtures/dc022-euid.S"],
+      "support_files": ["cases/support.py", "cases/guest_probe.py", "fixtures/dc022-euid.S"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
@@ -318,7 +318,7 @@
       "acceptance": "Configured syscall allow and deny behavior matches policy; unsupported profiles fail before start.",
       "test_file": "cases/test_security.py",
       "test_name": "test_seccomp",
-      "support_files": ["cases/support.py", "fixtures/dc023-uname.S"],
+      "support_files": ["cases/support.py", "cases/guest_probe.py", "fixtures/dc023-uname.S"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
@@ -604,6 +604,7 @@
       "acceptance": "Named and anonymous volume population, nocopy, UID and mode match reference behavior.",
       "test_file": "cases/test_storage.py",
       "test_name": "test_volume_copyup",
+      "support_files": ["cases/support.py", "cases/image_archives.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
@@ -659,6 +660,7 @@
       "acceptance": "Exercise xattrs, hardlinks, sparse files, locking and fsync on supported mount types.",
       "test_file": "cases/test_storage.py",
       "test_name": "test_filesystem_metadata",
+      "support_files": ["cases/support.py", "cases/guest_probe.py", "fixtures/dc048-filesystem.S"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

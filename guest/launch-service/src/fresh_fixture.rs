@@ -1442,13 +1442,17 @@ impl FreshFixture {
         }
         let id: [u8; 16] = random().map_err(|_| ("busy", "secure workload ID unavailable"))?;
         if let Some(volume) = &spec.volume {
-            crate::volume_disk::guest::initialize_mount(volume, spec.uid == 0 && spec.gid == 0)
-                .map_err(|_| {
-                    (
-                        "storage_failed",
-                        "cannot initialize native volume ownership",
-                    )
-                })?;
+            crate::volume_disk::guest::initialize_mount(
+                volume,
+                &spec.image_digest,
+                spec.uid == 0 && spec.gid == 0,
+            )
+            .map_err(|_| {
+                (
+                    "storage_failed",
+                    "cannot initialize native volume ownership",
+                )
+            })?;
         }
         let record = Record {
             handle: Handle {

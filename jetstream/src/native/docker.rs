@@ -913,6 +913,7 @@ struct Container {
     config: Value,
     spec: Value,
     volume: Option<conjet_launch_service::spec::VolumeMount>,
+    anonymous_volume: bool,
     bind: Option<bind::Binding>,
     created: u64,
     healthcheck: Option<health::Config>,
@@ -2335,10 +2336,12 @@ impl Owner {
             mount.as_ref(),
         )?;
         let buildkit_worker = worker_config.is_some();
+        let anonymous_volume = mount.as_ref().is_some_and(|mount| mount.name.is_none());
+        let allocate_anonymous = anonymous_volume && restored.is_none();
         let volume = mount
             .as_ref()
-            .filter(|_| !buildkit_worker)
-            .map(|mount| self.volume_mount(mount, false))
+            .filter(|_| !buildkit_worker && !allocate_anonymous)
+            .map(|mount| self.volume_mount(mount, &id, false, false))
             .transpose()?;
         let network = network::configured(
             &config,
@@ -2401,7 +2404,12 @@ impl Owner {
                     "BuildKit worker image has a different verified identity",
                 ));
             }
-            Some(self.volume_mount(mount.as_ref().expect("approved BuildKit cache"), true)?)
+            Some(self.volume_mount(
+                mount.as_ref().expect("approved BuildKit cache"),
+                &id,
+                true,
+                true,
+            )?)
         } else {
             volume
         };
@@ -2486,6 +2494,23 @@ impl Owner {
         if retained {
             spec["retained_layer"] = json!(id);
         }
+        let volume = if allocate_anonymous {
+            let mount = mount.as_ref().expect("anonymous volume requested");
+            if spec["tmpfs"].as_array().is_some_and(|mounts| {
+                mounts.iter().any(|tmpfs| {
+                    tmpfs["target"].as_str().is_some_and(|target| {
+                        conjet_launch_service::spec::mount_paths_overlap(mount.target, target)
+                    })
+                })
+            }) {
+                return Err(Rejected::bad("anonymous volume overlaps a tmpfs mount"));
+            }
+            let volume = self.volume_mount(mount, &id, true, false)?;
+            spec["volume"] = json!(volume);
+            Some(volume)
+        } else {
+            volume
+        };
         let created = restored.map_or_else(
             || {
                 SystemTime::now()
@@ -2519,7 +2544,14 @@ impl Owner {
                     removing: false,
                 },
             );
-            self.publish_containers(&mut ledger, records)?;
+            if let Err(error) = self.publish_containers(&mut ledger, records) {
+                // A failed directory sync can follow a successful rename.
+                // Retain the anonymous volume for either metadata version.
+                if allocate_anonymous {
+                    ledger.poisoned = true;
+                }
+                return Err(error);
+            }
         }
         let mut state = Lifecycle {
             network,
@@ -2550,6 +2582,7 @@ impl Owner {
                 config,
                 spec,
                 volume,
+                anonymous_volume,
                 bind,
                 created,
                 healthcheck,
@@ -2574,12 +2607,13 @@ impl Owner {
     fn volume_mount(
         &self,
         mount: &volume::Mount<'_>,
+        id: &str,
         create_if_missing: bool,
+        buildkit_worker: bool,
     ) -> Result<conjet_launch_service::spec::VolumeMount, Rejected> {
-        let info = match volume::ask(self, "inspect", Some(mount.name)) {
-            Err(Rejected(404, _)) if create_if_missing => {
-                volume::ask(self, "create", Some(mount.name))?
-            }
+        let name = mount.name.unwrap_or(id);
+        let info = match volume::ask(self, "inspect", Some(name)) {
+            Err(Rejected(404, _)) if create_if_missing => volume::ask(self, "create", Some(name))?,
             result => result?,
         };
         let inode = info["inode"]
@@ -2587,8 +2621,9 @@ impl Owner {
             .filter(|value| *value > 0)
             .ok_or_else(|| Rejected::internal("native volume has no inode identity"))?;
         Ok(conjet_launch_service::spec::VolumeMount {
-            name: mount.name.into(),
+            name: name.into(),
             read_only: mount.read_only,
+            docker_copy_up: (!buildkit_worker).then_some(mount.copy_up),
             inode,
             target: mount.target.into(),
         })

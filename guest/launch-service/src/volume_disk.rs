@@ -499,38 +499,100 @@ pub(crate) mod guest {
     }
 
     /// Called by the supervisor while it owns the volume admission lock.
-    /// The marker is set only on newly created volumes.
-    pub(crate) fn initialize_mount(request: &VolumeMount, namespace_root: bool) -> io::Result<()> {
+    /// Persist the marker before modifying an unclaimed volume so a VM restart
+    /// can roll back a partial copy before exposing it to any workload.
+    pub(crate) fn initialize_mount(
+        request: &VolumeMount,
+        image_digest: &str,
+        namespace_root: bool,
+    ) -> io::Result<()> {
         let source = open_volume(&request.name, 0)?;
         let info = checked_info(&request.name, &source.metadata()?, (UID_BASE, GID_BASE))?;
         if info.inode != request.inode {
             return Err(io::Error::other("stale native volume identity"));
         }
         let fd = source.as_raw_fd();
-        let marker = unsafe { libc::fgetxattr(fd, UNCLAIMED.as_ptr(), std::ptr::null_mut(), 0) };
-        if marker < 0 {
-            let error = io::Error::last_os_error();
-            return if error.raw_os_error() == Some(libc::ENODATA) {
-                Ok(())
-            } else {
-                Err(error)
-            };
+        let directory = std::path::PathBuf::from(format!("/proc/self/fd/{fd}"));
+        let mut pending = [0u8; 1];
+        let marker =
+            unsafe { libc::fgetxattr(fd, UNCLAIMED.as_ptr(), pending.as_mut_ptr().cast(), 1) };
+        match marker {
+            -1 => {
+                let error = io::Error::last_os_error();
+                return if error.raw_os_error() == Some(libc::ENODATA) {
+                    Ok(())
+                } else {
+                    Err(error)
+                };
+            }
+            0 => {}
+            1 if pending[0] == 1 => {
+                restore_unclaimed(&source, &directory)?;
+            }
+            _ => {
+                return Err(io::Error::other(
+                    "invalid native volume initialization marker",
+                ));
+            }
         }
-        if marker != 0 {
-            return Err(io::Error::other(
-                "invalid native volume initialization marker",
-            ));
+        if let Some(true) = request.docker_copy_up {
+            let from = crate::volume_copy::image_directory(image_digest, &request.target)?;
+            if let Some(from) = from {
+                if fs::read_dir(&directory)?.next().is_some() {
+                    return Err(io::Error::other("unclaimed native volume contains data"));
+                }
+                mark_unclaimed(fd, &[1])?;
+                source.sync_all()?;
+                if let Err(error) = crate::volume_copy::copy_directory(&from, &directory) {
+                    restore_unclaimed(&source, &directory)?;
+                    mark_unclaimed(fd, &[])?;
+                    source.sync_all()?;
+                    return Err(error);
+                }
+                source.sync_all()?;
+                checked(unsafe { libc::fremovexattr(fd, UNCLAIMED.as_ptr()) })?;
+                return source.sync_all();
+            }
         }
-        if namespace_root && info.guest_uid != 0 {
-            let directory = format!("/proc/self/fd/{fd}");
-            if fs::read_dir(directory)?.next().is_some() {
+        if namespace_root && source.metadata()?.uid() != UID_BASE {
+            if fs::read_dir(&directory)?.next().is_some() {
                 return Err(io::Error::other("unclaimed native volume contains data"));
             }
             checked(unsafe { libc::fchown(fd, UID_BASE, GID_BASE) })?;
-            source.sync_all()?;
         }
+        if request.docker_copy_up.is_some() && namespace_root {
+            checked(unsafe { libc::fchmod(fd, 0o755) })?;
+        }
+        source.sync_all()?;
         checked(unsafe { libc::fremovexattr(fd, UNCLAIMED.as_ptr()) })?;
         source.sync_all()
+    }
+
+    fn mark_unclaimed(fd: libc::c_int, pending: &[u8]) -> io::Result<()> {
+        checked(unsafe {
+            libc::fsetxattr(
+                fd,
+                UNCLAIMED.as_ptr(),
+                pending.as_ptr().cast(),
+                pending.len(),
+                libc::XATTR_REPLACE,
+            )
+        })
+    }
+
+    fn restore_unclaimed(volume: &File, directory: &Path) -> io::Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                fs::remove_dir_all(entry.path())?;
+            } else {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        let fd = volume.as_raw_fd();
+        checked(unsafe { libc::fchown(fd, UID_BASE + WORKLOAD_UID, GID_BASE + WORKLOAD_GID) })?;
+        checked(unsafe { libc::fchmod(fd, 0o700) })?;
+        volume.sync_all()
     }
 
     fn open_volume(name: &str, flags: libc::c_int) -> io::Result<File> {
@@ -573,7 +635,7 @@ pub(crate) mod guest {
 }
 
 #[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
-fn mapped_volume_owner(uid: u32, gid: u32, base: (u32, u32)) -> Option<(u32, u32)> {
+pub(crate) fn mapped_volume_owner(uid: u32, gid: u32, base: (u32, u32)) -> Option<(u32, u32)> {
     let owner = (uid.checked_sub(base.0)?, gid.checked_sub(base.1)?);
     (owner.0 < crate::spec::ID_MAP_WIDTH && owner.1 < crate::spec::ID_MAP_WIDTH).then_some(owner)
 }

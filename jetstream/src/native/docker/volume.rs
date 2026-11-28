@@ -9,9 +9,10 @@ use super::{client, request, Owner, Rejected};
 
 #[derive(Debug, PartialEq)]
 pub(super) struct Mount<'a> {
-    pub name: &'a str,
+    pub name: Option<&'a str>,
     pub target: &'a str,
     pub read_only: bool,
+    pub copy_up: bool,
 }
 
 pub(super) fn requested(config: &Value) -> Result<Option<Mount<'_>>, Rejected> {
@@ -42,18 +43,22 @@ pub(super) fn requested(config: &Value) -> Result<Option<Mount<'_>>, Rejected> {
     }
     let naming = |field: &str| mount.get(field).and_then(Value::as_str);
     if naming("Type") != Some("volume") {
-        return Err(Rejected::bad("require a named volume"));
+        return Err(Rejected::bad("require a Docker volume mount"));
     }
     let target = naming("Target")
         .filter(|target| valid_volume_target(target))
         .ok_or_else(|| Rejected::bad("unsupported native volume target"))?;
-    let name = naming("Source")
-        .filter(|name| valid_name(name))
-        .ok_or_else(|| Rejected::bad("invalid native volume name"))?;
+    let name = match mount.get("Source") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name)) if name.is_empty() => None,
+        Some(Value::String(name)) if valid_name(name) => Some(name.as_str()),
+        _ => return Err(Rejected::bad("invalid native volume name")),
+    };
     let read_only = mount.get("ReadOnly").map_or(Ok(false), |flag| {
         flag.as_bool()
             .ok_or_else(|| Rejected::bad("invalid native volume ReadOnly flag"))
     })?;
+    let mut copy_up = true;
     if let Some(options) = mount.get("VolumeOptions") {
         if let Some(options) = request::object(options, "Docker VolumeOptions")? {
             if options
@@ -62,12 +67,14 @@ pub(super) fn requested(config: &Value) -> Result<Option<Mount<'_>>, Rejected> {
             {
                 return Err(Rejected::bad("unsupported native VolumeOptions"));
             }
+            copy_up = options.get("NoCopy").and_then(Value::as_bool) != Some(true);
         }
     }
     Ok(Some(Mount {
         name,
         target,
         read_only,
+        copy_up,
     }))
 }
 
@@ -94,9 +101,10 @@ fn named_bind(value: &Value) -> Result<Mount<'_>, Rejected> {
         return Err(invalid());
     }
     Ok(Mount {
-        name,
+        name: Some(name),
         target,
         read_only,
+        copy_up: true,
     })
 }
 
@@ -109,9 +117,10 @@ mod tests {
         assert_eq!(
             named_bind(&json!(["owned:/data:ro"])).unwrap(),
             Mount {
-                name: "owned",
+                name: Some("owned"),
                 target: "/data",
-                read_only: true
+                read_only: true,
+                copy_up: true
             }
         );
         for input in [
