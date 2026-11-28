@@ -2,11 +2,30 @@
 
 import argparse
 import ast
+import hashlib
+import http.client
 import json
+import os
 from pathlib import Path
+import re
+import signal
+import time
 import unittest
 
+if __package__:
+    from .identity import SCRATCH, sha256
+else:
+    from identity import SCRATCH, sha256
+
 HERE = Path(__file__).resolve().parent
+MATRIX = HERE / 'matrix.json'
+RUNNER_FILES = ('run.py', 'identity.py')
+RESOURCE_LISTS = {
+    'containers': ('/containers/json?all=1', None, 'Id'),
+    'images': ('/images/json?all=1', None, 'Id'),
+    'networks': ('/networks', None, 'Id'),
+    'volumes': ('/volumes', 'Volumes', 'Name'),
+}
 
 
 def validate(matrix, root=HERE):
@@ -44,30 +63,235 @@ def qualified(result, expected):
             and not result.unexpectedSuccesses)
 
 
+def selection(profile):
+    matrix = json.loads(MATRIX.read_text())
+    validate(matrix)
+    return [case for case in matrix['cases'] if profile == 'all' or case['profile'] == profile]
+
+
+def load_tests():
+    # Discovery loads repository-owned test modules; no commands come from the manifest.
+    discovered = unittest.TestLoader().discover(str(HERE / 'cases'), pattern='test_*.py')
+    return {test.id().rsplit('.', 2)[0] + '.' + test._testMethodName: test
+            for module in discovered for cls in module for test in cls}
+
+
+class CaseSession:
+    def __init__(self, connection):
+        self.connection = connection
+        self.observation = None
+
+    def request(self, method, path, body=None):
+        payload = json.dumps(body).encode() if body is not None else None
+        headers = {'Content-Type': 'application/json'} if payload is not None else {}
+        try:
+            self.connection.request(method, path, body=payload, headers=headers)
+            with self.connection.getresponse() as response:
+                data = response.read(1024 * 1024 + 1)
+                if len(data) > 1024 * 1024:
+                    raise RuntimeError('compatibility response exceeds 1 MiB')
+                return response.status, data
+        finally:
+            self.connection.close()
+
+    def record(self, observation):
+        if self.observation is not None or not observation:
+            raise ValueError('a case must record one non-empty observation')
+        self.observation = json.loads(json.dumps(observation, allow_nan=False))
+
+    def resources(self):
+        inventory = {}
+        api_version = self.connection.server_version['ApiVersion']
+        for kind, (path, envelope, key) in RESOURCE_LISTS.items():
+            status, body = self.request('GET', f'/v{api_version}{path}')
+            if status != 200:
+                raise RuntimeError(f'cannot verify {kind} cleanup: HTTP {status}')
+            items = json.loads(body)
+            if envelope:
+                items = items[envelope]
+                if items is None:
+                    items = []
+            if not isinstance(items, list):
+                raise RuntimeError(f'invalid {kind} inventory')
+            if kind == 'images':
+                inventory[kind] = sorted(
+                    (item[key], sorted(item.get('RepoTags') or []), sorted(item.get('RepoDigests') or []))
+                    for item in items
+                )
+            else:
+                inventory[kind] = sorted(item[key] for item in items)
+        return inventory
+
+
+def execute_case(test, connection, timeout):
+    session = CaseSession(connection)
+    row = {'passed': False, 'cleanup': False}
+    started = time.monotonic()
+
+    def expired(_signum, _frame):
+        raise TimeoutError('compatibility case deadline exceeded')
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    test.compatibility = session
+    baseline = None
+    try:
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        baseline = session.resources()
+        result = unittest.TestResult()
+        test.run(result)
+        row['passed'] = qualified(result, 1) and session.observation is not None
+        row['details'] = {
+            name: [message for _, message in getattr(result, name)]
+            for name in ('failures', 'errors', 'skipped', 'expectedFailures')
+        }
+        row['observation'] = session.observation
+    except (Exception, KeyboardInterrupt) as error:
+        row['error'] = f'{type(error).__name__}: {error}'
+        if isinstance(error, KeyboardInterrupt):
+            row['interrupted'] = True
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        try:
+            if baseline is not None:
+                after = session.resources()
+                row['cleanup'] = after == baseline
+                if not row['cleanup']:
+                    row['resources'] = {'before': baseline, 'after': after}
+        except (ValueError, KeyError, OSError, http.client.HTTPException, RuntimeError) as error:
+            row['cleanup_error'] = str(error)
+        row['passed'] = row['passed'] and row['cleanup']
+        row['elapsed_seconds'] = time.monotonic() - started
+    return row
+
+
+def case_hash(case):
+    return sha256(HERE / case['test_file'])
+
+
+def runner_hashes():
+    return {file: sha256(HERE / file) for file in RUNNER_FILES}
+
+
+def record_lane(profile, connection, executable, identity, timeout=60):
+    matrix = sha256(MATRIX)
+    harness = runner_hashes()
+    selected = selection(profile)
+    if not selected or not 0 < timeout <= 3600:
+        raise ValueError('a non-empty profile and bounded case timeout are required')
+    fixtures = {case['id']: case_hash(case) for case in selected}
+    tests = load_tests()
+    rows = {}
+    start = connection.capture(executable)
+    if start != identity:
+        raise RuntimeError('Docker endpoint changed before running the compatibility lane')
+    for case in selected:
+        key = Path(case['test_file']).stem + '.' + case['test_name']
+        fixture = fixtures[case['id']]
+        if case_hash(case) != fixture:
+            raise RuntimeError(f"fixture changed before running {case['id']}")
+        row = execute_case(tests[key], connection, timeout)
+        row['fixture_sha256'] = fixture
+        rows[case['id']] = row
+        if row.get('interrupted') or not row['cleanup']:
+            break
+    if (matrix != sha256(MATRIX) or harness != runner_hashes()
+            or any(case_hash(case) != fixtures[case['id']] for case in selected)):
+        raise RuntimeError('compatibility harness changed while running the lane')
+    return {'profile': profile, 'matrix_sha256': matrix, 'harness_sha256': harness, 'cases': rows,
+            'endpoint_verified_after': connection.capture(executable) == start}
+
+
+def compare(profile, candidate, reference):
+    selected = selection(profile)
+    expected = {case['id']: case_hash(case) for case in selected}
+    matrix = sha256(MATRIX)
+    harness = runner_hashes()
+    receipt = {'matrix_sha256': matrix, 'harness_sha256': harness, 'profile': profile,
+               'cases': {}, 'passed': False}
+    for report in (candidate, reference):
+        lane = report.get('compatibility', {})
+        if (lane.get('profile') != profile or lane.get('matrix_sha256') != matrix
+                or lane.get('harness_sha256') != harness
+                or lane.get('endpoint_verified_after') is not True
+                or set(lane.get('cases', {})) != expected.keys()):
+            raise ValueError('missing or mismatched compatibility lane')
+        for key, fixture in expected.items():
+            if lane['cases'][key].get('fixture_sha256') != fixture:
+                raise ValueError(f'fixture identity changed for {key}')
+    left, right = (report['identity'] for report in (candidate, reference))
+    if (left['endpoint']['path'] == right['endpoint']['path']
+            or left['endpoint']['peer_sha256'] == right['endpoint']['peer_sha256']
+            or left['version'].get('platform') != 'Conjet Native OCI'
+            or right['version'].get('platform') != 'Docker Engine - Community'
+            or left['version']['Arch'] != right['version']['Arch']
+            or left['version']['Os'] != 'linux' or right['version']['Os'] != 'linux'):
+        raise ValueError('expected distinct Conjet and full Docker Engine identities on the same Linux architecture')
+    if (candidate.get('runtime_cleanup') is not True or candidate.get('production_unchanged') is not True
+            or any(reference.get('cleanup', {}).get(key) is not True
+                   for key in ('vm_removed', 'children_reaped', 'production_unchanged'))):
+        raise ValueError('launcher cleanup evidence is incomplete')
+    artifacts = {
+        'candidate': {
+            'app': candidate['app_executable_sha256'],
+            'engine': candidate['sha256']['Conjet Core'],
+            'guest': candidate['sha256']['conjet-launchd-linux-arm64'],
+            'kernel': candidate['native_artifacts']['NativeCore/Image'],
+        },
+        'reference': {'engine': reference['engine_sha256'], 'kernel': reference['kernel_sha256']},
+    }
+    if (artifacts['candidate']['engine'] != left['endpoint']['peer_sha256']
+            or any(not re.fullmatch(r'[a-f0-9]{64}', digest)
+                   for role in artifacts.values() for digest in role.values())):
+        raise ValueError('launcher artifact identity is incomplete or mismatched')
+    receipt['identities'] = {'candidate': left, 'reference': right}
+    receipt['artifacts'] = artifacts
+    for key in expected:
+        a, b = (report['compatibility']['cases'][key] for report in (candidate, reference))
+        observations = [json.dumps(row.get('observation'), sort_keys=True, allow_nan=False)
+                        for row in (a, b)]
+        receipt['cases'][key] = {
+            'passed': (a.get('passed') is True and b.get('passed') is True
+                       and a.get('cleanup') is True and b.get('cleanup') is True
+                       and bool(a.get('observation')) and observations[0] == observations[1]),
+            'candidate': a, 'reference': b,
+        }
+    receipt['passed'] = (bool(expected) and candidate.get('passed') is True
+                         and reference.get('passed') is True
+                         and all(row['passed'] for row in receipt['cases'].values()))
+    return receipt
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true', help='validate inventory only; no compatibility claim')
     parser.add_argument('--profile', choices=('single-host', 'swarm', 'advanced', 'all'))
+    parser.add_argument('--candidate', type=Path)
+    parser.add_argument('--reference', type=Path)
+    parser.add_argument('--evidence', type=Path)
     args = parser.parse_args()
-    matrix = json.loads((HERE / 'matrix.json').read_text())
-    validate(matrix)
     if args.check:
-        print(f"Inventory valid: {len(matrix['cases'])} mapped contracts; runtime qualification NOT performed")
+        print(f"Inventory valid: {len(selection('all'))} mapped contracts; runtime qualification NOT performed")
         return 0
-    if not args.profile:
-        parser.error('choose --check or an explicit --profile')
-    selected = [case for case in matrix['cases']
-                if args.profile == 'all' or case['profile'] == args.profile]
-    # Discovery loads repository-owned test modules; no commands come from the manifest.
-    discovered = unittest.TestLoader().discover(str(HERE / 'cases'), pattern='test_*.py')
-    tests = {test.id().rsplit('.', 2)[0] + '.' + test._testMethodName: test
-             for module in discovered for cls in module for test in cls}
-    suite = unittest.TestSuite()
-    for case in selected:
-        key = Path(case['test_file']).stem + '.' + case['test_name']
-        suite.addTest(tests[key])
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    return 0 if qualified(result, len(selected)) else 1
+    if not args.profile or not all((args.candidate, args.reference, args.evidence)):
+        parser.error('runtime qualification requires a profile, both launcher receipts and a new evidence path')
+    output = args.evidence.resolve()
+    if not output.is_relative_to(SCRATCH):
+        parser.error('write evidence under ExternalSSD scratch')
+    files = {'candidate': args.candidate, 'reference': args.reference}
+    os.umask(0o077)
+    with output.open('x') as stream:
+        receipt = {'passed': False}
+        try:
+            inputs = {name: path.read_bytes() for name, path in files.items()}
+            receipt = compare(args.profile, **{name: json.loads(raw) for name, raw in inputs.items()})
+            receipt['receipts'] = {name: {'path': str(files[name]), 'sha256': hashlib.sha256(raw).hexdigest()}
+                                   for name, raw in inputs.items()}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            receipt['error'] = str(error)
+        json.dump(receipt, stream, indent=2)
+        stream.write('\n')
+    return 0 if receipt['passed'] else 1
 
 
 if __name__ == '__main__':

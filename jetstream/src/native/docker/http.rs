@@ -197,7 +197,7 @@ mod framing_tests {
     #[test]
     fn archive_chunked_body_leaves_next_request_intact() {
         let scratch = tempfile::tempdir().unwrap();
-        let (mut reader, _client) = request(b"POST /v1.44/images/load HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n1\r\nd\r\n0\r\n\r\nGET /_ping HTTP/1.1\r\n\r\n");
+        let (mut reader, _client) = request(b"POST /v1.44/images/load HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTrailer: X-Archive\r\n\r\n3\r\nabc\r\n1\r\nd\r\n0\r\nX-Archive: complete\r\n\r\nGET /_ping HTTP/1.1\r\n\r\n");
         let loaded = parse(&mut reader, Some(scratch.path())).unwrap().unwrap();
         let mut body = String::new();
         loaded.archive.unwrap().read_to_string(&mut body).unwrap();
@@ -220,7 +220,7 @@ mod framing_tests {
             (&b"Transfer-Encoding: chunked\r\n\r\n4\r\nab"[..], 400),
             (oversized_chunk.as_bytes(), 413),
             (
-                &b"Transfer-Encoding: chunked\r\n\r\n0\r\nExtra: value\r\n\r\n"[..],
+                &b"Transfer-Encoding: chunked\r\n\r\n0\r\nMalformed-Trailer\r\n\r\n"[..],
                 400,
             ),
         ] {
@@ -231,42 +231,96 @@ mod framing_tests {
                 matches!(parse(&mut reader, Some(scratch.path())), Err(Rejected(code, _)) if code == status)
             );
         }
-        let (mut reader, _client) = request(b"POST /v1.44/containers/create HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
-        assert!(matches!(
-            parse(&mut reader, Some(scratch.path())),
-            Err(Rejected(400, _))
-        ));
+    }
+
+    #[test]
+    fn chunked_json_respects_body_limit_and_preserves_the_next_request() {
+        let (mut reader, _client) = request(b"POST /v1.44/volumes/create HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\nX-Fixture: complete\r\n\r\nGET /_ping HTTP/1.1\r\n\r\n");
+        let created = parse(&mut reader, None).unwrap().unwrap();
+        assert_eq!(created.body, b"{}");
+        assert!(created.archive.is_none());
+        assert_eq!(parse(&mut reader, None).unwrap().unwrap().path, "/_ping");
+
+        let oversized = format!(
+            "POST /volumes/create HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            MAX_BODY + 1
+        );
+        let (mut reader, _client) = request(oversized.as_bytes());
+        assert!(matches!(parse(&mut reader, None), Err(Rejected(413, _))));
+    }
+}
+
+fn header_field(header: &str) -> Result<(&str, &str)> {
+    let (key, value) = header
+        .split_once(':')
+        .ok_or_else(|| Rejected::bad("malformed HTTP header"))?;
+    if key.is_empty()
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^`_|~".contains(&byte))
+        || !value
+            .bytes()
+            .all(|byte| byte == b'\t' || (b' '..=b'~').contains(&byte))
+    {
+        return Err(Rejected::bad("malformed HTTP header"));
+    }
+    Ok((key, value.trim()))
+}
+
+fn read_trailers(reader: &mut BufReader<UnixStream>, deadline: Instant) -> Result<()> {
+    let mut budget = MAX_HEADERS;
+    loop {
+        let trailer = line(reader, &mut budget, deadline)?
+            .ok_or_else(|| Rejected::bad("incomplete HTTP trailers"))?;
+        if trailer.is_empty() {
+            return Ok(());
+        }
+        let (name, _) = header_field(&trailer)?;
+        if [
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "host",
+            "expect",
+            "upgrade",
+        ]
+        .iter()
+        .any(|field| name.eq_ignore_ascii_case(field))
+        {
+            return Err(Rejected::bad("invalid HTTP trailer field"));
+        }
     }
 }
 
 fn copy_chunks(
     reader: &mut BufReader<UnixStream>,
-    writer: &mut File,
+    writer: &mut impl Write,
     deadline: Instant,
     mut budget: usize,
 ) -> Result<()> {
-    // Bound framing overhead independently of the decoded archive.
+    // Bound framing overhead independently of the decoded body.
     let mut framing = 1024 * 1024;
     loop {
         let size = line(reader, &mut framing, deadline)?
-            .ok_or_else(|| Rejected::bad("missing Docker archive chunk"))?;
+            .ok_or_else(|| Rejected::bad("missing Docker body chunk"))?;
         if size.is_empty() || size.len() > 16 || !size.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(Rejected::bad("invalid Docker archive chunk size"));
+            return Err(Rejected::bad("invalid Docker body chunk size"));
         }
         let count = usize::from_str_radix(&size, 16)
-            .map_err(|_| Rejected::bad("invalid Docker archive chunk size"))?;
+            .map_err(|_| Rejected::bad("invalid Docker body chunk size"))?;
         if count > budget {
-            return Err(Rejected(413, "Docker archive exceeds its bound".into()));
-        }
-        if count != 0 {
-            copy_body(reader, writer, count, deadline)?;
-            budget -= count;
-        }
-        if line(reader, &mut framing, deadline)?.as_deref() != Some("") {
-            return Err(Rejected::bad("invalid Docker archive chunk terminator"));
+            return Err(Rejected(
+                413,
+                "Docker request body exceeds its bound".into(),
+            ));
         }
         if count == 0 {
-            return Ok(());
+            return read_trailers(reader, deadline);
+        }
+        copy_body(reader, writer, count, deadline)?;
+        budget -= count;
+        if line(reader, &mut framing, deadline)?.as_deref() != Some("") {
+            return Err(Rejected::bad("invalid Docker body chunk terminator"));
         }
     }
 }
@@ -303,6 +357,7 @@ fn parse(
             .and_then(|route| route.strip_suffix("/archive"))
             .is_some_and(super::request::name);
     let spooled = load || copy || build;
+    let accepts_body = matches!(method, "POST" | "PUT");
     let body_limit = if load {
         super::archive::LIMIT
     } else if copy {
@@ -324,28 +379,15 @@ fn parse(
         if header.is_empty() {
             break;
         }
-        let (key, value) = header
-            .split_once(':')
-            .ok_or_else(|| Rejected::bad("malformed HTTP header"))?;
-        if key.is_empty()
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^`_|~".contains(&byte))
-            || !value
-                .bytes()
-                .all(|byte| byte == b'\t' || (b' '..=b'~').contains(&byte))
-        {
-            return Err(Rejected::bad("malformed HTTP header"));
-        }
-        let value = value.trim();
+        let (key, value) = header_field(&header)?;
         if key.eq_ignore_ascii_case("transfer-encoding") {
-            if !spooled || chunked || !value.eq_ignore_ascii_case("chunked") {
+            if !accepts_body || chunked || !value.eq_ignore_ascii_case("chunked") {
                 return Err(Rejected::bad("unsupported Docker request body framing"));
             }
             chunked = true;
         }
         if key.eq_ignore_ascii_case("expect") {
-            if !spooled || expect || !value.eq_ignore_ascii_case("100-continue") {
+            if !accepts_body || expect || !value.eq_ignore_ascii_case("100-continue") {
                 return Err(Rejected::bad("unsupported Docker request expectation"));
             }
             expect = true;
@@ -390,38 +432,47 @@ fn parse(
             return Err(Rejected::bad("duplicate query option"));
         }
     }
-    let mut body = Vec::new();
-    let archive = if spooled {
-        use std::io::Seek;
-        if (chunked && size.is_some()) || (!chunked && size.unwrap_or(0) == 0) {
+    if chunked && size.is_some() {
+        return Err(Rejected::bad("invalid Docker request body framing"));
+    }
+    let count = size.unwrap_or(0);
+    let mut archive = if spooled {
+        if !chunked && count == 0 {
             return Err(Rejected::bad("invalid Docker archive framing"));
         }
         let root = archive_root
             .ok_or_else(|| Rejected(501, "native archive scratch is not configured".into()))?;
-        let mut spool = tempfile::tempfile_in(root)
-            .map_err(|_| Rejected::internal("cannot spool Docker archive"))?;
-        if expect {
-            reader
-                .get_ref()
-                .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-                .map_err(|_| Rejected::bad("Docker archive client disconnected"))?;
-        }
+        Some(
+            tempfile::tempfile_in(root)
+                .map_err(|_| Rejected::internal("cannot spool Docker archive"))?,
+        )
+    } else {
+        None
+    };
+    if expect && (chunked || count != 0) {
+        reader
+            .get_ref()
+            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+            .map_err(|_| Rejected::bad("Docker request client disconnected"))?;
+    }
+    let mut body = Vec::new();
+    if let Some(spool) = archive.as_mut() {
+        use std::io::Seek;
         let deadline = Instant::now() + ARCHIVE_READ_TIMEOUT;
         if chunked {
-            copy_chunks(reader, &mut spool, deadline, body_limit)?;
+            copy_chunks(reader, spool, deadline, body_limit)?;
         } else {
-            copy_body(reader, &mut spool, size.unwrap_or(0), deadline)?;
+            copy_body(reader, spool, count, deadline)?;
         }
         spool
             .rewind()
             .map_err(|_| Rejected::internal("cannot rewind Docker archive"))?;
-        Some(spool)
+    } else if chunked {
+        copy_chunks(reader, &mut body, deadline, body_limit)?;
     } else {
-        let count = size.unwrap_or(0);
         body.reserve_exact(count);
         copy_body(reader, &mut body, count, deadline)?;
-        None
-    };
+    }
     Ok(Some(Request {
         method: method.into(),
         path: path.into(),
