@@ -1016,6 +1016,8 @@
       "acceptance": "Explicit test context remains isolated; startup and stop do not replace production socket or selected context.",
       "test_file": "cases/test_product.py",
       "test_name": "test_socket_coexistence",
+      "required_restarts": 1,
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
