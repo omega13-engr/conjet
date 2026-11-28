@@ -152,11 +152,24 @@ pub(super) fn ask(owner: &Owner, action: &str, name: Option<&str>) -> Result<Val
     exchange(owner, operation)
 }
 
+pub(super) fn remove_layer(owner: &Owner, id: &str) -> Result<(), Rejected> {
+    let reply = exchange(owner, json!({"action":"remove_layer","id":id}))?;
+    if reply["removed"] != true {
+        return Err(Rejected::internal(
+            "native workload layer removal was not confirmed",
+        ));
+    }
+    Ok(())
+}
+
 fn exchange(owner: &Owner, operation: Value) -> Result<Value, Rejected> {
     // Removing a worker cache waits for the full recursive unlink and the
     // guest directory fsync. Keep that acknowledgement within a distinct
     // bounded budget so a large cache is not mistaken for lost ownership.
-    let budget_ms = if operation["action"] == "remove" {
+    let budget_ms = if matches!(
+        operation["action"].as_str(),
+        Some("remove" | "remove_layer")
+    ) {
         15_000
     } else {
         1_500

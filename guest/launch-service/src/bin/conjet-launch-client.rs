@@ -40,6 +40,7 @@ fn launch(
         operation_id: None,
         budget_ms: 3_000,
         spec: LaunchSpec {
+            retained_layer: None,
             docker_resource_defaults: false,
             docker_default_capabilities: false,
             memory_swap_disabled: false,

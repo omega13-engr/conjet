@@ -305,6 +305,9 @@ enum VolumeOperation {
     Remove {
         name: String,
     },
+    RemoveLayer {
+        id: String,
+    },
 }
 
 impl VolumeOperation {
@@ -334,6 +337,13 @@ impl VolumeOperation {
             Self::Inspect { name } => json!(volumes::inspect(&name).map_err(error)?),
             Self::Remove { name } => {
                 volumes::remove(&name).map_err(error)?;
+                json!({"removed": true})
+            }
+            Self::RemoveLayer { id } => {
+                crate::workload_layers::remove(&id).map_err(|failure| match failure.kind() {
+                    io::ErrorKind::WouldBlock => ("in_use", "native workload layer is in use"),
+                    _ => error(failure),
+                })?;
                 json!({"removed": true})
             }
         };

@@ -96,6 +96,8 @@ pub struct LaunchRequest {
 #[serde(deny_unknown_fields)]
 pub struct LaunchSpec {
     pub image_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_layer: Option<String>,
     pub argv: Vec<String>,
     pub env: Vec<String>,
     pub cwd: String,
@@ -205,6 +207,13 @@ fn default_volume_target() -> String {
 
 fn is_data_target(target: &str) -> bool {
     target == VOLUME_TARGET
+}
+
+pub fn valid_retained_layer_id(id: &str) -> bool {
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 pub fn valid_volume_target(target: &str) -> bool {
@@ -521,6 +530,11 @@ impl LaunchSpec {
 
     fn validate_process(&self, search_path: bool) -> Result<[u8; 32], SpecError> {
         let spec = self;
+        if spec.retained_layer.as_ref().is_some_and(|id| {
+            !valid_retained_layer_id(id) || spec.build_snapshot.is_some() || spec.buildkit_worker
+        }) {
+            return Err(SpecError::Volume);
+        }
         if spec.build_snapshot.as_ref().is_some_and(|snapshot| {
             !crate::build_snapshot::valid_id(&snapshot.id)
                 || snapshot.inode == 0
@@ -742,6 +756,7 @@ mod tests {
             operation_id: None,
             budget_ms: 500,
             spec: LaunchSpec {
+                retained_layer: None,
                 image_digest: format!("sha256:{}", "a0".repeat(32)),
                 argv: vec!["/bin/probe".into()],
                 env: vec!["LANG=C".into()],

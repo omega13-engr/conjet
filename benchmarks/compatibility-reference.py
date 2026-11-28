@@ -85,20 +85,13 @@ def main():
   digest: "sha512:f42866fe22b4baf9f0ed4f81d620064f2a4b86b18b92bfe3aaaa40babf6819d39cbf0caaaad13f4ae3e7c9f82cbd78b0c8cabadd8bc737ce13578e61fa86970c"
 arch: aarch64
 vmType: vz
+plain: true
 cpus: 2
 memory: 4GiB
 disk: 16GiB
 mounts: []
-containerd:
-  system: false
-  user: false
 ssh:
   loadDotSSHPubKeys: false
-portForwards:
-- guestIP: 0.0.0.0
-  proto: any
-  ignore: true
-  guestPortRange: [1, 65535]
 ''')
         report['lima_config_sha256'] = sha256(config)
         report['lima_sha256'] = sha256(lima)

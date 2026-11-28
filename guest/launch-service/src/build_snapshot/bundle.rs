@@ -263,6 +263,7 @@ fn process_spec(
     let mut field = |name| process.remove(name).ok_or("missing build process field");
     let live = snapshot.live_worker;
     let spec = LaunchSpec {
+        retained_layer: None,
         docker_resource_defaults: live,
         docker_default_capabilities: false,
         memory_swap_disabled: false,

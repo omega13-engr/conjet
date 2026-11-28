@@ -258,6 +258,7 @@ pub(crate) mod guest {
             }
             remove_pending()?;
             names()?;
+            crate::workload_layers::initialize()?;
             let workspace = if combined {
                 match DirBuilder::new().mode(0o700).create(path(BUILD_WORKSPACE)) {
                     Ok(()) => {}

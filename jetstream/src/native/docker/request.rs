@@ -310,6 +310,7 @@ impl Image {
             }
         };
         let spec = LaunchSpec {
+            retained_layer: None,
             image_digest: self.config_digest.clone(),
             argv,
             env: environment

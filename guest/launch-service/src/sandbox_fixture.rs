@@ -38,6 +38,7 @@ pub(crate) struct Sandbox {
     base: PathBuf,
     new_root: CString,
     root: RootMode,
+    _retained_layer: Option<crate::workload_layers::Layer>,
     cwd: CString,
     filter: WorkloadFilter,
     resolver: Option<std::net::Ipv4Addr>,
@@ -426,6 +427,17 @@ impl Sandbox {
                 std::fs::create_dir(base.join(entry))?;
             }
             let snapshot = oci.and_then(|spec| spec.build_snapshot.as_ref());
+            let retained = oci
+                .and_then(|spec| {
+                    spec.retained_layer
+                        .as_deref()
+                        .map(|id| (id, &spec.image_digest))
+                })
+                .map(|(id, digest)| crate::workload_layers::Layer::open(id, digest))
+                .transpose()?;
+            let writable = retained
+                .as_ref()
+                .map_or(base.as_path(), crate::workload_layers::Layer::path);
             let worker_mounts = match (oci, snapshot) {
                 (Some(spec), Some(snapshot)) if snapshot.bundle_policy && !snapshot.live_worker => {
                     let bundle =
@@ -457,7 +469,12 @@ impl Sandbox {
                 base.join("lower")
             } else if let Some(spec) = oci {
                 let (lower, links) = image_lower(&spec.image_digest)?;
-                prepare_oci_hardlinks(&lower, &links, &base.join("upper"))?;
+                if retained.as_ref().is_none_or(|layer| !layer.initialized()) {
+                    prepare_oci_hardlinks(&lower, &links, &writable.join("upper"))?;
+                    if let Some(layer) = &retained {
+                        layer.finish_setup(&spec.image_digest)?;
+                    }
+                }
                 lower
             } else {
                 std::fs::copy(executable, base.join("lower/bin/probe"))?;
@@ -521,10 +538,11 @@ impl Sandbox {
                     None => RootMode::Overlay(CString::new(format!(
                         "lowerdir={},upperdir={}/upper,workdir={}/work,userxattr",
                         lower.display(),
-                        base.display(),
-                        base.display()
+                        writable.display(),
+                        writable.display()
                     ))?),
                 },
+                _retained_layer: retained,
                 filter: WorkloadFilter::new(
                     bridge,
                     oci.is_some_and(|spec| spec.build_snapshot.is_none()) || live_mounts.is_some(),

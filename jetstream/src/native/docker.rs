@@ -7,6 +7,7 @@ mod build_mirror;
 mod build_proxy;
 mod build_registry;
 mod buildkit;
+mod container_store;
 mod discovery;
 mod events;
 mod exec;
@@ -1061,6 +1062,7 @@ impl Item {
 struct Ledger {
     active: Vec<Arc<Item>>,
     tags: image::Tags,
+    saved_containers: container_store::Records,
     transient_build_archives: BTreeSet<String>,
     registry_images: BTreeMap<String, String>,
     history: VecDeque<Arc<Item>>,
@@ -1090,6 +1092,7 @@ struct Owner {
     ledger: Mutex<Ledger>,
     store: Option<Mutex<registry::Store>>,
     archive_root: Option<PathBuf>,
+    retain_containers: bool,
     bind_root: Option<bind::Root>,
     pinned_build_registry: bool,
     build_client: Option<build_api::Client>,
@@ -1112,11 +1115,18 @@ impl Owner {
             .map(|store| image::Tags::load(store.root()))
             .transpose()?
             .unwrap_or_default();
-        Ok(Self {
+        let retain_containers = native.supervisor_pid.is_some() && store.is_some();
+        let saved_containers = if let Some(store) = store.as_ref().filter(|_| retain_containers) {
+            container_store::load(store.root())?
+        } else {
+            container_store::Records::new()
+        };
+        let owner = Self {
             memory_bytes: native.identity.memory_mib * 1024 * 1024,
             image,
             mapped_ids: native.mapped_ids,
             archive_root: store.as_ref().map(|store| store.root().to_owned()),
+            retain_containers,
             bind_root,
             pinned_build_registry,
             build_client,
@@ -1124,12 +1134,61 @@ impl Owner {
             native: Mutex::new(native),
             ledger: Mutex::new(Ledger {
                 tags,
+                saved_containers: saved_containers.clone(),
                 ..Ledger::default()
             }),
             store: store.map(Mutex::new),
             exec_peer: Mutex::new(None),
             event_changed: Condvar::new(),
-        })
+        };
+        for (id, record) in &saved_containers {
+            let result = if record.removing {
+                let mut ledger = owner.ledger.lock().unwrap();
+                owner.remove_saved_container(&mut ledger, id)
+            } else {
+                owner
+                    .create_item(
+                        Some(&record.name),
+                        record.config.clone(),
+                        Some((id, record)),
+                    )
+                    .map(|_| ())
+            };
+            result.map_err(|error| {
+                anyhow::anyhow!("cannot restore native container {id}: {}", error.1)
+            })?;
+        }
+        Ok(owner)
+    }
+
+    fn publish_containers(
+        &self,
+        ledger: &mut Ledger,
+        records: container_store::Records,
+    ) -> Result<(), Rejected> {
+        let root = self
+            .archive_root
+            .as_ref()
+            .ok_or_else(|| Rejected::internal("container record store is unavailable"))?;
+        container_store::save(root, &records).map_err(|error| {
+            Rejected::internal(format!("cannot save native container records: {error:#}"))
+        })?;
+        ledger.saved_containers = records;
+        Ok(())
+    }
+
+    fn remove_saved_container(&self, ledger: &mut Ledger, id: &str) -> Result<(), Rejected> {
+        let mut records = ledger.saved_containers.clone();
+        let Some(record) = records.get_mut(id) else {
+            return Ok(());
+        };
+        if !record.removing {
+            record.removing = true;
+            self.publish_containers(ledger, records.clone())?;
+        }
+        volume::remove_layer(self, id)?;
+        records.remove(id);
+        self.publish_containers(ledger, records)
     }
 
     fn publish_tags(&self, ledger: &mut Ledger, tags: image::Tags) -> Result<(), Rejected> {
@@ -2059,6 +2118,15 @@ impl Owner {
     }
 
     fn create(&self, name: Option<&str>, config: Value) -> Result<Arc<Item>, Rejected> {
+        self.create_item(name, config, None)
+    }
+
+    fn create_item(
+        &self,
+        name: Option<&str>,
+        mut config: Value,
+        restored: Option<(&str, &container_store::Record)>,
+    ) -> Result<Arc<Item>, Rejected> {
         if name.is_some_and(|name| !request::name(name)) {
             return Err(Rejected::bad("invalid container name"));
         }
@@ -2081,9 +2149,16 @@ impl Owner {
                 ));
             }
         }
-        let id = hex(&random::<32>()
-            .map_err(|_| Rejected::internal("cannot allocate container identity"))?);
+        let id = match restored {
+            Some((id, _)) => id.to_owned(),
+            None => hex(&random::<32>()
+                .map_err(|_| Rejected::internal("cannot allocate container identity"))?),
+        };
         let name = name.unwrap_or(&id[..12]).to_owned();
+        let requested_image = config["Image"].clone();
+        if let Some((_, record)) = restored {
+            config["Image"] = json!(record.image);
+        }
         let bind = bind::Binding::requested(&config, self.bind_root.as_ref())?;
         let mount = if bind.is_none() {
             volume::requested(&config)?
@@ -2221,6 +2296,72 @@ impl Owner {
             })
             .transpose()?;
         let auto_remove = config["HostConfig"]["AutoRemove"] == true;
+        let retained = self.retain_containers
+            && !auto_remove
+            && !buildkit_worker
+            && bind.is_none()
+            && network
+                .as_ref()
+                .is_none_or(|entry| entry.network.scope == BridgeScope::BuiltIn);
+        if restored.is_some() && !retained {
+            return Err(Rejected::internal(
+                "saved container no longer supports retained state",
+            ));
+        }
+        if retained {
+            spec["retained_layer"] = json!(id);
+        }
+        let created = restored.map_or_else(
+            || {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            },
+            |(_, record)| record.created,
+        );
+        if let Some((_, _)) = restored {
+            config["Image"] = requested_image;
+        } else if retained {
+            let image = ledger
+                .tags
+                .resolve(config["Image"].as_str().expect("validated image"))
+                .to_owned();
+            let mut records = ledger.saved_containers.clone();
+            records.insert(
+                id.clone(),
+                container_store::Record {
+                    name: name.clone(),
+                    created,
+                    config: config.clone(),
+                    image,
+                    generation: 0,
+                    started_at: None,
+                    exit_code: None,
+                    removing: false,
+                },
+            );
+            self.publish_containers(&mut ledger, records)?;
+        }
+        let mut state = Lifecycle {
+            network,
+            replacement_name: replacement.map(|(_, final_name)| final_name),
+            ..Lifecycle::default()
+        };
+        if let Some((_, record)) = restored {
+            state.started = record.started_at.is_some();
+            state.started_at = record.started_at.clone();
+            state.generation = record.generation;
+            if state.started {
+                state.terminal = Some(Arc::new(Terminal {
+                    code: record.exit_code.unwrap_or(137),
+                    stdout: vec![],
+                    stderr: vec![],
+                    witness: json!({}),
+                    delivery_error: None,
+                }));
+            }
+        }
         let item = Arc::new(Item {
             container: Container {
                 id,
@@ -2229,27 +2370,22 @@ impl Owner {
                 spec,
                 volume,
                 bind,
-                created: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
+                created,
                 healthcheck,
                 auto_remove,
                 buildkit_worker,
                 cancel: AtomicU8::new(0),
             },
-            state: Mutex::new(Lifecycle {
-                network,
-                replacement_name: replacement.map(|(_, final_name)| final_name),
-                ..Lifecycle::default()
-            }),
+            state: Mutex::new(state),
             control: Mutex::new(()),
             input_attachment: Mutex::new(()),
             changed: Condvar::new(),
             published: Mutex::new(published),
         });
         ledger.active.push(item.clone());
-        self.event(&mut ledger, "create", &item, None);
+        if restored.is_none() {
+            self.event(&mut ledger, "create", &item, None);
+        }
         Ok(item)
     }
 
@@ -2459,6 +2595,10 @@ impl Owner {
             || (state.started && state.terminal.is_none())
             || ledger.poisoned
             || ledger.closing
+            || ledger
+                .saved_containers
+                .get(&item.container.id)
+                .is_some_and(|record| record.removing)
         {
             return Err(Rejected(
                 409,
@@ -2503,11 +2643,36 @@ impl Owner {
             }
             spec
         });
+        let previous_records = if ledger.saved_containers.contains_key(&item.container.id) {
+            let previous = ledger.saved_containers.clone();
+            let mut records = previous.clone();
+            let record = records
+                .get_mut(&item.container.id)
+                .expect("saved container");
+            record.started_at = Some(events::daemon_time()?);
+            record.exit_code = None;
+            record.generation = generation;
+            self.publish_containers(&mut ledger, records)?;
+            Some(previous)
+        } else {
+            None
+        };
         let owner = self.clone();
         let work = item.clone();
-        let worker = thread::Builder::new()
+        let worker = match thread::Builder::new()
             .spawn(move || owner.run(work, generation, spec.as_ref()))
-            .map_err(|_| Rejected::internal("native worker allocation failed"))?;
+        {
+            Ok(worker) => worker,
+            Err(_) => {
+                if let Some(records) = previous_records {
+                    self.publish_containers(&mut ledger, records)?;
+                }
+                return Err(Rejected::internal("native worker allocation failed"));
+            }
+        };
+        if let Some(record) = ledger.saved_containers.get(&item.container.id) {
+            state.started_at.clone_from(&record.started_at);
+        }
         ledger.workers.push(worker);
         if let Some(terminal) = state.terminal.take() {
             let previous = state.generation;
@@ -2556,6 +2721,16 @@ impl Owner {
         }
         match terminal {
             Ok(terminal) => {
+                if ledger.saved_containers.contains_key(&item.container.id) {
+                    let mut records = ledger.saved_containers.clone();
+                    let record = records
+                        .get_mut(&item.container.id)
+                        .expect("saved container");
+                    record.exit_code = Some(terminal.code);
+                    if let Err(error) = self.publish_containers(&mut ledger, records) {
+                        state.error = Some(error.1);
+                    }
+                }
                 self.event(&mut ledger, "die", &item, Some(&terminal));
                 state.live = Default::default();
                 state.terminal = Some(Arc::new(terminal));
@@ -2687,6 +2862,7 @@ impl Owner {
                 return Err(Rejected::internal("guest cleanup is unresolved"));
             }
             if !state.started || state.terminal.is_some() {
+                self.remove_saved_container(&mut ledger, &item.container.id)?;
                 self.retire(&mut ledger, item, &mut state);
                 return Ok(());
             }
