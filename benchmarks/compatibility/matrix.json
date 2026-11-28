@@ -1130,6 +1130,7 @@
       "acceptance": "Foreign-platform pull, build and execution use emulation correctly or fail explicitly before execution.",
       "test_file": "cases/test_advanced.py",
       "test_name": "test_amd64",
+      "support_files": ["cases/support.py", "cases/image_archives.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

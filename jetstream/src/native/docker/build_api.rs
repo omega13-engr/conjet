@@ -36,14 +36,21 @@ pub(super) struct Options {
 
 impl Options {
     pub(super) fn parse(query: &BTreeMap<String, String>) -> Result<Self, Rejected> {
+        if query
+            .get("platform")
+            .is_some_and(|platform| platform != "linux/arm64")
+        {
+            return Err(Rejected::bad(
+                "only Linux ARM64 Docker builds are supported",
+            ));
+        }
         if !query.iter().all(|(key, value)| match key.as_str() {
             "dockerfile" => value == "Dockerfile",
             "networkmode" => value == "none",
-            "platform" => value == "linux/arm64",
             "version" => value == "1",
             "rm" | "forcerm" => matches!(value.as_str(), "1" | "true"),
             "nocache" => matches!(value.as_str(), "0" | "1" | "true" | "false"),
-            "t" => true,
+            "platform" | "t" => true,
             _ => false,
         }) {
             return Err(Rejected::bad("unsupported native Docker build option"));

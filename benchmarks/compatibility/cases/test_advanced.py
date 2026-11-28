@@ -1,15 +1,134 @@
 """Unimplemented conformance contracts; replace each failure with its real fixture."""
+import io
 import json
+import tarfile
 import unittest
+from urllib.parse import urlencode
 import uuid
 
-from support import API, alpine, container, exec_command
+import image_archives
+from support import API, alpine, container, demultiplex, exec_command
 
 
 class CompatibilityTests(unittest.TestCase):
     def test_amd64(self):
         'DC-085: Foreign-platform pull, build and execution use emulation correctly or fail explicitly before execution.'
-        self.fail('UNIMPLEMENTED DC-085; no runtime compatibility evidence')
+        session = self.compatibility
+        short = 'conjet-foreign-' + uuid.uuid4().hex[:12]
+        image_name = 'docker.io/library/alpine'
+        digest = 'sha256:4d889c14e7d5a73929ab00be2ef8ff22437e7cbc545931e52554a7b00e123d8b'
+        config = 'sha256:3cb067eab609612d81b4d82ff8ad71d73482bb3059a87b642d7e14f0ed659cde'
+        reference = image_name + '@' + digest
+        tagged = short + ':local'
+        marker = b'neutral-foreign-architecture'
+        platform = 'linux/amd64'
+
+        def refused(raw):
+            detail = raw.decode(errors='replace').lower()
+            self.assertRegex(detail, r'exec format error|no matching manifest|does not match the specified platform'
+                                      r'|only (?:the )?linux arm64|unsupported.*(?:platform|architecture)'
+                                      r'|(?:platform|architecture).*unsupported')
+
+        def output_has_error(raw):
+            rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+            self.assertTrue(rows, raw)
+            return any(row.get('error') or row.get('errorDetail') for row in rows)
+
+        def run_foreign(image, expected_available):
+            alias = short + ('-built' if image == tagged else '-pulled')
+            target = API + '/containers/' + alias
+            route = API + '/containers/create?' + urlencode({'name': alias, 'platform': platform})
+            try:
+                status, raw = session.request('POST', route, {
+                    'Image': image, 'Cmd': ['/bin/sh', '-c', 'printf "%s\n" "$1"; uname -m',
+                                            'fixture', marker.decode()],
+                    'HostConfig': {'NetworkMode': 'none'},
+                })
+                if status != 201:
+                    refused(raw)
+                    self.assertEqual(session.request('GET', target + '/json')[0], 404)
+                    return
+                self.assertTrue(expected_available)
+                status, raw = session.request('POST', target + '/start')
+                if status != 204:
+                    refused(raw)
+                    status, detail = session.request('GET', target + '/json')
+                    self.assertEqual(status, 200, detail)
+                    self.assertIs(json.loads(detail)['State']['Running'], False)
+                    code, output = session.request('GET', target + '/logs?stdout=true&stderr=true')
+                    self.assertIn(code, (200, 404), output)
+                    self.assertNotIn(marker, output)
+                    return
+                status, raw = session.request('POST', target + '/wait?condition=not-running')
+                self.assertEqual(status, 200, raw)
+                exit_code = json.loads(raw)['StatusCode']
+                status, raw = session.request('GET', target + '/logs?stdout=true&stderr=true')
+                self.assertEqual(status, 200, raw)
+                stdout, stderr = demultiplex(self, raw)
+                if exit_code == 0:
+                    self.assertEqual((stdout, stderr), (marker + b'\nx86_64\n', b''))
+                else:
+                    # Some daemon versions acknowledge Start after the OCI
+                    # shim starts, then report the kernel exec failure via logs.
+                    status, raw = session.request('GET', target + '/json')
+                    self.assertEqual(status, 200, raw)
+                    state = json.loads(raw)['State']
+                    self.assertIs(state['Running'], False)
+                    self.assertEqual(state['ExitCode'], exit_code)
+                    self.assertNotIn(marker, stdout + stderr)
+                    refused(stderr + state.get('Error', '').encode())
+            finally:
+                status, raw = session.request('DELETE', target + '?force=true')
+                self.assertIn(status, (204, 404), raw)
+
+        original, _ = session.request('GET', image_archives.image_path(reference) + '/json')
+        self.assertIn(original, (200, 404))
+        try:
+            query = {'fromImage': image_name, 'tag': digest, 'platform': platform}
+            pull = type(session)(session.connection.peer(timeout=80))
+            status, raw = pull.request('POST', API + '/images/create?' + urlencode(query))
+            available = status == 200 and not output_has_error(raw)
+            if available:
+                details = image_archives.inspect(self, session, reference)
+                self.assertEqual((details['Os'], details['Architecture']), ('linux', 'amd64'))
+                self.assertIn(details['Id'], (digest, config))
+                self.assertTrue(any(ref.endswith('@' + digest) for ref in details['RepoDigests']))
+            else:
+                refused(raw)
+                self.assertEqual(session.request('GET', image_archives.image_path(reference) + '/json')[0],
+                                 404)
+            run_foreign(reference, available)
+
+            context = io.BytesIO()
+            with tarfile.open(fileobj=context, mode='w', format=tarfile.USTAR_FORMAT) as tar:
+                dockerfile = (f'FROM {reference}\n'
+                              'RUN test "$(uname -m)" = x86_64 && echo verified-foreign-build\n').encode()
+                entry = tarfile.TarInfo('Dockerfile')
+                entry.mode, entry.size = 0o644, len(dockerfile)
+                tar.addfile(entry, io.BytesIO(dockerfile))
+            query = {'t': tagged, 'platform': platform, 'version': '1',
+                     'networkmode': 'none', 'rm': '1', 'forcerm': '1', 'nocache': '1'}
+            status, raw = image_archives.transfer(self, session, 'POST',
+                API + '/build?' + urlencode(query), context.getvalue())
+            built = status == 200 and not output_has_error(raw)
+            if built:
+                self.assertIn(b'verified-foreign-build', raw)
+                details = image_archives.inspect(self, session, tagged)
+                self.assertEqual((details['Os'], details['Architecture']), ('linux', 'amd64'))
+                run_foreign(tagged, True)
+            else:
+                refused(raw)
+                self.assertEqual(session.request('GET', image_archives.image_path(tagged) + '/json')[0],
+                                 404)
+        finally:
+            image_archives.clean(self, session, tagged)
+            if original == 404:
+                status, raw = session.request('DELETE', image_archives.image_path(reference))
+                self.assertIn(status, (200, 404), raw)
+        session.record({'requested_platform': platform, 'pinned_foreign_manifest': digest,
+                        'foreign_pull_identity_or_explicit_refusal': True,
+                        'foreign_execution_or_explicit_refusal': True,
+                        'foreign_build_or_explicit_refusal': True})
 
     def test_plugins(self):
         'DC-086: Each advertised volume, network and logging plugin contract passes lifecycle and failure tests.'
