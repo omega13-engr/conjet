@@ -10,6 +10,7 @@ const BPF_RETURN: u16 = 0x06;
 const BPF_AND: u16 = 0x54;
 const SYS_FADVISE64_AARCH64: u32 = 223;
 // Linux capability numbers for CHOWN, DAC_OVERRIDE, SETGID, and SETUID.
+const NET_ADMIN: u32 = 1 << 12;
 const REDIS_CAPABILITIES: u32 = (1 << 0) | (1 << 1) | (1 << 6) | (1 << 7);
 // CHOWN, DAC_OVERRIDE, FOWNER and SYS_ADMIN in the worker's mapped user namespace.
 const BUILDKIT_CAPABILITIES: u32 = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 21);
@@ -46,6 +47,7 @@ pub(crate) fn drop_workload_identity(
     gid: u32,
     supplementary_groups: &[u32],
     policy: WorkloadPolicy,
+    docker_net_admin: bool,
 ) -> io::Result<()> {
     let mut groups = [0; 128];
     let count = unsafe { libc::getgroups(groups.len() as i32, groups.as_mut_ptr()) };
@@ -71,6 +73,9 @@ pub(crate) fn drop_workload_identity(
         WorkloadPolicy::BuildKitRun | WorkloadPolicy::DockerDefault if uid == 0 => 0xa80425fb,
         _ => 0,
     };
+    // The caller has already entered the owned user and network namespaces.
+    let bounding = allowed | if docker_net_admin { NET_ADMIN } else { 0 };
+    let allowed = if uid == 0 { bounding } else { allowed };
     for capability in 0..64 {
         let supported = unsafe { libc::prctl(libc::PR_CAPBSET_READ, capability, 0, 0, 0) };
         if supported < 0 {
@@ -80,7 +85,7 @@ pub(crate) fn drop_workload_identity(
             }
             return Err(error);
         }
-        if (u64::from(allowed) & (1 << capability)) == 0 {
+        if (u64::from(bounding) & (1 << capability)) == 0 {
             checked(unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) })?;
         }
     }

@@ -911,6 +911,15 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             let reference = image_reference(path, "/json")?;
             Reply::json(200, owner.inspect_image(&reference)?)
         }
+        ("GET", _) if path.starts_with("/images/") && path.ends_with("/history") => {
+            if !query.is_empty() {
+                return Err(Rejected::bad("unsupported image history option"));
+            }
+            Reply::json(
+                200,
+                owner.image_history(&image_reference(path, "/history")?)?,
+            )
+        }
         ("POST", _) if path.starts_with("/images/") && path.ends_with("/tag") => {
             let reference = image_reference(path, "/tag")?;
             if query

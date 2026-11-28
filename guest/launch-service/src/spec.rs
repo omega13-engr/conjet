@@ -133,6 +133,8 @@ pub struct LaunchSpec {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub docker_default_capabilities: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub docker_net_admin: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub memory_swap_disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_files_limit: Option<OpenFilesLimit>,
@@ -572,6 +574,7 @@ impl LaunchSpec {
             && self.uid == 0
             && self.gid == 0
             && self.cwd == "/data"
+            && !self.docker_net_admin
             && self.build_snapshot.is_none()
             && (self.bind.is_none() && self.binds.is_empty())
             && self
@@ -755,7 +758,7 @@ impl LaunchSpec {
                 return Err(SpecError::Environment);
             }
         }
-        if spec.docker_default_capabilities
+        if (spec.docker_default_capabilities || spec.docker_net_admin)
             && (!search_path || spec.build_snapshot.is_some() || spec.buildkit_worker)
         {
             return Err(SpecError::Identity);
@@ -891,6 +894,7 @@ mod tests {
                 },
                 docker_resource_defaults: false,
                 docker_default_capabilities: false,
+                docker_net_admin: false,
                 memory_swap_disabled: false,
                 open_files_limit: None,
                 open_stdin: false,

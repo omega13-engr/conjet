@@ -637,6 +637,7 @@ pub fn run_helper(
                 } else {
                     security::WorkloadPolicy::Standard
                 },
+                spec.docker_net_admin,
             )?;
             checked(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;
             let mut poll = libc::pollfd {

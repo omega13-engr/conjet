@@ -267,6 +267,7 @@ fn process_spec(
         rootfs_read_only: false,
         docker_resource_defaults: live,
         docker_default_capabilities: false,
+        docker_net_admin: false,
         memory_swap_disabled: false,
         open_files_limit: None,
         open_stdin: false,

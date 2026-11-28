@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 import uuid
 
-from support import ALPINE, API
+from support import ALPINE, API, exec_command
 
 
 DOCKER = Path('/opt/homebrew/bin/docker')
@@ -281,7 +281,74 @@ services:
 
     def test_resource_fields(self):
         'DC-069: Compose limits, reservations and capabilities reach actual cgroup and process state; no silent ineffective settings.'
-        self.fail('UNIMPLEMENTED DC-069; no runtime compatibility evidence')
+        session = self.compatibility
+        connection = session.connection
+        project = 'conjet-limits-' + uuid.uuid4().hex[:12]
+        alias = f'{project}-worker-1'
+        path = API + '/containers/' + alias
+        memory, reservation, swap = 48 * 1024 * 1024, 16 * 1024 * 1024, 80 * 1024 * 1024
+        file_name = 'compose-limits.yaml'
+        fixture = f'''services:
+  worker:
+    image: "{ALPINE}"
+    pull_policy: never
+    network_mode: none
+    command: ["/bin/sleep", "120"]
+    cap_drop: ["ALL"]
+    cap_add: ["NET_ADMIN"]
+    cpuset: "1"
+    memswap_limit: "80M"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.250"
+          memory: "48M"
+          pids: 16
+        reservations:
+          memory: "16M"
+'''
+        with TemporaryDirectory(dir=connection.root) as scratch:
+            root = Path(scratch)
+            (root / file_name).write_text(fixture)
+            call = compose_command(self, connection, root, project, ('-f', file_name))
+            try:
+                up = call('up', '--detach', '--wait', '--wait-timeout', '10')
+                self.assertEqual(up.returncode, 0, up.stderr)
+                status, raw = session.request('GET', path + '/json')
+                self.assertEqual(status, 200, raw)
+                inspected = json.loads(raw)
+                self.assertIs(inspected['State']['Running'], True)
+                expected = {'Memory': memory, 'MemoryReservation': reservation,
+                            'MemorySwap': swap, 'NanoCpus': 250_000_000,
+                            'PidsLimit': 16, 'CpusetCpus': '1'}
+                actual = inspected['HostConfig']
+                self.assertEqual({field: actual[field] for field in expected}, expected)
+                self.assertEqual([cap.removeprefix('CAP_') for cap in actual['CapAdd']], ['NET_ADMIN'])
+                controls = ['memory.max', 'memory.low', 'memory.swap.max', 'cpu.max',
+                            'pids.max', 'cpuset.cpus.effective']
+                code, output, error = exec_command(self, session, path, [
+                    '/bin/cat', *('/sys/fs/cgroup/' + key for key in controls),
+                ])
+                self.assertEqual((code, error), (0, b''))
+                output = output.decode().splitlines()
+                self.assertEqual(output, [str(memory), str(reservation), str(swap - memory),
+                                          '25000 100000', '16', '1'])
+                code, capability, error = exec_command(self, session, path, [
+                    '/usr/bin/awk', '/^CapEff:/{print $2}', '/proc/1/status',
+                ])
+                self.assertEqual((code, error), (0, b''))
+                self.assertEqual(int(capability.strip(), 16), 1 << 12)
+            finally:
+                try:
+                    down = call('down', '--timeout', '0')
+                    self.assertEqual(down.returncode, 0, down.stderr)
+                    self.assertEqual(session.request('GET', path + '/json')[0], 404)
+                finally:
+                    status, raw = session.request('DELETE', path + '?force=true')
+                    self.assertIn(status, (204, 404), raw)
+
+        session.record({'compose_resources': expected, 'cgroup_values': dict(zip(controls, output)),
+                        'effective_capabilities': ['NET_ADMIN']})
 
     def test_secrets_configs(self):
         'DC-070: File and supported environment sources mount with correct targets and access; missing sources fail before start.'

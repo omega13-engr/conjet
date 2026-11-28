@@ -1744,6 +1744,7 @@ impl Owner {
         json!({
             "Id":image.config_digest,"Os":"linux","Architecture":"arm64",
             "Config":image.defaults,"RepoDigests":[image.reference],
+            "RootFS":{"Type":"layers","Layers":image.diff_ids},
             "RepoTags":ledger.tags.names_for(&image.reference).collect::<Vec<_>>(),
         })
     }
@@ -1971,17 +1972,42 @@ impl Owner {
         Ok(Some(config))
     }
 
+    fn archived_image<'a>(
+        &'a self,
+        store: &registry::Store,
+        reference: &'a str,
+    ) -> Result<&'a str, Rejected> {
+        if self.boot_reference(reference) {
+            Ok(&self.image.reference)
+        } else if store.get(reference).ok().flatten().is_some() {
+            Ok(reference)
+        } else {
+            Err(Rejected(404, "image is not staged".into()))
+        }
+    }
+
+    fn image_history(&self, name: &str) -> Result<Value, Rejected> {
+        let ledger = self.ledger.lock().unwrap();
+        let store = self.image_store(&ledger)?;
+        let canonical = self.archived_image(&store, ledger.tags.resolve(name))?;
+        let manifest = canonical
+            .rsplit_once('@')
+            .expect("immutable image reference")
+            .1;
+        let tags = ledger
+            .tags
+            .names_for(canonical)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        archive::history(store.root(), manifest, &tags)
+            .map_err(|error| Rejected::internal(format!("image history unavailable: {error:#}")))
+    }
+
     fn save_archive(&self, name: &str) -> Result<fs::File, Rejected> {
         let ledger = self.ledger.lock().unwrap();
         let reference = ledger.tags.resolve(name);
         let store = self.image_store(&ledger)?;
-        let canonical = if self.boot_reference(reference) {
-            &self.image.reference
-        } else if store.get(reference).ok().flatten().is_some() {
-            reference
-        } else {
-            return Err(Rejected(404, "image is not staged".into()));
-        };
+        let canonical = self.archived_image(&store, reference)?;
         let manifest = canonical
             .rsplit_once('@')
             .expect("immutable image reference")

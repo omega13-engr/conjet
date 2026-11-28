@@ -57,6 +57,7 @@ pub(crate) struct Sandbox {
     buildkit_image: bool,
     buildkit_registry: bool,
     policy: WorkloadPolicy,
+    docker_net_admin: bool,
 }
 
 enum RootMode {
@@ -575,6 +576,7 @@ impl Sandbox {
                     .is_some_and(|spec| crate::spec::approved_buildkit_config(&spec.image_digest)),
                 buildkit_registry: oci.is_some_and(LaunchSpec::buildkit_registry),
                 policy,
+                docker_net_admin: oci.is_some_and(|spec| spec.docker_net_admin),
             })
         })();
         if setup.is_err() {
@@ -847,7 +849,13 @@ impl Sandbox {
         )?;
         step(
             "credentials and capabilities",
-            security::drop_workload_identity(self.uid, self.gid, &self.groups, self.policy),
+            security::drop_workload_identity(
+                self.uid,
+                self.gid,
+                &self.groups,
+                self.policy,
+                self.docker_net_admin,
+            ),
         )?;
         before_filter()?;
         step("exec signals", security::prepare_exec_signals())?;

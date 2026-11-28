@@ -44,6 +44,7 @@ fn launch(
             rootfs_read_only: false,
             docker_resource_defaults: false,
             docker_default_capabilities: false,
+            docker_net_admin: false,
             memory_swap_disabled: false,
             open_files_limit: None,
             open_stdin: false,

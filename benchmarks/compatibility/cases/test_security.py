@@ -53,7 +53,71 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_cap_add(self):
         'DC-020: Add NET_ADMIN in a private network namespace; permitted operation succeeds without unrelated capabilities.'
-        self.fail('UNIMPLEMENTED DC-020; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-net-admin-' + uuid.uuid4().hex[:16]
+        address = b'192.0.2.21/32'
+        cmd = ['/bin/busybox', 'ip', 'addr', 'add', address.decode(), 'dev', 'lo']
+        show = ['/bin/busybox', 'ip', '-4', 'addr', 'show', 'dev', 'lo']
+        capability_keys = {'CapInh:', 'CapPrm:', 'CapEff:', 'CapBnd:', 'CapAmb:'}
+
+        def state(path):
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            self.assertIs(json.loads(raw)['State']['Running'], True)
+            return json.loads(raw)['HostConfig']
+
+        def observe(path):
+            code, output, errors = exec_command(self, session, path, [
+                '/usr/bin/awk', '/^Cap(Inh|Prm|Eff|Bnd|Amb):/ {print $1, $2}',
+                '/proc/1/status', '/proc/self/status',
+            ])
+            self.assertEqual((code, errors), (0, b''))
+            lines = output.decode().splitlines()
+            self.assertEqual(len(lines), 10)
+            values = []
+            for start in (0, 5):
+                caps = {key: int(value, 16)
+                        for key, value in (line.split() for line in lines[start:start + 5])}
+                self.assertEqual(caps.keys(), capability_keys)
+                values.append(caps)
+            self.assertEqual(values[0], values[1])
+            return values[0]
+
+        with alpine(self, session) as image:
+            settings = {'Image': image, 'Cmd': ['/bin/sleep', '120']}
+            base = {'NetworkMode': 'none', 'CapDrop': ['ALL']}
+            with container(self, session, name + '-only', {
+                    **settings, 'HostConfig': {**base, 'CapAdd': ['NET_ADMIN']},
+            }) as (positive, _), container(self, session, name + '-control', {
+                    **settings, 'HostConfig': base,
+            }) as (negative, _):
+                for path in (positive, negative):
+                    status, raw = session.request('POST', path + '/start')
+                    self.assertEqual(status, 204, raw)
+                host = state(positive)
+                self.assertEqual([cap.removeprefix('CAP_') for cap in host['CapAdd']], ['NET_ADMIN'])
+                self.assertEqual(observe(positive), {
+                    'CapInh:': 0, 'CapPrm:': 1 << 12, 'CapEff:': 1 << 12,
+                    'CapBnd:': 1 << 12, 'CapAmb:': 0,
+                })
+                self.assertEqual(set(observe(negative).values()), {0})
+                self.assertEqual(exec_command(self, session, positive, cmd), (0, b'', b''))
+                code, output, errors = exec_command(self, session, positive, show)
+                self.assertEqual((code, errors), (0, b''))
+                self.assertIn(address, output)
+                code, output, errors = exec_command(self, session, negative, show)
+                self.assertEqual((code, errors), (0, b''))
+                self.assertNotIn(address, output)
+                code, output, errors = exec_command(self, session, negative, cmd)
+                self.assertNotEqual(code, 0)
+                self.assertIn(b'Operation not permitted', errors)
+                code, output, errors = exec_command(self, session, positive, [
+                    '/bin/sh', '-c', 'touch /tmp/fixture-owner && chown 12345:12345 /tmp/fixture-owner',
+                ])
+                self.assertNotEqual(code, 0)
+                self.assertIn(b'Operation not permitted', errors)
+        session.record({'effective_capabilities': ['NET_ADMIN'], 'private_link_change': True,
+                        'control_link_unchanged': True, 'unrelated_chown_denied': True})
 
     def test_read_only(self):
         'DC-021: Rootfs write fails while writable named volume succeeds.'

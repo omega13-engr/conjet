@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{ensure, Context};
 use conjet_launch_service::handshake::hex;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::native::oci_stage;
@@ -240,6 +240,105 @@ pub(super) fn read(mut file: &File, layer_limit: u64) -> anyhow::Result<Import<'
         blobs,
         tags: record.repo_tags.unwrap_or_default(),
     })
+}
+
+#[derive(serde::Deserialize)]
+struct HistoryStep {
+    created: Option<String>,
+    #[serde(default)]
+    created_by: String,
+    #[serde(default)]
+    comment: String,
+    #[serde(default)]
+    empty_layer: bool,
+}
+
+fn history_time(value: &str) -> anyhow::Result<i64> {
+    let (base, zone) = value
+        .get(..19)
+        .zip(value.get(19..))
+        .context("short image timestamp")?;
+    let zone = if let Some(fraction) = zone.strip_prefix('.') {
+        let zone = fraction.trim_start_matches(|c: char| c.is_ascii_digit());
+        ensure!(
+            zone.len() < fraction.len(),
+            "invalid image timestamp fraction"
+        );
+        zone
+    } else {
+        zone
+    };
+    let offset = if zone == "Z" {
+        0
+    } else {
+        let (sign, rest) = zone
+            .get(..1)
+            .zip(zone.get(1..))
+            .context("missing image timestamp zone")?;
+        let (hours, minutes) = rest
+            .split_once(':')
+            .context("invalid image timestamp zone")?;
+        ensure!(
+            hours.len() == 2 && minutes.len() == 2,
+            "invalid image timestamp zone"
+        );
+        let (hours, minutes) = (hours.parse::<u8>()?, minutes.parse::<u8>()?);
+        ensure!(hours < 24 && minutes < 60, "invalid image timestamp offset");
+        let seconds = i64::from(hours) * 3600 + i64::from(minutes) * 60;
+        match sign {
+            "+" => seconds,
+            "-" => -seconds,
+            _ => anyhow::bail!("invalid image timestamp zone"),
+        }
+    };
+    let base = std::ffi::CString::new(base)?;
+    let mut time: libc::tm = unsafe { std::mem::zeroed() };
+    // The format consumes only the bounded local date fields. Apply the
+    // explicitly parsed offset without consulting the daemon's time zone.
+    let end = unsafe { libc::strptime(base.as_ptr(), c"%Y-%m-%dT%H:%M:%S".as_ptr(), &mut time) };
+    ensure!(
+        end.cast_const() == unsafe { base.as_ptr().add(19) },
+        "invalid image timestamp"
+    );
+    Ok(unsafe { libc::timegm(&mut time) } - offset)
+}
+
+pub(super) fn history(root: &Path, manifest: &str, tags: &[String]) -> anyhow::Result<Value> {
+    let manifest = oci_stage::read_manifest(root, manifest)?;
+    let bytes = oci_stage::blob(root, &manifest.config.digest, oci_stage::METADATA_LIMIT)?;
+    let config: Value = serde_json::from_slice(&bytes)?;
+    let history = serde_json::from_value::<Option<Vec<HistoryStep>>>(config["history"].clone())?
+        .unwrap_or_default();
+    let mut layers = manifest.layers.iter();
+    let mut records = Vec::with_capacity(history.len());
+    for step in history {
+        let bytes = if step.empty_layer {
+            0
+        } else {
+            layers
+                .next()
+                .context("image history has excess filesystem layers")?
+                .size
+        };
+        let created = step
+            .created
+            .as_deref()
+            .map(history_time)
+            .transpose()?
+            .unwrap_or_default();
+        records.push(json!({
+            "Id":"<missing>", "Created":created, "CreatedBy":step.created_by,
+            "Tags":Value::Null, "Size":bytes, "Comment":step.comment,
+        }));
+    }
+    records.reverse();
+    if let Some(record) = records.first_mut() {
+        record["Id"] = json!(manifest.config.digest);
+        if !tags.is_empty() {
+            record["Tags"] = json!(tags);
+        }
+    }
+    Ok(json!(records))
 }
 
 pub(super) fn export(

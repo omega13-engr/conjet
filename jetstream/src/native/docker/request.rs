@@ -14,6 +14,7 @@ pub(super) struct Image {
     pub(super) reference: String,
     pub(super) config_digest: String,
     pub(super) defaults: Value,
+    pub(super) diff_ids: Option<Vec<String>>,
 }
 
 pub(super) fn digest(value: &str) -> bool {
@@ -159,10 +160,20 @@ impl Image {
             .to_owned();
         let defaults = metadata["process"].clone();
         ensure!(defaults.is_object(), "missing OCI process defaults");
+        let diff_ids = serde_json::from_value::<Option<Vec<String>>>(metadata["diff_ids"].clone())
+            .context("invalid staged rootfs diff IDs")?;
+        ensure!(
+            diff_ids.as_ref().is_none_or(|ids| {
+                ids.len() <= super::super::oci_stage::LAYERS_LIMIT
+                    && ids.iter().all(|id| digest(id))
+            }),
+            "invalid staged rootfs diff IDs"
+        );
         Ok(Self {
             reference,
             config_digest,
             defaults,
+            diff_ids,
         })
     }
 
@@ -217,6 +228,7 @@ impl Image {
                 "LogConfig",
                 "MemorySwappiness",
                 "CapDrop",
+                "CapAdd",
                 "SecurityOpt",
                 "ReadonlyRootfs",
             ],
@@ -234,6 +246,15 @@ impl Image {
         {
             return Err(Rejected::bad("only dropping all capabilities is supported"));
         }
+        let docker_net_admin = match &host["CapAdd"] {
+            value if value.is_null() || value == &json!([]) => false,
+            value if value == &json!(["NET_ADMIN"]) || value == &json!(["CAP_NET_ADMIN"]) => true,
+            _ => {
+                return Err(Rejected::bad(
+                    "only NET_ADMIN can be added to native Docker workloads",
+                ))
+            }
+        };
         let security = &host["SecurityOpt"];
         if !(security.is_null()
             || security == &json!([])
@@ -327,6 +348,7 @@ impl Image {
             limits,
             docker_resource_defaults: limits.has_unlimited(),
             docker_default_capabilities: host["CapDrop"] != json!(["ALL"]),
+            docker_net_admin,
             memory_swap_disabled: false,
             open_files_limit: open_files_limit(&host["Ulimits"])?,
             open_stdin,
