@@ -132,6 +132,8 @@
       "acceptance": "Verify no, always, unless-stopped and on-failure across exit, explicit stop and engine restart.",
       "test_file": "cases/test_lifecycle.py",
       "test_name": "test_restart_policy",
+      "required_restarts": 1,
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },

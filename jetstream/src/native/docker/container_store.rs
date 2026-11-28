@@ -26,6 +26,10 @@ pub(super) struct Record {
     pub(super) generation: u64,
     pub(super) started_at: Option<String>,
     pub(super) exit_code: Option<i64>,
+    #[serde(default)]
+    pub(super) restart_count: u64,
+    #[serde(default)]
+    pub(super) manually_stopped: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) removing: bool,
 }
@@ -106,6 +110,8 @@ mod tests {
             generation: 2,
             started_at: Some("2026-11-28T00:00:00Z".into()),
             exit_code: Some(143),
+            restart_count: 0,
+            manually_stopped: false,
             removing: false,
         };
         let mut records = Records::from([(id.clone(), record)]);

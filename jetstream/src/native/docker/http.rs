@@ -1216,7 +1216,8 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                 .map_or("none", |attachment| attachment.network.name.as_str()));
             let specs = container.spec["argv"].as_array().expect("validated args");
             let mut lifecycle = json!({
-                "Status":status,"Running":status=="running","ExitCode":code,
+                "Status":status,"Running":matches!(status, "running" | "restarting"),
+                "Restarting":state.restarting,"ExitCode":code,
                 "StartedAt":state.started_at.as_deref().unwrap_or("0001-01-01T00:00:00Z"),
                 "OOMKilled":state.terminal.as_ref().is_some_and(|terminal|
                     terminal.witness["exit"]["oom_killed"] == true),
@@ -1231,7 +1232,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                     "Id":container.id,"Name":format!("/{}",container.name().as_str()),"Image":container.spec["image_digest"],
                     "Driver":BACKEND,"Platform":"linux","Path":specs[0],"Args":specs[1..],
                     "Mounts":container.mounts(),
-                    "RestartCount":state.generation,
+                    "RestartCount":state.restart_count,
                     "State":lifecycle,
                     "Config":config,"HostConfig":host,"NetworkSettings":{
                         "Networks":networks, "Ports":item.port_metadata(state.network_address.is_some())

@@ -1,8 +1,10 @@
 """Lifecycle conformance fixtures and pending contracts."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import hashlib
 import json
 from threading import Barrier
+import time
 import unittest
 from urllib.parse import quote, urlencode
 import uuid
@@ -101,7 +103,91 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_restart_policy(self):
         'DC-009: Verify no, always, unless-stopped and on-failure across exit, explicit stop and engine restart.'
-        self.fail('UNIMPLEMENTED DC-009; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-restart-' + uuid.uuid4().hex
+        volume = API + '/volumes/' + name
+        cases = (
+            ('no', 'no', 0, 1),
+            ('always', 'always', 0, 1),
+            ('unless-stopped', 'unless-stopped', 0, 1),
+            ('unless-running', 'unless-stopped', 0, 1),
+            ('on-failure', 'on-failure', 1, 2),
+        )
+        command = (
+            'file=/data/"$1"; attempts=0; '
+            'if [ -f "$file" ]; then attempts=$(cat "$file"); fi; '
+            'attempts=$((attempts+1)); printf "%s\\n" "$attempts" >"$file"; '
+            'if [ "$attempts" -le "$2" ]; then exit 37; fi; exec sleep 120'
+        )
+
+        def inspect(path):
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            return json.loads(raw)
+
+        def wait(path, target, restarts=None):
+            deadline = time.monotonic() + 8
+            while True:
+                current = inspect(path)
+                state = current['State']
+                if (state['Status'] == target
+                        and (restarts is None or current['RestartCount'] == restarts)):
+                    return current
+                if time.monotonic() >= deadline:
+                    self.fail(f'{path} did not reach {target}: {state!r}, restarts={current["RestartCount"]!r}')
+                time.sleep(0.04)
+
+        def attempts(path, key, count):
+            result = exec_command(self, session, path, ['/bin/cat', '/data/' + key])
+            self.assertEqual(result, (0, f'{count}\n'.encode(), b''))
+
+        with alpine(self, session) as image:
+            try:
+                status, raw = session.request('POST', API + '/volumes/create', {'Name': name})
+                self.assertEqual(status, 201, raw)
+                with ExitStack() as workloads:
+                    paths = {}
+                    for key, policy, retries, failures in cases:
+                        path, identifier = workloads.enter_context(container(self, session, name + '-' + key, {
+                            'Image': image, 'Cmd': ['/bin/sh', '-c', command, 'fixture', key, str(failures)],
+                            'HostConfig': {
+                                'NetworkMode': 'none',
+                                'Mounts': [{'Type': 'volume', 'Source': name, 'Target': '/data'}],
+                                'RestartPolicy': {'Name': policy, 'MaximumRetryCount': retries},
+                            },
+                        }))
+                        paths[key] = (path, identifier)
+                        status, raw = session.request('POST', path + '/start')
+                        self.assertEqual(status, 204, raw)
+
+                    for key, expected_retries in (('no', 0), ('on-failure', 1)):
+                        model = wait(paths[key][0], 'exited', expected_retries)
+                        self.assertEqual(model['State']['ExitCode'], 37)
+                    for key in ('always', 'unless-stopped', 'unless-running'):
+                        path = paths[key][0]
+                        wait(path, 'running', 1)
+                        attempts(path, key, 2)
+                    for key in ('always', 'unless-stopped'):
+                        status, raw = session.request('POST', paths[key][0] + '/stop?t=1')
+                        self.assertEqual(status, 204, raw)
+                    time.sleep(0.35)
+                    for key in ('always', 'unless-stopped'):
+                        wait(paths[key][0], 'exited', 1)
+
+                    session.restart_engine()
+                    for key in ('always', 'unless-running'):
+                        path, identifier = paths[key]
+                        self.assertEqual(wait(path, 'running')['Id'], identifier)
+                        attempts(path, key, 3)
+                    for key in ('no', 'unless-stopped', 'on-failure'):
+                        path, identifier = paths[key]
+                        self.assertEqual(wait(path, 'exited')['Id'], identifier)
+            finally:
+                status, raw = session.request('DELETE', volume)
+                self.assertIn(status, (204, 404), raw)
+        session.record({'no': 'stayed-exited', 'on_failure': 'one-retry-stayed-exited',
+                        'always': 'resumed-after-restart', 'unless_stopped': 'stayed-stopped',
+                        'unless_running': 'resumed-after-restart'})
 
     def test_signal_init(self):
         'DC-010: PID 1 receives configured stop signal; init reaps zombies; timeout escalates and reports exit correctly.'

@@ -19,6 +19,7 @@ mod port;
 mod public_registry;
 mod registry;
 mod request;
+mod restart_policy;
 mod volume;
 mod workload_copy;
 mod workload_input;
@@ -423,6 +424,7 @@ fn serve_endpoint(
     let _registry = pinned_build_registry
         .then(|| build_registry::Relay::start(&owner, trace_requests || supervisor_pid.is_some()))
         .transpose()?;
+    owner.resume_restart_policies();
     println!("{ready}");
     let mut handlers: Vec<JoinHandle<()>> = Vec::with_capacity(CONNECTIONS);
     let result = loop {
@@ -916,6 +918,7 @@ struct Container {
     healthcheck: Option<health::Config>,
     auto_remove: bool,
     buildkit_worker: bool,
+    restart_policy: restart_policy::Policy,
     cancel: AtomicU8,
 }
 
@@ -956,6 +959,9 @@ struct Lifecycle {
     error: Option<String>,
     removed: bool,
     generation: u64,
+    restart_count: u64,
+    manually_stopped: bool,
+    restarting: bool,
     previous: VecDeque<(u64, Arc<Terminal>)>,
     live: [Vec<u8>; 2],
     native_handle: Option<Value>,
@@ -967,7 +973,9 @@ struct Lifecycle {
 
 impl Lifecycle {
     fn status(&self) -> &'static str {
-        if self.terminal.is_some() || self.error.is_some() {
+        if self.restarting {
+            "restarting"
+        } else if self.terminal.is_some() || self.error.is_some() {
             "exited"
         } else if self.started {
             "running"
@@ -2303,6 +2311,16 @@ impl Owner {
             && network
                 .as_ref()
                 .is_none_or(|entry| entry.network.scope == BridgeScope::BuiltIn);
+        let restart_policy = if buildkit_worker {
+            restart_policy::Policy::No
+        } else {
+            restart_policy::Policy::parse(&config["HostConfig"]["RestartPolicy"])?
+        };
+        if restart_policy != restart_policy::Policy::No && !retained {
+            return Err(Rejected::bad(
+                "restart policy requires a retained native container",
+            ));
+        }
         if restored.is_some() && !retained {
             return Err(Rejected::internal(
                 "saved container no longer supports retained state",
@@ -2338,6 +2356,8 @@ impl Owner {
                     generation: 0,
                     started_at: None,
                     exit_code: None,
+                    restart_count: 0,
+                    manually_stopped: false,
                     removing: false,
                 },
             );
@@ -2352,6 +2372,8 @@ impl Owner {
             state.started = record.started_at.is_some();
             state.started_at = record.started_at.clone();
             state.generation = record.generation;
+            state.restart_count = record.restart_count;
+            state.manually_stopped = record.manually_stopped;
             if state.started {
                 state.terminal = Some(Arc::new(Terminal {
                     code: record.exit_code.unwrap_or(137),
@@ -2374,6 +2396,7 @@ impl Owner {
                 healthcheck,
                 auto_remove,
                 buildkit_worker,
+                restart_policy,
                 cancel: AtomicU8::new(0),
             },
             state: Mutex::new(state),
@@ -2475,6 +2498,25 @@ impl Owner {
         self.submit(item, false)?;
         Self::wait_for_network_start(item)?;
         Ok(true)
+    }
+
+    fn resume_restart_policies(self: &Arc<Self>) {
+        let items = self.ledger.lock().unwrap().active.clone();
+        for item in items {
+            let resume = {
+                let state = item.state();
+                item.container
+                    .restart_policy
+                    .after_daemon_restart(state.started, state.manually_stopped)
+            };
+            if resume {
+                let _control = item.control.lock().unwrap();
+                if let Err(error) = self.submit(&item, false) {
+                    item.state().error = Some(error.1);
+                    item.changed.notify_all();
+                }
+            }
+        }
     }
 
     fn wait_for_network_start(item: &Item) -> Result<(), Rejected> {
@@ -2630,8 +2672,42 @@ impl Owner {
         } else {
             state.generation
         };
+        let spec = Self::generation_spec(item, &state);
+        let previous_records = if ledger.saved_containers.contains_key(&item.container.id) {
+            let previous = ledger.saved_containers.clone();
+            let mut records = previous.clone();
+            let record = records
+                .get_mut(&item.container.id)
+                .expect("saved container");
+            record.started_at = Some(events::daemon_time()?);
+            record.exit_code = None;
+            record.generation = generation;
+            record.restart_count = 0;
+            record.manually_stopped = false;
+            self.publish_containers(&mut ledger, records)?;
+            Some(previous)
+        } else {
+            None
+        };
         item.container.cancel.store(0, Ordering::Release);
-        let spec = state.network.as_ref().map(|attachment| {
+        let owner = self.clone();
+        let work = item.clone();
+        let worker = match thread::Builder::new().spawn(move || owner.run(work, generation, spec)) {
+            Ok(worker) => worker,
+            Err(_) => {
+                if let Some(records) = previous_records {
+                    self.publish_containers(&mut ledger, records)?;
+                }
+                return Err(Rejected::internal("native worker allocation failed"));
+            }
+        };
+        ledger.workers.push(worker);
+        self.begin_generation(&mut ledger, item, &mut state, generation, emit_restart);
+        Ok(())
+    }
+
+    fn generation_spec(item: &Item, state: &Lifecycle) -> Option<Value> {
+        state.network.as_ref().map(|attachment| {
             let mut spec = item.container.spec.clone();
             spec["network"] = json!(attachment.network.scope.wire_mode());
             spec["network_alias"] = json!(attachment.aliases[0]);
@@ -2642,46 +2718,31 @@ impl Owner {
                 spec["network_alias_project"] = json!(project);
             }
             spec
-        });
-        let previous_records = if ledger.saved_containers.contains_key(&item.container.id) {
-            let previous = ledger.saved_containers.clone();
-            let mut records = previous.clone();
-            let record = records
-                .get_mut(&item.container.id)
-                .expect("saved container");
-            record.started_at = Some(events::daemon_time()?);
-            record.exit_code = None;
-            record.generation = generation;
-            self.publish_containers(&mut ledger, records)?;
-            Some(previous)
-        } else {
-            None
-        };
-        let owner = self.clone();
-        let work = item.clone();
-        let worker = match thread::Builder::new()
-            .spawn(move || owner.run(work, generation, spec.as_ref()))
-        {
-            Ok(worker) => worker,
-            Err(_) => {
-                if let Some(records) = previous_records {
-                    self.publish_containers(&mut ledger, records)?;
-                }
-                return Err(Rejected::internal("native worker allocation failed"));
-            }
-        };
+        })
+    }
+
+    fn begin_generation(
+        &self,
+        ledger: &mut Ledger,
+        item: &Item,
+        state: &mut Lifecycle,
+        generation: u64,
+        emit_restart: bool,
+    ) {
         if let Some(record) = ledger.saved_containers.get(&item.container.id) {
             state.started_at.clone_from(&record.started_at);
+            state.restart_count = record.restart_count;
         }
-        ledger.workers.push(worker);
         if let Some(terminal) = state.terminal.take() {
-            let previous = state.generation;
             if state.previous.len() == 4 {
                 state.previous.pop_front();
             }
-            state.previous.push_back((previous, terminal));
+            state.previous.push_back((state.generation, terminal));
         }
         state.generation = generation;
+        state.error = None;
+        state.manually_stopped = false;
+        state.restarting = false;
         state.live = Default::default();
         state.native_handle = None;
         state.network_address = None;
@@ -2692,14 +2753,91 @@ impl Owner {
             .map(|_| health::State::starting(Instant::now()));
         state.started = true;
         if emit_restart {
-            self.event(&mut ledger, "restart", item, None);
+            self.event(ledger, "restart", item, None);
         }
-        self.event(&mut ledger, "start", item, None);
+        self.event(ledger, "start", item, None);
         item.changed.notify_all();
-        Ok(())
     }
 
-    fn run(&self, item: Arc<Item>, generation: u64, spec: Option<&Value>) {
+    fn run(&self, item: Arc<Item>, mut generation: u64, mut spec: Option<Value>) {
+        let mut delay = Duration::ZERO;
+        loop {
+            let began = Instant::now();
+            if !self.run_generation(&item, generation, spec.as_ref()) {
+                return;
+            }
+            delay = restart_policy::backoff(delay, began.elapsed());
+            if !self.wait_restart_delay(&item, generation, delay) {
+                return;
+            }
+            let _control = item.control.lock().unwrap();
+            let mut ledger = self.ledger.lock().unwrap();
+            let mut state = item.state();
+            if ledger.closing
+                || ledger.poisoned
+                || state.removed
+                || !state.restarting
+                || state.manually_stopped
+                || state.generation != generation
+            {
+                return;
+            }
+            match self.prepare_automatic_restart(&mut ledger, &item, &state) {
+                Ok(next) => {
+                    generation = next;
+                    spec = Self::generation_spec(&item, &state);
+                    self.begin_generation(&mut ledger, &item, &mut state, generation, true);
+                }
+                Err(error) => {
+                    state.restarting = false;
+                    state.error = Some(error.1);
+                    item.changed.notify_all();
+                    return;
+                }
+            }
+        }
+    }
+
+    fn wait_restart_delay(&self, item: &Item, generation: u64, delay: Duration) -> bool {
+        let state = item.state();
+        let (state, _) = item
+            .changed
+            .wait_timeout_while(state, delay, |state| {
+                state.restarting
+                    && !state.manually_stopped
+                    && state.generation == generation
+                    && !state.removed
+            })
+            .unwrap();
+        state.restarting
+            && !state.manually_stopped
+            && state.generation == generation
+            && !state.removed
+    }
+
+    fn prepare_automatic_restart(
+        &self,
+        ledger: &mut Ledger,
+        item: &Item,
+        state: &Lifecycle,
+    ) -> Result<u64, Rejected> {
+        let next = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| Rejected::internal("container generation exhausted"))?;
+        let mut records = ledger.saved_containers.clone();
+        let record = records
+            .get_mut(&item.container.id)
+            .ok_or_else(|| Rejected::internal("restart policy lost its retained record"))?;
+        record.generation = next;
+        record.restart_count = record.restart_count.saturating_add(1);
+        record.started_at = Some(events::daemon_time()?);
+        record.exit_code = None;
+        self.publish_containers(ledger, records)?;
+        Ok(next)
+    }
+
+    fn run_generation(&self, item: &Arc<Item>, generation: u64, spec: Option<&Value>) -> bool {
         let signal = item.container.cancel.load(Ordering::Acquire);
         let terminal = if signal != 0 {
             Ok(Terminal {
@@ -2710,7 +2848,7 @@ impl Owner {
                 witness: json!({"cleanup":"not_admitted"}),
             })
         } else {
-            self.run_admitted(&item, generation, spec.unwrap_or(&item.container.spec))
+            self.run_admitted(item, generation, spec.unwrap_or(&item.container.spec))
         };
         let mut ledger = self.ledger.lock().unwrap();
         let mut state = item.state();
@@ -2731,11 +2869,18 @@ impl Owner {
                         state.error = Some(error.1);
                     }
                 }
-                self.event(&mut ledger, "die", &item, Some(&terminal));
+                self.event(&mut ledger, "die", item, Some(&terminal));
                 state.live = Default::default();
+                state.restarting = !ledger.closing
+                    && !state.manually_stopped
+                    && state.error.is_none()
+                    && item
+                        .container
+                        .restart_policy
+                        .after_exit(terminal.code, state.restart_count);
                 state.terminal = Some(Arc::new(terminal));
                 if item.container.auto_remove {
-                    self.retire(&mut ledger, &item, &mut state);
+                    self.retire(&mut ledger, item, &mut state);
                 }
             }
             Err(error) => {
@@ -2744,6 +2889,7 @@ impl Owner {
             }
         }
         item.changed.notify_all();
+        state.restarting
     }
 
     fn run_admitted(&self, item: &Item, generation: u64, spec: &Value) -> anyhow::Result<Terminal> {
@@ -2795,7 +2941,39 @@ impl Owner {
 
     fn stop(&self, item: &Arc<Item>, signal: u8, grace: u64) -> Result<bool, Rejected> {
         let _control = item.control.lock().unwrap();
+        let cancelled = self.mark_stopped(item)?;
         self.stop_generation(item, signal, grace)
+            .map(|stopped| stopped || cancelled)
+    }
+
+    fn mark_stopped(&self, item: &Item) -> Result<bool, Rejected> {
+        let mut ledger = self.ledger.lock().unwrap();
+        let mut state = item.state();
+        self.stop_restart_policy(&mut ledger, item, &mut state)
+    }
+
+    fn stop_restart_policy(
+        &self,
+        ledger: &mut Ledger,
+        item: &Item,
+        state: &mut Lifecycle,
+    ) -> Result<bool, Rejected> {
+        if !state.started
+            || state.removed
+            || item.container.restart_policy == restart_policy::Policy::No
+        {
+            return Ok(false);
+        }
+        let mut records = ledger.saved_containers.clone();
+        let record = records
+            .get_mut(&item.container.id)
+            .ok_or_else(|| Rejected::internal("restart policy lost its retained record"))?;
+        record.manually_stopped = true;
+        self.publish_containers(ledger, records)?;
+        state.manually_stopped = true;
+        let was_restarting = std::mem::take(&mut state.restarting);
+        item.changed.notify_all();
+        Ok(was_restarting)
     }
 
     fn stop_generation(&self, item: &Item, signal: u8, grace: u64) -> Result<bool, Rejected> {
@@ -2841,6 +3019,7 @@ impl Owner {
         if item.container.auto_remove {
             return Err(Rejected::bad("restart requires a retained container"));
         }
+        self.mark_stopped(item)?;
         self.stop_generation(item, TERM, grace)?;
         self.submit(item, true)?;
         Self::wait_for_network_start(item)
@@ -2869,6 +3048,7 @@ impl Owner {
             if !force {
                 return Err(Rejected(409, "container is running".into()));
             }
+            self.stop_restart_policy(&mut ledger, item, &mut state)?;
             item.container.cancel.store(KILL, Ordering::Release);
             cancelled = true;
             drop(state);
@@ -2889,6 +3069,7 @@ impl Owner {
                 item.container.cancel.store(KILL, Ordering::Release);
                 // Unstarted admissions own no guest resources.
                 let mut state = item.state();
+                state.restarting = false;
                 if !state.started {
                     state.error = Some("native Docker owner is shutting down".into());
                 }

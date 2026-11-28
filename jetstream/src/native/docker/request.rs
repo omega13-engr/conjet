@@ -240,13 +240,7 @@ impl Image {
         if !host["MemorySwappiness"].is_null() && host["MemorySwappiness"].as_i64() != Some(-1) {
             return Err(Rejected::bad("explicit memory swappiness is unsupported"));
         }
-        let restart = &host["RestartPolicy"];
-        if let Some(restart_opts) = object(restart, "restart policy")? {
-            options(restart_opts, &["Name"], "restart policy ")?;
-            if !restart["Name"].is_null() && !matches!(restart["Name"].as_str(), Some("" | "no")) {
-                return Err(Rejected::bad("restart policies are unsupported"));
-            }
-        }
+        super::restart_policy::Policy::parse(&host["RestartPolicy"])?;
         let log = &host["LogConfig"];
         if object(log, "log configuration")?.is_some()
             && ((!log["Type"].is_null() && log["Type"] != "") || !falsey(&log["Config"]))
