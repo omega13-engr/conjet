@@ -962,6 +962,8 @@ struct Lifecycle {
     restart_count: u64,
     manually_stopped: bool,
     restarting: bool,
+    paused: bool,
+    resource_override: Option<(Value, request::ResourceOptions)>,
     previous: VecDeque<(u64, Arc<Terminal>)>,
     live: [Vec<u8>; 2],
     native_handle: Option<Value>,
@@ -973,7 +975,9 @@ struct Lifecycle {
 
 impl Lifecycle {
     fn status(&self) -> &'static str {
-        if self.restarting {
+        if self.paused {
+            "paused"
+        } else if self.restarting {
             "restarting"
         } else if self.terminal.is_some() || self.error.is_some() {
             "exited"
@@ -2542,11 +2546,159 @@ impl Owner {
         Ok(())
     }
 
+    fn workload_control(
+        &self,
+        handle: &Value,
+        operation: conjet_launch_service::wire::WorkloadControl,
+    ) -> Result<(), Rejected> {
+        let mut peer = self.scoped_peer()?;
+        let response = peer
+            .exchange(
+                Kind::WorkloadControl,
+                Kind::WorkloadControl,
+                &json!({"handle":handle,"operation":operation,"budget_ms":1000}),
+                Duration::from_millis(1250),
+            )
+            .map_err(|error| match error {
+                WireError::PeerError(code) if code == "not_running" || code == "busy" => {
+                    Rejected(409, "native workload is no longer running".into())
+                }
+                WireError::PeerError(code) if code == "invalid_spec" => {
+                    Rejected::bad("invalid resource update")
+                }
+                _ => Rejected::internal(format!("native cgroup operation failed: {error}")),
+            })?;
+        if response["handle"] != *handle || response["confirmed"] != true {
+            return Err(Rejected::internal(
+                "native cgroup operation lost its workload identity",
+            ));
+        }
+        Ok(())
+    }
+
+    fn pause(&self, item: &Item, frozen: bool) -> Result<(), Rejected> {
+        let _control = item.control.lock().unwrap();
+        self.change_pause(item, frozen)
+    }
+
+    fn change_pause(&self, item: &Item, frozen: bool) -> Result<(), Rejected> {
+        let (handle, generation) = {
+            let state = item.state();
+            if state.paused == frozen {
+                return Err(Rejected(
+                    409,
+                    "workload already has that pause state".into(),
+                ));
+            }
+            let handle = state
+                .native_handle
+                .clone()
+                .ok_or_else(|| Rejected(409, "pause requires a running native container".into()))?;
+            (handle, state.generation)
+        };
+        self.workload_control(
+            &handle,
+            conjet_launch_service::wire::WorkloadControl::Freeze { frozen },
+        )?;
+        let mut state = item.state();
+        if state.generation != generation || state.removed || (frozen && state.terminal.is_some()) {
+            return Err(Rejected(
+                409,
+                "workload stopped during the pause operation".into(),
+            ));
+        }
+        state.paused = frozen;
+        drop(state);
+        self.event(
+            &mut self.ledger.lock().unwrap(),
+            if frozen { "pause" } else { "unpause" },
+            item,
+            None,
+        );
+        item.changed.notify_all();
+        Ok(())
+    }
+
+    fn update_resources(&self, item: &Item, patch: &Value) -> Result<(), Rejected> {
+        use conjet_launch_service::wire::WorkloadControl;
+        const LIMITS: &[&str] = &["Memory", "MemorySwap", "NanoCpus", "PidsLimit"];
+        let fields = patch
+            .as_object()
+            .ok_or_else(|| Rejected::bad("expected a Docker resource update object"))?;
+        if fields.keys().any(|field| !LIMITS.contains(&field.as_str())) {
+            return Err(Rejected::bad("unsupported native Docker resource update"));
+        }
+        let _control = item.control.lock().unwrap();
+        let (after, previous, handle) = {
+            let state = item.state();
+            if state.removed
+                || state.error.is_some()
+                || item.container.buildkit_worker
+                || (state.started && state.terminal.is_none() && state.native_handle.is_none())
+            {
+                return Err(Rejected(
+                    409,
+                    "native workload is not available for resource update".into(),
+                ));
+            }
+            let current = state
+                .resource_override
+                .as_ref()
+                .map_or(&item.container.config["HostConfig"], |(host, _)| host);
+            let previous = request::resource_options(current)?;
+            let mut updated = current.clone();
+            for (field, value) in fields {
+                if !value.is_null() {
+                    updated[field] = value.clone();
+                }
+            }
+            (updated, previous, state.native_handle.clone())
+        };
+        // Validate the complete resulting configuration before any kernel write.
+        let updated = request::resource_options(&after)?;
+        let apply = |handle: &Value, resources: request::ResourceOptions| {
+            self.workload_control(
+                handle,
+                WorkloadControl::Limits {
+                    limits: resources.limits,
+                    disable_swap: resources.disable_swap,
+                },
+            )
+        };
+        if let Some(handle) = &handle {
+            apply(handle, updated)?;
+        }
+        let mut ledger = self.ledger.lock().unwrap();
+        let mut records = ledger.saved_containers.clone();
+        if let Some(record) = records.get_mut(&item.container.id) {
+            record.config["HostConfig"] = after.clone();
+            if let Err(error) = self.publish_containers(&mut ledger, records) {
+                drop(ledger);
+                if let Some(handle) = &handle {
+                    apply(handle, previous)?;
+                }
+                return Err(error);
+            }
+        }
+        item.state().resource_override = Some((after, updated));
+        self.event(&mut ledger, "update", item, None);
+        Ok(())
+    }
+
     fn stats(&self, item: &Item, one_shot: bool) -> Result<Value, Rejected> {
         use conjet_launch_service::wire::CgroupUsage;
 
         let (handle, generation) = {
-            let state = item.state();
+            let state = item.wait_for(
+                |state| {
+                    state.native_handle.is_some()
+                        || !state.started
+                        || state.terminal.is_some()
+                        || state.error.is_some()
+                        || state.removed
+                },
+                1,
+            )?;
             let handle = state.native_handle.clone().ok_or_else(|| {
                 Rejected(409, "statistics require a running native container".into())
             })?;
@@ -2562,7 +2714,12 @@ impl Owner {
                     &request,
                     Duration::from_secs(1),
                 )
-                .map_err(|error| Rejected::internal(error.to_string()))?;
+                .map_err(|error| match error {
+                    WireError::PeerError(code) if code == "not_running" => {
+                        Rejected(409, "statistics require a running native container".into())
+                    }
+                    _ => Rejected::internal(error.to_string()),
+                })?;
             if reply["handle"] != handle {
                 return Err(Rejected::internal("statistics workload identity changed"));
             }
@@ -2707,8 +2864,11 @@ impl Owner {
     }
 
     fn generation_spec(item: &Item, state: &Lifecycle) -> Option<Value> {
-        state.network.as_ref().map(|attachment| {
-            let mut spec = item.container.spec.clone();
+        if state.network.is_none() && state.resource_override.is_none() {
+            return None;
+        }
+        let mut spec = item.container.spec.clone();
+        if let Some(attachment) = &state.network {
             spec["network"] = json!(attachment.network.scope.wire_mode());
             spec["network_alias"] = json!(attachment.aliases[0]);
             if let Some(alias) = attachment.aliases.get(1) {
@@ -2717,8 +2877,15 @@ impl Owner {
             if let Some(project) = &attachment.alias_project {
                 spec["network_alias_project"] = json!(project);
             }
-            spec
-        })
+        } else {
+            spec["network"] = json!("none");
+        }
+        if let Some((_, resources)) = &state.resource_override {
+            spec["limits"] = json!(resources.limits);
+            spec["docker_resource_defaults"] = json!(resources.limits.has_unlimited());
+            spec["memory_swap_disabled"] = json!(resources.disable_swap);
+        }
+        Some(spec)
     }
 
     fn begin_generation(
@@ -2743,6 +2910,7 @@ impl Owner {
         state.error = None;
         state.manually_stopped = false;
         state.restarting = false;
+        state.paused = false;
         state.live = Default::default();
         state.native_handle = None;
         state.network_address = None;
@@ -2854,6 +3022,7 @@ impl Owner {
         let mut state = item.state();
         state.native_handle = None;
         state.network_address = None;
+        state.paused = false;
         if let Some(published) = item.published.lock().unwrap().as_ref() {
             published.set_target(None);
         }
@@ -2941,6 +3110,9 @@ impl Owner {
 
     fn stop(&self, item: &Arc<Item>, signal: u8, grace: u64) -> Result<bool, Rejected> {
         let _control = item.control.lock().unwrap();
+        if item.state().paused {
+            return Err(Rejected(409, "cannot stop a paused container".into()));
+        }
         let cancelled = self.mark_stopped(item)?;
         self.stop_generation(item, signal, grace)
             .map(|stopped| stopped || cancelled)
@@ -2984,6 +3156,12 @@ impl Owner {
             }
             if let Some(error) = &state.error {
                 return Err(Rejected::internal(error));
+            }
+            if state.paused {
+                return Err(Rejected(
+                    409,
+                    "unpause the container before stopping it".into(),
+                ));
             }
             if !state.started || state.terminal.is_some() {
                 return Ok(false);
@@ -3047,6 +3225,12 @@ impl Owner {
             }
             if !force {
                 return Err(Rejected(409, "container is running".into()));
+            }
+            if state.paused {
+                drop(state);
+                drop(ledger);
+                self.change_pause(item, false)?;
+                continue;
             }
             self.stop_restart_policy(&mut ledger, item, &mut state)?;
             item.container.cancel.store(KILL, Ordering::Release);

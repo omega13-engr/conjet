@@ -402,6 +402,7 @@ impl Server {
                         | Kind::Account
                         | Kind::Network
                         | Kind::Volume
+                        | Kind::WorkloadControl
                         | Kind::BuildSnapshot
                 )
             {

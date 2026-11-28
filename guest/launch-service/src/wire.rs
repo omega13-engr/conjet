@@ -24,6 +24,18 @@ pub struct CgroupUsage {
     pub inactive_file: u64,
     pub tasks: u64,
 }
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkloadControl {
+    Freeze {
+        frozen: bool,
+    },
+    Limits {
+        limits: crate::spec::ResourceLimits,
+        disable_swap: bool,
+    },
+}
+
 pub const COPY_LIMIT: u64 = 16 * 1024 * 1024;
 pub const COPY_DOWNLOAD_CAPABILITY: &str = "native_copy_download_v1";
 pub const COPY_UPLOAD_CAPABILITY: &str = "native_copy_upload_v1";
@@ -71,6 +83,7 @@ pub enum Kind {
     BuildRegistry = 34,
     CopyDownload = 35,
     CopyUpload = 36,
+    WorkloadControl = 37,
 }
 
 impl TryFrom<u8> for Kind {
@@ -115,6 +128,7 @@ impl TryFrom<u8> for Kind {
             34 => Ok(BuildRegistry),
             35 => Ok(CopyDownload),
             36 => Ok(CopyUpload),
+            37 => Ok(WorkloadControl),
             _ => Err(WireError::BadHeader),
         }
     }

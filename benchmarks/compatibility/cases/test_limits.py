@@ -82,4 +82,36 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_transactional_update(self):
         'DC-031: Invalid multi-field update leaves all previously effective limits unchanged.'
-        self.fail('UNIMPLEMENTED DC-031; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-update-' + uuid.uuid4().hex
+        limits = {'Memory': 32 * 1024 * 1024, 'PidsLimit': 16, 'NanoCpus': 250_000_000}
+        increased = 48 * 1024 * 1024
+
+        def assert_limits(path, wanted):
+            status, raw = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, raw)
+            actual = json.loads(raw)
+            self.assertIs(actual['State']['Running'], True)
+            self.assertEqual({field: actual['HostConfig'][field] for field in wanted}, wanted)
+            status, raw = session.request('GET', path + '/stats?stream=false&one-shot=true')
+            self.assertEqual(status, 200, raw)
+            self.assertEqual(json.loads(raw)['memory_stats']['limit'], wanted['Memory'])
+
+        with alpine(self, session) as image, container(self, session, name, {
+                'Image': image, 'Cmd': ['/bin/sleep', '120'],
+                'HostConfig': {'NetworkMode': 'none', **limits},
+        }) as (path, _):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+            assert_limits(path, limits)
+            status, raw = session.request('POST', path + '/update', {
+                'Memory': increased, 'PidsLimit': 20, 'CpuPeriod': 100,
+            })
+            self.assertIn(status, (400, 500), raw)
+            self.assertIsInstance(json.loads(raw)['message'], str)
+            assert_limits(path, limits)
+            status, raw = session.request('POST', path + '/update', {'Memory': increased})
+            self.assertEqual(status, 200, raw)
+            assert_limits(path, {**limits, 'Memory': increased})
+        session.record({'invalid_update_rejected': True, 'old_limits_preserved': True,
+                        'valid_update_memory': increased, 'unrelated_limits_retained': True})

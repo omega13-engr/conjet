@@ -243,6 +243,10 @@ impl ResourceLimits {
         self.memory_bytes == 0 || self.pids == 0 || self.cpu_millicores == 0
     }
 
+    pub fn valid_docker(self) -> bool {
+        self.validate(true)
+    }
+
     fn validate(self, defaults: bool) -> bool {
         ((defaults && self.memory_bytes == 0)
             || (MIN_MEMORY_BYTES..=MAX_MEMORY_BYTES).contains(&self.memory_bytes))

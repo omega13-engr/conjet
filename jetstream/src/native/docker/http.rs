@@ -1092,6 +1092,16 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             owner.rename(&item, name)?;
             Reply::empty(204)
         }
+        ("POST", "pause" | "unpause") => {
+            owner.pause(&item, action == "pause")?;
+            Reply::empty(204)
+        }
+        ("POST", "update") => {
+            let settings = serde_json::from_slice(body)
+                .map_err(|_| Rejected::bad("invalid Docker update body"))?;
+            owner.update_resources(&item, &settings)?;
+            Reply::json(200, json!({"Warnings":[]}))
+        }
         ("GET", "stats") => {
             if query.get("stream").is_none() || !disabled(query.get("stream")) {
                 return Err(Rejected::bad("native stats require stream=false"));
@@ -1205,7 +1215,11 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             );
             let container = &item.container;
             let mut config = container.config.clone();
-            let mut host = container.config["HostConfig"].clone();
+            let mut host = state
+                .resource_override
+                .as_ref()
+                .map_or(&container.config["HostConfig"], |(host, _)| host)
+                .clone();
             config["Tty"] = json!(false);
             let networks = state.network.as_ref().map_or_else(|| json!({}), |attachment| {
                 json!({(attachment.network.name.as_str()):attachment.inspect(state.network_address.as_deref())})
@@ -1216,8 +1230,8 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                 .map_or("none", |attachment| attachment.network.name.as_str()));
             let specs = container.spec["argv"].as_array().expect("validated args");
             let mut lifecycle = json!({
-                "Status":status,"Running":matches!(status, "running" | "restarting"),
-                "Restarting":state.restarting,"ExitCode":code,
+                "Status":status,"Running":matches!(status, "running" | "restarting" | "paused"),
+                "Paused":state.paused,"Restarting":state.restarting,"ExitCode":code,
                 "StartedAt":state.started_at.as_deref().unwrap_or("0001-01-01T00:00:00Z"),
                 "OOMKilled":state.terminal.as_ref().is_some_and(|terminal|
                     terminal.witness["exit"]["oom_killed"] == true),

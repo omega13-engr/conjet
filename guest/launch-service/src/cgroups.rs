@@ -213,6 +213,77 @@ fn populated(path: &Path) -> io::Result<bool> {
     }
 }
 
+pub(crate) fn freeze(path: &Path, frozen: bool, expires: Instant) -> io::Result<()> {
+    let previous = std::fs::read_to_string(path.join("cgroup.freeze"))?;
+    write_control(path, "cgroup.freeze", if frozen { "1" } else { "0" })?;
+    let expected = if frozen { "frozen 1" } else { "frozen 0" };
+    let confirm = || -> io::Result<()> {
+        loop {
+            if std::fs::read_to_string(path.join("cgroup.events"))?
+                .lines()
+                .any(|line| line == expected)
+            {
+                return Ok(());
+            }
+            if Instant::now() >= expires {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "cgroup freeze deadline elapsed",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    if let Err(error) = confirm() {
+        write_control(path, "cgroup.freeze", previous.trim())?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub(crate) fn update_limits(
+    path: &Path,
+    limits: ResourceLimits,
+    disable_swap: bool,
+) -> io::Result<()> {
+    let maximum = |n: u64| if n == 0 { "max".into() } else { n.to_string() };
+    let quota = u64::from(limits.cpu_millicores) * CPU_PERIOD_US / 1_000;
+    let next = [
+        ("cpu.max", format!("{} {CPU_PERIOD_US}", maximum(quota))),
+        ("pids.max", maximum(u64::from(limits.pids))),
+        (
+            "memory.swap.max",
+            (if disable_swap { "0" } else { "max" }).to_owned(),
+        ),
+        ("memory.max", maximum(limits.memory_bytes)),
+    ];
+    let previous = next
+        .iter()
+        .map(|(name, _)| std::fs::read_to_string(path.join(name)))
+        .collect::<io::Result<Vec<_>>>()?;
+    for (index, ((name, value), old)) in next.iter().zip(&previous).enumerate() {
+        if value == old.trim() {
+            continue;
+        }
+        // The kernel can otherwise block the controller while reclaiming
+        // pages from a workload whose limit was lowered.
+        let wrote = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path.join(name))
+            .and_then(|mut file| file.write_all(value.as_bytes()));
+        if let Err(error) = wrote {
+            for ((old_name, applied), original) in next[..index].iter().zip(&previous).rev() {
+                if applied != original.trim() {
+                    write_control(path, old_name, original.trim())?;
+                }
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn observation(path: &Path) -> io::Result<(u64, bool)> {
     let current = std::fs::read_to_string(path.join("memory.current"))?
         .trim()

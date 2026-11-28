@@ -195,7 +195,80 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_pause_update(self):
         'DC-011: Pause freezes progress; unpause resumes; resource update preserves unrelated configuration.'
-        self.fail('UNIMPLEMENTED DC-011; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-pause-' + uuid.uuid4().hex
+        memory = 32 * 1024 * 1024
+        updated = 48 * 1024 * 1024
+        run = 'i=0; while [ "$i" -lt 1200 ]; do i=$((i+1)); printf "tick:%s\\n" "$i"; sleep 0.06; done'
+        labels = {'dev.conjet.fixture': 'pause-update'}
+        env = ['CONJET_FIXTURE_MARKER=unchanged']
+
+        def latest(path):
+            status, data = session.request('GET', path + '/logs?stdout=true&stderr=false&follow=false')
+            self.assertEqual(status, 200, data)
+            chunks = []
+            while data:
+                self.assertEqual(data[:4], b'\x01\0\0\0')
+                size = int.from_bytes(data[4:8], 'big')
+                self.assertIn(size, range(1, len(data) - 7))
+                chunks.append(data[8:8 + size])
+                data = data[8 + size:]
+            values = [int(line.split(b':', 1)[1]) for line in b''.join(chunks).splitlines()
+                      if line.startswith(b'tick:') and line[5:].isdigit()]
+            return max(values, default=0)
+
+        def progress(path, baseline):
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline:
+                result = latest(path)
+                if result > baseline:
+                    return result
+                time.sleep(0.05)
+            self.fail('container output stopped progressing')
+
+        def model(path):
+            status, data = session.request('GET', path + '/json')
+            self.assertEqual(status, 200, data)
+            return json.loads(data)
+
+        def active_memory(path):
+            status, data = session.request('GET', path + '/stats?stream=false&one-shot=true')
+            self.assertEqual(status, 200, data)
+            return json.loads(data)['memory_stats']['limit']
+
+        with alpine(self, session) as image, container(self, session, name, {
+                'Image': image, 'Cmd': ['/bin/sh', '-c', run], 'Env': env, 'Labels': labels,
+                'HostConfig': {'NetworkMode': 'none', 'Memory': memory, 'PidsLimit': 16},
+        }) as (path, identifier):
+            status, raw = session.request('POST', path + '/start')
+            self.assertEqual(status, 204, raw)
+            progress(path, 0)
+            self.assertEqual(active_memory(path), memory)
+            status, raw = session.request('POST', path + '/pause')
+            self.assertEqual(status, 204, raw)
+            self.assertIs(model(path)['State']['Paused'], True)
+            time.sleep(0.4)
+            frozen = latest(path)
+            time.sleep(0.4)
+            self.assertEqual(latest(path), frozen)
+            status, raw = session.request('POST', path + '/unpause')
+            self.assertEqual(status, 204, raw)
+            self.assertIs(model(path)['State']['Paused'], False)
+            progress(path, frozen)
+            status, raw = session.request('POST', path + '/update', {'Memory': updated})
+            self.assertEqual(status, 200, raw)
+            current = model(path)
+            self.assertEqual(current['Id'], identifier)
+            self.assertIs(current['State']['Running'], True)
+            self.assertEqual(current['HostConfig']['Memory'], updated)
+            self.assertEqual(current['HostConfig']['PidsLimit'], 16)
+            self.assertIn(env[0], current['Config']['Env'])
+            self.assertEqual(current['Config']['Labels'], labels)
+            self.assertEqual(active_memory(path), updated)
+
+        session.record({'frozen_and_resumed': True,
+                        'memory_before': memory, 'memory_after': updated,
+                        'limits_labels_and_environment_retained': True})
 
     def test_name_races(self):
         'DC-012: Concurrent create with one name admits one owner; failed start releases only its owned resources.'

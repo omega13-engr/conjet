@@ -166,6 +166,7 @@ impl Entry {
         }
         let no_longer_running = |container: &super::Lifecycle| {
             !container.started
+                || container.paused
                 || container.removed
                 || container.terminal.is_some()
                 || container.error.is_some()
@@ -486,7 +487,11 @@ impl Owner {
         });
         let generation = {
             let state = item.state();
-            if !state.started || state.removed || state.terminal.is_some() || state.error.is_some()
+            if !state.started
+                || state.paused
+                || state.removed
+                || state.terminal.is_some()
+                || state.error.is_some()
             {
                 return Err(Rejected(409, "native exec target is not running".into()));
             }

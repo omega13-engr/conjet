@@ -296,17 +296,10 @@ impl Image {
         {
             return Err(Rejected::bad("invalid native stdin options"));
         }
-        let limits = resources(host)?;
-        let memory_swap_disabled = match &host["MemorySwap"] {
-            Value::Null => false,
-            value if value.as_u64() == Some(0) => false,
-            value if value.as_u64() == Some(limits.memory_bytes) => true,
-            _ => {
-                return Err(Rejected::bad(
-                    "native MemorySwap must equal the requested memory limit",
-                ))
-            }
-        };
+        let ResourceOptions {
+            limits,
+            disable_swap: memory_swap_disabled,
+        } = resource_options(host)?;
         let spec = LaunchSpec {
             retained_layer: None,
             rootfs_read_only: host["ReadonlyRootfs"] == true,
@@ -341,6 +334,35 @@ impl Image {
         serde_json::to_value(spec)
             .map_err(|_| Rejected::internal("cannot encode native process spec"))
     }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ResourceOptions {
+    pub(super) limits: ResourceLimits,
+    pub(super) disable_swap: bool,
+}
+
+pub(super) fn resource_options(host: &Value) -> Result<ResourceOptions, Rejected> {
+    let limits = resources(host)?;
+    if !limits.valid_docker() {
+        return Err(Rejected::bad(
+            "native Docker resource limits are outside their bounds",
+        ));
+    }
+    let disable_swap = match &host["MemorySwap"] {
+        Value::Null => false,
+        value if value.as_u64() == Some(0) => false,
+        value if value.as_u64() == Some(limits.memory_bytes) => true,
+        _ => {
+            return Err(Rejected::bad(
+                "native MemorySwap must equal the requested memory limit",
+            ))
+        }
+    };
+    Ok(ResourceOptions {
+        limits,
+        disable_swap,
+    })
 }
 
 fn resources(host: &Value) -> Result<ResourceLimits, Rejected> {

@@ -222,6 +222,14 @@ struct Dial {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CgroupControl {
+    handle: Handle,
+    budget_ms: u64,
+    operation: crate::wire::WorkloadControl,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct VolumeRequest {
     boot_id: String,
     budget_ms: u64,
@@ -2313,7 +2321,7 @@ impl FreshFixture {
         Ok(())
     }
 
-    fn wait_for_archive_start<'a>(
+    fn wait_for_workload_start<'a>(
         &self,
         ledger: MutexGuard<'a, Ledger>,
         handle: &Handle,
@@ -2458,7 +2466,7 @@ impl FreshFixture {
             let deadline = started + Duration::from_millis(request.budget_ms);
             let ready_by = deadline.min(started + Duration::from_secs(1));
             let ledger = self.ledger.lock().expect("fresh ledger");
-            let mut ledger = self.wait_for_archive_start(ledger, &request.handle, ready_by);
+            let mut ledger = self.wait_for_workload_start(ledger, &request.handle, ready_by);
             if Instant::now() >= ready_by {
                 return Err(("deadline_exceeded", "native archive startup expired"));
             }
@@ -2635,6 +2643,8 @@ impl FreshFixture {
                 let expires = deadline(request.budget_ms)?;
                 if let Some(handle) = request.workload {
                     check(&guard, &handle)?;
+                    guard = self.wait_for_workload_start(guard, &handle, expires);
+                    check(&guard, &handle)?;
                     if !self.oci
                         || !guard
                             .record(&handle.workload_id)
@@ -2782,6 +2792,55 @@ impl FreshFixture {
                 }
                 Ok((Kind::Memory, snapshot))
             }
+            Kind::WorkloadControl if self.oci => {
+                use crate::wire::WorkloadControl;
+                let request: CgroupControl = parse(frame)?;
+                let expires = deadline(request.budget_ms)?;
+                check(&guard, &request.handle)?;
+                guard = self.wait_for_workload_start(guard, &request.handle, expires);
+                check(&guard, &request.handle)?;
+                if guard.closing {
+                    return Err(("busy", "native workload registry is draining"));
+                }
+                let record = guard
+                    .record_mut(&request.handle.workload_id)
+                    .filter(|record| {
+                        record.phase == Phase::Running
+                            && !record.buildkit_worker
+                            && record.build_parent.is_none()
+                    })
+                    .ok_or(("not_running", "control requires a running workload"))?;
+                if Instant::now() >= expires {
+                    return Err(("deadline_exceeded", "workload control budget elapsed"));
+                }
+                let path = record.cgroup_path(true);
+                let error = |_| {
+                    (
+                        "control_failed",
+                        "native cgroup control could not be confirmed",
+                    )
+                };
+                match request.operation {
+                    WorkloadControl::Freeze { frozen } => {
+                        crate::cgroups::freeze(&path, frozen, expires).map_err(error)?;
+                    }
+                    WorkloadControl::Limits {
+                        limits,
+                        disable_swap,
+                    } => {
+                        if !limits.valid_docker() || (disable_swap && limits.memory_bytes == 0) {
+                            return Err(("invalid_spec", "invalid Docker resource update"));
+                        }
+                        crate::cgroups::update_limits(&path, limits, disable_swap)
+                            .map_err(error)?;
+                        record.memory_limit_bytes = limits.memory_bytes;
+                    }
+                }
+                Ok((
+                    Kind::WorkloadControl,
+                    json!({"handle": request.handle, "confirmed": true}),
+                ))
+            }
             Kind::Volume if self.oci => {
                 let request: VolumeRequest = parse(frame)?;
                 if request.boot_id != boot {
@@ -2913,7 +2972,7 @@ impl FreshFixture {
                     crate::workload_copy::Operation::Stat { .. }
                         | crate::workload_copy::Operation::Begin(_)
                 ) {
-                    guard = self.wait_for_archive_start(guard, &request.handle, expires);
+                    guard = self.wait_for_workload_start(guard, &request.handle, expires);
                     check(&guard, &request.handle)?;
                 }
                 if guard.closing {
