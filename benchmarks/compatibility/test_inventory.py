@@ -32,6 +32,12 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'escaping'):
             RUNNER['validate'](matrix)
 
+    def test_support_file_escape_rejected(self):
+        matrix = copy.deepcopy(MATRIX)
+        matrix['cases'][0]['support_files'] = ['../native-compatibility-gate.py']
+        with self.assertRaisesRegex(ValueError, 'escaping support file'):
+            RUNNER['validate'](matrix)
+
     def test_skips_and_expected_failures_block_qualification(self):
         result = unittest.TestResult()
         result.testsRun = 1

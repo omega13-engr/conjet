@@ -48,11 +48,14 @@ fn apply_defaults(value: &Value, config: &Value) -> std::result::Result<Vec<Stri
     for (name, value) in options {
         let supported = match name.as_str() {
             "Cmd" => value.is_array(),
+            // The route has already selected the container. SDKs also send its
+            // identifier in the body, which the Docker handler does not use.
+            "Container" | "containerId" => value.is_string(),
             "AttachStdout" | "AttachStderr" => value.is_boolean(),
             "AttachStdin" => value.is_null() || value.is_boolean(),
             "Privileged" => value.is_null() || value == false,
             "Tty" => value.is_null() || value.is_boolean(),
-            "User" | "WorkingDir" | "DetachKeys" => value.is_null() || value == "",
+            "User" | "WorkingDir" | "DetachKeys" | "detachKeys" => value.is_null() || value == "",
             "Env" => value.is_null() || value.as_array().is_some_and(Vec::is_empty),
             _ => false,
         };
@@ -137,7 +140,9 @@ impl Entry {
         for (name, value) in data {
             let supported = match name.as_str() {
                 "Detach" => value.is_null() || value == false,
-                "Tty" => value.is_null() || value.is_boolean(),
+                // Dockerode also includes its local stream option. AttachStdin
+                // from exec-create governs whether the guest receives input.
+                "Tty" | "stdin" => value.is_null() || value.is_boolean(),
                 "ConsoleSize" => value.is_null() || value == &json!([0, 0]),
                 _ => false,
             };
@@ -513,5 +518,36 @@ impl Owner {
             .find(|entry| id == entry.id)
             .cloned()
             .ok_or_else(|| Rejected(404, "native exec does not exist".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sdk_container_fields_do_not_change_the_routed_exec() {
+        let spec = json!({
+            "image_digest": format!("sha256:{}", "a".repeat(64)),
+            "argv": ["/bin/sleep", "120"],
+            "env": [],
+            "cwd": "/",
+            "uid": 0,
+            "gid": 0,
+            "network": "none",
+            "limits": {"memory_bytes": 16 * 1024 * 1024, "pids": 4, "cpu_millicores": 500},
+        });
+        for field in ["Container", "containerId"] {
+            let request = json!({
+                (field): "sdk-metadata",
+                "Cmd": ["/bin/true"],
+                "AttachStdout": true,
+                "AttachStderr": true,
+            });
+            assert_eq!(apply_defaults(&request, &spec).unwrap(), ["/bin/true"]);
+        }
+        let unsupported =
+            json!({"Container":"sdk-metadata", "Cmd":["/bin/true"], "Privileged":true});
+        assert!(apply_defaults(&unsupported, &spec).is_err());
     }
 }

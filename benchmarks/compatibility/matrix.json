@@ -54,6 +54,12 @@
       "acceptance": "Java and Python SDK exec returns complete stdout, stderr and integer terminal exit status.",
       "test_file": "cases/test_api.py",
       "test_name": "test_exec_exit",
+      "support_files": [
+        "cases/support.py",
+        "clients/exec_probe.py",
+        "clients/java/ExecProbe.java",
+        "clients/java/pom.xml"
+      ],
       "status": "UNTESTED",
       "upstream_issues": [
         "https://github.com/libracoder/kiri/issues/551"
@@ -68,6 +74,7 @@
       "acceptance": "Node Testcontainers connects an alias network and resolves its peer successfully.",
       "test_file": "cases/test_api.py",
       "test_name": "test_network_connect_status",
+      "support_files": ["cases/support.py", "clients/network_probe.cjs"],
       "status": "UNTESTED",
       "upstream_issues": [
         "https://github.com/libracoder/kiri/issues/878"
@@ -82,6 +89,7 @@
       "acceptance": "Recreate from inspect metadata and preserve mounts, ports, environment and labels.",
       "test_file": "cases/test_api.py",
       "test_name": "test_inspect_recreate",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": [
         "https://github.com/libracoder/kiri/issues/610"
@@ -248,6 +256,7 @@
       "acceptance": "Drop ALL; inspect capability sets and prove a capability-dependent operation fails.",
       "test_file": "cases/test_security.py",
       "test_name": "test_cap_drop",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
@@ -556,6 +565,7 @@
       "acceptance": "Force removal of a volume referenced by running or stopped container is refused and checksum survives.",
       "test_file": "cases/test_storage.py",
       "test_name": "test_volume_in_use",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": [
         "https://github.com/libracoder/kiri/issues/773"

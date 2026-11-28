@@ -1,11 +1,53 @@
-"""Unimplemented conformance contracts; replace each failure with its real fixture."""
+"""Security conformance fixtures and pending contracts."""
+
 import unittest
+import uuid
+
+from support import alpine, container, exec_command
 
 
 class CompatibilityTests(unittest.TestCase):
     def test_cap_drop(self):
         'DC-019: Drop ALL; inspect capability sets and prove a capability-dependent operation fails.'
-        self.fail('UNIMPLEMENTED DC-019; no runtime compatibility evidence')
+        session = self.compatibility
+        prefix = 'conjet-capdrop-' + uuid.uuid4().hex
+        capability_keys = {'CapInh:', 'CapPrm:', 'CapEff:', 'CapBnd:', 'CapAmb:'}
+
+        def check(image, drop):
+            host = {'NetworkMode': 'none'}
+            if drop:
+                host['CapDrop'] = ['ALL']
+            name = prefix + ('-dropped' if drop else '-control')
+            config = {'Image': image, 'Cmd': ['/bin/sleep', '120'], 'HostConfig': host}
+            with container(self, session, name, config) as (path, _):
+                self.assertEqual(session.request('POST', path + '/start')[0], 204)
+                code, output, errors = exec_command(self, session, path, [
+                    '/usr/bin/awk', '/^Cap(Inh|Prm|Eff|Bnd|Amb):/ {print $1, $2}', '/proc/self/status',
+                ])
+                self.assertEqual((code, errors), (0, b''))
+                capabilities = {key: int(value, 16)
+                                for key, value in (line.split() for line in output.decode().splitlines())}
+                self.assertEqual(capabilities.keys(), capability_keys)
+                code, output, errors = exec_command(self, session, path, [
+                    '/bin/sh', '-c', 'touch /tmp/fixture-owner && chown 12345:12345 /tmp/fixture-owner',
+                ])
+                self.assertEqual(output, b'')
+                if drop:
+                    self.assertEqual(set(capabilities.values()), {0})
+                    self.assertEqual(code, 1)
+                    self.assertIn(b'Operation not permitted', errors)
+                else:
+                    self.assertTrue(capabilities['CapEff:'] & 1)
+                    self.assertEqual((code, errors), (0, b''))
+                outcome = exec_command(self, session, path,
+                                       ['/bin/sh', '-c', 'stat -c %u:%g /tmp/fixture-owner'])
+                self.assertEqual(outcome, (0, b'0:0\n' if drop else b'12345:12345\n', b''))
+
+        with alpine(self, session) as image:
+            check(image, False)
+            check(image, True)
+        session.record({'zero_capability_sets': sorted(capability_keys),
+                        'chown_control': 'changed-owner', 'chown_dropped': 'denied'})
 
     def test_cap_add(self):
         'DC-020: Add NET_ADMIN in a private network namespace; permitted operation succeeds without unrelated capabilities.'

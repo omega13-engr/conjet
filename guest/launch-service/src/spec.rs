@@ -208,14 +208,8 @@ fn is_data_target(target: &str) -> bool {
 }
 
 pub fn valid_volume_target(target: &str) -> bool {
-    matches!(
-        target,
-        VOLUME_TARGET
-            | "/dataset"
-            | "/var/lib/registry"
-            | "/var/lib/buildkit"
-            | "/var/lib/postgresql/data"
-    )
+    // Retain the workload setup's runtime and configuration directories.
+    valid_bind_target(target) && !matches!(target, "/run" | "/etc") && !target.starts_with("/etc/")
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -775,6 +769,27 @@ mod tests {
                 redis_bootstrap: false,
                 buildkit_worker: false,
             },
+        }
+    }
+
+    #[test]
+    fn named_volumes_allow_workload_directories_and_preserve_runtime_mounts() {
+        for path in ["/payload", "/data", "/var/lib/postgresql/data"] {
+            assert!(valid_volume_target(path));
+        }
+        for path in [
+            "/",
+            "relative",
+            "/x/../y",
+            "/proc",
+            "/sys/data",
+            "/dev",
+            "/run",
+            "/run/conjet/data",
+            "/etc",
+            "/etc/fixture",
+        ] {
+            assert!(!valid_volume_target(path));
         }
     }
 

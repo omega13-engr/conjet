@@ -1,11 +1,67 @@
-"""Unimplemented conformance contracts; replace each failure with its real fixture."""
+"""Storage conformance fixtures and pending contracts."""
+
+import hashlib
+import json
 import unittest
+import uuid
+
+from support import API, alpine, container, exec_command
 
 
 class CompatibilityTests(unittest.TestCase):
     def test_volume_in_use(self):
         'DC-043: Force removal of a volume referenced by running or stopped container is refused and checksum survives.'
-        self.fail('UNIMPLEMENTED DC-043; no runtime compatibility evidence')
+        session = self.compatibility
+        name = 'conjet-volume-use-' + uuid.uuid4().hex
+        volume = API + '/volumes/' + name
+        data = b'owned-volume-checksum\n'
+        checksum = hashlib.sha256(data).hexdigest().encode()
+
+        def assert_retained(path):
+            rejected, raw = session.request('DELETE', volume + '?force=true')
+            self.assertEqual(rejected, 409, raw)
+            self.assertIsInstance(json.loads(raw)['message'], str)
+            status, raw = session.request('GET', volume)
+            self.assertEqual(status, 200, raw)
+            self.assertEqual(json.loads(raw)['Name'], name)
+            if path is not None:
+                outcome = exec_command(self, session, path, ['/usr/bin/sha256sum', '/data/value'])
+                self.assertEqual(outcome, (0, checksum + b'  /data/value\n', b''))
+
+        with alpine(self, session) as image:
+            try:
+                status, body = session.request('POST', API + '/volumes/create', {'Name': name})
+                self.assertEqual(status, 201, body)
+                config = {'Image': image, 'Cmd': ['/bin/sleep', '120'], 'HostConfig': {
+                    'NetworkMode': 'none',
+                    'Mounts': [{'Type': 'volume', 'Source': name, 'Target': '/data'}],
+                }}
+                with container(self, session, name, config) as (path, identifier):
+                    start_status, body = session.request('POST', path + '/start')
+                    self.assertEqual(start_status, 204, body)
+                    outcome = exec_command(self, session, path, ['/bin/sh', '-c',
+                                           "printf '%s\\n' 'owned-volume-checksum' >/data/value"])
+                    self.assertEqual(outcome, (0, b'', b''))
+                    assert_retained(path)
+                    self.assertEqual(session.request('POST', path + '/stop?t=1')[0], 204)
+                    status, body = session.request('GET', path + '/json')
+                    self.assertEqual(status, 200, body)
+                    stopped = json.loads(body)
+                    self.assertIs(stopped['State']['Running'], False)
+                    self.assertEqual(stopped['Id'], identifier)
+                    assert_retained(None)
+                    start_status, body = session.request('POST', path + '/start')
+                    self.assertEqual(start_status, 204, body)
+                    assert_retained(path)
+                    self.assertEqual(session.request('POST', path + '/start')[0], 304)
+                self.assertEqual(session.request('DELETE', volume)[0], 204)
+                self.assertEqual(session.request('GET', volume)[0], 404)
+            finally:
+                status, body = session.request('DELETE', volume)
+                self.assertIn(status, (204, 404), body)
+
+        session.record({'running_delete': 409, 'stopped_delete': 409,
+                        'retained_checksum': checksum.decode(), 'removed_after_container': True})
 
     def test_volume_copyup(self):
         'DC-044: Named and anonymous volume population, nocopy, UID and mode match reference behavior.'

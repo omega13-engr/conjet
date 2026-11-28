@@ -44,6 +44,10 @@ def validate(matrix, root=HERE):
         path = (root / case['test_file']).resolve()
         if not path.is_relative_to(root.resolve()) or not path.is_file():
             raise ValueError('missing or escaping test file: ' + case['id'])
+        for file in case.get('support_files', ()):
+            support = (root / file).resolve()
+            if not support.is_relative_to(root.resolve()) or not support.is_file():
+                raise ValueError('missing or escaping support file: ' + case['id'])
         tree = ast.parse(path.read_text())
         classes = [node for node in tree.body if isinstance(node, ast.ClassDef)
                    and node.name == 'CompatibilityTests']
@@ -166,7 +170,11 @@ def execute_case(test, connection, timeout):
 
 
 def case_hash(case):
-    return sha256(HERE / case['test_file'])
+    files = [case['test_file'], *case.get('support_files', ())]
+    if len(files) == 1:
+        return sha256(HERE / files[0])
+    manifest = {file: sha256(HERE / file) for file in files}
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
 
 
 def runner_hashes():

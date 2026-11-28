@@ -1524,7 +1524,16 @@ impl Owner {
                 "container no longer owns an eligible lifecycle".into(),
             ));
         }
-        if state.network.is_some() == attachment.is_some() {
+        // Before start a client can select a custom network after creating a
+        // container on the implicit bridge. No guest endpoint exists yet.
+        let replacing_default = attachment.is_some()
+            && !state.started
+            && request::falsey(&item.container.config["HostConfig"]["NetworkMode"])
+            && request::falsey(&item.container.config["NetworkingConfig"])
+            && state.network.as_ref().is_some_and(|current| {
+                current.network.scope == conjet_launch_service::spec::BridgeScope::BuiltIn
+            });
+        if state.network.is_some() == attachment.is_some() && !replacing_default {
             return Err(Rejected(
                 409,
                 "container already has that network disposition".into(),
@@ -2312,14 +2321,23 @@ impl Owner {
             .ok_or_else(|| Rejected(404, "container was not found".into()))
     }
 
-    fn start(self: &Arc<Self>, item: &Arc<Item>) -> Result<(), Rejected> {
+    fn start(self: &Arc<Self>, item: &Arc<Item>) -> Result<bool, Rejected> {
         let _control = item.control.lock().unwrap();
+        {
+            let state = item.state();
+            if state.started && state.terminal.is_none() && state.error.is_none() && !state.removed
+            {
+                return Ok(false);
+            }
+        }
         self.submit(item, false)?;
-        Self::wait_for_publication(item)
+        Self::wait_for_network_start(item)?;
+        Ok(true)
     }
 
-    fn wait_for_publication(item: &Item) -> Result<(), Rejected> {
-        if item.published.lock().unwrap().is_none() {
+    fn wait_for_network_start(item: &Item) -> Result<(), Rejected> {
+        let published = item.published.lock().unwrap().is_some();
+        if !published && item.state().network.is_none() {
             return Ok(());
         }
         let state = item.wait_for(
@@ -2331,7 +2349,7 @@ impl Owner {
             },
             30,
         )?;
-        if state.network_address.is_none() {
+        if published && state.network_address.is_none() {
             return Err(Rejected(
                 409,
                 "workload exited before loopback publication".into(),
@@ -2428,11 +2446,11 @@ impl Owner {
         Ok(())
     }
 
-    fn submit(self: &Arc<Self>, item: &Arc<Item>, restart: bool) -> Result<(), Rejected> {
+    fn submit(self: &Arc<Self>, item: &Arc<Item>, emit_restart: bool) -> Result<(), Rejected> {
         let mut ledger = self.ledger.lock().unwrap();
         let mut state = item.state();
         if !ledger.active.iter().any(|active| Arc::ptr_eq(active, item))
-            || (state.started && (!restart || state.terminal.is_none()))
+            || (state.started && state.terminal.is_none())
             || ledger.poisoned
             || ledger.closing
         {
@@ -2458,7 +2476,7 @@ impl Owner {
         if ledger.workers.len() >= CONTAINERS {
             return Err(Rejected(409, "native launch workers are occupied".into()));
         }
-        let generation = if restart && state.started {
+        let generation = if state.started {
             state
                 .generation
                 .checked_add(1)
@@ -2502,7 +2520,7 @@ impl Owner {
             .as_ref()
             .map(|_| health::State::starting(Instant::now()));
         state.started = true;
-        if restart {
+        if emit_restart {
             self.event(&mut ledger, "restart", item, None);
         }
         self.event(&mut ledger, "start", item, None);
@@ -2644,7 +2662,7 @@ impl Owner {
         }
         self.stop_generation(item, TERM, grace)?;
         self.submit(item, true)?;
-        Self::wait_for_publication(item)
+        Self::wait_for_network_start(item)
     }
 
     fn remove(&self, item: &Arc<Item>, force: bool) -> Result<(), Rejected> {

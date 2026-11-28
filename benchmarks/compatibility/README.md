@@ -49,3 +49,30 @@ do not satisfy any coverage gate by themselves.
 
 Run with `PYTHONDONTWRITEBYTECODE=1`; keep generated artifacts on ExternalSSD.
 Never run runtime fixtures against a default or production Docker endpoint.
+
+DC-004 uses stock docker-py 7.1.0 and docker-java 3.7.1. Run both
+launchers with Python from an ExternalSSD virtual environment containing
+`docker==7.1.0` and Java 11 or later on `PATH`. Resolve the Java fixture's
+dependencies into a scratch Maven repository with the classpath beside it.
+
+```sh
+mvn -f benchmarks/compatibility/clients/java/pom.xml \
+  -Dmaven.repo.local="$sdk_root/m2" -Dmdep.outputFile="$sdk_root/classpath" \
+  org.apache.maven.plugins:maven-dependency-plugin:3.9.0:build-classpath
+export CONJET_COMPAT_DOCKER_JAVA_CLASSPATH="$sdk_root/classpath"
+```
+
+Each SDK receives only the authenticated lane's Unix socket and a private,
+empty Docker configuration directory.
+
+DC-005 uses Node.js with Testcontainers 12.2.2. Install it in the private
+scratch directory and point the harness to that installation.
+
+```sh
+npm install --prefix "$sdk_root/node" --cache "$sdk_root/npm-cache" \
+  --ignore-scripts --save-exact testcontainers@12.2.2
+export CONJET_COMPAT_TESTCONTAINERS_PACKAGE="$sdk_root/node/node_modules/testcontainers/package.json"
+```
+
+The fixture limits Node socket connections to the verified lane endpoint.
+The harness owns cleanup of the named containers and network.

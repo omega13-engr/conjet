@@ -23,6 +23,7 @@ struct Request {
     method: String,
     path: String,
     query: BTreeMap<String, String>,
+    create_options: BTreeMap<String, Vec<String>>,
     body: Vec<u8>,
     archive: Option<File>,
     close: bool,
@@ -192,6 +193,22 @@ mod framing_tests {
         client.write_all(bytes).unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         (BufReader::new(server), client)
+    }
+
+    #[test]
+    fn dockerode_create_query_requires_matching_body() {
+        let (mut reader, _client) = request(b"POST /containers/create?name=owned&Cmd=%2Fbin%2Fecho&Cmd=ok&HostConfig=%7B%7D HTTP/1.1\r\n\r\n");
+        let scope = parse(&mut reader, None).unwrap().unwrap();
+        assert_eq!(scope.query["name"], "owned");
+        let body = json!({"Cmd":["/bin/echo", "ok"], "HostConfig":{}});
+        assert!(verify_create_options(&body, &scope.create_options).is_ok());
+        let wrong = json!({"Cmd":["ok", "/bin/echo"], "HostConfig":{}});
+        assert!(verify_create_options(&wrong, &scope.create_options).is_err());
+
+        let (mut reader, _client) =
+            request(b"POST /containers/create?name=a&name=b HTTP/1.1\r\n\r\n");
+        assert!(matches!(parse(&mut reader, None),
+            Err(Rejected(400, message)) if message == "duplicate query option"));
     }
 
     #[test]
@@ -423,12 +440,18 @@ fn parse(
         }
     }
     let mut query = BTreeMap::new();
+    let mut create_options = BTreeMap::<String, Vec<String>>::new();
+    let create = (method == "POST").then(|| path.strip_prefix("/v1.44").unwrap_or(path));
     for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if query
-            .insert(decode(key)?, decode(&value.replace('+', " "))?)
-            .is_some()
-        {
+        let key = decode(key)?;
+        let value = decode(&value.replace('+', " "))?;
+        let duplicated = create == Some("/networks/create")
+            || (create == Some("/containers/create")
+                && !matches!(key.as_str(), "name" | "platform"));
+        if duplicated {
+            create_options.entry(key).or_default().push(value);
+        } else if query.insert(key, value).is_some() {
             return Err(Rejected::bad("duplicate query option"));
         }
     }
@@ -477,6 +500,7 @@ fn parse(
         method: method.into(),
         path: path.into(),
         query,
+        create_options,
         body,
         archive,
         close,
@@ -577,6 +601,36 @@ fn disabled(value: Option<&String>) -> bool {
     value.map_or(true, |value| matches!(value.as_str(), "0" | "false"))
 }
 
+fn verify_create_options(body: &Value, query: &BTreeMap<String, Vec<String>>) -> Result<()> {
+    fn matches_value(value: &Value, raw: &str) -> bool {
+        match value {
+            Value::String(value) => value == raw,
+            Value::Null => raw.is_empty(),
+            _ => serde_json::from_str::<Value>(raw).is_ok_and(|parsed| &parsed == value),
+        }
+    }
+
+    // Dockerode mirrors its JSON create options in the query, with a repeated
+    // key for each array member. Only the validated JSON body has semantics.
+    if query.iter().all(|(name, raw)| match body.get(name) {
+        Some(Value::Array(values)) => {
+            values.len() == raw.len()
+                && values
+                    .iter()
+                    .zip(raw)
+                    .all(|(value, raw)| matches_value(value, raw))
+        }
+        Some(value) => raw.len() == 1 && matches_value(value, &raw[0]),
+        None => false,
+    }) {
+        Ok(())
+    } else {
+        Err(Rejected::bad(
+            "create options in query must match the JSON body",
+        ))
+    }
+}
+
 fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
     let method = request.method.as_str();
     let query = &request.query;
@@ -649,8 +703,24 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
                     "only the Linux ARM64 create query is supported",
                 ));
             }
-            let config = serde_json::from_slice(&request.body)
+            let mut config: Value = serde_json::from_slice(&request.body)
                 .map_err(|_| Rejected::bad("invalid Docker request object"))?;
+            verify_create_options(&config, &request.create_options)?;
+            if let Some(fields) = config.as_object_mut() {
+                for field in ["name", "platform"] {
+                    if let Some(value) = fields.remove(field) {
+                        if !value.is_null()
+                            && !value.as_str().is_some_and(|value| {
+                                query.get(field).is_some_and(|query| query == value)
+                            })
+                        {
+                            return Err(Rejected::bad(
+                                "container create route option differs from the body",
+                            ));
+                        }
+                    }
+                }
+            }
             let item = owner.create(query.get("name").map(String::as_str), config)?;
             Reply::json(201, json!({"Id":item.container.id,"Warnings":[]}))
         }
@@ -692,9 +762,10 @@ fn dispatch(owner: &Arc<Owner>, request: &Request) -> Result<Action> {
             let filters = super::discovery::Filters::parse(query.get("filters"))?;
             Reply::json(200, owner.list_networks(&filters))
         }
-        ("POST", "/networks/create") if query.is_empty() => {
+        ("POST", "/networks/create") => {
             let body = serde_json::from_slice(&request.body)
                 .map_err(|_| Rejected::bad("invalid Docker network request"))?;
+            verify_create_options(&body, &request.create_options)?;
             Reply::json(201, owner.create_network(body)?)
         }
         ("GET", "/volumes") if query.keys().all(|key| key == "filters") => {
@@ -1002,8 +1073,8 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
             Reply::json(201, owner.create_exec(item, data)?)
         }
         ("POST", "start") => {
-            owner.start(&item)?;
-            let mut reply = Reply::empty(204);
+            let started = owner.start(&item)?;
+            let mut reply = Reply::empty(if started { 204 } else { 304 });
             reply.attributed = true;
             reply
         }
@@ -1514,7 +1585,6 @@ pub(super) fn serve(
                     }
                     break;
                 }
-                let completed = (!entry.stdin()).then(|| entry.run(owner, handle.clone(), None));
                 let (status, connection) = if request.tcp_upgrade {
                     (101, "Connection: Upgrade\r\nUpgrade: tcp\r\n")
                 } else {
@@ -1529,15 +1599,19 @@ pub(super) fn serve(
                     ),
                 );
                 if let Err(error) = sent {
-                    if completed.is_none() {
-                        entry.fail("native exec client disconnected before start".into());
-                    }
+                    entry.fail("native exec client disconnected before start".into());
                     return Err(error);
                 }
-                let result = completed.unwrap_or_else(|| match read_exec_stdin(&mut reader) {
-                    Ok(input) => entry.run(owner, handle, Some(&input)),
-                    Err(error) => entry.fail(error.to_string()),
-                });
+                // Upgrade clients switch readers at the header boundary. Write
+                // the handshake before starting the guest process, as Docker does.
+                let result = if entry.stdin() {
+                    match read_exec_stdin(&mut reader) {
+                        Ok(input) => entry.run(owner, handle, Some(&input)),
+                        Err(error) => entry.fail(error.to_string()),
+                    }
+                } else {
+                    entry.run(owner, handle, None)
+                };
                 if entry.tty() {
                     stream.write_all(&result.output[0])?;
                     if let Some(error) = result.error {
