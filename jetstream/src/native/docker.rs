@@ -955,6 +955,7 @@ impl Container {
 struct Lifecycle {
     started: bool,
     started_at: Option<String>,
+    finished_at: Option<String>,
     terminal: Option<Arc<Terminal>>,
     error: Option<String>,
     removed: bool,
@@ -2823,9 +2824,6 @@ impl Owner {
                 "Compose replacement must be renamed before start".into(),
             ));
         }
-        if item.container.buildkit_worker {
-            state.started_at = Some(events::daemon_time()?);
-        }
         for index in (0..ledger.workers.len()).rev() {
             if ledger.workers[index].is_finished() {
                 let _ = ledger.workers.swap_remove(index).join();
@@ -2843,13 +2841,14 @@ impl Owner {
             state.generation
         };
         let spec = Self::generation_spec(item, &state);
+        let started_at = events::daemon_time()?;
         let previous_records = if ledger.saved_containers.contains_key(&item.container.id) {
             let previous = ledger.saved_containers.clone();
             let mut records = previous.clone();
             let record = records
                 .get_mut(&item.container.id)
                 .expect("saved container");
-            record.started_at = Some(events::daemon_time()?);
+            record.started_at = Some(started_at.clone());
             record.exit_code = None;
             record.generation = generation;
             record.restart_count = 0;
@@ -2872,6 +2871,7 @@ impl Owner {
             }
         };
         ledger.workers.push(worker);
+        state.started_at = Some(started_at);
         self.begin_generation(&mut ledger, item, &mut state, generation, emit_restart);
         Ok(())
     }
@@ -2920,6 +2920,7 @@ impl Owner {
             state.previous.push_back((state.generation, terminal));
         }
         state.generation = generation;
+        state.finished_at = None;
         state.error = None;
         state.manually_stopped = false;
         state.restarting = false;
@@ -3039,6 +3040,7 @@ impl Owner {
         if let Some(published) = item.published.lock().unwrap().as_ref() {
             published.set_target(None);
         }
+        state.finished_at = events::daemon_time().ok();
         match terminal {
             Ok(terminal) => {
                 if ledger.saved_containers.contains_key(&item.container.id) {

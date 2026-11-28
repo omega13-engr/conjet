@@ -1233,6 +1233,7 @@ fn container(owner: &Arc<Owner>, path: &str, request: &Request) -> Result<Action
                 "Status":status,"Running":matches!(status, "running" | "restarting" | "paused"),
                 "Paused":state.paused,"Restarting":state.restarting,"ExitCode":code,
                 "StartedAt":state.started_at.as_deref().unwrap_or("0001-01-01T00:00:00Z"),
+                "FinishedAt":state.finished_at.as_deref().unwrap_or("0001-01-01T00:00:00Z"),
                 "OOMKilled":state.terminal.as_ref().is_some_and(|terminal|
                     terminal.witness["exit"]["oom_killed"] == true),
                 "Error":state.error.as_deref().unwrap_or("")

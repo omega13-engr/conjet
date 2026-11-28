@@ -901,6 +901,7 @@
       "acceptance": "Started, healthy and completed dependencies plus up wait enforce actual readiness and failure semantics.",
       "test_file": "cases/test_compose.py",
       "test_name": "test_health_dependencies",
+      "support_files": ["cases/support.py"],
       "status": "UNTESTED",
       "upstream_issues": []
     },
